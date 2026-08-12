@@ -56,6 +56,15 @@ import image_engine as agent_image_engine
 # serializer (ideoBuildCaption / ideoSynthDesc / ideoRectToBbox).
 import ideogram_caption
 
+# Storyboard — the layer ABOVE the video modes: one concept in, a film's worth
+# of shots out. `storyboard` is the spine (schema, validation, scheduling,
+# durable state) and is deliberately pure-stdlib and model-free, so it unit-tests
+# with no GPU and no weights. `storyboard_planner` is the brain and spawns a
+# short-lived child that loads a small LLM, writes the plan and dies — it never
+# loads a model in THIS process. Both are 3.9-compatible because the panel is.
+import storyboard
+import storyboard_planner
+
 # --- Paths -------------------------------------------------------------------
 # Everything below is overridable via env vars so the panel can be cloned and
 # run from any directory without source edits. Defaults assume the repo layout:
@@ -239,6 +248,229 @@ _REQUIRED = _load_required_files()
 _MIN_FILE_BYTES = int(_REQUIRED.get("min_size_bytes", 1024))
 
 
+# ---- model-version registry --------------------------------------------------
+# ONE entry per LTX generation. Everything that needs to know "which weights,
+# in which folder, complete or not, and what can this generation actually do"
+# reads THIS table — job dispatch, the download/completeness checks, and the
+# env the warm helper is spawned with. Registering LTX-2.5 is meant to be one
+# entry here plus its `required_files.json` repos, not a scavenger hunt.
+#
+# WHY this exists (the June-2026 mosaic, in one paragraph): the panel was built
+# around exactly one model version. `MODEL_ID` was a module-level singleton
+# resolved at import; the Q8 folder was reached by a bare `Q8_LOCAL_PATH`
+# constant at eight job-spec sites; the Q4 folder was reached at four more by
+# the *string literal* "ltx-2.3-mlx-q4"; and "is it installed" was a q8-keyed
+# special case inside `repo_status_list()`. A single 1 GB upscaler dropped out
+# of one `download_include` list produced a randomly-initialised module and two
+# weeks of rainbow-grid renders across three wrong theories. A second version
+# multiplies every one of those surfaces, so they are funnelled through here
+# first.
+#
+# Field contract per version:
+#   id            stable key. Wire format — goes in sidecars and env, so it
+#                 may never be renamed once a render has carried it.
+#   label         what a human sees ("LTX-2.3"). Mirrors the ENGINES label.
+#   engine_id     which entry in ENGINES serves this version.
+#   config_key    the vendored ltx-2-mlx model-config generation key. 2.5
+#                 makes the vendored lib metadata-driven; this is the value
+#                 handed to it (and the thing to grep for when a checkpoint
+#                 loads with the wrong hyperparameters).
+#   default       exactly one version carries True.
+#   cap_tiers     which FEATURE tiers this version can serve. This is the
+#                 generalisation of the old binary `cap_tier`: a version that
+#                 ships q4 weights only declares ("q4",) and the whole Q8
+#                 surface (FFLF / Extend / High) folds away for it, on ANY
+#                 machine, without a second CSS system.
+#   packs         one per quantisation. `repo_key` points into
+#                 required_files.json — deliberately a REFERENCE, not a copy:
+#                 that file stays the single source of truth for the file list
+#                 AND the `download_include` allowlist, so the two can never
+#                 disagree the way they did in June. `path` is the resolved
+#                 on-disk directory (honouring the same env overrides the old
+#                 constants did). `serves_cap_tiers` is which feature tiers may
+#                 load this pack. `verify_source` is where /models/verify-deep
+#                 gets the expected SHA-256 for this pack (see below).
+#
+# verify_source — "hf-api" | "manifest"
+#   "hf-api"   the pack lives on HuggingFace and its LFS metadata carries the
+#              published sha256. This is how every 2.3 pack has always been
+#              verified and it is the default for anything not registered.
+#   "manifest" the pack is mirrored somewhere with no checksum API of its own
+#              — GitHub releases, the lane the 2.5 packs take because their
+#              upstream is gated and we publish our own quantisation. The
+#              expected hashes travel WITH the weights in
+#              `phosphene_quant_manifest.json`, which scripts/quantize_ltx.py
+#              already emits (deterministically — that is what makes a
+#              published manifest meaningful). Without this a mirrored pack
+#              would report every file "unverified", which is exactly the
+#              blind spot the mosaic lived in for two weeks.
+#
+# The two path constants above (Q4_LOCAL_PATH / Q8_LOCAL_PATH) remain the
+# INPUTS to the 2.3 entry rather than being replaced by it, so every existing
+# env override (LTX_MODEL, LTX_Q8_LOCAL) keeps working byte-for-byte.
+MODEL_VERSIONS: tuple[dict, ...] = (
+    {
+        "id": "ltx23",
+        "label": "LTX-2.3",
+        "engine_id": "ltx",
+        "config_key": "ltx-2.3",
+        # The default — and in this release the only registered generation.
+        # Every character LoRA in the wild is trained against 2.3, and its two
+        # packs are the ones users can actually download today.
+        "default": True,
+        "cap_tiers": ("q4", "q8"),
+        # The text encoder is part of the generation, not of the install.
+        # 2.3 conditions on stock Gemma 3; 2.5 conditions on its own Gemma 4
+        # fine-tune. Naming it here for the same reason the DiT packs are
+        # named here: the alternative is a module-level constant that
+        # silently describes whichever generation happened to be first.
+        "text_encoder": {"repo_key": "gemma", "path": GEMMA},
+        # The two files the dev-transformer feature surface (High / Extend /
+        # Keyframe / A2V) loads BY NAME out of the hq pack.
+        #
+        # `dev_transformer` is generation-invariant only because WE choose it:
+        # scripts/convert_ltx_mlx.py's --transformer-stem names the output, and
+        # we name both generations' dev file the same thing. It is stated here
+        # anyway so a generation that renames it has one place to say so.
+        #
+        # `distilled_lora` is NOT invariant, and that is the whole reason this
+        # block exists. The number in the filename is the LoRA's alpha/rank
+        # (2.3's file declares lora_alpha == lora_rank == 384; 2.5's declares
+        # 450), so the name changes with the generation. Until now the panel
+        # never passed it and the vendored TI2VidTwoStagesPipeline's own
+        # default — the literal 2.3 string — supplied it. That default is an
+        # upstream constant we do not control, aimed at a file a 2.5 pack does
+        # not contain, and the failure is a FileNotFoundError mid-render, after
+        # the user has waited for Gemma. Naming it per generation here is the
+        # same seam `model_dir` already is.
+        "hq_weights": {
+            "dev_transformer": "transformer-dev.safetensors",
+            "distilled_lora": "ltx-2.3-22b-distilled-lora-384.safetensors",
+        },
+        "packs": (
+            {
+                "quant": "q4",
+                "role": "base",
+                "repo_key": "q4",
+                "path": Q4_LOCAL_PATH,
+                "hf_repo_id": "dgrauet/ltx-2.3-mlx-q4",
+                "serves_cap_tiers": ("q4", "q8"),
+                "verify_source": "hf-api",
+            },
+            {
+                "quant": "q8",
+                "role": "hq",
+                "repo_key": "q8",
+                "path": Q8_LOCAL_PATH,
+                "hf_repo_id": MODEL_ID_HQ,
+                "serves_cap_tiers": ("q8",),
+                "verify_source": "hf-api",
+            },
+        ),
+    },
+    # --- LTX-2.5 is NOT registered in this release -----------------------
+    # 2.5 renders through the panel (the vendored ltx-2-mlx pin carries the
+    # port) but its weight packs are not publicly downloadable yet: `q4_25`,
+    # `q8_25` and `gemma4_25` are our own quantisations of a gated upstream,
+    # and the public mirror is still being uploaded. Registering a version
+    # here puts its packs on the Models page with a live Download button and
+    # makes `kind: "base"` packs mandatory for the install to read complete —
+    # so a fresh install would boot into a generation it cannot fetch.
+    #
+    # The registry seam exists precisely so this is a curation, not a revert:
+    # the 2.5 entry lives on the development line, and the packs' own
+    # `required_files.json` rows come back with it. Re-registering is adding
+    # one dict here plus its three repo entries — nothing else in the panel
+    # is 2.5-aware, because every consumer reads this registry.
+)
+
+# Which version this panel is driving. Env override exists so a 2.5 pack can
+# be exercised side-by-side before it becomes the default; an unknown value
+# falls back to the registry default rather than taking the panel down.
+_MODEL_VERSION_ENV = (os.environ.get("LTX_MODEL_VERSION", "") or "").strip()
+
+
+def default_model_version_id() -> str:
+    for v in MODEL_VERSIONS:
+        if v.get("default"):
+            return v["id"]
+    return MODEL_VERSIONS[0]["id"]
+
+
+def model_version(version_id: str | None = None) -> dict:
+    """The registry entry for `version_id` (None → the active version)."""
+    wanted = version_id or ACTIVE_MODEL_VERSION
+    for v in MODEL_VERSIONS:
+        if v["id"] == wanted:
+            return v
+    for v in MODEL_VERSIONS:
+        if v.get("default"):
+            return v
+    return MODEL_VERSIONS[0]
+
+
+ACTIVE_MODEL_VERSION = (
+    _MODEL_VERSION_ENV
+    if any(v["id"] == _MODEL_VERSION_ENV for v in MODEL_VERSIONS)
+    else default_model_version_id()
+)
+if _MODEL_VERSION_ENV and _MODEL_VERSION_ENV != ACTIVE_MODEL_VERSION:
+    sys.stderr.write(
+        f"WARN: LTX_MODEL_VERSION={_MODEL_VERSION_ENV!r} is not a registered "
+        f"model version; falling back to {ACTIVE_MODEL_VERSION!r}. Known: "
+        f"{', '.join(v['id'] for v in MODEL_VERSIONS)}\n"
+    )
+
+
+def version_pack(quant: str, version_id: str | None = None) -> dict | None:
+    """The pack entry for one quantisation of one version, or None."""
+    for p in model_version(version_id).get("packs", ()):
+        if p["quant"] == quant:
+            return p
+    return None
+
+
+def pack_path(quant: str, version_id: str | None = None) -> Path:
+    """On-disk directory for (version, quant). Falls back to the models root
+    so a caller that asks for a pack this version doesn't ship still gets a
+    path it can report rather than a None it will crash on."""
+    pack = version_pack(quant, version_id)
+    return Path(pack["path"]) if pack else MODELS_DIR
+
+
+def pack_repo(quant: str, version_id: str | None = None) -> dict | None:
+    """The required_files.json repo entry backing (version, quant)."""
+    pack = version_pack(quant, version_id)
+    if not pack:
+        return None
+    for r in _REQUIRED.get("repos", []):
+        if r.get("key") == pack["repo_key"]:
+            return r
+    return None
+
+
+def _quant_for_repo_key(repo_key: str | None,
+                        version_id: str | None = None) -> str | None:
+    """Reverse lookup: which pack of this version does a required_files.json
+    repo key back? None for repos that aren't model packs at all (gemma, the
+    IC-LoRAs). Lets repo-shaped code ask the registry without knowing the
+    version's pack names."""
+    if not repo_key:
+        return None
+    for p in model_version(version_id).get("packs", ()):
+        if p.get("repo_key") == repo_key:
+            return p["quant"]
+    return None
+
+
+def version_cap_tiers(version_id: str | None = None) -> tuple[str, ...]:
+    return tuple(model_version(version_id).get("cap_tiers", ("q4",)))
+
+
+def version_quants(version_id: str | None = None) -> tuple[str, ...]:
+    return tuple(p["quant"] for p in model_version(version_id).get("packs", ()))
+
+
 # ---- panel settings: user-controllable preferences -------------------------
 # Persisted to panel_settings.json so the user's choice survives restarts.
 # Read at startup, exposed via /settings GET, mutated via /settings POST.
@@ -323,6 +555,23 @@ SETTINGS_FILE = STATE_DIR / "panel_settings.json"
 _SETTINGS_LOCK = threading.Lock()
 
 
+# ---- Storyboard preferences ------------------------------------------------
+# The shot-count chips the brief offers, and the qualities each pass may take.
+# Kept beside the settings defaults because _validate_settings_patch is the
+# only thing that enforces them and both run before anything else is imported.
+STORYBOARD_SHOT_CHOICES = (6, 12, 24, 36)
+# The chips above are what the brief OFFERS. This is what the feature ACCEPTS —
+# any count in the band the planner's token budget can actually serve. They are
+# different questions, and conflating them is how a brief asking for 4 shots
+# silently became a 12-shot film.
+STORYBOARD_MAX_SHOTS = 48
+STORYBOARD_DRAFT_QUALITIES = ("quick", "balanced", "standard")
+STORYBOARD_FINAL_QUALITIES = ("balanced", "standard", "high")
+# The film-level engine choice. See storyboard.ENGINE_MODES for what each means
+# and why it is a PLANNING input rather than a post-hoc filter.
+STORYBOARD_ENGINE_MODES = ("auto", "h3", "ltx")
+
+
 def _settings_defaults() -> dict:
     preset = OUTPUT_PRESETS[DEFAULT_OUTPUT_PRESET]
     return {
@@ -358,8 +607,9 @@ def _settings_defaults() -> dict:
         # ---- Anonymous usage analytics -----------------------------------
         # Full contract in the "Anonymous usage analytics" section further
         # down this file, and the event-by-event schema in docs/ANALYTICS.md.
-        # Short version: counts only, never content, and completely inert
-        # until a PostHog key is configured.
+        # Short version: counts only, never content, ON by default, and the
+        # build ships a working project key — so this toggle, not the key
+        # field below, is the off switch.
         #
         # Default ON. This is a change of posture from the 2026-05 opt-in
         # experiment that was reverted (da1d6f5) — that one was OFF by
@@ -372,9 +622,10 @@ def _settings_defaults() -> dict:
         # Random UUID4, generated on first use and never derived from
         # anything about the machine. The only identifier we send.
         "analytics_install_id": "",
-        # PostHog PROJECT key (write-only, safe to hold on disk). Empty =
-        # analytics opens no sockets at all. Maintainer pastes this in
-        # Settings to switch the fleet on; PHOSPHENE_ANALYTICS_KEY overrides.
+        # PostHog PROJECT key (write-only, safe to hold on disk). This is an
+        # OVERRIDE of the shipped ANALYTICS_KEY_DEFAULT, not the on switch:
+        # empty means "no override" and capture falls back to the shipped
+        # key. A fork pastes its own here; PHOSPHENE_ANALYTICS_KEY beats both.
         "analytics_key": "",
         # PostHog PERSONAL API key (read-only, maintainer-only). Powers the
         # fleet view on /stats/usage. Never used for capture.
@@ -384,6 +635,14 @@ def _settings_defaults() -> dict:
         "analytics_last_packs": {},
         # Whether the one-line boot disclosure has already been printed.
         "analytics_disclosed": False,
+        # ---- Storyboard --------------------------------------------------
+        # The brief's shot-count chip, and the quality each of the film's two
+        # passes runs at. Same store as every other preference; the Storyboard
+        # tab reads them on entry and writes them back through POST /settings.
+        "storyboard_shots": 12,
+        "storyboard_draft_quality": "quick",
+        "storyboard_final_quality": "standard",
+        "storyboard_engine": "auto",
     }
 
 
@@ -624,13 +883,36 @@ def _validate_settings_patch(patch: dict) -> tuple[dict, str | None]:
                            ("analytics_query_key", "PostHog personal API key")):
         if _akey in patch:
             val = str(patch[_akey]).strip()
-            # Empty is legal and meaningful: it clears the key and (for
-            # analytics_key) returns the panel to fully-inert.
+            # Empty is legal: it clears the override. For analytics_key that
+            # restores the SHIPPED default key (it does not stop sending —
+            # the analytics_enabled toggle does); for analytics_query_key it
+            # genuinely turns the fleet view off, since nothing ships there.
             if val and not (8 <= len(val) <= 256):
                 return {}, f"{_alabel} length looks wrong (expected 8-256 chars)"
             if any(c.isspace() for c in val):
                 return {}, f"{_alabel} cannot contain whitespace"
             out[_akey] = val
+
+    # ---- Storyboard defaults ------------------------------------------------
+    # The brief's shot-count chip and the film's two quality passes persist HERE
+    # rather than in a private file, because that is the store every other panel
+    # preference already uses.
+    if "storyboard_shots" in patch:
+        try:
+            n = int(str(patch["storyboard_shots"]).strip())
+        except (TypeError, ValueError):
+            return {}, "storyboard_shots must be a number"
+        if not (1 <= n <= STORYBOARD_MAX_SHOTS):
+            return {}, f"storyboard_shots must be between 1 and {STORYBOARD_MAX_SHOTS}"
+        out["storyboard_shots"] = n
+    for _skey, _allowed in (("storyboard_draft_quality", STORYBOARD_DRAFT_QUALITIES),
+                            ("storyboard_final_quality", STORYBOARD_FINAL_QUALITIES),
+                            ("storyboard_engine", STORYBOARD_ENGINE_MODES)):
+        if _skey in patch:
+            q = str(patch[_skey]).strip().lower()
+            if q not in _allowed:
+                return {}, f"{_skey} must be one of: {list(_allowed)}"
+            out[_skey] = q
 
     return out, None
 
@@ -2823,8 +3105,24 @@ def _detect_local_install_state() -> None:
     detect runs after every Update."""
     sha = _git_capture(["rev-parse", "HEAD"])
     branch = _git_capture(["rev-parse", "--abbrev-ref", "HEAD"]) or "(unknown)"
-    # `git status --porcelain` empty = clean tree.
-    porcelain = _git_capture(["status", "--porcelain"])
+    # `git status --porcelain -uno` empty = no MODIFIED TRACKED files.
+    #
+    # -uno (untracked-files=no) is load-bearing, not a tidy-up. Plain
+    # --porcelain also lists `??` untracked paths, and an install grows
+    # those by design: the optional H3 pack clones minimax-h3-mlx/ into
+    # this directory, Pinokio fills cache/ and logs/. That made the tree
+    # permanently "dirty" for every H3 user, which suppressed the update
+    # check outright — @Morac2 reported the pill stuck on "Update check
+    # is paused: local changes uncommitted" with nothing but `?? minimax-
+    # h3-mlx/` in his status (#52). .gitignore now covers those three
+    # paths, but only for users who already got the new .gitignore, which
+    # they can't without updating. -uno is what actually fixes it, and it
+    # is the honest question anyway: untracked files are exactly the ones
+    # a fast-forward pull (and the reset --hard fallback) leave alone. The
+    # one case where an untracked file DOES matter — an incoming commit
+    # adding a file at the same path — git refuses on its own, and that
+    # error is surfaced verbatim by the /version/pull handler.
+    porcelain = _git_capture(["status", "--porcelain", "-uno"])
     dirty = bool(porcelain and porcelain.strip())
     local_version = _read_local_version()
     # 2026-05-21 — capture HEAD commit date so the dev pill can show
@@ -2987,8 +3285,10 @@ def get_version_state() -> dict:
 # Runs the stdlib-only fetcher script as a subprocess once per 24h, appending
 # a JSON line to state/stats-data.jsonl. Dashboard at /stats reads this file.
 # 127.0.0.1-only by design (state/ is gitignored, file lives on the user's
-# Mac only). Skipped silently if no GitHub token is resolvable — no telemetry
-# is the floor, this is opt-in via "have a token configured".
+# Mac only). Skipped silently if no GitHub token is resolvable — this fetcher
+# is opt-in via "have a token configured". It only READS GitHub's API and
+# sends nothing anywhere; the panel's outbound usage analytics is a separate
+# module entirely (see "Anonymous usage analytics" / docs/ANALYTICS.md).
 # ---------------------------------------------------------------------------
 
 _STATS_POLL_INTERVAL_SEC = 24 * 60 * 60  # daily
@@ -3277,32 +3577,218 @@ def base_missing() -> list[str]:
     return out
 
 
-def q8_missing_files() -> list[str]:
-    """Files missing for the Q8 repo (bare filenames). Honors $LTX_Q8_LOCAL.
+def pack_missing_files(quant: str, version_id: str | None = None) -> list[str]:
+    """Files missing for ONE pack of ONE model version (bare filenames).
 
-    When LTX_Q8_LOCAL is set, it overrides the Q8 repo's local_dir — we
-    re-route the check there. Other overrides (e.g. moving Q4 elsewhere)
-    aren't supported via env var; users with custom layouts should adjust
-    required_files.json directly."""
-    for r in _repos():
-        if r.get("key") == "q8":
-            override = r.copy()
-            override["local_dir"] = str(Q8_LOCAL_PATH.relative_to(ROOT)) \
-                if Q8_LOCAL_PATH.is_relative_to(ROOT) else str(Q8_LOCAL_PATH)
-            # _repo_missing uses ROOT-relative; if Q8_LOCAL_PATH is absolute
-            # outside ROOT, build a temporary repo with absolute base.
-            if Path(override["local_dir"]).is_absolute():
-                missing = []
-                for fname in r.get("files", []):
-                    p = Path(override["local_dir"]) / fname
-                    try:
-                        if not p.exists() or p.stat().st_size < _MIN_FILE_BYTES:
-                            missing.append(fname)
-                    except OSError:
-                        missing.append(fname)
-                return missing
-            return _repo_missing(override)
-    return []
+    This is the anti-mosaic primitive. The file list comes from the pack's
+    `required_files.json` entry (reached through the registry by repo key,
+    never by a literal), and the directory comes from the registry's resolved
+    pack path — so the answer is always about the exact weights the job is
+    going to load, and a second model version cannot inherit the first one's
+    answer.
+
+    Directory resolution keeps the pre-registry behaviour exactly: a pack
+    under ROOT is checked ROOT-relative via `_repo_missing`; a pack an env
+    var moved outside ROOT (LTX_Q8_LOCAL) is checked absolutely. Returns []
+    for a quant this version doesn't ship, which is the honest answer — the
+    caller's job is to notice the pack isn't registered, not to see phantom
+    missing files."""
+    repo = pack_repo(quant, version_id)
+    if not repo:
+        return []
+    base = pack_path(quant, version_id)
+    if base.is_relative_to(ROOT):
+        override = repo.copy()
+        override["local_dir"] = str(base.relative_to(ROOT))
+        return _repo_missing(override)
+    missing = []
+    for fname in repo.get("files", []):
+        p = base / fname
+        try:
+            if not p.exists() or p.stat().st_size < _MIN_FILE_BYTES:
+                missing.append(fname)
+        except OSError:
+            missing.append(fname)
+    return missing
+
+
+def pack_available_anywhere(quant: str, version_id: str | None = None) -> bool:
+    """True if (version, quant) is complete in EITHER its local dir OR the HF
+    cache — the cache-aware form of `pack_missing_files`. Same reasoning as
+    q8_available_anywhere below, generalised to any registered pack."""
+    repo = pack_repo(quant, version_id)
+    if not repo:
+        return False
+    for entry in repo_status_list():
+        if entry.get("key") == repo.get("key"):
+            return bool(entry.get("complete"))
+    return False
+
+
+def base_model_dir(version_id: str | None = None) -> str:
+    """Model directory for a version's BASE (distilled) pipeline, as a job
+    spec wants it.
+
+    Every version resolves to its own registry q4 pack, with ONE exception:
+    the version whose q4 pack is literally `Q4_LOCAL_PATH` gets `MODEL_ID`
+    instead. That is not a special case for "the default" — it is a special
+    case for **2.3 specifically**, because `MODEL_ID` is the env-aware
+    spelling of that one install: `LTX_MODEL` overrides it, and it degrades
+    to the bare HF repo id `dgrauet/ltx-2.3-mlx-q4` when the directory is
+    absent. Those two shapes have to keep working byte-for-byte.
+
+    KEYING THIS OFF PACK IDENTITY RATHER THAN DEFAULT-NESS IS LOAD-BEARING.
+    Two earlier spellings both broke, in mirror image:
+
+      `== ACTIVE_MODEL_VERSION` — read correctly only while ltx23 was the
+      sole generation and so always both default and active. The day
+      LTX_MODEL_VERSION=ltx25 made a second version active, 2.5 asked for its
+      base pipeline and was handed MODEL_ID — the 2.3 pack — and rendered 2.3
+      weights under 2.5 code, silently, at full speed. Caught by reading the
+      helper's `ready` line, not by any test.
+
+      `== default_model_version_id()` — correct until 2.5 BECAME the default,
+      at which point it hands the 2.5 generation the 2.3 pack again.
+
+    A pack's own path cannot drift out from under it, so this spelling
+    survives the default moving in either direction."""
+    wanted = version_id or ACTIVE_MODEL_VERSION
+    pack = version_pack("q4", wanted)
+    if pack is not None and Path(pack["path"]) == Q4_LOCAL_PATH:
+        return str(MODEL_ID)
+    return str(pack_path("q4", wanted))
+
+
+def text_encoder_dir(version_id: str | None = None) -> str:
+    """Text-encoder directory for a version, as the helper's env wants it.
+
+    Each version names its own encoder in the registry, and 2.3's entry names
+    the `GEMMA` constant itself — so `LTX_GEMMA_PATH` and every existing
+    install layout are honoured byte-for-byte without a branch here. Like
+    base_model_dir(), this deliberately does NOT ask which version is the
+    default; that answer changes, and the encoder a generation needs does not.
+
+    This exists because the conditioning half of the pipeline had no seam at
+    all. `MODEL_VERSIONS` described which DiT weights a generation loads while
+    the encoder stayed a module-level constant pointing at Gemma 3, so
+    selecting 2.5 moved the transformer and left the text tower behind — and
+    the mismatch is silent — a Gemma 3 tower hands a 188160-wide projection
+    to a generation that wants its own, and nothing raises."""
+    te = model_version(version_id).get("text_encoder") or {}
+    return str(te.get("path") or GEMMA)
+
+
+def text_encoder_missing_files(version_id: str | None = None) -> list[str]:
+    """Anti-mosaic primitive for the encoder, mirroring pack_missing_files().
+
+    An encoder that is half-downloaded fails the same way a half-downloaded
+    DiT does: it loads what is there, leaves the rest at whatever the module
+    constructor produced, and renders something that looks like a bad model
+    rather than a missing file."""
+    te = model_version(version_id).get("text_encoder") or {}
+    key = te.get("repo_key")
+    if not key:
+        return []
+    repo = None
+    for r in _REQUIRED.get("repos", []):
+        if r.get("key") == key:
+            repo = r
+            break
+    if not repo:
+        return []
+    base = Path(text_encoder_dir(version_id))
+    return [f for f in (repo.get("files") or []) if not (base / f).exists()]
+
+
+_HQ_WEIGHTS_FALLBACK = {
+    "dev_transformer": "transformer-dev.safetensors",
+    "distilled_lora": "ltx-2.3-22b-distilled-lora-384.safetensors",
+}
+
+
+def hq_weights(version_id: str | None = None) -> dict:
+    """The dev transformer + distilled LoRA FILENAMES a version's two-stage HQ
+    surface loads out of its hq pack.
+
+    High, Extend, Keyframe and A2V all reach past `model_dir` and name a file
+    inside it. `model_dir` alone is therefore not the whole seam: point a job
+    at the 2.5 pack while the filename still says 2.3 and the loader looks for
+    something that is not there.
+
+    The fallback is the 2.3 pair rather than an empty dict on purpose — an
+    unknown or malformed registry entry must behave exactly like the code did
+    before this function existed, which is what makes adding it a no-op for
+    every generation that does not override it."""
+    names = model_version(version_id).get("hq_weights") or {}
+    return {k: str(names.get(k) or v) for k, v in _HQ_WEIGHTS_FALLBACK.items()}
+
+
+def ltx_model_dir(quant: str, version_id: str | None = None) -> str:
+    """Pack directory for a job spec, with the fallback the IC-LoRA / HDR
+    sites hand-rolled four times: if the pack directory isn't on disk, hand
+    the helper the models root and let its own resolution take over rather
+    than naming a path that doesn't exist."""
+    p = pack_path(quant, version_id)
+    return str(p) if p.is_dir() else str(MODELS_DIR)
+
+
+def _canonical_layout() -> bool:
+    """True when this panel is driving the canonical Pinokio model layout.
+
+    False for the two shapes we must never second-guess: LTX_MODEL set to a
+    bare HF repo id (weights resolve through the HF cache) and LTX_MODEL
+    pointed at a directory the user assembled themselves. We have no
+    manifest for either, so completeness claims about them would be lies."""
+    return str(MODEL_ID).startswith("/") and str(MODEL_ID) == str(pack_path("q4"))
+
+
+def ltx_pack_preflight(quant: str, feature: str,
+                       version_id: str | None = None) -> None:
+    """Refuse a render whose weights are incomplete, and NAME the file.
+
+    This is the June-2026 lesson turned into four lines of control flow. One
+    1 GB spatial upscaler fell out of a `download_include` allowlist; the
+    pack still had every other file, the loader still built the module, and
+    it built it from random initialisation. Output was a rainbow mosaic with
+    no error anywhere -- two weeks and three wrong theories (Metal watchdog,
+    corrupt download, an MLX 4-bit kernel bug) before anyone looked at the
+    file list. A second model version multiplies that surface by the number
+    of packs, so every pack a job is about to load gets asked first.
+
+    Conservative by construction -- it can only fire where we have ground
+    truth: the canonical layout, a registered pack, and the files absent
+    from BOTH the pack directory and the HF cache. Anything else returns
+    silently and the job proceeds exactly as it did before."""
+    if not _canonical_layout():
+        return
+    repo = pack_repo(quant, version_id)
+    if not repo:
+        return
+    if pack_available_anywhere(quant, version_id):
+        return
+    missing = pack_missing_files(quant, version_id)
+    if not missing:
+        return
+    ver = model_version(version_id)
+    shown = ", ".join(missing[:3]) + (" …" if len(missing) > 3 else "")
+    raise RuntimeError(
+        f"{feature} can't run: the {ver['label']} {quant.upper()} model is "
+        f"incomplete. Missing {len(missing)} file(s) in "
+        f"{pack_path(quant, version_id)}: {shown}. "
+        f"Rendering anyway produces garbled 'mosaic' output rather than an "
+        f"error, which is why this stops here. Use the Repair banner in "
+        f"Settings → Model files, or re-download {repo['repo_id']}."
+    )
+
+
+def q8_missing_files() -> list[str]:
+    """Files missing for the active version's Q8 pack (bare filenames).
+    Honors $LTX_Q8_LOCAL via the registry's pack path.
+
+    Kept as a named function because ~10 job-time gates and /status read it;
+    the logic now lives in `pack_missing_files` so a second model version
+    asks the same question about its OWN pack."""
+    return pack_missing_files("q8")
 
 
 def q8_available_anywhere() -> bool:
@@ -3321,10 +3807,7 @@ def q8_available_anywhere() -> bool:
     cache. This helper is the single source of truth so the FFLF gate
     matches the model browser.
     """
-    for repo in repo_status_list():
-        if repo.get("key") == "q8":
-            return bool(repo.get("complete"))
-    return False
+    return pack_available_anywhere("q8")
 
 
 def repo_status_list() -> list[dict]:
@@ -3345,9 +3828,20 @@ def repo_status_list() -> list[dict]:
     for r in _repos():
         local_dir = r["local_dir"]
         if r.get("key") == "q8":
+            # DISPLAY convention only, deliberately left as a special case:
+            # this string is what /models and the model browser print, and
+            # q8 has printed the absolute path since LTX_Q8_LOCAL existed
+            # while every other repo prints the ROOT-relative one. Making
+            # them agree is a cosmetic change to a shipped surface, not part
+            # of the version seam — the seam is WHICH FILES in WHICH DIR, and
+            # that is registry-driven below.
             local_dir = str(Q8_LOCAL_PATH)
 
-        local_missing = q8_missing_files() if r.get("key") == "q8" else _repo_missing(r)
+        # Completeness is asked of the registry when this repo backs a
+        # registered pack, so the answer is per-(version, pack) and a second
+        # model version gets its own answer instead of inheriting 2.3's.
+        _quant = _quant_for_repo_key(r.get("key"))
+        local_missing = pack_missing_files(_quant) if _quant else _repo_missing(r)
         total = len(r.get("files", []))
         local_present = total - len(local_missing)
 
@@ -3773,6 +4267,67 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+# The sidecar our own quantiser writes next to the weights it produces
+# (scripts/quantize_ltx.py). Shape: {"files": {"<name>": {"sha256", "bytes"}}}.
+PACK_MANIFEST_NAME = "phosphene_quant_manifest.json"
+
+
+def _manifest_meta(base: Path) -> dict:
+    """filename -> {"sha256", "size"} read from a pack's own manifest.
+
+    The second source of truth for /models/verify-deep. HuggingFace publishes
+    an LFS sha256 per file, which is where every expected hash has come from
+    so far — but a pack mirrored through GitHub releases (the lane the 2.5
+    packs take, because their upstream is gated and we publish our own
+    quantisation) has no such API. Its hashes ride along in the pack instead.
+
+    Returns {} on anything unexpected. The caller reads a missing entry as
+    'unverifiable', never as corrupt, so a malformed or absent manifest can
+    never trigger a spurious multi-GB re-download."""
+    try:
+        with open(base / PACK_MANIFEST_NAME, "r") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    files = data.get("files")
+    if not isinstance(files, dict):
+        return {}
+    out: dict = {}
+    for name, entry in files.items():
+        if not isinstance(entry, dict):
+            continue
+        sha = entry.get("sha256") or ""
+        size = int(entry.get("bytes") or entry.get("size") or 0)
+        if sha or size:
+            out[name] = {"sha256": sha, "size": size}
+    return out
+
+
+def _pack_verify_source(repo_key: str | None) -> str:
+    """Where the expected SHAs for this repo come from — "hf-api" (default,
+    and what every 2.3 pack plus gemma and the IC-LoRAs use) or "manifest"."""
+    quant = _quant_for_repo_key(repo_key)
+    if not quant:
+        return "hf-api"
+    pack = version_pack(quant) or {}
+    return pack.get("verify_source") or "hf-api"
+
+
+def _expected_meta(repo_key: str | None, repo_id: str, base: Path) -> dict:
+    """filename -> {"sha256", "size"} for one installed repo, from whichever
+    source its registry entry declares.
+
+    A "hf-api" pack additionally falls back to a manifest if one is sitting in
+    the directory and the network lookup came back empty. That fallback is
+    inert for every 2.3 pack — dgrauet's repos carry no manifest — and turns
+    "unverified because the network blinked" into a real answer where we do
+    ship one."""
+    if _pack_verify_source(repo_key) == "manifest":
+        return _manifest_meta(base)
+    meta = _upstream_meta(repo_id) if repo_id else {}
+    return meta or _manifest_meta(base)
+
+
 def _deep_verify_thread() -> None:
     """Hash every installed weight + compare to upstream. Result mirrors
     _model_integrity's shape ({ok, bad:[{repo,file,reason}], checked}) so the
@@ -3788,7 +4343,13 @@ def _deep_verify_thread() -> None:
             repo_def = defs.get(r["key"], {})
             repo_id = repo_def.get("repo_id", "")
             base = Path(r.get("location") or (ROOT / r["local_dir"]))
-            up = {k: v["sha256"] for k, v in _upstream_meta(repo_id).items() if v.get("sha256")}
+            # Expected hashes come from whichever source the registry
+            # declares for this pack: HuggingFace LFS metadata (every 2.3
+            # pack, unchanged) or the pack's own manifest (a mirrored pack
+            # with no checksum API, which is how the 2.5 packs ship).
+            up = {k: v["sha256"]
+                  for k, v in _expected_meta(r["key"], repo_id, base).items()
+                  if v.get("sha256")}
             for fname in repo_def.get("files", []):
                 if not fname.endswith(".safetensors"):
                     continue
@@ -3826,10 +4387,11 @@ def _deep_verify_thread() -> None:
         exp_meta: dict = {}
         for r in _repos():
             repo_id = r.get("repo_id", "")
-            base = Q8_LOCAL_PATH if r.get("key") == "q8" else (ROOT / r["local_dir"])
-            if not repo_id or not any(_placed_size(base / f) for f in r.get("files", [])):
+            _q = _quant_for_repo_key(r.get("key"))
+            base = pack_path(_q) if _q else (ROOT / r["local_dir"])
+            if not any(_placed_size(base / f) for f in r.get("files", [])):
                 continue                # not installed here — don't ask upstream
-            for fname, m in _upstream_meta(repo_id).items():
+            for fname, m in _expected_meta(r.get("key"), repo_id, base).items():
                 exp_meta[(r["key"], fname)] = m
         already = {(b["repo"], b["file"]) for b in result["bad"]}
         for p in _placement_errors(expected=exp_meta, hasher=_sha256_file):
@@ -3912,40 +4474,73 @@ def _download_thread(repo: dict) -> None:
     download in a 3-attempt retry loop with exponential backoff. hf is
     resumable, so retries pick up from where the previous attempt
     stopped. User cancellations (DOWNLOAD["active"] flipping to False)
-    break the loop early."""
+    break the loop early.
+
+    2026-08-12 - TWO LANES, ONE RETRY LOOP. A pack whose registry entry carries
+    a `mirror` block is not on HuggingFace at all: the LTX-2.5 packs are our own
+    quantisation of a gated upstream, our HF token is read-only, and they are
+    published as GitHub release assets instead (the lane the sample-character
+    LoRA already takes). For those we spawn `scripts/fetch_pack_release.py`
+    instead of `hf`. Only the COMMAND differs -- the retry/backoff, the
+    line-streaming into the panel log, the single download slot and
+    cancel-by-killing-the-process-group are all shared, because the alternative
+    is a second downloader that drifts from this one."""
     repo_id = repo["repo_id"]
     target = ROOT / repo["local_dir"]
     target.mkdir(parents=True, exist_ok=True)
-    cmd = [str(HF_BIN), "download", repo_id, "--local-dir", str(target)]
-    # Y1.024 — apply --include filter when the repo entry declares one. Without
-    # it `hf download` grabs every file in the upstream repo. dgrauet's LTX
-    # repos host duplicate transformer variants (-distilled, -distilled-1.1,
-    # -dev), duplicate distilled LoRAs, and unused upscalers — turning a
-    # declared 25 GB Q8 into 82 GB on disk and a 25 GB Q4 into 56 GB.
-    # `download_include` is the explicit allowlist of patterns we ship to
-    # the user; everything else stays on the Hub. See required_files.json
-    # for the comment block on this.
-    include_patterns = repo.get("download_include") or []
-    for pat in include_patterns:
-        cmd.extend(["--include", pat])
-    if include_patterns:
-        push(f"[hf] filtering {repo_id} download to {len(include_patterns)} pattern(s) — only the files the panel actually loads.")
-    push(f"[hf] {repo_id} → {target} (~{repo.get('size_gb','?')} GB) — resumable")
-
-    # Build the env once. HF_HUB_ENABLE_HF_TRANSFER=1 turns on the Rust
-    # downloader; if hf_transfer isn't installed the hf CLI logs a warning
-    # and falls back to the Python downloader (slower but still works).
-    # HF_TOKEN unlocks faster throughput for users who configured a token
-    # in Settings — anonymous HF is throttled hard.
+    mirror = repo.get("mirror") or {}
+    is_release_mirror = mirror.get("kind") == "github-release"
     env = os.environ.copy()
-    env["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
-    hf_token = _active_hf_token()
-    if hf_token:
-        env["HF_TOKEN"] = hf_token
-        env["HUGGING_FACE_HUB_TOKEN"] = hf_token
-        push(f"[hf] using authenticated download (HF token configured) — ~10× faster than anonymous.")
+
+    if is_release_mirror:
+        # sys.executable, not HF_BIN: the fetcher is stdlib-only and runs under
+        # the panel's own interpreter. No hf, no token, no Hub. It shards, it
+        # resumes, and it refuses to rename a file into place until the
+        # reassembled sha256 matches the published manifest.
+        dl_tag = "mirror"
+        cmd = [sys.executable, str(ROOT / "scripts" / "fetch_pack_release.py"),
+               "--repo-key", str(repo.get("key") or ""), "--root", str(ROOT)]
+        push(f"[mirror] {repo.get('key')} → {target} (~{repo.get('size_gb','?')} GB) "
+             f"from the {mirror.get('release_repo')} release "
+             f"{mirror.get('tag')} — sharded, sha256-verified, resumable")
     else:
-        push(f"[hf] no HF token configured — downloads run on the throttled anonymous tier. Set one in Settings → Hugging Face token for ~10× faster downloads.")
+        dl_tag = "hf"
+        cmd = [str(HF_BIN), "download", repo_id, "--local-dir", str(target)]
+        # Y1.024 - apply --include filter when the repo entry declares one.
+        # Without it `hf download` grabs every file in the upstream repo.
+        # dgrauet's LTX repos host duplicate transformer variants (-distilled,
+        # -distilled-1.1, -dev), duplicate distilled LoRAs, and unused
+        # upscalers - turning a declared 25 GB Q8 into 82 GB on disk and a
+        # 25 GB Q4 into 56 GB. `download_include` is the explicit allowlist of
+        # patterns we ship to the user; everything else stays on the Hub. See
+        # required_files.json for the comment block on this.
+        include_patterns = repo.get("download_include") or []
+        for pat in include_patterns:
+            cmd.extend(["--include", pat])
+        if include_patterns:
+            push(f"[hf] filtering {repo_id} download to {len(include_patterns)} pattern(s) — only the files the panel actually loads.")
+        push(f"[hf] {repo_id} → {target} (~{repo.get('size_gb','?')} GB) — resumable")
+
+        # HF_HUB_ENABLE_HF_TRANSFER=1 turns on the Rust downloader; if
+        # hf_transfer isn't installed the hf CLI logs a warning and falls back
+        # to the Python downloader (slower but still works). HF_TOKEN unlocks
+        # faster throughput for users who configured a token in Settings -
+        # anonymous HF is throttled hard. Neither applies to the mirror lane,
+        # which is why they live inside this branch.
+        env["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+        hf_token = _active_hf_token()
+        if hf_token:
+            env["HF_TOKEN"] = hf_token
+            env["HUGGING_FACE_HUB_TOKEN"] = hf_token
+            push(f"[hf] using authenticated download (HF token configured) — ~10× faster than anonymous.")
+        else:
+            push(f"[hf] no HF token configured — downloads run on the throttled anonymous tier. Set one in Settings → Hugging Face token for ~10× faster downloads.")
+
+    # What to call this download in the log. A mirrored pack has no meaningful
+    # `repo_id` (it names an HF repo that does not exist), so it is identified
+    # by registry key + release tag instead.
+    dl_label = (f"{repo.get('key')} ({mirror.get('tag')})"
+                if is_release_mirror else repo_id)
 
     max_attempts = 3
     backoff_sec = 5
@@ -3953,10 +4548,10 @@ def _download_thread(repo: dict) -> None:
         for attempt in range(1, max_attempts + 1):
             with DOWNLOAD_LOCK:
                 if not DOWNLOAD["active"]:
-                    push(f"[hf] {repo_id} cancelled before attempt {attempt}.")
+                    push(f"[{dl_tag}] {dl_label} cancelled before attempt {attempt}.")
                     break
             if attempt > 1:
-                push(f"[hf] {repo_id} attempt {attempt}/{max_attempts} — resuming from where the previous attempt stopped.")
+                push(f"[{dl_tag}] {dl_label} attempt {attempt}/{max_attempts} — resuming from where the previous attempt stopped.")
             try:
                 proc = subprocess.Popen(
                     cmd,
@@ -3968,7 +4563,7 @@ def _download_thread(repo: dict) -> None:
                     start_new_session=True,
                 )
             except Exception as exc:
-                push(f"[hf] failed to spawn hf: {exc}")
+                push(f"[{dl_tag}] failed to spawn the downloader: {exc}")
                 break
             with DOWNLOAD_LOCK:
                 DOWNLOAD["proc"] = proc
@@ -3990,22 +4585,22 @@ def _download_thread(repo: dict) -> None:
                     if line:
                         with DOWNLOAD_LOCK:
                             DOWNLOAD["last_line"] = line[:200]
-                        push(f"[hf:{repo['key']}] {line[:300]}")
+                        push(f"[{dl_tag}:{repo['key']}] {line[:300]}")
                 else:
                     buf += ch
             if buf.strip():
-                push(f"[hf:{repo['key']}] {buf.strip()[:300]}")
+                push(f"[{dl_tag}:{repo['key']}] {buf.strip()[:300]}")
             rc = proc.wait()
             if rc == 0:
-                push(f"[hf] {repo_id} downloaded successfully.")
+                push(f"[{dl_tag}] {dl_label} downloaded successfully.")
                 break
             with DOWNLOAD_LOCK:
                 still_active = DOWNLOAD["active"]
             if not still_active:
-                push(f"[hf] {repo_id} cancelled (exit {rc}).")
+                push(f"[{dl_tag}] {dl_label} cancelled (exit {rc}).")
                 break
             if attempt < max_attempts:
-                push(f"[hf] {repo_id} attempt {attempt} failed (exit {rc}). Retrying in {backoff_sec}s — hf will resume from the last completed file.")
+                push(f"[{dl_tag}] {dl_label} attempt {attempt} failed (exit {rc}). Retrying in {backoff_sec}s — the downloader resumes from where it stopped.")
                 # Sleep in 1-second slices so a cancel during backoff is responsive.
                 for _ in range(backoff_sec):
                     time.sleep(1)
@@ -4014,9 +4609,9 @@ def _download_thread(repo: dict) -> None:
                             break
                 backoff_sec = min(backoff_sec * 2, 60)   # 5 → 10 → 20s cap by attempt 3
             else:
-                push(f"[hf] {repo_id} FAILED after {max_attempts} attempts (last exit {rc}). Click Download again to keep retrying — hf will resume.")
+                push(f"[{dl_tag}] {dl_label} FAILED after {max_attempts} attempts (last exit {rc}). Click Download again to keep retrying — it resumes.")
     except Exception as exc:
-        push(f"[hf] {repo_id} crashed: {exc}")
+        push(f"[{dl_tag}] {dl_label} crashed: {exc}")
     finally:
         with DOWNLOAD_LOCK:
             DOWNLOAD["active"] = False
@@ -5162,6 +5757,36 @@ H3_CHAIN_PROMPT_HELP = (
 # file instead (no separator to collide with a prompt that contains '|||'), but
 # a hand-rolled curl may still post this form and it costs one split to accept.
 H3_CHAIN_PROMPT_SEPARATOR = " ||| "
+# Storyboard's `?` copy, on the same four-hop Python-owned path as
+# H3_CHAIN_PROMPT_HELP above and for the same reason: the sentence explaining a
+# mechanism has to live beside the mechanism or it drifts. It names no model and
+# no size ON PURPOSE — repointing LTX_STORYBOARD_PLANNER at a different planner
+# must not turn this copy into a lie.
+STORYBOARD_RAM_HELP = (
+    "On a Mac the planner and the renderer share one pool of memory, so they "
+    "never run at the same time. Phosphene plans the whole film in one go, in a "
+    "separate process that exits when it's done, and only then starts rendering. "
+    "That is also why the plan is worth reading before you start — nothing "
+    "rewrites itself halfway through.")
+# What decides a shot's engine, on the same Python-owned path. This used to open
+# "There is no engine switch on a film" — written before the film-level control
+# existed, and then printed by the `?` sitting a few centimetres to its right.
+# It describes the control that is actually there now.
+STORYBOARD_ENGINE_HELP = (
+    "You choose this once for the whole film, in the brief. On Auto each shot "
+    "gets the engine that can actually render it: a shot cast with one of your "
+    "trained characters goes to LTX-2.3 — that is where character LoRAs load, "
+    "and Hailuo H3 cannot stack one, so a cast shot on H3 would render a "
+    "stranger — and every other shot goes to Hailuo H3, which renders dialogue, "
+    "voices and sound together with the picture. Pick an engine by name and the "
+    "whole film goes there, except that a cast shot always stays on LTX-2.3. "
+    "The chip on each card tells you which one that shot got. Changing the "
+    "choice on a film that is already planned means re-planning it, because the "
+    "two engines want their prompts written differently — that is why the same "
+    "control is in the Re-plan box. Shots are rendered grouped by engine, so "
+    "each model loads once instead of once per shot.")
+STORYBOARD_ENGINE_NOTE = "The plan picks the engine per shot — the chip on each card says which."
+STORYBOARD_ENGINE_NOTE_NO_H3 = "Hailuo H3 isn't installed, so every shot renders on LTX-2.3."
 # The Draft canvas renders at 0.25 MP. The H3 community's practical floor is
 # ~0.5 MP, and video STRUCTURE resolves in the last denoise step, so at 9 steps a
 # 0.25 MP pass is genuinely noisy: composition, motion and dialogue timing are
@@ -7013,11 +7638,16 @@ def _engine_css() -> str:
 # "not going to be well accepted in the open source world." What ships now
 # is deliberately a different animal, and the differences are the point:
 #
-#   * INERT BY DEFAULT IN THE PUBLIC TREE. ANALYTICS_KEY_DEFAULT is "" and
-#     an empty key is a hard no-op — no socket is ever opened. The panel
-#     starts pinging only after the maintainer pastes a PostHog project key
-#     into Settings (or sets PHOSPHENE_ANALYTICS_KEY). A fork that never
-#     pastes a key never sends anything, forever, with no code change.
+#   * IT SHIPS A KEY, AND SAYS SO. ANALYTICS_KEY_DEFAULT carries the live
+#     phc_ project key (since acfbdc7), so a stock install reports out of
+#     the box. That is deliberate: Phosphene is distributed AS SOURCE, so a
+#     key that stayed empty in the tree could never reach anyone and the
+#     fleet counts would not exist. A phc_ key is WRITE-ONLY — it cannot
+#     read an event back. The off switch is the Settings toggle (or
+#     PHOSPHENE_ANALYTICS_DISABLED=1), NOT clearing the key field: an empty
+#     `analytics_key` setting resolves back to this default. Read
+#     docs/ANALYTICS.md before changing any of that; the doc and this
+#     module are meant to be diffable by a suspicious user.
 #   * IT NEVER SEES CONTENT. No prompts, no filenames, no paths, no media,
 #     no LoRA/character names, no seeds. The event list in docs/ANALYTICS.md
 #     is the WHOLE schema. _analytics_clean_props() drops known-dangerous
@@ -7045,8 +7675,9 @@ def _engine_css() -> str:
 # only way anonymous fleet counts work at all. The earlier stance here treated a
 # client key like a secret; it isn't. Reading the fleet still requires the
 # separate PERSONAL key (analytics_query_key), which is NOT committed.
-# Empty string would disable analytics at the source (no socket opened);
-# PHOSPHENE_ANALYTICS_KEY still overrides at runtime.
+# Blanking this constant is the only way to make a build that never opens a
+# socket — the per-user off switch is the analytics_enabled toggle, not an
+# empty key field. PHOSPHENE_ANALYTICS_KEY still overrides at runtime.
 ANALYTICS_KEY_DEFAULT = "phc_shvL6mr1NB8fmcCqGUtAbpr8d4TgA2ebEIxwoLxeezn"
 # PostHog ingestion host (capture). Override for a self-hosted receiver.
 ANALYTICS_HOST_DEFAULT = "https://us.i.posthog.com"
@@ -7055,6 +7686,27 @@ ANALYTICS_HOST_DEFAULT = "https://us.i.posthog.com"
 ANALYTICS_API_HOST_DEFAULT = "https://us.posthog.com"
 ANALYTICS_TIMEOUT_SEC = 2.0
 ANALYTICS_STR_MAX = 120
+
+# The value we put in the event's own $ip property so PostHog never writes the
+# connecting address there. It has to be a TRUTHY string: PostHog's ingest fills
+# properties.$ip from the socket only when the event didn't carry one
+# (`if (!properties['$ip'] && event.ip)`), so `None` — the obvious spelling — is
+# falsy and gets silently replaced by the real address. 0.0.0.0 is also chosen
+# over the more natural 127.0.0.1: the GeoIP transformation rewrites loopback
+# and 192.168.* to a real Swedish address for local-dev convenience, which would
+# manufacture a location if the disable flag below were ever dropped.
+ANALYTICS_IP_PLACEHOLDER = "0.0.0.0"
+
+# Instructions to the receiver, attached to every event next to our own
+# properties. They are spread LAST in _analytics_post so no call site can
+# override them, and the dry-run suite asserts this exact set on every event
+# the panel can fire — a new $-prefixed key cannot appear without a test
+# turning red. See _analytics_post for what each one does and does not buy.
+_ANALYTICS_RECEIVER_DIRECTIVES = {
+    "$process_person_profile": False,
+    "$geoip_disable": True,
+    "$ip": ANALYTICS_IP_PLACEHOLDER,
+}
 
 # Local mirror. Written for every captured event whether or not a PostHog
 # key is configured, so /stats always has a "this machine" view and so
@@ -7115,9 +7767,11 @@ def _analytics_enabled() -> bool:
     for users who want it off before the panel ever writes a settings file
     — PHOSPHENE_ANALYTICS_DISABLED=1 wins over everything.
 
-    Note this is independent of whether a key is configured: with the
-    toggle ON and no key, capture still writes the local mirror (which
-    never leaves the Mac) but opens no socket."""
+    This is the ONLY off switch, and the one docs/ANALYTICS.md points users
+    at. It is independent of the key: because a working project key ships
+    in ANALYTICS_KEY_DEFAULT, returning False here is what stops a stock
+    install from sending — and it stops the local mirror too, since capture
+    returns before it builds a payload."""
     if _optional_bool_env("PHOSPHENE_ANALYTICS_DISABLED") is True:
         return False
     return bool(get_settings().get("analytics_enabled", True))
@@ -7127,8 +7781,15 @@ def _analytics_key() -> str:
     """Resolve the PostHog PROJECT key used for capture, in priority order:
        1. PHOSPHENE_ANALYTICS_KEY env var (maintainer / CI override)
        2. `analytics_key` in panel_settings.json (Settings modal)
-       3. ANALYTICS_KEY_DEFAULT — "" in the public tree
-    Empty result means "never open a socket"."""
+       3. ANALYTICS_KEY_DEFAULT — the live phc_ key this build ships with
+
+    NOTE the fallback: an EMPTY setting is not an off switch, it just means
+    "no override", so a user who clears the Settings field is still
+    reporting under the shipped key. Turning analytics off is
+    _analytics_enabled() — the toggle or PHOSPHENE_ANALYTICS_DISABLED.
+    docs/ANALYTICS.md says this in the same words; keep them in step. An
+    empty RESULT (only reachable if a fork blanks the constant) means
+    "never open a socket"."""
     env = (os.environ.get("PHOSPHENE_ANALYTICS_KEY") or "").strip()
     if env:
         return env
@@ -7366,14 +8027,35 @@ def _usage_log_append(record: dict) -> None:
 def _analytics_post(payload: dict) -> None:
     """Single-event POST to the PostHog capture API. Never raises.
 
-    `$process_person_profile: false` tells PostHog not to build a person
-    record for the install id — we want counts, not people. The IP the
-    request arrives from is whatever the backend sees; PostHog derives a
-    coarse country from it by default and we neither add to nor suppress
-    that (documented in docs/ANALYTICS.md)."""
+    Every event carries _ANALYTICS_RECEIVER_DIRECTIVES — three instructions
+    to the receiver, verified against PostHog's ingest source rather than
+    assumed:
+
+      $process_person_profile: False
+          Don't build a person record for the install id. We want counts,
+          not people.
+      $geoip_disable: True
+          PostHog's GeoIP transformation returns immediately instead of
+          deriving country, city, subdivision, timezone and the city's
+          coordinates. Its first statement is literally
+          `if (event.properties?.$geoip_disable or empty(...$ip))`, and this
+          is the same property posthog-python sets for disable_geoip=True.
+      $ip: ANALYTICS_IP_PLACEHOLDER
+          Ingest copies the connecting address into properties.$ip only when
+          the event didn't bring its own, so sending one is the only way to
+          keep the real address off the stored event. It must be truthy —
+          see ANALYTICS_IP_PLACEHOLDER for why `None` silently does nothing.
+
+    What this does NOT do, and what docs/ANALYTICS.md is careful not to
+    claim: the request still arrives over TCP from a real address, and no
+    field inside a request body can change that. What the panel controls is
+    what the receiver is instructed to derive from it and store on the
+    event. Discarding it at the edge as well is a project-side setting, not
+    something this code can assert."""
     key = _analytics_key()
     if not key:
-        return  # no key => inert, and this is the only guard that matters
+        return  # only reachable if a fork blanks the shipped key; the guard
+                # users actually rely on is _analytics_enabled(), upstream
     body = json.dumps({
         "api_key": key,
         "event": payload["event"],
@@ -7381,7 +8063,7 @@ def _analytics_post(payload: dict) -> None:
         "timestamp": payload["utc"],
         "properties": {
             **payload["props"],
-            "$process_person_profile": False,
+            **_ANALYTICS_RECEIVER_DIRECTIVES,   # last: not overridable
         },
     }).encode("utf-8")
     req = urllib.request.Request(
@@ -8612,6 +9294,11 @@ def list_outputs(
         # at …" button would need a /sidecar fetch on every gallery click.
         engine = None
         h3_tier = None
+        # Which film this clip is a shot of, if any — {"id": ..., "n": 3} or None.
+        # Derived from the sidecar read already happening below, so it costs
+        # nothing, and it is what puts an S03 badge on a gallery card. None for
+        # every clip that isn't part of a storyboard, which is most of them.
+        sb_tag = None
         sidecar = p.with_suffix(p.suffix + ".json")
         has_sidecar = sidecar.exists()
         if has_sidecar:
@@ -8636,6 +9323,7 @@ def list_outputs(
                 _tier = h3_resolve_tier(_sc_params.get("h3_tier"))
                 if _tier:
                     h3_tier = _tier
+                sb_tag = _sb_tag_from(_sc_params.get("session_tag"))
                 # Clip LENGTH, derived — frames/frame_rate are already in the
                 # sidecar params for both engines, so the card can lead with
                 # what the file IS (a 10 s clip) instead of only how long it
@@ -8681,6 +9369,10 @@ def list_outputs(
             "h3_tier": h3_tier,
             "h3_quality": (H3_TIERS[h3_tier]["quality"] if h3_tier else None),
             "h3_length": (H3_TIERS[h3_tier]["length"] if h3_tier else None),
+            # Storyboard provenance, or None. One badge on the card, one click
+            # back to the film it belongs to — and invisible for every clip
+            # that isn't part of one.
+            "sb": sb_tag,
             "hidden": is_hidden,
             # 'kind' lets the right-pane viewer + filter chips branch
             # without re-parsing the filename. Mirrors isPhotoOutput() on
@@ -8785,8 +9477,19 @@ class WarmHelper:
                 return
             env = os.environ.copy()
             env["PATH"] = f"{FFMPEG_BIN}:{env.get('PATH', '')}"
-            env["LTX_MODEL"] = MODEL_ID
-            env["LTX_GEMMA"] = str(GEMMA)
+            env["LTX_MODEL"] = base_model_dir()
+            # The Q8 pack directory, stated rather than string-derived. The
+            # helper's _upscaler_dir() otherwise guesses it by swapping the
+            # trailing folder name of LTX_MODEL for the literal
+            # "ltx-2.3-mlx-q8" — a guess that is wrong for any second model
+            # version and for anyone who moved the pack with LTX_Q8_LOCAL.
+            # Same value as the guess on a default install.
+            env["LTX_Q8_LOCAL"] = str(pack_path("q8"))
+            # Version-aware, for the same reason LTX_MODEL is. This was
+            # `str(GEMMA)` — a constant naming Gemma 3 — so selecting LTX-2.5
+            # moved the transformer and silently left the text tower on 2.3's
+            # encoder. It renders; it just renders wrong.
+            env["LTX_GEMMA"] = text_encoder_dir()
             env["LTX_IDLE_TIMEOUT"] = str(HELPER_IDLE_TIMEOUT)
             env["LTX_LOW_MEMORY"] = HELPER_LOW_MEMORY
             env["LTX_ENABLE_MODEL_UPSCALE"] = "1" if MODEL_UPSCALE_ENABLED else "0"
@@ -9837,6 +10540,918 @@ def _new_job_id() -> str:
     return f"j-{int(time.time()*1000):x}-{n:03d}"
 
 
+# =============================================================================
+# STORYBOARD — the server side
+# =============================================================================
+# One concept in, a film's worth of shots out. A layer ABOVE the video modes,
+# not a second app: a shot is an ORDINARY panel job, so the queue, the worker,
+# the progress machinery, the outputs folder, the sidecars, the player, the
+# gallery and the lightbox are all reused unchanged.
+#
+# THE ONE HARDWARE FACT THAT SHAPES ALL OF IT: `_free_all_but(keep_kind)` holds
+# exactly one pipeline at a time, and a language model occupies the same slot.
+# PLAN and RENDER can therefore never overlap. Everything below is downstream of
+# that — the planner runs in a short-lived child that exits before a single job
+# is enqueued, and the render dispatcher refuses to start while one is planning.
+#
+# Board files live at state/storyboards/<id>/storyboard.json (storyboard.py owns
+# the format), beside panel_queue.json, in a directory /sidecar already serves.
+# -----------------------------------------------------------------------------
+
+# Planner + render bookkeeping, keyed by board id. Guarded by _SB_LOCK, which is
+# ALWAYS taken before LOCK when both are needed (there is exactly one such place,
+# _sb_render_thread, and it takes them in that order every time).
+_SB_LOCK = threading.RLock()
+_SB_PLANNERS: dict = {}          # board_id -> {"session", "thread", "cancelled"}
+_SB_RENDERS: dict = {}           # board_id -> {"thread", "stop", "pass", "queued"}
+_SB_TAG_RX = re.compile(r"^sb:([^#]+)#(\d+)$")
+
+
+def _sb_tag_from(session_tag) -> dict | None:
+    """`"sb:<board>#3"` -> `{"id": "<board>", "n": 3}`. Anything else -> None.
+
+    One parser, used by the gallery badge, the queue badge and the reconciler,
+    so the wire format is stated exactly once.
+    """
+    m = _SB_TAG_RX.match(str(session_tag or "").strip())
+    if not m:
+        return None
+    try:
+        return {"id": m.group(1), "n": int(m.group(2))}
+    except (TypeError, ValueError):
+        return None
+
+
+def _sb_known_character_ids() -> list:
+    try:
+        return [c["id"] for c in list_characters()]
+    except Exception:
+        return []
+
+
+def _sb_h3_available() -> bool:
+    """Can this machine actually render an H3 shot right now?"""
+    try:
+        return bool(h3_capable() and not h3_paths()["missing"])
+    except Exception:
+        return False
+
+
+def _sb_h3_cost(quality_key: str, length_key: str):
+    """The MEASURED wall clock for one H3 cell, in seconds — the hook
+    storyboard.estimate() takes so the cost model lives in exactly one place.
+
+    H3_TIERS carries a per-cell `eta_min` that is measured where a measurement
+    exists (H3_MEASURED_ETA) and derived from the same forward-cost model where
+    it doesn't. Turbo's number is used when Turbo is actually installed, because
+    that is what the render will do.
+    """
+    try:
+        key = h3_compose_tier(quality_key, length_key)
+        if not key:
+            return None
+        cell = H3_TIERS[key]
+        turbo = False
+        try:
+            turbo = bool(h3_turbo_status().get("available"))
+        except Exception:
+            turbo = False
+        minutes = cell.get("turbo_min") if turbo else cell.get("eta_min")
+        return float(minutes) * 60.0 if minutes else None
+    except Exception:
+        return None
+
+
+def _sb_max_dim() -> int:
+    try:
+        return int(tier_max_dim("t2v"))
+    except Exception:
+        return 1024
+
+
+def _sb_disk() -> dict:
+    try:
+        free = shutil.disk_usage(str(OUTPUT)).free
+    except Exception:
+        return {"free_gb": None}
+    return {"free_gb": round(free / (1000 ** 3), 1)}
+
+
+def _sb_job_index() -> dict:
+    """Every job the panel currently knows about, by id. One snapshot, one lock."""
+    idx: dict = {}
+    with LOCK:
+        cur = STATE.get("current")
+        if cur and cur.get("id"):
+            idx[cur["id"]] = {"status": cur.get("status") or "running",
+                              "output_path": cur.get("output_path"),
+                              "error": cur.get("error")}
+        for j in (STATE.get("queue") or []):
+            if j.get("id"):
+                idx[j["id"]] = {"status": j.get("status") or "queued",
+                                "output_path": None, "error": None}
+        for j in (STATE.get("history") or []):
+            if j.get("id") and j["id"] not in idx:
+                idx[j["id"]] = {"status": j.get("status"),
+                                "output_path": j.get("output_path"),
+                                "error": j.get("error")}
+    return idx
+
+
+def _sb_sidecar_seed(path) -> int | None:
+    """The seed a finished clip ACTUALLY used, from its sidecar.
+
+    Written back onto the shot when its seed was -1, so "Finish keepers"
+    re-renders the take that was approved rather than a fresh roll of the dice.
+    With the character LoRA that is the whole continuity mechanism in v1.
+    """
+    try:
+        p = Path(str(path))
+        meta = json.loads((p.parent / (p.name + ".json")).read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    for holder in (meta, meta.get("params") or {}):
+        v = holder.get("seed_used")
+        if isinstance(v, int):
+            return v
+        if isinstance(v, str) and v.strip().lstrip("-").isdigit():
+            return int(v)
+    return None
+
+
+def _sb_reconcile(board: dict) -> bool:
+    """Walk each shot's job id and fold the queue's truth back into the board.
+
+    Returns True when anything changed, so the caller can save once. This is why
+    a panel restart mid-render loses nothing: panel_queue.json already re-queues
+    an interrupted job, and this is what re-attaches it to its shot.
+    """
+    idx = _sb_job_index()
+    changed = False
+    for s in (board.get("shots") or []):
+        if not isinstance(s, dict):
+            continue
+        for key, out_key in (("draft_job_id", "draft_output"),
+                             ("final_job_id", "final_output")):
+            jid = s.get(key)
+            if not jid:
+                continue
+            job = idx.get(jid)
+            if not job:
+                # The job is gone from queue AND history (history is capped).
+                # Leave the shot alone: if it has an output it is done, and if
+                # it doesn't, it is renderable again.
+                continue
+            st = (job.get("status") or "").lower()
+            if st == "done" and job.get("output_path"):
+                if s.get(out_key) != job["output_path"]:
+                    s[out_key] = job["output_path"]
+                    changed = True
+                if s.get("status") != "done":
+                    s["status"] = "done"
+                    s["error"] = None
+                    changed = True
+                if not isinstance(s.get("seed"), int) or s.get("seed") == -1:
+                    seed = _sb_sidecar_seed(job["output_path"])
+                    if isinstance(seed, int):
+                        s["seed"] = seed
+                        changed = True
+            elif st in ("failed", "error", "cancelled"):
+                if s.get("status") != "failed":
+                    s["status"] = "failed"
+                    changed = True
+                if s.get("error") != job.get("error"):
+                    s["error"] = job.get("error")
+                    changed = True
+            elif st == "running":
+                if s.get("status") != "rendering":
+                    s["status"] = "rendering"
+                    changed = True
+            elif st == "queued":
+                if s.get("status") not in ("queued", "done"):
+                    s["status"] = "queued"
+                    changed = True
+        # `status` is the shot's MOST RECENT state, not a record of which passes
+        # it has been through — the OUTPUTS are that record, and they are what
+        # the scheduler reads. But the UI reads `status`, so a shot waiting on
+        # its delivery render must not keep showing "done" from its draft.
+        fj = s.get("final_job_id")
+        if fj and not s.get("final_output"):
+            fst = ((idx.get(fj) or {}).get("status") or "").lower()
+            if fst in ("queued", "running"):
+                want = "rendering" if fst == "running" else "queued"
+                if s.get("status") != want:
+                    s["status"] = want
+                    changed = True
+    return changed
+
+
+def _sb_normalize(board: dict) -> dict:
+    """Make a board internally consistent before it is validated or saved.
+
+    Renumbers 1..N with no gaps, forces the mode/character pair to agree,
+    re-injects every character trigger mechanically (never trusted to a model —
+    a prompt that lost its trigger renders a stranger), and forces `engine` to
+    LTX for a cast shot or on a machine with no H3 pack, so a plan can never be
+    saved in a state that cannot render.
+    """
+    known = set(_sb_known_character_ids())
+    h3_ok = _sb_h3_available()
+    mode = (board.get("engine_mode") or storyboard.DEFAULT_ENGINE_MODE).strip().lower()
+    if mode not in storyboard.ENGINE_MODES:
+        mode = storyboard.DEFAULT_ENGINE_MODE
+    board["engine_mode"] = mode
+    shots = [s for s in (board.get("shots") or []) if isinstance(s, dict)]
+    for i, s in enumerate(shots, start=1):
+        s["n"] = i
+        smode = s.get("mode")
+        if smode not in storyboard.VALID_MODES:
+            smode = "text"
+        cid = (s.get("character_id") or "").strip() or None
+        if cid and known and cid not in known:
+            # Keep the id — the validator's job is to say so, not ours — but do
+            # not pretend the pair is coherent.
+            pass
+        if cid:
+            smode = "character" if smode in ("text", "character") else smode
+            trig = (s.get("trigger") or cid).strip()
+            s["trigger"] = trig
+            s["prompt"] = storyboard.ensure_trigger(s.get("prompt") or "", trig)
+        else:
+            s.pop("character_id", None)
+            s.pop("trigger", None)
+            if smode == "character":
+                smode = "text"
+            if (s.get("engine") or "").strip().lower() not in storyboard.VALID_ENGINES:
+                s["engine"] = "h3" if h3_ok else "ltx"
+        # ONE decision point for what actually renders — the film's engine mode,
+        # the cast rule and the "is the pack even here" rule, in that order.
+        s["engine"] = storyboard.resolve_engine(s, engine_mode=mode, h3_available=h3_ok)
+        s["mode"] = smode
+        if not isinstance(s.get("refs"), list):
+            s["refs"] = []
+        try:
+            d = float(s.get("duration_s") or 5.0)
+        except (TypeError, ValueError):
+            d = 5.0
+        s["duration_s"] = max(1.0, min(60.0, d))
+        if s.get("status") not in ("pending", "queued", "rendering", "done",
+                                   "failed", "skipped"):
+            s["status"] = "pending"
+    board["shots"] = shots
+    board["updated_at"] = int(time.time())
+    return board
+
+
+def _sb_payload(board: dict) -> dict:
+    """Everything the plan screen renders from, in one reply.
+
+    The errors are the STRUCTURED form; the UI keys its own human copy off
+    `code` rather than regexing English out of `message`, which is what stops
+    the panel's wording from drifting away from the check that produced it.
+    """
+    pass_name = "final" if _sb_pass_done(board, "draft") else "draft"
+    errors = storyboard.validate_storyboard_detail(
+        board,
+        known_character_ids=_sb_known_character_ids(),
+        ref_root=OUTPUT,
+        max_dim=_sb_max_dim(),
+    )
+    # Price and bucket the film the way it will ACTUALLY render. With no H3 pack
+    # `shot_to_job` forces every shot to LTX, so estimating off a stored
+    # engine="h3" would put an H3 bucket in the run strip and an H3 price on the
+    # summary for a render that is going to be all LTX. Only ever a copy — the
+    # board on disk keeps what the planner wrote, so installing the pack later
+    # restores the intent without a re-plan.
+    h3_ok = _sb_h3_available()
+    emode = board.get("engine_mode") or storyboard.DEFAULT_ENGINE_MODE
+    costed = board
+    if any(storyboard.shot_engine(s)
+           != storyboard.resolve_engine(s, engine_mode=emode, h3_available=h3_ok)
+           for s in (board.get("shots") or []) if isinstance(s, dict)):
+        import copy as _copy
+        costed = _copy.deepcopy(board)
+        for s in costed.get("shots") or []:
+            if isinstance(s, dict):
+                s["engine"] = storyboard.resolve_engine(
+                    s, engine_mode=emode, h3_available=h3_ok)
+    est = storyboard.estimate(costed, pass_name=pass_name, h3_cost=_sb_h3_cost)
+    per_shot = storyboard.per_shot_estimate(costed, pass_name=pass_name,
+                                            h3_cost=_sb_h3_cost)
+    with _SB_LOCK:
+        rendering = board.get("id") in _SB_RENDERS
+        planning = board.get("id") in _SB_PLANNERS
+    return {
+        "ok": True,
+        "board": board,
+        "errors": errors,
+        "estimate": est,
+        "per_shot_est": per_shot,
+        "pass": pass_name,
+        "disk": _sb_disk(),
+        "planner": board.get("planner") or {"state": "idle"},
+        "rendering": rendering,
+        "planning": planning,
+        "h3_available": h3_ok,
+        "engine_mode": board.get("engine_mode") or storyboard.DEFAULT_ENGINE_MODE,
+        "characters": [
+            {"id": c.get("id"), "trigger": c.get("trigger") or c.get("id"),
+             "name": c.get("name") or c.get("id"),
+             "preview": c.get("preview_url") or c.get("thumb") or None}
+            for c in (list_characters() or [])
+        ],
+    }
+
+
+def _sb_pass_done(board: dict, pass_name: str) -> bool:
+    """Has every renderable shot got a clip from this pass?"""
+    key = "draft_output" if pass_name == "draft" else "final_output"
+    live = [s for s in (board.get("shots") or [])
+            if isinstance(s, dict) and s.get("status") != "skipped"]
+    return bool(live) and all(s.get(key) for s in live)
+
+
+def _sb_board_summary(board: dict) -> dict:
+    shots = [s for s in (board.get("shots") or []) if isinstance(s, dict)]
+    with _SB_LOCK:
+        running = board.get("id") in _SB_RENDERS
+        planning = board.get("id") in _SB_PLANNERS
+    return {
+        "id": board.get("id"),
+        "title": board.get("title") or "",
+        "shots": len(shots),
+        "done": sum(1 for s in shots if s.get("status") == "done"),
+        "failed": sum(1 for s in shots if s.get("status") == "failed"),
+        "running": running,
+        "planning": planning,
+    }
+
+
+def _sb_all_summaries() -> list:
+    """The one-line-per-board payload /status carries.
+
+    It is what drives the queue badge's `S03/12` denominator, the tab count
+    during an overnight run, and whether `To film` is visible at all. Cheap: one
+    read per board file, and boards are few.
+    """
+    out = []
+    try:
+        rows = storyboard.list_storyboards(STATE_DIR)
+    except Exception:
+        return out
+    for r in rows:
+        try:
+            board = storyboard.load_storyboard(STATE_DIR, r["id"])
+        except Exception:
+            continue
+        out.append(_sb_board_summary(board))
+    return out
+
+
+def storyboard_status() -> dict:
+    """Compact Storyboard snapshot for the page bootstrap.
+
+    `planner_present` answers the only question that could make the feature
+    unusable — and it is almost always yes, because the planner runs on the same
+    weights /prompt/enhance already loads. Nothing is ever downloaded.
+    """
+    model = ""
+    present = False
+    try:
+        model = str(storyboard_planner.DEFAULT_MODEL_PATH or "")
+        present = bool(model) and Path(model).is_dir()
+    except Exception:
+        pass
+    s = get_settings()
+    return {
+        "available": True,
+        "planner_model": model,
+        "planner_model_name": Path(model).name if model else "",
+        "planner_present": present,
+        "ram_help": STORYBOARD_RAM_HELP,
+        "engine_help": STORYBOARD_ENGINE_HELP,
+        "engine_note": STORYBOARD_ENGINE_NOTE,
+        "engine_note_no_h3": STORYBOARD_ENGINE_NOTE_NO_H3,
+        "shot_choices": list(STORYBOARD_SHOT_CHOICES),
+        "engine_modes": list(STORYBOARD_ENGINE_MODES),
+        "draft_qualities": list(STORYBOARD_DRAFT_QUALITIES),
+        "final_qualities": list(STORYBOARD_FINAL_QUALITIES),
+        "defaults": {
+            "shots": s.get("storyboard_shots", 12),
+            "draft_quality": s.get("storyboard_draft_quality", "quick"),
+            "final_quality": s.get("storyboard_final_quality", "standard"),
+            "engine": s.get("storyboard_engine", "auto"),
+        },
+        "boards": _sb_all_summaries(),
+    }
+
+
+def _sb_policy_for(draft_quality: str, final_quality: str) -> dict:
+    """The board's two passes, in the panel's own geometry vocabulary, clamped
+    to what this Mac can actually render."""
+    cap = _sb_max_dim()
+    table = {
+        "quick":    (640, 480),
+        "balanced": (768, 432),
+        "standard": (1024, 576),
+        "high":     (1024, 576),
+    }
+
+    def cell(q, default):
+        q = (q or default).strip().lower()
+        w, h = table.get(q, table[default])
+        if max(w, h) > cap:
+            scale = cap / float(max(w, h))
+            w = max(64, int(w * scale) // 8 * 8)
+            h = max(64, int(h * scale) // 8 * 8)
+        return {"quality": q, "width": w, "height": h,
+                "frames": storyboard.ltx_frames_for(5)}
+
+    return {"draft": cell(draft_quality, "quick"),
+            "final": cell(final_quality, "standard")}
+
+
+def _sb_claim_planner(board_id: str):
+    """Take the ONE planner slot, or say why it can't be taken.
+
+    Global on purpose. `_free_all_but(keep_kind)` holds exactly one pipeline and
+    a language model occupies that same slot, so two planners is not "slower",
+    it is two 7.7 GB children at once (15.1 GB measured) — and on a 48 GB Mac,
+    which is H3's own floor, an OOM. The guard used to be per board, so two
+    different films could plan simultaneously and a third could start rendering
+    underneath them. Returns None on success, else the sentence to show.
+    """
+    with _SB_LOCK:
+        if _SB_PLANNERS:
+            return ("Another film is already being planned. The planner and the "
+                    "renderer share one pool of memory, so they take turns.")
+        if _SB_RENDERS:
+            return ("The renderer is using the memory. Planning can start when "
+                    "the queue is empty.")
+        _SB_PLANNERS[board_id] = {"cancelled": False}
+    return None
+
+
+def _sb_release_planner(*board_ids) -> None:
+    """Hand the planner slot back. Used on every early return AFTER a claim."""
+    with _SB_LOCK:
+        for bid in board_ids:
+            _SB_PLANNERS.pop(bid, None)
+
+
+def _sb_release_stranded_claim(action: str) -> None:
+    """A raise between claiming the planner slot and starting its thread would
+    strand the slot for the life of the process — nothing could ever plan again.
+    Only the two routes that claim it can strand it, and a claim with no live
+    thread is by definition stranded."""
+    if action not in ("plan", "replan-shots"):
+        return
+    with _SB_LOCK:
+        for bid, entry in list(_SB_PLANNERS.items()):
+            th = entry.get("thread")
+            if th is None or not th.is_alive():
+                _SB_PLANNERS.pop(bid, None)
+
+
+def _sb_error_kind(err: dict) -> str:
+    """The planner's structured error -> the copy the failure screen shows.
+
+    Note what is NOT here: a "download" kind. The planner runs on the weights
+    /prompt/enhance already loads and fetches nothing, so "the model didn't
+    finish downloading" would be a sentence that can never be true. A child that
+    exits mid-plan is, in practice, jetsam — two MLX processes competing for
+    unified memory, which is the one thing this feature's whole architecture is
+    arranged around — so that maps to the memory copy, not to a shrug.
+    """
+    kind = (err.get("kind") or "").lower()
+    msg = (err.get("message") or "").lower()
+    if kind == "invalid_plan":
+        return "invalid"
+    if any(w in msg for w in ("exited", "closed its output", "died", "memory", "killed")):
+        return "oom"
+    if "timed out" in msg:
+        return "busy"
+    return "other"
+
+
+def _sb_set_planner(board: dict, **kw) -> None:
+    p = board.get("planner")
+    if not isinstance(p, dict):
+        p = {"state": "idle", "stage": None, "error": None, "error_kind": None,
+             "raw": None, "warnings": []}
+    p.update(kw)
+    board["planner"] = p
+
+
+def _sb_plan_thread(board_id: str, brief: dict, previous: dict | None) -> None:
+    """Plan a film, then GIVE THE MEMORY BACK — in that order, always.
+
+    `plan_film()` blocks for 20-40 s in a child process. We create the session
+    ourselves so `/storyboard/cancel` can kill that child from another thread,
+    which means WE own releasing it: `plan_film()` only auto-releases sessions it
+    created. Hence the `finally`.
+
+    The stages written onto `board["planner"]["stage"]` are exactly the
+    transitions this layer can actually observe. There is no progress callback
+    inside plan_film(), and inventing finer granularity than the module reports
+    would be a progress bar that lies.
+    """
+    session = None
+    board = None
+    try:
+        board = storyboard.load_storyboard(STATE_DIR, board_id)
+        _sb_set_planner(board, state="running", stage="load", error=None,
+                        error_kind=None, raw=None, warnings=[])
+        storyboard.save_storyboard(STATE_DIR, board)
+
+        session = storyboard_planner.PlannerSession()
+        with _SB_LOCK:
+            entry = _SB_PLANNERS.get(board_id) or {}
+            entry["session"] = session
+            _SB_PLANNERS[board_id] = entry
+
+        board["planner"]["stage"] = "write"
+        storyboard.save_storyboard(STATE_DIR, board)
+        push(f"[storyboard] planning {brief.get('n_shots')} shots — "
+             f"the renderer's memory is borrowed for about a minute")
+
+        result = storyboard_planner.plan_film(
+            brief.get("concept") or "",
+            n_shots=int(brief.get("n_shots") or 12),
+            style=brief.get("style") or "",
+            characters=brief.get("characters") or None,
+            must_include=brief.get("must") or None,
+            feedback=brief.get("feedback") or None,
+            previous=previous,
+            # The film's own choice, and it is a PLANNING input: the planner
+            # writes H3's three-field dialect or LTX prose depending on it, so
+            # this cannot be applied after the fact. With no H3 pack installed
+            # there is only one answer it could honestly give.
+            engine=(brief.get("engine_mode") or "auto") if _sb_h3_available() else "ltx",
+            board_id=board_id,
+            known_character_ids=_sb_known_character_ids(),
+            max_dim=_sb_max_dim(),
+            session=session,
+        )
+
+        with _SB_LOCK:
+            cancelled = (_SB_PLANNERS.get(board_id) or {}).get("cancelled")
+        if cancelled:
+            return
+
+        board = storyboard.load_storyboard(STATE_DIR, board_id)
+        meta = (result or {}).get("_planner") or {}
+        if storyboard_planner.is_plan_error(result):
+            err = result.get("error") or {}
+            # A board whose first plan failed must not sit in the list titled
+            # "Planning…" forever — name it from its own concept so the row
+            # reads as the film the user asked for and Try again is obvious.
+            if not (board.get("shots") or []) and board.get("title") in ("", "Planning…", None):
+                words = (board.get("concept") or "").split()
+                board["title"] = " ".join(words[:6]) or "Untitled film"
+            _sb_set_planner(board, state="failed", stage=None,
+                            error=err.get("message") or "the planner failed",
+                            error_kind=_sb_error_kind(err),
+                            raw=err.get("raw_excerpt") or None,
+                            hint=err.get("hint") or None)
+            storyboard.save_storyboard(STATE_DIR, board)
+            push(f"[storyboard] the planner couldn't write a usable plan: "
+                 f"{err.get('message')}")
+            return
+
+        # `check`, then `repair` only when the module says a retry actually
+        # happened — advertising a failure that usually doesn't occur is worse
+        # than saying nothing.
+        board["planner"]["stage"] = "repair" if int(meta.get("attempts") or 1) > 1 else "check"
+
+        board["title"] = result.get("title") or board.get("title") or "Untitled film"
+        # What each shot had BEFORE the plan replaced it. A re-rolled shot is a
+        # brand-new dict, so its previous take has to be read from here — off
+        # the new dict it is always None.
+        _prev_out = {}
+        for _s in (board.get("shots") or []):
+            if isinstance(_s, dict) and _s.get("n") is not None:
+                _prev_out[_s["n"]] = (_s.get("draft_output") or _s.get("final_output")
+                                      or _s.get("stale_output"))
+        board["shots"] = result.get("shots") or []
+        # A rewritten shot must go back to being UN-RENDERED. Without this it
+        # kept `status: "done"` with no output, and since shooting_order() and
+        # estimate() both exclude "done" the film skipped it forever — the user
+        # asked for a rewrite precisely because they wanted it rendered again.
+        # The old clip is kept on `stale_output` so the card can show it under
+        # the "old take" wash until the new one lands (design spec 8.3); the
+        # file itself is never deleted.
+        for _n in (brief.get("reroll_ns") or []):
+            for _s in board["shots"]:
+                if not isinstance(_s, dict) or _s.get("n") != _n:
+                    continue
+                _old = _prev_out.get(_n)
+                if _old:
+                    _s["stale_output"] = _old
+                _s["status"] = "pending"
+                _s["grade"] = None
+                for _k in ("draft_output", "final_output",
+                           "draft_job_id", "final_job_id", "error"):
+                    _s.pop(_k, None)
+        board["cast"] = result.get("cast") or board.get("cast") or []
+        # The POLICY is the panel's, not the planner's: the user picked the two
+        # passes in the film-level Quality control and a re-plan must not silently
+        # reset them.
+        board.setdefault("policy", result.get("policy") or storyboard.new_storyboard("x", "x")["policy"])
+        _sb_normalize(board)
+        _sb_set_planner(board, state="done", stage="unload", error=None,
+                        warnings=list(meta.get("warnings") or []),
+                        model=meta.get("model"), elapsed_s=meta.get("elapsed_s"),
+                        attempts=meta.get("attempts"),
+                        first_try_clean=meta.get("first_try_clean"))
+        storyboard.save_storyboard(STATE_DIR, board)
+        push(f"[storyboard] plan ready — {len(board['shots'])} shots, "
+             f"{round(float(meta.get('elapsed_s') or 0))}s, memory given back")
+    except Exception as exc:                                     # noqa: BLE001
+        try:
+            if board is None:
+                board = storyboard.load_storyboard(STATE_DIR, board_id)
+            with _SB_LOCK:
+                cancelled = (_SB_PLANNERS.get(board_id) or {}).get("cancelled")
+            _sb_set_planner(board,
+                            state=("cancelled" if cancelled else "failed"),
+                            stage=None, error=str(exc),
+                            error_kind=("busy" if cancelled else "other"))
+            storyboard.save_storyboard(STATE_DIR, board)
+        except Exception:
+            pass
+        if not str(exc).lower().startswith("planner session released"):
+            push(f"[storyboard] planning failed: {exc}")
+    finally:
+        # A caller that supplies a session OWNS releasing it. There is no path
+        # out of this function that leaves a model resident.
+        try:
+            if session is not None:
+                session.release()
+        except Exception:
+            pass
+        with _SB_LOCK:
+            _SB_PLANNERS.pop(board_id, None)
+            _SB_PLANNERS.pop("-pending-", None)
+
+
+def _sb_enqueue(job_form: dict) -> str:
+    """Enqueue one shot exactly the way /queue/add does. No private path."""
+    job = make_job(job_form)
+    with QUEUE_COND:
+        STATE["queue"].append(job)
+        QUEUE_COND.notify_all()
+    persist_queue()
+    return job["id"]
+
+
+def _sb_render_thread(board_id: str, pass_name: str, only: list | None) -> None:
+    """Submit the film ONE BUCKET AT A TIME, then wait for it.
+
+    Not all N jobs at once, and the difference matters: it is what makes editing
+    a shot that hasn't started yet actually take effect, it is what lets `stop`
+    be seen mid-film, and it is what keeps the grouping honest when a later
+    bucket's shots were edited while an earlier one rendered. The panel's own
+    dispatcher still owns execution — /queue/pause keeps working; this thread
+    only waits.
+    """
+    key = "draft_job_id" if pass_name == "draft" else "final_job_id"
+    out_key = "draft_output" if pass_name == "draft" else "final_output"
+    queued_total = 0
+    try:
+        while True:
+            with _SB_LOCK:
+                entry = _SB_RENDERS.get(board_id)
+                if not entry or entry.get("stop"):
+                    return
+            # Re-read from disk every round so edits to not-yet-submitted shots
+            # are honoured.
+            board = storyboard.load_storyboard(STATE_DIR, board_id)
+            _sb_reconcile(board)
+
+            # PASS-AWARE. Without the pass name this scheduled the draft pass no
+            # matter what was asked for, and since the reconciler marks a shot
+            # "done" when its DRAFT lands, the delivery pass found nothing to do
+            # and answered 202 with an empty queue — every film, every time.
+            pending = storyboard.shooting_order(board.get("shots") or [], pass_name)
+            if only:
+                pending = [s for s in pending if s.get("n") in only]
+            # A shot already carrying a live job id for this pass is in flight.
+            pending = [s for s in pending
+                       if s.get("status") not in ("queued", "rendering") or not s.get(key)]
+            if not pending:
+                break
+
+            bucket = storyboard.bucket_key(pending[0])
+            batch = [s for s in pending if storyboard.bucket_key(s) == bucket]
+            policy = (board.get("policy") or {}).get(pass_name) or {}
+            h3_ok = _sb_h3_available()
+            # Does THIS install's runner take `--chain-prompts`? A pack cloned
+            # before that flag landed renders 10 s fine and cannot be told what
+            # each window should do, so asking would be an argparse failure.
+            try:
+                chain_ok = bool(h3_ok and h3_supports_chain_prompts())
+            except Exception:
+                chain_ok = False
+            ids = []
+            for shot in batch:
+                form = storyboard.shot_to_job(
+                    shot, policy,
+                    board_id=board_id, board_title=board.get("title") or "",
+                    h3_available=h3_ok,
+                    engine_mode=board.get("engine_mode") or "auto",
+                    h3_chain_prompts=chain_ok)
+                # make_job reads a form: every value is a string (or a list of
+                # them). Normalise here so a bool/int never reaches f().
+                job_form = {k: ("" if v is None else str(v)) for k, v in form.items()}
+                try:
+                    jid = _sb_enqueue(job_form)
+                except Exception as exc:                          # noqa: BLE001
+                    push(f"[storyboard] shot {shot.get('n')} could not be queued: {exc}")
+                    shot["status"] = "failed"
+                    shot["error"] = str(exc)
+                    continue
+                shot[key] = jid
+                shot["status"] = "queued"
+                shot["error"] = None
+                ids.append(jid)
+                queued_total += 1
+            storyboard.save_storyboard(STATE_DIR, board)
+            with _SB_LOCK:
+                entry = _SB_RENDERS.get(board_id)
+                if entry is not None:
+                    entry["queued"] = queued_total
+            push(f"[storyboard] queued {len(ids)} shot(s) on "
+                 f"{bucket[0].upper()} — {board.get('title')}")
+
+            # Wait for this bucket to go terminal before submitting the next.
+            while ids:
+                with _SB_LOCK:
+                    entry = _SB_RENDERS.get(board_id)
+                    if not entry or entry.get("stop"):
+                        return
+                idx = _sb_job_index()
+                live = [j for j in ids
+                        if (idx.get(j) or {}).get("status") in ("queued", "running")]
+                if not live:
+                    break
+                time.sleep(5.0)
+
+            try:
+                board = storyboard.load_storyboard(STATE_DIR, board_id)
+                if _sb_reconcile(board):
+                    storyboard.save_storyboard(STATE_DIR, board)
+            except Exception:
+                pass
+    except Exception as exc:                                       # noqa: BLE001
+        push(f"[storyboard] render dispatch stopped: {exc}")
+    finally:
+        with _SB_LOCK:
+            _SB_RENDERS.pop(board_id, None)
+        try:
+            board = storyboard.load_storyboard(STATE_DIR, board_id)
+            if _sb_reconcile(board):
+                storyboard.save_storyboard(STATE_DIR, board)
+            # Delivered shots don't need their draft's Stage-A cache any more.
+            _sb_sweep_stage_a(board)
+        except Exception:
+            pass
+
+
+def _sb_boot_reconcile() -> None:
+    """Boot hook — no planner survives a panel restart, so no board may claim one.
+
+    The planner lives in a child of THIS process. If the panel was killed (or
+    updated, or crashed) mid-plan, that child died with it — but the board on
+    disk still says `planner.state = "running"`, and the tab would sit on the
+    planning screen forever waiting for a stage that can never advance. Caught
+    live: the owner started a plan seconds before a restart.
+
+    Render state needs no equivalent, and that is the whole point of riding the
+    normal queue: panel_queue.json already re-queues an interrupted job, and
+    _sb_reconcile() re-attaches it to its shot on the next read.
+    """
+    try:
+        rows = storyboard.list_storyboards(STATE_DIR)
+    except Exception:
+        return
+    for r in rows:
+        try:
+            board = storyboard.load_storyboard(STATE_DIR, r["id"])
+        except Exception:
+            continue
+        p = board.get("planner") or {}
+        if p.get("state") != "running":
+            continue
+        if not (board.get("shots") or []) and board.get("title") in ("", "Planning…", None):
+            words = (board.get("concept") or "").split()
+            board["title"] = " ".join(words[:6]) or "Untitled film"
+        _sb_set_planner(board, state="failed", stage=None,
+                        error="the panel restarted while the planner was running",
+                        error_kind="restarted")
+        try:
+            storyboard.save_storyboard(STATE_DIR, board)
+            push(f"[storyboard] {board.get('title')!r} was mid-plan when the panel "
+                 f"stopped — press Try again when you're ready")
+        except Exception:
+            pass
+
+
+def _sb_sweep_stage_a(board: dict) -> int:
+    """Drop the Stage-A latent caches a film no longer has a use for.
+
+    Every H3 DRAFT drops a `<clip>.stage_a.npz` beside its output — **8.5 MB a
+    shot**, ~300 MB across a 36-shot film, on a disk the summary bar is already
+    calling tight. It exists so a later hires-refine pass can sharpen THAT take
+    rather than re-rolling it, and nothing in the panel consumes it yet.
+
+    So the rule is decided by whether the draft can still be refined:
+      * CUT (`status: "skipped"`)      -> it never will be. Delete.
+      * DELIVERED (`final_output` set) -> it already has its finished version.
+        Delete.
+      * anything else                  -> the draft is still awaiting a verdict.
+        KEEP, which is the whole window a future finish-from-cache would use.
+
+    Never touches a clip, and never touches a cache belonging to another film.
+    """
+    freed = 0
+    for s in (board.get("shots") or []):
+        if not isinstance(s, dict):
+            continue
+        draft = s.get("draft_output")
+        if not draft:
+            continue
+        if not (s.get("status") == "skipped" or s.get("final_output")):
+            continue
+        try:
+            cache = Path(draft).with_suffix(".stage_a.npz")
+            if cache.is_file() and cache.parent.resolve() == OUTPUT.resolve():
+                cache.unlink()
+                freed += 1
+        except OSError:
+            continue
+    if freed:
+        push(f"[storyboard] released {freed} Stage-A cache file(s) — "
+             f"about {freed * 8.5:.0f} MB")
+    return freed
+
+
+def _sb_slug(text: str, words: int = 5) -> str:
+    parts = re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).split()
+    return "-".join(parts[:words]) or "shot"
+
+
+def _sb_export(board: dict) -> dict:
+    """A folder and a manifest. No editor, no timeline, no assembly UI.
+
+    Clips are COPIED, never moved — the gallery keeps them.
+    """
+    title = board.get("title") or "storyboard"
+    day = time.strftime("%Y-%m-%d", time.localtime(board.get("created_at") or time.time()))
+    dest = OUTPUT / "storyboards" / f"{day}_{_sb_slug(title, 6)}"
+    dest.mkdir(parents=True, exist_ok=True)
+    rows, cut, files = [], [], []
+    for s in sorted((board.get("shots") or []), key=lambda x: x.get("n") or 0):
+        if not isinstance(s, dict):
+            continue
+        n = s.get("n") or 0
+        if s.get("status") == "skipped":
+            cut.append(f"- **S{n:02d}** — {(s.get('prompt') or '')[:120]}")
+            continue
+        src = s.get("final_output") or s.get("draft_output")
+        if not src or not Path(src).is_file():
+            continue
+        which = "delivery" if s.get("final_output") else "draft"
+        name = f"S{n:02d}_{_sb_slug(s.get('title') or s.get('prompt') or '')}.mp4"
+        try:
+            shutil.copy2(src, dest / name)
+        except Exception as exc:                                   # noqa: BLE001
+            push(f"[storyboard] could not copy shot {n}: {exc}")
+            continue
+        files.append(name)
+        rows.append(f"| {n:02d} | {name} | {s.get('duration_s')} s | "
+                    f"{s.get('seed')} | {which} | "
+                    f"{(s.get('prompt') or '')[:90].replace('|', '/')}… |")
+    delivered = sum(1 for s in (board.get("shots") or [])
+                    if isinstance(s, dict) and s.get("final_output"))
+    runtime = sum(float(s.get("duration_s") or 0) for s in (board.get("shots") or [])
+                  if isinstance(s, dict) and s.get("status") != "skipped")
+    cast = ", ".join(sorted({str(s.get("character_id")) for s in (board.get("shots") or [])
+                             if isinstance(s, dict) and s.get("character_id")})) or "none"
+    md = [f"# {title}", "",
+          f"{len(board.get('shots') or [])} shots planned · {delivered} delivered · "
+          f"{round(runtime)} s", "",
+          f"Rendered with Phosphene {_read_local_version() or 'dev'} · character: {cast}", "",
+          "| # | file | length | seed | pass | prompt |",
+          "|---|---|---|---|---|---|"] + rows
+    if cut:
+        md += ["", "## Cut", ""] + cut
+    (dest / "storyboard.md").write_text("\n".join(md) + "\n", encoding="utf-8")
+    (dest / "storyboard.json").write_text(
+        json.dumps(board, indent=2, ensure_ascii=False), encoding="utf-8")
+    return {"ok": True, "dir": str(dest), "files": files}
+
+
 def _validate_character_quality(form: dict[str, list[str]] | dict[str, str]) -> str | None:
     """Character mode is available on Q4 — LoRAs fuse into the distilled
     base (identity match is mediocre per 2026-05-17 empirical test with
@@ -9882,6 +11497,30 @@ def _validate_character_quality(form: dict[str, list[str]] | dict[str, str]) -> 
             log_push(f"[character] raw train_character LoRA {p.name!r} at quality={quality!r} "
                      f"on Q4 base — identity match may be imperfect")
     return None
+
+
+def _safe_float(raw, default: float = 0.0, *,
+                minimum: float | None = None,
+                maximum: float | None = None) -> float:
+    """Parse a form value as a float without ever raising.
+
+    make_job's existing float fields do `float(f(name, "1.0") or 1.0)`, which
+    is fine for the ones backed by range sliders — a slider cannot emit
+    "abc". Free-form number inputs can, and /queue/add is a plain POST that
+    anything may call, so a typo should land on the default rather than
+    turning the submit into a 500. Optional clamps keep out-of-range values
+    from reaching a pipeline that would silently swallow them."""
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return default
+    if val != val or val in (float("inf"), float("-inf")):   # NaN / inf
+        return default
+    if minimum is not None:
+        val = max(minimum, val)
+    if maximum is not None:
+        val = min(maximum, val)
+    return val
 
 
 def make_job(form: dict[str, list[str]] | dict[str, str], *,
@@ -10552,6 +12191,22 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             # explicitly to "full" or "off" via this form field.
             "stage2_image_conditioning": f("stage2_image_conditioning", "") or "",
             "audio_conditioning_scale": float(f("audio_conditioning_scale", "1.0") or 1.0),
+            # Where in the source file A2V starts reading. Both pipelines
+            # (a2vid_two_stage / a2vid_distilled) have taken this since they
+            # landed, and mlx_warm_helper forwards it on both actions — the
+            # panel was the only layer that never put a value on the job, so
+            # it fell through to 0.0 and every A2V render used the first N
+            # seconds of the file no matter what (#46, @blackest). This
+            # allowlist entry is load-bearing: a form field that isn't named
+            # here silently no-ops on /queue/add, which is exactly the class
+            # of bug this file warns about repeatedly.
+            #
+            # Parsed defensively, unlike its float siblings above: those are
+            # all backed by range sliders that can only emit numbers, while
+            # this one is a free-form number input (and /queue/add is a public
+            # POST). A stray non-numeric value should start the clip at 0,
+            # not 500 the submit.
+            "audio_start_time": _safe_float(f("audio_start_time", "0"), 0.0, minimum=0.0),
         },
         "command": None,
         "raw_path": None,
@@ -11790,6 +13445,62 @@ def run_train_job_inner(job: dict) -> None:
     push(f"[train.audio] done: {audio_lora_path} (elapsed {audio_elapsed}s)")
 
 
+def _h3_fit_first_frame(src: Path, width: int, height: int, job_id: str) -> Path:
+    """Cover-crop `src` onto the H3 canvas and return the path to use.
+
+    Why the panel does this instead of the runner: upstream's
+    `prepare_keyframe_image(image, height, width, stretch=index == 0)`
+    HARD-STRETCHES the FIRST keyframe onto the canvas — `image.resize((width,
+    height))`, aspect thrown away — because upstream treats keyframe 0 as the
+    geometry anchor. A *second* keyframe is cover-cropped instead. So a 4:3
+    photo into a 16:9 canvas comes back visibly widened, which is the
+    distortion @Morac2 opened #53 with, and no combination of panel settings
+    could avoid it: the panel only ever sends keyframe 0.
+
+    The bypass is in the same function, one line above the stretch:
+
+        if image.size == (width, height):
+            return image
+
+    An image that already IS the canvas is returned untouched, with no
+    resampling pass at all. So pre-fitting here removes the stretch entirely
+    without touching the engine, and costs the render nothing — it replaces
+    upstream's resize with ours rather than adding a second one.
+
+    The arithmetic below is a deliberate line-for-line port of upstream's own
+    non-stretch branch (`packing.py`): max-scale so the image covers the
+    canvas, LANCZOS, centre crop with floor division. Faithfulness is the
+    point — the panel is standing in for the runner's cover-crop, so it should
+    produce what a second keyframe would have produced, not a lookalike.
+    `ImageOps.fit` is close but rounds and centres differently.
+
+    Best-effort by construction: any failure returns the ORIGINAL path, so the
+    worst case is the stretch we have today rather than a render that dies on
+    a reference image."""
+    try:
+        from PIL import Image
+        with Image.open(src) as im:
+            im = im.convert("RGB")
+            if im.size == (width, height):
+                return src          # runner's own early-return handles it
+            scale = max(width / im.size[0], height / im.size[1])
+            resized_size = (max(width, round(im.size[0] * scale)),
+                            max(height, round(im.size[1] * scale)))
+            left = max(0, (resized_size[0] - width) // 2)
+            top = max(0, (resized_size[1] - height) // 2)
+            fitted = im.resize(resized_size, Image.Resampling.LANCZOS).crop(
+                (left, top, left + width, top + height))
+            UPLOADS.mkdir(parents=True, exist_ok=True)
+            out = UPLOADS / f".h3_{job_id}_firstframe_{width}x{height}.png"
+            fitted.save(out, format="PNG")
+        return out
+    except Exception as exc:                     # noqa: BLE001 - never fatal
+        push(f"[h3] warn: couldn't pre-fit the reference to {width}x{height} "
+             f"({exc}); passing it through — the runner will stretch it onto "
+             f"the canvas.")
+        return src
+
+
 def run_h3_job_inner(job: dict) -> None:
     """Render one job on the Hailuo H3 engine (optional subprocess pack).
 
@@ -12040,7 +13751,15 @@ def run_h3_job_inner(job: dict) -> None:
             raise RuntimeError(
                 "This Hailuo H3 checkout has no `--first-frame` support "
                 f"({paths['runner']}). Update the H3 pack, or use Text mode.")
-        first_frame = Path(src)
+        # Pre-fit to the canvas so upstream's first-keyframe STRETCH never
+        # runs (#53). See _h3_fit_first_frame for the mechanism; it returns
+        # the original path unchanged when the image is already the canvas
+        # size or when anything goes wrong.
+        first_frame = _h3_fit_first_frame(Path(src), width, height, job["id"])
+        if str(first_frame) != src:
+            push(f"[h3] reference cover-cropped to {width}x{height} before "
+                 f"conditioning (keeps its proportions — the runner would "
+                 f"stretch the first keyframe onto the canvas).")
 
     # Seed: the panel keeps "-1" = random. H3's runner has no random mode, so
     # resolve it here and record what we used (matches the LTX seed_used
@@ -12586,7 +14305,7 @@ def run_job_inner(job: dict) -> None:
         ext_missing = q8_missing_files()
         if ext_missing:
             raise RuntimeError(
-                f"Extend requires the full Q8 model at {Q8_LOCAL_PATH}. "
+                f"Extend requires the full Q8 model at {pack_path('q8')}. "
                 f"Missing {len(ext_missing)} file(s): {', '.join(ext_missing[:3])}"
                 f"{' …' if len(ext_missing) > 3 else ''}. "
                 f"Click \"Download Q8\" in Pinokio to install it (~37 GB)."
@@ -12660,7 +14379,11 @@ def run_job_inner(job: dict) -> None:
                 # Y1.036: explicit model_dir → Q8. Helper's get_pipe("extend")
                 # caches per-model-dir so this rebuilds the pipe only when
                 # the dir actually flips.
-                "model_dir": str(Q8_LOCAL_PATH),
+                "model_dir": str(pack_path("q8")),
+                # Naming the dev transformer per generation rather than
+                # inheriting the vendored RetakePipeline default. Same string
+                # today for both generations; stated so it cannot drift.
+                "dev_transformer": hq_weights()["dev_transformer"],
                 "prompt": p["prompt"],
                 "negative_prompt": p.get("negative_prompt", ""),
                 "video_path": src,
@@ -12688,7 +14411,7 @@ def run_job_inner(job: dict) -> None:
             # the panel's nominal MODEL_ID (which tracks the Q4 distilled
             # used by T2V/I2V/Standard). Record the actual path so the
             # /info modal and historical analyzers don't misreport.
-            "fps": FPS, "model": str(Q8_LOCAL_PATH), "queue_id": job["id"],
+            "fps": FPS, "model": str(pack_path("q8")), "queue_id": job["id"],
             "helper_elapsed_sec": result.get("elapsed_sec"),
             "output_codec": output_codec_settings(),
             # Lineage for issue #48. `extend_picked` is what the user chose in
@@ -12790,9 +14513,8 @@ def run_job_inner(job: dict) -> None:
         # Force the Q4 distilled folder — same rule HDR / Colorize / Ingredients
         # use. The Union-Control IC-LoRA was trained against the distilled
         # checkpoint.
-        control_model_dir = (str(MODELS_DIR / "ltx-2.3-mlx-q4")
-                             if (MODELS_DIR / "ltx-2.3-mlx-q4").is_dir()
-                             else str(MODELS_DIR))
+        control_model_dir = ltx_model_dir("q4")
+        ltx_pack_preflight("q4", "Control")
         job_spec = {
             "action": "generate_restore",
             "id": job["id"],
@@ -12896,9 +14618,8 @@ def run_job_inner(job: dict) -> None:
         job["raw_path"] = str(final_out)
         # Force the Q4 distilled folder — same rule HDR uses. The Colorize
         # IC-LoRA was trained against transformer-distilled.safetensors.
-        restore_model_dir = (str(MODELS_DIR / "ltx-2.3-mlx-q4")
-                             if (MODELS_DIR / "ltx-2.3-mlx-q4").is_dir()
-                             else str(MODELS_DIR))
+        restore_model_dir = ltx_model_dir("q4")
+        ltx_pack_preflight("q4", "Restore")
         job_spec = {
             "action": "generate_restore",
             "id": job["id"],
@@ -13073,9 +14794,8 @@ def run_job_inner(job: dict) -> None:
         job["raw_path"] = str(final_out)
         # Force Q4 distilled — the Ingredients LoRA was trained against
         # transformer-distilled.safetensors (same rule HDR / Colorize use).
-        ing_model_dir = (str(MODELS_DIR / "ltx-2.3-mlx-q4")
-                         if (MODELS_DIR / "ltx-2.3-mlx-q4").is_dir()
-                         else str(MODELS_DIR))
+        ing_model_dir = ltx_model_dir("q4")
+        ltx_pack_preflight("q4", "Ingredients")
         # IC reference STRENGTH — the composition lever. This is the second
         # element of each video_conditioning tuple, and it sets how clean the
         # reference latent is held during denoise (VideoConditionByReferenceLatent
@@ -13190,10 +14910,11 @@ def run_job_inner(job: dict) -> None:
         kf_missing = q8_missing_files()
         if kf_missing:
             raise RuntimeError(
-                f"Keyframe mode requires the full Q8 model at {Q8_LOCAL_PATH}. "
+                f"Keyframe mode requires the full Q8 model at {pack_path('q8')}. "
                 f"Missing {len(kf_missing)} file(s): {', '.join(kf_missing[:3])}"
                 f"{' …' if len(kf_missing) > 3 else ''}. "
-                f"Run: hf download {MODEL_ID_HQ} --local-dir {Q8_LOCAL_PATH}"
+                f"Run: hf download {(pack_repo('q8') or {}).get('repo_id', MODEL_ID_HQ)} "
+                f"--local-dir {pack_path('q8')}"
             )
         # Multi-keyframe path: agent submits a JSON-encoded list of
         # {image_path, frame_index} pairs. Layer 1 of the SDK shipped the
@@ -13287,7 +15008,12 @@ def run_job_inner(job: dict) -> None:
             "action": "generate_keyframe",
             "id": job["id"],
             "params": {
-                "model_dir": str(Q8_LOCAL_PATH),
+                "model_dir": str(pack_path("q8")),
+                # Keyframe REQUIRES both by name — the pipeline raises without
+                # them, and the distilled-only path hallucinates unrelated
+                # content mid-interpolation. Per generation: see hq_weights().
+                "dev_transformer": hq_weights()["dev_transformer"],
+                "distilled_lora": hq_weights()["distilled_lora"],
                 "prompt": p["prompt"],
                 "negative_prompt": p.get("negative_prompt", ""),
                 "output_path": str(out_path),
@@ -13353,14 +15079,15 @@ def run_job_inner(job: dict) -> None:
                 uses_q8 = False
         if uses_q8:
             action = "generate_a2v"
-            model_dir = str(Q8_LOCAL_PATH)
+            model_dir = str(pack_path("q8"))
             default_stage1 = 20
             default_stage2 = 3
         else:
             action = "generate_a2v_distilled"
-            model_dir = str(Q4_LOCAL_PATH)
+            model_dir = str(pack_path("q4"))
             default_stage1 = 8
             default_stage2 = 3
+        ltx_pack_preflight("q8" if uses_q8 else "q4", "Audio to Video")
         audio_src = (p.get("audio") or "").strip()
         if not audio_src or not Path(audio_src).exists():
             raise RuntimeError(f"audio file not found: {audio_src}")
@@ -13406,6 +15133,11 @@ def run_job_inner(job: dict) -> None:
             })
         a2v_params = {
             "model_dir": model_dir,
+            # Only the Q8 branch builds A2VidPipelineTwoStage and reads these;
+            # the Q4 distilled branch ignores them, which is why they can be
+            # set unconditionally. Per generation: see hq_weights().
+            "dev_transformer": hq_weights()["dev_transformer"],
+            "distilled_lora": hq_weights()["distilled_lora"],
             "prompt": p["prompt"],
             "negative_prompt": p.get("negative_prompt", ""),
             "output_path": str(out_path),
@@ -13419,18 +15151,30 @@ def run_job_inner(job: dict) -> None:
             "stage1_steps": int(p.get("stage1_steps", default_stage1)),
             "stage2_steps": int(p.get("stage2_steps", default_stage2)),
             "audio_conditioning_scale": float(p.get("audio_conditioning_scale", 1.0)),
+            # Offset into the source audio. The helper reads this key on both
+            # the Q8 and the Q4-distilled action and hands it to
+            # load_audio(start_time=…); it defaulted to 0.0 here only because
+            # the key was absent (#46).
+            "audio_start_time": max(0.0, float(p.get("audio_start_time", 0.0) or 0.0)),
         }
         if uses_q8:
             a2v_params["cfg_scale"] = float(p.get("cfg_scale", 3.0))
             a2v_params["stg_scale"] = float(p.get("stg_scale", 1.0))
             a2v_params["loras"] = a2v_loras
         job_spec = {"action": action, "id": job["id"], "params": a2v_params}
+        # Only mention the offset when it is actually non-zero — a "start=0.00s"
+        # on every line would be noise, but when it IS set the log is the only
+        # place a user can confirm the panel honoured it.
+        _start_note = ""
+        if a2v_params["audio_start_time"]:
+            _start_note = " start=%.2fs" % a2v_params["audio_start_time"]
         push(
             f"Run A2V ({'Q8' if uses_q8 else 'Q4-distilled'}) via helper: "
             f"id={job['id']} {width}x{height} {frames}f · "
             f"audio={Path(audio_src).name}"
             f"{' image=' + Path(ref_image_path).name if ref_image_path else ''}"
             f" scale={a2v_params['audio_conditioning_scale']}"
+            f"{_start_note}"
         )
         result = HELPER.run(job_spec)
         if "seed_used" in result:
@@ -13622,6 +15366,7 @@ def run_job_inner(job: dict) -> None:
             "path": CURATED_LORAS["hdr"]["repo_id"],
             "strength": float(CURATED_LORAS["hdr"]["default_strength"]),
         }]
+        ltx_pack_preflight("q4", "HDR")
         job_spec = {
             "action": "generate_hdr",
             "id": job["id"],
@@ -13629,9 +15374,7 @@ def run_job_inner(job: dict) -> None:
                 # Force distilled folder. The Q4 dir holds
                 # transformer-distilled.safetensors which is what the
                 # IC-LoRA was trained against.
-                "model_dir": str(MODELS_DIR / "ltx-2.3-mlx-q4")
-                              if (MODELS_DIR / "ltx-2.3-mlx-q4").is_dir()
-                              else str(MODELS_DIR),
+                "model_dir": ltx_model_dir("q4"),
                 "prompt": p["prompt"],
                 "negative_prompt": p.get("negative_prompt", ""),
                 "output_path": str(raw_out),
@@ -13683,10 +15426,11 @@ def run_job_inner(job: dict) -> None:
         hq_missing = q8_missing_files()
         if hq_missing:
             raise RuntimeError(
-                f"High quality requires the full Q8 model at {Q8_LOCAL_PATH}. "
+                f"High quality requires the full Q8 model at {pack_path('q8')}. "
                 f"Missing {len(hq_missing)} file(s): {', '.join(hq_missing[:3])}"
                 f"{' …' if len(hq_missing) > 3 else ''}. "
-                f"Run: hf download {MODEL_ID_HQ} --local-dir {Q8_LOCAL_PATH}"
+                f"Run: hf download {(pack_repo('q8') or {}).get('repo_id', MODEL_ID_HQ)} "
+                f"--local-dir {pack_path('q8')}"
             )
         # HQ is the only inference path that runs the dev transformer with
         # CFG and the full sigma schedule — which is exactly what character
@@ -13704,7 +15448,14 @@ def run_job_inner(job: dict) -> None:
             "action": "generate_hq",
             "id": job["id"],
             "params": {
-                "model_dir": str(Q8_LOCAL_PATH),
+                "model_dir": str(pack_path("q8")),
+                # High is the two-stage HQ pipeline: dev transformer + CFG at
+                # half res, then a refine pass driven by the distilled LoRA.
+                # Until now neither filename was passed and the vendored
+                # class's 2.3-named defaults supplied both. Per generation:
+                # see hq_weights().
+                "dev_transformer": hq_weights()["dev_transformer"],
+                "distilled_lora": hq_weights()["distilled_lora"],
                 "prompt": p["prompt"],
                 "negative_prompt": p.get("negative_prompt", ""),
                 "output_path": str(raw_out),
@@ -13782,10 +15533,19 @@ def run_job_inner(job: dict) -> None:
                 "path": CURATED_LORAS["hdr"]["repo_id"],
                 "strength": float(CURATED_LORAS["hdr"]["default_strength"]),
             })
+        ltx_pack_preflight("q4", "This render")
         job_spec = {
             "action": "generate",
             "id": job["id"],
             "params": {
+                # The base render finally states WHICH weights it wants
+                # instead of inheriting whatever LTX_MODEL the helper was
+                # spawned with. base_model_dir() resolves to MODEL_ID for the
+                # active version, so this is the same directory the helper
+                # already loads -- the point is that a second model version
+                # becomes a different string here rather than a different
+                # helper process.
+                "model_dir": base_model_dir(),
                 "mode": mode,
                 "prompt": p["prompt"],
                 "negative_prompt": p.get("negative_prompt", ""),
@@ -13960,7 +15720,11 @@ def run_job_inner(job: dict) -> None:
         "started": job.get("started_at"),
         "elapsed_sec": round(time.time() - job["started_ts"], 2) if job.get("started_ts") else None,
         "video_duration_sec": video_duration(frames),
-        "fps": FPS, "model": MODEL_ID, "queue_id": job["id"],
+        # The sidecar is the clip's provenance — the one durable record of
+        # which weights made it. MODEL_ID names the DEFAULT install, so on a
+        # non-default version this recorded 2.3's pack for a 2.5 render. The
+        # job spec already resolves the right directory; report that.
+        "fps": FPS, "model": base_model_dir(), "queue_id": job["id"],
         "helper_elapsed_sec": result.get("elapsed_sec"),
         "output_codec": output_codec_settings(),
         "memory_policy": memory_plan,
@@ -14809,6 +16573,13 @@ class Handler(BaseHTTPRequestHandler):
             payload["outputs"] = _outs
             payload["outputs_total"] = _outs_total
             payload["hidden_count"] = hidden_count
+            # Storyboards — one line per board. Three jobs, all of them cheap:
+            # the `S03/12` badge on a queue card needs the denominator, the tab
+            # count during an overnight run needs `running`, and `To film` in
+            # the player overlay stays hidden until this list is non-empty
+            # (rule 5 — with no film in progress the panel looks exactly as it
+            # did yesterday).
+            payload["storyboards"] = _sb_all_summaries()
             payload["memory"] = get_memory()
             payload["comfy_pids"] = find_comfy_pids()
             payload["server_now"] = time.time()
@@ -14893,7 +16664,7 @@ class Handler(BaseHTTPRequestHandler):
             _q8_available = q8_available_anywhere()
             payload["q8_available"] = _q8_available
             payload["q8_missing"] = [] if _q8_available else _q8_missing
-            payload["q8_path"] = str(Q8_LOCAL_PATH)
+            payload["q8_path"] = str(pack_path("q8"))
             payload["base_available"] = not _base_missing
             payload["base_missing"] = _base_missing
             # Repo-level counts for the header pill — granular view that
@@ -15667,6 +17438,28 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"characters": list_characters()})
             return
 
+        # ---- Storyboard reads ------------------------------------------
+        if parsed.path == "/storyboard/list":
+            self._json({"ok": True, "boards": _sb_all_summaries()})
+            return
+        if parsed.path == "/storyboard/get":
+            bid = (parse_qs(parsed.query).get("id") or [""])[0].strip()
+            try:
+                board = storyboard.load_storyboard(STATE_DIR, bid)
+            except Exception as exc:                                # noqa: BLE001
+                self._json({"ok": False, "error": str(exc)}, 404)
+                return
+            # Reconcile job ids -> shot status BEFORE replying, and save if the
+            # queue told us something the board didn't know. This is what makes
+            # a panel restart mid-render invisible to the user.
+            try:
+                if _sb_reconcile(board):
+                    storyboard.save_storyboard(STATE_DIR, board)
+            except Exception:
+                pass
+            self._json(_sb_payload(board))
+            return
+
         # Progress poll for the one-click sample-character download.
         if parsed.path == "/characters/download-sample/status":
             with _sample_char_lock:
@@ -16262,6 +18055,497 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self.send_error(404)
+
+    # ---- Storyboard writes ---------------------------------------------
+    # One method rather than fourteen `if path ==` blocks in do_POST, because
+    # every one of them shares the same three opening moves (find the board,
+    # normalise it, reply with the full payload the plan screen repaints from).
+    # Called from do_POST AFTER the body/form parse — the routes below read
+    # both, and /storyboard/save posts JSON rather than a form.
+    def _storyboard_post(self, action: str, body: str, form: dict) -> None:
+        def f(name: str, default: str = "") -> str:
+            v = form.get(name, default)
+            if isinstance(v, list):
+                v = v[0] if v else default
+            return (v or "").strip() or default
+
+        def load(bid: str):
+            return storyboard.load_storyboard(STATE_DIR, bid)
+
+        try:
+            # ---- plan / re-plan -----------------------------------------
+            if action == "plan":
+                concept = f("concept", "")
+                bid = f("id", "")
+                notes = f("notes", "")
+                if not concept and not bid:
+                    self._json({"ok": False,
+                                "error": "Write a couple of sentences about the "
+                                         "film first."}, 400)
+                    return
+                # Constraint 1, enforced server-side: a stale tab must not be
+                # able to start a planner while the renderer holds the memory.
+                with LOCK:
+                    busy = bool(STATE.get("running")) or bool(STATE.get("queue"))
+                if busy:
+                    self._json({"ok": False, "busy": True,
+                                "error": "The renderer is using the memory. "
+                                         "Planning can start when the queue is "
+                                         "empty."}, 409)
+                    return
+                # Take the ONE planner slot first. Everything below writes to
+                # disk, and a refusal after that leaves a dead "Planning…" board
+                # claiming state=running forever.
+                err = _sb_claim_planner(bid or "-pending-")
+                if err:
+                    self._json({"ok": False, "busy": True, "error": err}, 409)
+                    return
+                previous = None
+                if bid:
+                    try:
+                        board = load(bid)
+                        previous = {k: board.get(k) for k in
+                                    ("schema", "id", "title", "cast", "policy", "shots")}
+                        concept = concept or board.get("concept") or ""
+                    except Exception:
+                        bid = ""
+                if not bid:
+                    bid = "sb_%s_%s" % (time.strftime("%Y%m%d"),
+                                        hashlib.sha1(
+                                            (concept + str(time.time())).encode()
+                                        ).hexdigest()[:6])
+                    board = storyboard.new_storyboard(bid, "Planning…")
+                # Offer the number or refuse it — never quietly render a
+                # different film. A brief that asked for 4 shots used to come
+                # back as a 12-shot board with no message anywhere. The four
+                # chips are what the UI OFFERS; they were never meant to be the
+                # only counts the API accepts.
+                _raw_shots = f("shots", "")
+                if _raw_shots:
+                    try:
+                        shots_n = int(str(_raw_shots).strip())
+                    except (TypeError, ValueError):
+                        _sb_release_planner(bid, "-pending-")
+                        self._json({"ok": False,
+                                    "error": f"shots must be a whole number "
+                                             f"(got {_raw_shots!r})."}, 400)
+                        return
+                    if not (1 <= shots_n <= STORYBOARD_MAX_SHOTS):
+                        _sb_release_planner(bid, "-pending-")
+                        self._json({"ok": False,
+                                    "error": f"shots must be between 1 and "
+                                             f"{STORYBOARD_MAX_SHOTS} (got {shots_n})."}, 400)
+                        return
+                else:
+                    shots_n = int(get_settings().get("storyboard_shots", 12) or 12)
+                must = [x.strip() for x in (f("must", "") or "").splitlines() if x.strip()]
+                emode = (f("engine", "") or board.get("engine_mode")
+                         or get_settings().get("storyboard_engine", "auto")).strip().lower()
+                if emode not in storyboard.ENGINE_MODES:
+                    emode = storyboard.DEFAULT_ENGINE_MODE
+                # An H3-only film cannot carry a trained character: H3 has no
+                # LoRA path, so the trigger would do nothing and a stranger's
+                # face would render. Refuse the pair here rather than plan a
+                # film that can't keep its promise.
+                cid = f("character_id", "")
+                if emode == "h3" and cid:
+                    _sb_release_planner(bid, "-pending-")
+                    self._json({"ok": False,
+                                "error": "Hailuo H3 can't load a trained character. "
+                                         "Pick Auto to keep them (their shots render on "
+                                         "LTX-2.3), or clear the cast."}, 400)
+                    return
+                chars = [c for c in (list_characters() or []) if c.get("id") == cid] if cid else []
+                board["engine_mode"] = emode
+                board["concept"] = concept
+                board["style"] = f("style", "")
+                board["must"] = must
+                board["shots_target"] = shots_n
+                board["cast"] = [{"id": c.get("id"),
+                                  "trigger": c.get("trigger") or c.get("id")}
+                                 for c in chars]
+                board.setdefault("policy", _sb_policy_for(
+                    get_settings().get("storyboard_draft_quality", "quick"),
+                    get_settings().get("storyboard_final_quality", "standard")))
+                _sb_set_planner(board, state="running", stage="load", error=None)
+                storyboard.save_storyboard(STATE_DIR, board)
+                # The slot was claimed under a placeholder before the id existed
+                # (a brand-new board mints its id above); move it onto the real
+                # one now that nothing else can fail.
+                with _SB_LOCK:
+                    _SB_PLANNERS.pop("-pending-", None)
+                    _SB_PLANNERS.setdefault(bid, {"cancelled": False})
+                th = threading.Thread(
+                    target=_sb_plan_thread, daemon=True, name=f"phos-sb-plan-{bid}",
+                    args=(bid, {"concept": concept, "n_shots": shots_n,
+                                "style": board["style"], "characters": chars,
+                                "must": must, "feedback": notes or None,
+                                "engine_mode": emode},
+                          previous if notes else None))
+                with _SB_LOCK:
+                    _SB_PLANNERS[bid]["thread"] = th
+                th.start()
+                self._json({"ok": True, "id": bid}, 202)
+                return
+
+            if action == "cancel":
+                bid = f("id", "")
+                with _SB_LOCK:
+                    entry = _SB_PLANNERS.get(bid)
+                    if entry:
+                        entry["cancelled"] = True
+                        sess = entry.get("session")
+                    else:
+                        sess = None
+                # release() from another thread kills the child and makes the
+                # blocked plan_film() call raise into its own finally.
+                if sess is not None:
+                    try:
+                        sess.release()
+                    except Exception:
+                        pass
+                try:
+                    board = load(bid)
+                    # Same rename the failed path does: a cancelled board must
+                    # not sit in the list called "Planning…" forever, where it
+                    # is indistinguishable from one that really is planning.
+                    if (not (board.get("shots") or [])
+                            and board.get("title") in ("", "Planning…", None)):
+                        _w = (board.get("concept") or "").split()
+                        board["title"] = " ".join(_w[:6]) or "Untitled film"
+                    _sb_set_planner(board, state="cancelled", stage=None)
+                    storyboard.save_storyboard(STATE_DIR, board)
+                except Exception:
+                    pass
+                self._json({"ok": True})
+                return
+
+            # ---- edit ----------------------------------------------------
+            if action == "save":
+                try:
+                    payload = json.loads(body or "{}")
+                except json.JSONDecodeError as exc:
+                    self._json({"ok": False, "error": f"bad JSON: {exc}"}, 400)
+                    return
+                bid = str(payload.get("id") or "").strip()
+                incoming = payload.get("board")
+                if not isinstance(incoming, dict):
+                    self._json({"ok": False, "error": "no board"}, 400)
+                    return
+                board = load(bid)
+                # Only the fields the plan screen can edit. Everything else on
+                # disk (job ids, outputs, planner metadata) is the server's and
+                # a stale tab must not be able to roll it back.
+                for k in ("title", "concept", "style", "must", "shots_target", "policy"):
+                    if k in incoming:
+                        board[k] = incoming[k]
+                if isinstance(incoming.get("shots"), list):
+                    bad = [i for i, x in enumerate(incoming["shots"])
+                           if not isinstance(x, dict)]
+                    if bad:
+                        # Silently dropping these turned 6 shots into 5 with a
+                        # 200. Refuse instead of quietly editing the film.
+                        self._json({"ok": False,
+                                    "error": f"shots {bad} are not objects"}, 400)
+                        return
+                    keep = {"draft_job_id", "final_job_id", "draft_output",
+                            "final_output", "error"}
+                    by_n = {s.get("n"): s for s in (board.get("shots") or [])
+                            if isinstance(s, dict)}
+                    merged = []
+                    for s in incoming["shots"]:
+                        if not isinstance(s, dict):
+                            continue
+                        old = by_n.get(s.get("n")) or {}
+                        for k in keep:
+                            if k in old and k not in s:
+                                s[k] = old[k]
+                        merged.append(s)
+                    board["shots"] = merged
+                _sb_normalize(board)
+                storyboard.save_storyboard(STATE_DIR, board)
+                self._json(_sb_payload(board))
+                return
+
+            if action == "grade":
+                board = load(f("id", ""))
+                try:
+                    n = int(f("n", "0"))
+                except (TypeError, ValueError):
+                    n = 0
+                grade = f("grade", "") or None
+                if grade not in (None, "keep", "reroll", "cut"):
+                    self._json({"ok": False, "error": "bad grade"}, 400)
+                    return
+                for s in (board.get("shots") or []):
+                    if isinstance(s, dict) and s.get("n") == n:
+                        s["grade"] = grade
+                        if "note" in form:
+                            s["note"] = f("note", "")
+                        # CUT is the one verdict that changes scheduling:
+                        # shooting_order() and estimate() already exclude
+                        # "skipped", so no new filtering logic anywhere.
+                        if grade == "cut":
+                            s["status"] = "skipped"
+                        elif s.get("status") == "skipped":
+                            s["status"] = "done" if s.get("draft_output") else "pending"
+                        break
+                board["updated_at"] = int(time.time())
+                storyboard.save_storyboard(STATE_DIR, board)
+                # A CUT draft will never be refined — let its Stage-A cache go.
+                _sb_sweep_stage_a(board)
+                self._json(_sb_payload(board))
+                return
+
+            if action == "estimate":
+                board = load(f("id", ""))
+                pass_name = f("pass", "draft")
+                only = [int(x) for x in (f("only", "") or "").split(",") if x.strip().isdigit()]
+                if only:
+                    import copy as _copy
+                    board = _copy.deepcopy(board)
+                    for s in (board.get("shots") or []):
+                        if isinstance(s, dict) and s.get("n") not in only:
+                            s["status"] = "skipped"
+                    for s in (board.get("shots") or []):
+                        if isinstance(s, dict) and s.get("n") in only:
+                            s["status"] = "pending"
+                self._json({"ok": True,
+                            "estimate": storyboard.estimate(board, pass_name=pass_name,
+                                                            h3_cost=_sb_h3_cost)})
+                return
+
+            # ---- render --------------------------------------------------
+            if action == "render":
+                bid = f("id", "")
+                board = load(bid)
+                pass_name = "final" if f("pass", "draft") == "final" else "draft"
+                only = [int(x) for x in (f("only", "") or "").split(",") if x.strip().isdigit()]
+                errs = storyboard.validate_storyboard_detail(
+                    board, known_character_ids=_sb_known_character_ids(),
+                    ref_root=OUTPUT, max_dim=_sb_max_dim())
+                if errs:
+                    # Never render a plan the validator rejected — that is the
+                    # entire reason the validator exists.
+                    self._json({"ok": False, "errors": errs}, 400)
+                    return
+                with _SB_LOCK:
+                    # GLOBAL, not per board: the planner and the renderer share
+                    # one pool of memory, so ANY plan in flight blocks a render,
+                    # not just this film's. The other direction is checked in
+                    # _sb_claim_planner().
+                    if _SB_PLANNERS:
+                        self._json({"ok": False, "busy": True,
+                                    "error": "A film is still being planned. "
+                                             "Rendering can start when it's "
+                                             "finished."}, 409)
+                        return
+                    _live = _SB_RENDERS.get(bid)
+                    if _live and not _live.get("stop"):
+                        self._json({"ok": False,
+                                    "error": "This film is already rendering."}, 409)
+                        return
+                    if _live:
+                        # Stopped, but the dispatch thread hasn't woken from its
+                        # 5 s wait to release the slot yet. Saying "already
+                        # rendering" here is a sentence about a thread, not
+                        # about the film.
+                        self._json({"ok": False,
+                                    "error": "Still stopping the previous run — "
+                                             "try again in a moment."}, 409)
+                        return
+                    _SB_RENDERS[bid] = {"stop": False, "pass": pass_name, "queued": 0}
+                # A final pass re-renders at the draft's seed, which is already
+                # pinned onto the shot by the reconciler.
+                if pass_name == "final":
+                    for s in (board.get("shots") or []):
+                        if isinstance(s, dict) and (not only or s.get("n") in only):
+                            s.pop("final_job_id", None)
+                    storyboard.save_storyboard(STATE_DIR, board)
+                th = threading.Thread(target=_sb_render_thread, daemon=True,
+                                      name=f"phos-sb-render-{bid}",
+                                      args=(bid, pass_name, only or None))
+                with _SB_LOCK:
+                    _SB_RENDERS[bid]["thread"] = th
+                th.start()
+                self._json({"ok": True, "queued": len(only) if only else None}, 202)
+                return
+
+            if action == "stop":
+                bid = f("id", "")
+                with _SB_LOCK:
+                    entry = _SB_RENDERS.get(bid)
+                    if entry:
+                        entry["stop"] = True
+                board = load(bid)
+                # Remove ONLY this board's queued jobs, through the same code
+                # path removeJob(id) uses. Never /queue/clear — another
+                # feature's jobs may be in there.
+                mine = set()
+                for s in (board.get("shots") or []):
+                    if not isinstance(s, dict):
+                        continue
+                    for k in ("draft_job_id", "final_job_id"):
+                        if s.get(k):
+                            mine.add(s[k])
+                removed = 0
+                with QUEUE_COND:
+                    before = len(STATE["queue"])
+                    STATE["queue"] = [j for j in STATE["queue"] if j.get("id") not in mine]
+                    removed = before - len(STATE["queue"])
+                    QUEUE_COND.notify_all()
+                persist_queue()
+                for s in (board.get("shots") or []):
+                    if isinstance(s, dict) and s.get("status") in ("queued",):
+                        s["status"] = "pending"
+                storyboard.save_storyboard(STATE_DIR, board)
+                push(f"[storyboard] stopped — {removed} queued shot(s) removed; "
+                     f"the shot in flight finishes")
+                self._json({"ok": True, "removed": removed})
+                return
+
+            if action == "replan-shots":
+                bid = f("id", "")
+                board = load(bid)
+                ns = [int(x) for x in (f("ns", "") or "").split(",") if x.strip().isdigit()]
+                if not ns:
+                    self._json({"ok": False, "error": "no shots named"}, 400)
+                    return
+                with LOCK:
+                    busy = bool(STATE.get("running")) or bool(STATE.get("queue"))
+                if busy:
+                    self._json({"ok": False, "busy": True,
+                                "error": "The renderer is using the memory. "
+                                         "Planning can start when the queue is "
+                                         "empty."}, 409)
+                    return
+                err = _sb_claim_planner(bid)
+                if err:
+                    self._json({"ok": False, "busy": True, "error": err}, 409)
+                    return
+                notes = []
+                for s in (board.get("shots") or []):
+                    if isinstance(s, dict) and s.get("n") in ns:
+                        notes.append("shot %d: %s" % (s["n"], (s.get("note") or "").strip()
+                                                      or "the director rejected this shot — "
+                                                         "write a different one"))
+                previous = {k: board.get(k) for k in
+                            ("schema", "id", "title", "cast", "policy", "shots")}
+                chars = [c for c in (list_characters() or [])
+                         if c.get("id") in {x.get("id") for x in (board.get("cast") or [])}]
+                th = threading.Thread(
+                    target=_sb_plan_thread, daemon=True, name=f"phos-sb-reroll-{bid}",
+                    args=(bid, {"concept": board.get("concept") or "",
+                                "n_shots": len(board.get("shots") or []),
+                                "style": board.get("style") or "",
+                                "characters": chars,
+                                "must": board.get("must") or [],
+                                "feedback": "\n".join(notes),
+                                "engine_mode": board.get("engine_mode") or "auto",
+                                "reroll_ns": ns},
+                          previous))
+                with _SB_LOCK:
+                    _SB_PLANNERS[bid]["thread"] = th
+                th.start()
+                self._json({"ok": True}, 202)
+                return
+
+            # ---- shared state --------------------------------------------
+            if action == "add-shot":
+                bid = f("id", "")
+                clip = f("path", "")
+                p = Path(clip)
+                if not p.is_file() or OUTPUT.resolve() not in p.resolve().parents:
+                    self._json({"ok": False, "error": "no such clip"}, 400)
+                    return
+                try:
+                    meta = json.loads((p.parent / (p.name + ".json")).read_text(encoding="utf-8"))
+                except Exception:
+                    meta = {}
+                params = meta.get("params") or {}
+                if bid in ("", "new"):
+                    bid = "sb_%s_%s" % (time.strftime("%Y%m%d"),
+                                        hashlib.sha1(str(time.time()).encode()).hexdigest()[:6])
+                    board = storyboard.new_storyboard(bid, "Untitled film")
+                    board["policy"] = _sb_policy_for(
+                        get_settings().get("storyboard_draft_quality", "quick"),
+                        get_settings().get("storyboard_final_quality", "standard"))
+                else:
+                    board = load(bid)
+                cid = params.get("character_id") or ""
+                try:
+                    dur = round(float(params.get("frames") or 121)
+                                / float(params.get("frame_rate") or 24.0), 1)
+                except Exception:
+                    dur = 5.0
+                shot = {
+                    "n": len(board.get("shots") or []) + 1,
+                    "title": p.stem[:60],
+                    "mode": "character" if cid else "text",
+                    "engine": (params.get("engine") or "ltx"),
+                    "prompt": params.get("prompt") or "",
+                    "duration_s": max(1.0, min(60.0, dur)),
+                    "seed": (meta.get("seed_used") if isinstance(meta.get("seed_used"), int)
+                             else params.get("seed_used") if isinstance(params.get("seed_used"), int)
+                             else -1),
+                    "refs": [], "status": "done",
+                    "draft_output": str(p),
+                }
+                if cid:
+                    shot["character_id"] = cid
+                    shot["trigger"] = params.get("trigger") or cid
+                board.setdefault("shots", []).append(shot)
+                _sb_normalize(board)
+                storyboard.save_storyboard(STATE_DIR, board)
+                self._json({"ok": True, "id": bid, "n": shot["n"],
+                            "title": board.get("title") or ""})
+                return
+
+            # ---- export / housekeeping -----------------------------------
+            if action == "export":
+                board = load(f("id", ""))
+                self._json(_sb_export(board))
+                return
+
+            if action == "reveal":
+                board = load(f("id", ""))
+                title = board.get("title") or "storyboard"
+                day = time.strftime("%Y-%m-%d",
+                                    time.localtime(board.get("created_at") or time.time()))
+                d = OUTPUT / "storyboards" / f"{day}_{_sb_slug(title, 6)}"
+                if not d.is_dir():
+                    self._json({"ok": False, "error": "nothing exported yet"}, 404)
+                    return
+                try:
+                    subprocess.Popen(["open", str(d)])
+                except Exception as exc:                            # noqa: BLE001
+                    self._json({"ok": False, "error": str(exc)}, 500)
+                    return
+                self._json({"ok": True})
+                return
+
+            if action == "delete":
+                bid = f("id", "")
+                with _SB_LOCK:
+                    if bid in _SB_RENDERS or bid in _SB_PLANNERS:
+                        self._json({"ok": False,
+                                    "error": "Stop the film first."}, 409)
+                        return
+                d = storyboard.board_dir(STATE_DIR, bid)
+                if d.is_dir() and d.resolve().parent == (STATE_DIR / "storyboards").resolve():
+                    shutil.rmtree(d, ignore_errors=True)
+                # Deletes the plan. The clips it rendered stay in mlx_outputs/.
+                self._json({"ok": True})
+                return
+
+            self._json({"ok": False, "error": f"unknown storyboard action: {action}"}, 404)
+        except storyboard.StoryboardError as exc:
+            _sb_release_stranded_claim(action)
+            self._json({"ok": False, "error": str(exc)}, 404)
+        except Exception as exc:                                    # noqa: BLE001
+            _sb_release_stranded_claim(action)
+            push(f"[storyboard] {action} failed: {exc}")
+            self._json({"ok": False, "error": str(exc)}, 500)
 
     def do_POST(self) -> None:
         if not self._is_local_request():
@@ -17308,6 +19592,14 @@ class Handler(BaseHTTPRequestHandler):
                 QUEUE_COND.notify_all()
             persist_queue()
             self._json({"ok": True, "id": job["id"]})
+            return
+
+        # ====== Storyboard — plan a film, then shoot it ====================
+        # Sits with the /queue/* cluster on purpose: every one of these routes
+        # ends up going through the SAME make_job -> STATE["queue"] contract
+        # above, and none of them has a private execution path.
+        if path.startswith("/storyboard/"):
+            self._storyboard_post(path[len("/storyboard/"):], body, form)
             return
 
         # ====== Characters — thin wrapper around /queue/add ================
@@ -18362,16 +20654,20 @@ class Handler(BaseHTTPRequestHandler):
                     ),
                 }, 409)
                 return
-            # `git status --porcelain` is empty iff the working tree is
-            # clean. The UI's clean-check uses the same probe.
-            dirty = (_git_capture(["status", "--porcelain"]) or "").strip()
+            # `git status --porcelain -uno` is empty iff no TRACKED file is
+            # modified. Same probe (and same -uno reasoning) as
+            # _detect_local_install_state — see the long note there: the
+            # installers legitimately leave untracked dirs in this tree
+            # (minimax-h3-mlx/, cache/, logs/) and refusing to pull because
+            # of them is what left every H3 user unable to update (#52).
+            dirty = (_git_capture(["status", "--porcelain", "-uno"]) or "").strip()
             if dirty:
                 self._json({
                     "ok": False,
                     "error": (
                         "refusing to pull: local working tree has "
-                        "uncommitted changes. Commit, stash, or discard "
-                        "them, then click Update again."
+                        "uncommitted changes to tracked files. Commit, "
+                        "stash, or discard them, then click Update again."
                     ),
                     "dirty_files": dirty.splitlines()[:20],
                 }, 409)
@@ -18821,7 +21117,10 @@ class Handler(BaseHTTPRequestHandler):
             if not repo:
                 self._json({"error": f"unknown repo key: {key!r}. Valid keys: "
                                      f"{[r['key'] for r in _repos()]}"}, 400); return
-            if HF_BIN is None:
+            # A GitHub-release-mirrored pack does not go through `hf` at all
+            # (scripts/fetch_pack_release.py is stdlib-only), so a missing hf
+            # binary must not block the one lane that never needed it.
+            if HF_BIN is None and (repo.get("mirror") or {}).get("kind") != "github-release":
                 self._json({"error": "hf binary not found. Reinstall Phosphene "
                                      "or install huggingface_hub>=1.0 in the venv."}, 500); return
             with DOWNLOAD_LOCK:
@@ -18889,7 +21188,7 @@ class Handler(BaseHTTPRequestHandler):
             if not bad:
                 self._json({"ok": True, "nothing_to_repair": True,
                             "note": f"no corrupt files detected for {key!r}"}); return
-            if HF_BIN is None:
+            if HF_BIN is None and (repo.get("mirror") or {}).get("kind") != "github-release":
                 self._json({"error": "hf binary not found. Reinstall Phosphene."}, 500); return
             target = Q8_LOCAL_PATH if key == "q8" else (ROOT / repo["local_dir"])
             deleted = []
@@ -19445,25 +21744,72 @@ def _compute_progress(current: dict | None, log_lines: list[str]) -> dict | None
 
 # ---- HTML --------------------------------------------------------------------
 
-def _resolve_cap_tier() -> str:
-    """Capability tier the Manual surface organizes around.
+def _resolve_quant_tier() -> str:
+    """QUANTISATION LEVEL this Mac can run. A statement about RAM, nothing
+    else: "q8" on Comfortable+ (>= 48 GB, the dev transformer fits), "q4"
+    on Compact (< 48 GB).
 
-      "q8" — Comfortable+ machines (>= 48 GB RAM, Q8 weights installable).
-             Manual surface offers character / FFLF / extend / lip-dub.
-             Q4 still available as a per-render compute fallback for
-             plain Text/Image renders.
-      "q4" — Compact tier (< 48 GB). Manual surface only shows what
-             actually works: Text + Image, style LoRAs, HDR, joint audio.
-             Character / FFLF / Extend are hidden entirely because the
-             dev transformer doesn't fit in RAM.
+    This is one half of what the single `cap_tier` string used to mean. It
+    is deliberately model-version-blind — a Mac's memory does not change
+    when a new checkpoint generation ships.
 
     `LTX_FORCE_CAP_TIER=q4|q8` overrides — useful for testing the Q4
     surface on a high-RAM dev machine (Mr Bizarro's M4 Max defaults to q8;
-    `LTX_FORCE_CAP_TIER=q4 ./run.sh` reveals the low-RAM layout)."""
+    `LTX_FORCE_CAP_TIER=q4 ./run.sh` reveals the low-RAM layout). The env
+    var keeps its old name because it is documented, in the notes, and in
+    people's shell history."""
     override = (os.environ.get("LTX_FORCE_CAP_TIER", "") or "").strip().lower()
     if override in ("q4", "q8"):
         return override
     return "q8" if SYSTEM_CAPS.get("allows_q8") else "q4"
+
+
+def _resolve_cap_tier(version_id: str | None = None) -> str:
+    """FEATURE TIER the Manual surface organizes around — the other half.
+
+      "q8" — Manual surface offers character / FFLF / extend / lip-dub.
+             Q4 still available as a per-render compute fallback for
+             plain Text/Image renders.
+      "q4" — Manual surface only shows what actually works: Text + Image,
+             style LoRAs, HDR, joint audio. Character / FFLF / Extend are
+             hidden entirely.
+
+    WHY THE SPLIT: the one string used to answer both questions, and the
+    two answers were only ever the same because there was exactly one model
+    version and it shipped both quantisations. The moment a version ships
+    q4 weights only (which is exactly how LTX-2.5 lands -- distilled q4
+    first, q8 in a second wave), a 128 GB Mac still resolves "q8" from RAM
+    and the panel offers Extend, Keyframe and High against weights that do
+    not exist. That is a job-time RuntimeError at best and a wrong-base
+    render at worst.
+
+    So the feature tier is now the machine's quant tier CLAMPED to what the
+    active model version declares it can serve (registry `cap_tiers`). For
+    LTX-2.3, which declares both, the clamp is a no-op and this returns
+    exactly what it always did.
+
+    Note this is the OFFER, not the guarantee: a version can declare a q8
+    surface while that pack is still downloading. Presence stays the job of
+    q8_missing_files() / pack_missing_files(), which every gate already
+    calls -- one asks "can this generation do it at all", the other asks
+    "are the bytes here"."""
+    quant = _resolve_quant_tier()
+    tiers = version_cap_tiers(version_id)
+    if quant in tiers:
+        return quant
+    # The version can't serve this machine's quant tier. Fold DOWN to the
+    # richest surface it can serve that this Mac can still run — never up,
+    # or a Compact machine gets offered a q8-only generation it has no RAM
+    # for. `order` is poorest → richest.
+    order = ("q4", "q8")
+    reachable = [t for t in order
+                 if t in tiers and order.index(t) <= order.index(quant)]
+    if reachable:
+        return reachable[-1]
+    # Nothing this version ships is runnable here. Report the machine's own
+    # tier so the surface is at least honest about the hardware; the pack
+    # gates refuse the job with the real reason.
+    return quant
 
 
 def page() -> str:
@@ -19472,7 +21818,10 @@ def page() -> str:
         "presets": PRESETS, "aspects": ASPECTS,
         "default_image": str(REFERENCE),
         "default_audio": str(AUDIO_DEFAULT),
-        "fps": FPS, "model": MODEL_ID,
+        # Same fix as the sidecar: the model chip should name the generation
+        # actually loaded. Identical bytes for the default version, so a 2.3
+        # user's page.html is unchanged.
+        "fps": FPS, "model": base_model_dir(),
         "profile": PROFILE,
         "model_upscale_enabled": MODEL_UPSCALE_ENABLED,
         "pipersr_upscale_enabled": PIPERSR_UPSCALE_ENABLED,
@@ -19501,6 +21850,10 @@ def page() -> str:
         # points at this block by name (its `probe` key), rather than the
         # switcher knowing anything about H3 in particular.
         "h3": h3_status(),
+        # Storyboard — planner presence, the RAM copy, the shot/quality choices
+        # and the boards already on disk. In the bootstrap (not just /status) so
+        # the tab renders its real state on first paint instead of flickering.
+        "storyboard": storyboard_status(),
         # The engine registry (see ENGINES). The header switcher, the mode
         # gate, the surface swap and the accent tints are all rendered from
         # this list — adding an engine is one entry there, not a UI rewrite.
@@ -19997,6 +22350,595 @@ HTML = r"""<!doctype html>
     body[data-workflow="audio"] #studioSection,
     body[data-workflow="audio"] #trainSection { display: none !important; }
     body[data-workflow="audio"] #audioSectionTab { display: block; }
+
+    /* =========================================================
+       STORYBOARD — the workflow fold + its own surfaces
+       =========================================================
+       Same shape as the audio fold above, plus one extra move: the shot
+       list takes the GALLERY's slot in the stage column and the player
+       stays where it is. That is what makes shared state free — clicking a
+       shot's thumbnail calls the existing selectOutput() and the existing
+       player, Params/Extend/Expand overlay and lightbox all work unchanged.
+
+       Everything below is built from existing tokens. No new colours, no
+       fonts, no libraries — the panel is offline-capable and dark-only. */
+    body[data-workflow="storyboard"] #modelsInline,
+    body[data-workflow="storyboard"] #modeGroup,
+    body[data-workflow="storyboard"] aside.form-pane > h2,
+    body[data-workflow="storyboard"] #genForm,
+    body[data-workflow="storyboard"] #studioSection,
+    body[data-workflow="storyboard"] #trainSection,
+    body[data-workflow="storyboard"] #audioSectionTab { display: none !important; }
+    body[data-workflow="storyboard"] #sbSectionTab { display: block; }
+    /* form-pane children get no padding by default (the sticky-footer pin
+       math depends on it) — match #genForm's. */
+    .form-pane > #sbSectionTab { padding: 0 18px; }
+
+    body[data-workflow="storyboard"] .stage-pane > .carousel-wrap,
+    body[data-workflow="storyboard"] .ideo-stage-bar,
+    body[data-workflow="storyboard"] .ideo-canvas-host { display: none !important; }
+    /* #modelTag names the ONE model the current surface renders on, which is
+       what makes it a lie here: a film picks its engine per shot, so a footer
+       reading "ltx-2.3-mlx-q4" is read as "LTX is selected" — reported by the
+       owner on first contact with this tab. It folds away for exactly the same
+       reason #engineSwitch does (see _currentSurface), and #sbEngineNote below
+       says what actually decides. */
+    body[data-workflow="storyboard"] #modelTag { display: none !important; }
+    body[data-workflow="storyboard"] #sbStage { display: flex; }
+    /* Plan-only phases want the whole column — the same trick the Ideogram
+       layout editor uses, so there is one mechanism for "this surface needs
+       the stage" rather than two. */
+    body[data-workflow="storyboard"].sb-full .stage-pane > .player-surface { display: none; }
+
+    #sbStage {
+      display: none;
+      flex: 1 1 auto;
+      flex-direction: column;
+      /* Never collapse to a sliver: the gallery this replaces is a short
+         horizontal strip and is happy with 130px, a shot list is not. */
+      min-height: 240px;
+      overflow-y: auto;
+      padding-right: 2px;
+    }
+    /* .player-surface is width-driven (`width:100%` + aspect-ratio), so in the
+       wide stage column it grows to ~690px and leaves the shot list a sliver.
+       Flip it to height-driven while the list is sharing the column — the SAME
+       idiom .player-surface[data-orient="vertical"] already uses for the same
+       reason, so there is one mechanism here, not two. When the list has the
+       column to itself (body.sb-full) the player is hidden anyway. */
+    body[data-workflow="storyboard"]:not(.sb-full) .stage-pane > .player-surface {
+      width: auto;
+      max-width: 100%;
+      height: min(46vh, calc(100vh - 420px));
+      max-height: min(46vh, calc(100vh - 420px));
+    }
+    /* ---- the brief (left column) ---------------------------------- */
+    .sb-brief { margin-bottom: 12px; }
+    .sb-concept { min-height: 92px; }
+    .sb-input, .sb-textarea {
+      width: 100%; padding: 8px 10px;
+      background: var(--panel-2); border: 1px solid var(--border);
+      border-radius: var(--r-sm); color: var(--text);
+      font-size: 12.5px; font-family: inherit; line-height: 1.5;
+    }
+    .sb-textarea { resize: vertical; min-height: 68px; }
+    .sb-input:focus, .sb-textarea:focus {
+      outline: none; border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-dim);
+    }
+    #sbSectionTab .cz-control { margin-bottom: 14px; }
+    .sb-ramline {
+      font-size: 11.5px; line-height: 1.45; color: var(--muted);
+      margin-bottom: 9px; display: flex; align-items: center; gap: 6px;
+    }
+    .sb-boards { margin: 12px 0 14px; }
+    .sb-boards-head {
+      font-size: 11px; font-weight: 600; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px;
+    }
+    .sb-boards[hidden] { display: none !important; }
+
+    /* ---- planning -------------------------------------------------- */
+    .sb-planning {
+      flex: 1 1 auto;
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; gap: 12px; text-align: center;
+      padding: 40px 20px;
+    }
+    .sb-planning[hidden] { display: none !important; }
+    .sb-planning-mark {
+      width: 54px; height: 44px; position: relative; opacity: 0.75;
+    }
+    .sb-planning-mark i {
+      position: absolute; left: 0; right: 0; height: 12px;
+      border: 1px solid var(--accent); border-radius: 3px;
+      background: var(--accent-dim);
+      animation: sbFrames 1.8s ease-in-out infinite;
+    }
+    .sb-planning-mark i:nth-child(1) { top: 0; animation-delay: 0s; }
+    .sb-planning-mark i:nth-child(2) { top: 16px; animation-delay: 0.25s; }
+    .sb-planning-mark i:nth-child(3) { top: 32px; animation-delay: 0.5s; }
+    @keyframes sbFrames {
+      0%, 100% { opacity: 0.25; transform: translateX(0); }
+      50%      { opacity: 1;    transform: translateX(4px); }
+    }
+    .sb-planning-title { font-size: 15px; font-weight: 600; color: var(--text); }
+    .sb-planning-sub { font-size: 12px; color: var(--muted); }
+    .sb-planning-steps {
+      display: flex; flex-direction: column; gap: 7px;
+      margin-top: 8px; text-align: left;
+    }
+    .sb-step {
+      display: flex; align-items: center; gap: 9px;
+      font-size: 12px; color: var(--muted); opacity: 0.55;
+      transition: opacity var(--t-base), color var(--t-base);
+    }
+    .sb-step[hidden] { display: none !important; }
+    .sb-step-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      border: 1px solid var(--border-strong); flex: 0 0 auto;
+    }
+    .sb-step.is-now { opacity: 1; color: var(--text); }
+    .sb-step.is-now .sb-step-dot {
+      border-color: var(--accent); background: var(--accent);
+      animation: sbPulse 1.2s ease-in-out infinite;
+    }
+    .sb-step.is-done { opacity: 0.9; }
+    .sb-step.is-done .sb-step-dot {
+      border-color: var(--success); background: var(--success);
+    }
+    @keyframes sbPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+    /* ---- empty state ---------------------------------------------- */
+    .sb-empty {
+      flex: 1 1 auto;
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; gap: 10px; text-align: center;
+      padding: 36px 24px; max-width: 520px; margin: 0 auto;
+    }
+    .sb-empty[hidden] { display: none !important; }
+    .sb-empty-icon { color: var(--text); opacity: 0.35; }
+    .sb-empty-title { font-size: 16px; font-weight: 600; color: var(--text); }
+    .sb-empty-sub { font-size: 12.5px; line-height: 1.6; color: var(--muted); }
+    .sb-empty-steps {
+      list-style: none; padding: 0; margin: 10px 0 0;
+      display: flex; flex-direction: column; gap: 7px;
+      text-align: left; font-size: 12px; color: var(--muted); line-height: 1.5;
+    }
+    .sb-empty-steps b { color: var(--text); font-weight: 600; }
+
+    /* ---- plan review ----------------------------------------------- */
+    .sb-plan { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
+    .sb-plan[hidden] { display: none !important; }
+    .sb-plan-head { position: relative; z-index: 4; }
+    .sb-title {
+      flex: 1 1 auto; min-width: 120px;
+      background: transparent; border: 1px solid transparent;
+      border-radius: var(--r-sm);
+      color: var(--text); font-size: 14px; font-weight: 600;
+      padding: 4px 7px; font-family: inherit;
+    }
+    .sb-title:hover { border-color: var(--border); }
+    .sb-title:focus {
+      outline: none; border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-dim); background: var(--panel-2);
+    }
+    .sb-plan-status {
+      font-size: 11px; color: var(--muted); white-space: nowrap;
+      font-family: var(--ph-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    }
+    #sbStageToggle {
+      display: inline-flex; gap: 4px; padding: 3px;
+      background: var(--bg-2); border: 1px solid var(--border);
+      border-radius: 10px; flex: 0 0 auto;
+    }
+    #sbStageToggle[hidden] { display: none !important; }
+    #sbStageToggle .smt-btn {
+      appearance: none; border: 0; background: transparent;
+      color: var(--muted); font: inherit; font-size: 12px; font-weight: 600;
+      padding: 4px 12px; border-radius: 7px; cursor: pointer;
+      transition: background var(--t-fast), color var(--t-fast);
+      white-space: nowrap; width: auto;
+    }
+    #sbStageToggle .smt-btn:hover { color: var(--text); }
+    #sbStageToggle .smt-btn.active { background: var(--accent); color: #fff; }
+
+    .sb-summary {
+      position: sticky; top: 0; z-index: 3;
+      display: flex; align-items: stretch; gap: 8px; flex-wrap: wrap;
+      padding: 10px 0 12px;
+      background: linear-gradient(180deg, var(--bg) 0%, var(--bg) 62%,
+                                  rgba(0, 6, 26, 0) 100%);
+    }
+    .sb-sum-cell {
+      flex: 1 1 118px; min-width: 0;
+      display: flex; flex-direction: column; gap: 2px;
+      padding: 8px 10px;
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: var(--r-md);
+    }
+    .sb-sum-cell b {
+      font-size: 13px; font-weight: 600; color: var(--text);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .sb-sum-cell span { font-size: 10.5px; color: var(--muted); line-height: 1.4; }
+    .sb-sum-cell.is-warn { border-color: rgba(210,153,34,0.45); }
+    .sb-sum-cell.is-warn b { color: var(--warning); }
+    .sb-runstrip { flex: 1 1 100%; display: flex; gap: 4px; }
+    .sb-runstrip[hidden] { display: none !important; }
+    .sb-runseg {
+      display: flex; align-items: center; gap: 7px;
+      padding: 5px 9px; min-width: 0;
+      background: var(--panel-2); border: 1px solid var(--border);
+      border-radius: var(--r-sm);
+      font-size: 10.5px; color: var(--muted); cursor: default;
+    }
+    .sb-runseg:hover { border-color: var(--border-strong); }
+    .sb-runseg-load {
+      text-transform: uppercase; letter-spacing: 0.07em; font-weight: 700;
+      font-size: 8.5px; color: var(--accent-bright);
+      padding: 1px 5px; border-radius: var(--r-pill);
+      background: var(--accent-dim); flex: 0 0 auto;
+    }
+    .sb-runseg-name {
+      color: var(--text); font-weight: 500;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .sb-runseg-shots {
+      margin-left: auto; flex: 0 0 auto;
+      font-family: var(--ph-font-mono, ui-monospace, Menlo, monospace);
+    }
+    .sb-errors {
+      margin: 0 0 10px; padding: 9px 11px;
+      border: 1px solid rgba(248,81,73,0.35); border-radius: var(--r-md);
+      background: rgba(248,81,73,0.06);
+      font-size: 11.5px; line-height: 1.55; color: var(--text);
+      display: flex; flex-direction: column; gap: 5px;
+    }
+    .sb-errors[hidden] { display: none !important; }
+    .sb-errors b, .sb-shot-err b { color: var(--text); font-weight: 600; }
+
+    .sb-shots { list-style: none; margin: 0; padding: 0 0 8px; }
+    .sb-shot {
+      background: var(--panel);
+      border: 1px solid var(--border-strong);
+      border-left: 2px solid var(--border-strong);
+      border-radius: var(--r-lg);
+      padding: 10px 11px;
+      margin-bottom: 9px;
+      box-shadow: var(--shadow-1);
+      transition: border-color var(--t-base), box-shadow var(--t-base);
+    }
+    .sb-shot:focus-within {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-dim), var(--shadow-1);
+    }
+    .sb-shot.is-lit { border-color: var(--accent); }
+    .sb-shot.has-error { border-left-color: var(--danger); }
+    .sb-shot.is-dragging { opacity: 0.4; }
+    .sb-shot.is-locked { opacity: 0.92; }
+    .sb-shot.sb-drop-before { box-shadow: 0 -2px 0 0 var(--accent-bright); }
+    .sb-shot.sb-drop-after  { box-shadow: 0  2px 0 0 var(--accent-bright); }
+    .sb-shot-head {
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+      margin-bottom: 8px;
+    }
+    .sb-shot-n {
+      font-family: var(--ph-font-mono, ui-monospace, Menlo, monospace);
+      font-size: 12px; font-weight: 700; color: var(--accent-bright);
+      flex: 0 0 auto;
+    }
+    .sb-seg {
+      display: inline-flex; gap: 2px; padding: 2px;
+      background: var(--bg-2); border: 1px solid var(--border);
+      border-radius: var(--r-sm); flex: 0 0 auto;
+    }
+    .sb-seg-btn {
+      width: auto; appearance: none; border: 0; background: transparent;
+      color: var(--muted); font: inherit; font-size: 11px; font-weight: 600;
+      padding: 3px 9px; border-radius: 5px; cursor: pointer;
+      transition: background var(--t-fast), color var(--t-fast);
+    }
+    .sb-seg-btn:hover { color: var(--text); }
+    .sb-seg-btn.active { background: var(--accent-dim); color: var(--accent-bright); }
+    .sb-select {
+      width: auto; padding: 3px 6px; font-size: 11px;
+      background: var(--panel-2); border: 1px solid var(--border);
+      border-radius: var(--r-sm); color: var(--text); font-family: inherit;
+      max-width: 150px;
+    }
+    .sb-chip {
+      font-size: 9px; font-weight: 700; letter-spacing: 0.07em;
+      text-transform: uppercase; padding: 2px 7px;
+      border-radius: var(--r-pill);
+      border: 1px solid var(--border); color: var(--muted);
+      flex: 0 0 auto; cursor: default;
+    }
+    /* The engine chip is a small .eng-seg: same glyph, same label, same accent
+       variables, rendered from the SAME ENGINES registry row the header
+       switcher is rendered from. No colours are typed here — a third engine
+       lands with one table entry and this chip already knows how to wear it. */
+    .sb-chip-engine {
+      display: inline-flex; align-items: center; gap: 4px;
+      letter-spacing: 0.04em; text-transform: none;
+      color: var(--eng-accent, var(--muted));
+      border-color: var(--eng-soft, var(--border));
+      background: var(--eng-dim, transparent);
+    }
+    .sb-chip-engine .ph { width: 11px; height: 11px; }
+    /* One quiet line saying what decides the engine, in the panel's own
+       help-dot idiom (#h3WinHelpBtn + .h3-winhelp), Python-owned copy. */
+    .sb-enginenote {
+      display: flex; align-items: center; gap: 6px; flex: 1 1 100%;
+      font-size: 11.5px; line-height: 1.45; color: var(--muted);
+      padding: 0 2px;
+    }
+    .sb-enginenote[hidden] { display: none !important; }
+    .sb-enginenote b { color: var(--text); font-weight: 600; }
+    /* The film-level engine picker. .pill-group.cols-3 of .pill-btn — the same
+       segmented grammar #qualityGroup and #sbDraftQuality use — with the
+       engine's own glyph and accent from the ENGINES registry, so an active
+       Hailuo pill is the same pink as its chip and its header segment. */
+    #sbEngineGroup .pill-btn, #sbReplanEngineGroup .pill-btn {
+      gap: 3px; padding: 8px 6px;
+    }
+    #sbEngineGroup .pill-btn .eng-mark .ph,
+    #sbReplanEngineGroup .pill-btn .eng-mark .ph { width: 13px; height: 13px; }
+    #sbEngineGroup .pill-btn.active, #sbReplanEngineGroup .pill-btn.active {
+      color: var(--eng-accent, var(--accent-bright));
+      border-color: var(--eng-soft, var(--accent));
+      background: var(--eng-dim, var(--accent-dim));
+    }
+    /* Not installed is not dead — it is the install, exactly as the High
+       quality chip's .needs-install state reads. */
+    #sbEngineGroup .pill-btn.needs-install,
+    #sbReplanEngineGroup .pill-btn.needs-install {
+      opacity: 1; border-style: dashed;
+    }
+    #sbEngineGroup .pill-btn:disabled,
+    #sbReplanEngineGroup .pill-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .sb-enginepick-note {
+      font-size: 11px; line-height: 1.5; color: var(--muted);
+      padding: 4px 2px 0;
+    }
+    .sb-enginepick-note:empty { display: none; }
+    .sb-enginepick-note b { color: var(--text); font-weight: 600; }
+    .sb-chip-pass { cursor: pointer; }
+    .sb-chip-pass:hover { color: var(--text); border-color: var(--border-strong); }
+    .sb-shot-est {
+      font-size: 10.5px; color: var(--muted); flex: 0 0 auto;
+      font-family: var(--ph-font-mono, ui-monospace, Menlo, monospace);
+    }
+    .sb-shot-spacer { flex: 1 1 auto; }
+    .sb-icon {
+      width: 22px; height: 22px; padding: 0; flex: 0 0 auto;
+      display: inline-flex; align-items: center; justify-content: center;
+      background: transparent; border: 1px solid transparent;
+      border-radius: var(--r-sm); color: var(--muted);
+      font-size: 11px; cursor: pointer; transition: var(--t-fast);
+    }
+    .sb-icon:hover:not(:disabled) {
+      color: var(--text); border-color: var(--border); background: var(--panel-2);
+    }
+    .sb-icon:disabled { opacity: 0.3; cursor: not-allowed; }
+    /* A pinned seed is a state worth seeing without a number taking a slot in
+       the header row — the die lights, and the number is one click (or one
+       hover) away. */
+    .sb-icon.is-set { color: var(--accent-bright); }
+    .sb-icon-danger:hover:not(:disabled) {
+      color: var(--danger); border-color: rgba(248,81,73,0.4);
+      background: rgba(248,81,73,0.08);
+    }
+    .sb-grip { color: var(--muted); opacity: 0.5; cursor: grab; font-size: 12px; }
+    .sb-shot-prompt {
+      width: 100%; min-height: 62px; resize: vertical;
+      background: var(--bg-2); border: 1px solid var(--border);
+      border-radius: var(--r-sm); color: var(--text);
+      font-family: inherit; font-size: 12.5px; line-height: 1.55;
+      padding: 7px 9px;
+    }
+    .sb-shot-prompt:focus {
+      outline: none; border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-dim);
+    }
+    .sb-shot-prompt[readonly] { opacity: 0.7; cursor: default; }
+    .sb-shot-err {
+      margin-top: 7px; font-size: 11.5px; line-height: 1.5; color: var(--text);
+      display: flex; flex-direction: column; gap: 5px;
+    }
+    .sb-shot-err[hidden] { display: none !important; }
+    .sb-err-row { display: flex; align-items: flex-start; gap: 7px; }
+    .sb-err-dot {
+      width: 6px; height: 6px; border-radius: 50%; margin-top: 6px;
+      background: var(--danger); flex: 0 0 auto;
+    }
+    .sb-err-fix {
+      width: auto; flex: 0 0 auto; margin-left: 4px;
+      padding: 2px 8px; font-size: 10.5px;
+      background: var(--panel-2); border: 1px solid var(--border);
+      border-radius: var(--r-sm); color: var(--text); cursor: pointer;
+    }
+    .sb-err-fix:hover { border-color: var(--accent); color: var(--accent-bright); }
+    .sb-seedwrap { display: inline-flex; align-items: center; gap: 4px; }
+    .sb-seedwrap[hidden] { display: none !important; }
+    .sb-seed {
+      width: 78px; padding: 3px 6px; font-size: 11px;
+      background: var(--panel-2); border: 1px solid var(--border);
+      border-radius: var(--r-sm); color: var(--text);
+      font-family: var(--ph-font-mono, ui-monospace, Menlo, monospace);
+    }
+    .sb-shot-out { margin-top: 9px; }
+    .sb-shot-out[hidden] { display: none !important; }
+    .sb-shot-out .info {
+      display: flex; align-items: baseline; gap: 8px;
+      padding: 6px 8px; font-size: 11px;
+    }
+    .sb-shot-out .info .name {
+      color: var(--text); overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap;
+    }
+    .sb-shot-out .info .sub { color: var(--muted); margin-left: auto; flex: 0 0 auto; }
+    .sb-shot-out.is-stale { opacity: 0.5; }
+    .sb-stale-tag {
+      font-size: 9px; text-transform: uppercase; letter-spacing: 0.07em;
+      color: var(--warning); font-weight: 700;
+    }
+    .sb-grade { display: flex; gap: 4px; padding: 0 8px 7px; }
+    .sb-grade-btn {
+      flex: 1 1 0; width: auto; padding: 5px 4px;
+      font-size: 11px; font-weight: 600; letter-spacing: 0.07em;
+      text-transform: uppercase;
+      background: transparent; border: 1px solid var(--border);
+      border-radius: var(--r-sm); color: var(--muted); cursor: pointer;
+      transition: var(--t-fast);
+    }
+    .sb-grade-btn:hover { color: var(--text); border-color: var(--border-strong); }
+    .sb-grade-btn[data-g="keep"].active {
+      color: var(--success); border-color: rgba(63,185,80,0.5);
+      background: rgba(63,185,80,0.16);
+    }
+    .sb-grade-btn[data-g="reroll"].active {
+      color: var(--warning); border-color: rgba(210,153,34,0.5);
+      background: rgba(210,153,34,0.16);
+    }
+    .sb-grade-btn[data-g="cut"].active {
+      color: var(--danger); border-color: rgba(248,81,73,0.5);
+      background: rgba(248,81,73,0.16);
+    }
+    .sb-note {
+      width: calc(100% - 16px); margin: 0 8px 8px; resize: vertical;
+      background: var(--bg-2); border: 1px solid var(--border);
+      border-radius: var(--r-sm); color: var(--text);
+      font-family: inherit; font-size: 11.5px; padding: 6px 8px;
+    }
+    .sb-note[hidden] { display: none !important; }
+    .sb-addrow { padding: 2px 0 10px; }
+
+    .sb-actionbar {
+      position: sticky; bottom: 0; z-index: 4;
+      display: flex; align-items: center; gap: 9px;
+      padding: 11px 0 12px;
+      border-top: 1px solid var(--border);
+      background: linear-gradient(180deg, rgba(0,6,26,0) 0%,
+                                  rgba(0,6,26,0.85) 22%, var(--bg) 50%, var(--bg) 100%);
+      backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    }
+    .sb-actionbar[hidden] { display: none !important; }
+    .sb-actionbar-spacer { flex: 1 1 auto; }
+    .sb-actionbar-note {
+      font-size: 11px; color: var(--muted);
+      font-family: var(--ph-font-mono, ui-monospace, Menlo, monospace);
+    }
+    .sb-actionbar .primary, .sb-actionbar .ghost-btn { width: auto; flex: 0 0 auto; }
+    .sb-actionbar .primary { padding: 8px 16px; font-size: 13px; }
+    #sbTallyText b { color: var(--success); }
+    .sb-export-note {
+      font-size: 11px; line-height: 1.5; color: var(--muted);
+      padding: 0 0 10px;
+    }
+    .sb-export-note[hidden] { display: none !important; }
+
+    /* ---- run bar ---------------------------------------------------- */
+    .sb-runbar {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      margin: 0 0 11px; padding: 9px 0 9px 10px;
+    }
+    .sb-runbar[hidden] { display: none !important; }
+    .sb-runbar-slot {
+      width: 96px; aspect-ratio: 16/9; flex: 0 0 auto;
+      border-radius: var(--r-sm); background: var(--bg-2);
+      border: 1px solid var(--border); overflow: hidden;
+      display: flex; align-items: center; justify-content: center;
+      color: var(--text);
+    }
+    .sb-runbar-slot img { width: 100%; height: 100%; object-fit: cover; }
+    .sb-runbar-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    .sb-runbar-text b { font-size: 13px; color: var(--text); font-weight: 600; }
+    .sb-runbar-text span {
+      font-size: 11px; color: var(--muted);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .sb-runbar-dots {
+      display: flex; gap: 4px; flex-wrap: wrap; flex: 1 1 auto;
+      align-items: center; min-width: 60px;
+    }
+    .sb-dot {
+      width: 8px; height: 8px; border-radius: 50%; padding: 0;
+      border: 1px solid var(--border-strong); background: transparent;
+      cursor: pointer; flex: 0 0 auto;
+    }
+    .sb-dot.is-done { background: var(--success); border-color: var(--success); }
+    .sb-dot.is-running {
+      background: var(--accent); border-color: var(--accent);
+      animation: sbPulse 1.2s ease-in-out infinite;
+    }
+    .sb-dot.is-failed { background: var(--danger); border-color: var(--danger); }
+    .sb-dot.is-cut { opacity: 0.35; }
+    .sb-runbar .qchip { flex: 0 0 auto; }
+    .sb-runbar .sb-danger { color: var(--danger); border-color: rgba(248,81,73,0.4); }
+
+    /* ---- board list -------------------------------------------------- */
+    .sb-boardlist li { grid-template-columns: 1fr auto auto auto; cursor: pointer; }
+    .sb-boardlist li .badge { color: var(--muted); background: rgba(255,255,255,0.05); }
+    .sb-boardlist li.is-live .badge {
+      color: var(--accent-bright); background: var(--accent-dim);
+      border-color: var(--accent);
+    }
+    .sb-badge {
+      color: var(--accent-bright);
+      background: var(--accent-dim);
+      border: 1px solid var(--accent) !important;
+    }
+    /* A queue / Recent row that carries film tags grows ONE column rather than
+       reflowing — .row-list li is a 4-column grid and a fifth child would
+       otherwise wrap onto a second line. The film badge and the engine chip
+       share that one cell (.sb-rowtags), so adding the engine cost no layout.
+       Scoped with :has() so every row without a badge is byte-identical. */
+    .row-list li:has(.sb-rowtags) {
+      grid-template-columns: auto 1fr auto auto auto;
+    }
+    .sb-rowtags { display: inline-flex; align-items: center; gap: 5px; }
+    .sb-rowtags .sb-chip-engine { font-size: 8.5px; padding: 1px 6px; }
+    .sb-rowtags .sb-chip-engine .ph { width: 9px; height: 9px; }
+    .car-card .sb-badge {
+      font-size: 8.5px; letter-spacing: 0.07em; text-transform: uppercase;
+      font-weight: 700; padding: 1px 6px; border-radius: var(--r-pill);
+      cursor: pointer;
+    }
+    /* The High delivery pill can't exist on a Q4 machine — put the rule
+       right beside the one that hides #qualityGroup's, so the two can never
+       disagree about what this Mac can render. */
+    body[data-cap-tier="q4"] #sbFinalQuality [data-q="high"] { display: none !important; }
+
+    /* The panel has no layout breakpoint today. Storyboard adds one, scoped
+       to itself so nothing else can regress. */
+    @media (max-width: 900px) {
+      /* One column, and — the part that matters — the panes stop being
+         independent scroll boxes. main.layout's `minmax(0,1fr)` row would
+         otherwise squeeze the brief into a ~360px scroller with its own sticky
+         footer floating mid-form. Stacked, the PAGE scrolls. */
+      body[data-workflow="storyboard"] main.layout {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: auto auto auto;
+        height: auto;
+        min-height: 0;
+        overflow: visible;
+      }
+      body[data-workflow="storyboard"] main.layout > aside.form-pane {
+        grid-column: 1; grid-row: 1;
+        max-height: none; overflow: visible;
+      }
+      body[data-workflow="storyboard"] main.layout > .stage-pane {
+        grid-column: 1; grid-row: 2;
+        max-height: none; overflow: visible;
+      }
+      body[data-workflow="storyboard"] main.layout > #bottomPane { grid-column: 1; grid-row: 3; }
+      body[data-workflow="storyboard"] #sbStage { max-height: none; overflow: visible; }
+      body[data-workflow="storyboard"] #sbSectionTab .form-action-footer { position: static; }
+      .sb-shot-head { flex-wrap: wrap; }
+      .sb-summary { flex-direction: column; align-items: stretch; gap: 8px; }
+      .sb-runbar { flex-wrap: wrap; }
+    }
 
     /* =========================================================
        CAPABILITY TIER (Q4 vs Q8) — Codex C+ recommendation, 2026-05-17
@@ -26280,6 +29222,7 @@ HTML = r"""<!doctype html>
 <symbol id="ph-caret-down-bold" viewBox="0 0 256 256"><polyline points="208 96 128 176 48 96" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="24"/></symbol>
 <symbol id="ph-check-bold" viewBox="0 0 256 256"><polyline points="40 144 96 200 224 72" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="24"/></symbol>
 <symbol id="ph-download-simple" viewBox="0 0 256 256"><line x1="128" y1="144" x2="128" y2="32" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><polyline points="216 144 216 208 40 208 40 144" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><polyline points="168 104 128 144 88 104" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="ph-film-slate" viewBox="0 0 256 256"><path d="M216,112H40a8,8,0,0,0-8,8v88a8,8,0,0,0,8,8H216a8,8,0,0,0,8-8V120A8,8,0,0,0,216,112Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M32,112,50.6,44.7a8,8,0,0,1,9.8-5.6L213.3,80.4a8,8,0,0,1,5.6,9.8L213,112" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="110.1" y1="59.5" x2="83.2" y2="112" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="163.9" y1="74" x2="137" y2="112" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="ph-film-strip" viewBox="0 0 256 256"><rect x="32" y="48" width="192" height="160" rx="8" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="128" y1="48" x2="128" y2="208" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="32" y1="80" x2="224" y2="80" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="32" y1="176" x2="224" y2="176" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="80" y1="48" x2="80" y2="80" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="176" y1="48" x2="176" y2="80" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="80" y1="176" x2="80" y2="208" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="176" y1="176" x2="176" y2="208" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="ph-gear-six" viewBox="0 0 256 256"><circle cx="128" cy="128" r="40" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M130.05,206.11c-1.34,0-2.69,0-4,0L94,224a104.61,104.61,0,0,1-34.11-19.2l-.12-36c-.71-1.12-1.38-2.25-2-3.41L25.9,147.24a99.15,99.15,0,0,1,0-38.46l31.84-18.1c.65-1.15,1.32-2.29,2-3.41l.16-36A104.58,104.58,0,0,1,94,32l32,17.89c1.34,0,2.69,0,4,0L162,32a104.61,104.61,0,0,1,34.11,19.2l.12,36c.71,1.12,1.38,2.25,2,3.41l31.85,18.14a99.15,99.15,0,0,1,0,38.46l-31.84,18.1c-.65,1.15-1.32,2.29-2,3.41l-.16,36A104.58,104.58,0,0,1,162,224Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="ph-image" viewBox="0 0 256 256"><rect x="32" y="48" width="192" height="160" rx="8" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><circle cx="156" cy="100" r="12"/><path d="M147.31,164,173,138.34a8,8,0,0,1,11.31,0L224,178.06" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M32,168.69l54.34-54.35a8,8,0,0,1,11.32,0L191.31,208" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
@@ -26430,6 +29373,12 @@ HTML = r"""<!doctype html>
     <nav class="workflow-tabs" id="workflowTabs">
       <button data-workflow="manual" class="active"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-film-strip"/></svg>Video</button>
       <button data-workflow="studio"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-image"/></svg>Images</button>
+      <!-- Storyboard sits next to the video surfaces; Audio and Train are the
+           two "go elsewhere and come back" tabs. No NEW badge on purpose —
+           with no film in progress the panel must look exactly as it did
+           yesterday, plus one calm word. The count span is filled only while
+           a storyboard render is actually in flight. -->
+      <button data-workflow="storyboard"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-film-slate"/></svg>Storyboard<span class="new-badge sb-live" id="sbTabCount" hidden></span></button>
       <button data-workflow="audio"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-music-notes"/></svg>Audio<span class="new-badge">NEW</span></button>
       <button data-workflow="train"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-user-plus"/></svg>Train Character</button>
     </nav>
@@ -28639,6 +31588,96 @@ HTML = r"""<!doctype html>
 
     </div>
 
+    <!-- ============== STORYBOARD — the brief (own workflow tab) ========
+         One concept in, a film's worth of shots out. Every element here
+         mirrors one that already exists: the concept box is the Video tab's
+         composer, the shot chips are #h3LengthGroup's, the cast picker is
+         the Manual tab's character strip reading the same _manualCharacters
+         array, and the footer is the sticky Generate footer. Nothing new is
+         invented that could have been borrowed. -->
+    <div id="sbSectionTab" style="display:none">
+
+      <!-- Saved boards. Hidden while the list is empty — with no film in
+           progress this tab is a concept box and a button, nothing else. -->
+      <div class="sb-boards" id="sbBoards" hidden>
+        <div class="sb-boards-head">Your storyboards</div>
+        <ul class="row-list sb-boardlist" id="sbBoardListMini"></ul>
+      </div>
+
+      <div class="composer-card sb-brief" id="sbBrief">
+        <textarea class="composer-prompt sb-concept" id="sbConcept" rows="4"
+          oninput="sbConceptInput()"
+          placeholder="A retired boxer walks his old neighbourhood at dawn and remembers a fight he lost."></textarea>
+      </div>
+
+      <div class="cz-control" id="sbLengthRow">
+        <div class="cz-label">Shots <span class="cz-label-hint">how many, roughly</span></div>
+        <div class="quality-strip pill-group cols-4" id="sbLengthGroup">
+          <button type="button" class="q-chip pill-btn" data-sb-shots="6">
+            <span class="ql-name">6</span><span class="q-spec ql-spec sub">a scene</span></button>
+          <button type="button" class="q-chip pill-btn active" data-sb-shots="12">
+            <span class="ql-name">12</span><span class="q-spec ql-spec sub">a short</span></button>
+          <button type="button" class="q-chip pill-btn" data-sb-shots="24">
+            <span class="ql-name">24</span><span class="q-spec ql-spec sub">a film</span></button>
+          <button type="button" class="q-chip pill-btn" data-sb-shots="36">
+            <span class="ql-name">36</span><span class="q-spec ql-spec sub">long</span></button>
+        </div>
+      </div>
+
+      <!-- The film-level engine. It is a PLANNING input, not a label: the two
+           engines want prompts written differently, so this is asked before the
+           plan exists and changing it means re-planning (the Re-plan modal
+           carries the same control). Per-shot override stays cut for v1. -->
+      <div class="cz-control" id="sbEngineRow">
+        <div class="cz-label">Engine <span class="cz-label-hint">who renders the shots</span></div>
+        <div class="pill-group cols-3" id="sbEngineGroup"></div>
+        <div class="sb-enginepick-note" id="sbEnginePickNote"></div>
+      </div>
+
+      <div class="cz-control" id="sbStyleRow">
+        <div class="cz-label">Look <span class="cz-label-hint">goes on every shot</span></div>
+        <input type="text" id="sbStyle" class="sb-input"
+               placeholder="16mm, cold morning light, handheld, muted greens">
+      </div>
+
+      <div class="cz-control" id="sbCastRow">
+        <div class="cz-label">Who's in it <span class="cz-label-hint">optional</span></div>
+        <div class="chars-strip"><div class="chars-avatar-row" id="sbCharsList"></div></div>
+        <div class="chars-strip-empty" id="sbCharsEmpty" hidden>
+          No trained characters yet —
+          <a href="#" onclick="workflowSwitch('train'); return false;">train one in the Train tab</a>, or
+          <button type="button" class="ghost-btn js-get-sample-char" style="padding:2px 8px;font-size:12px"
+                  onclick="downloadSampleCharacter()">get a sample character (Bizarro)</button>.
+        </div>
+        <div class="chars-q4-note"><b>Q4 fallback:</b> on this machine characters render on the fast (distilled) base — identity comes out <em>approximate</em>. A Q8-capable Mac renders faithful faces.</div>
+      </div>
+
+      <details class="customize-section" id="sbMustSection">
+        <summary class="cz-summary">
+          <span class="cz-chevron"><svg class="ph" aria-hidden="true"><use href="#ph-caret-down"/></svg></span>
+          <span class="cz-title">Shots it must include</span>
+          <span class="cz-meta" id="sbMustMeta">none</span>
+        </summary>
+        <div class="cz-body">
+          <div class="cz-control">
+            <div class="cz-label">One per line</div>
+            <textarea id="sbMust" class="sb-textarea" rows="4" oninput="sbMustInput()"
+              placeholder="close-up on his hands wrapping&#10;the empty gym at the end"></textarea>
+          </div>
+        </div>
+      </details>
+
+      <div class="form-action-footer">
+        <div class="sb-ramline" id="sbRamLine">
+          <span>Planning borrows the memory for about a minute, then gives it back.</span>
+          <button type="button" class="help-dot" id="sbRamHelpBtn" aria-expanded="false"
+                  aria-controls="sbRamHelpNote" title="Why?" onclick="sbToggleRamHelp()">?</button>
+        </div>
+        <div class="h3-winhelp" id="sbRamHelpNote" hidden></div>
+        <button type="button" class="primary" id="sbPlanBtn" onclick="sbPlan()">Plan film</button>
+      </div>
+    </div>
+
     <!-- ============== AUDIO → VIDEO (own workflow tab) ==============
          Routes to the helper's `generate_a2v` action which loads
          A2VidPipelineTwoStage (Q8 dev + distilled LoRA stage 2). The
@@ -28731,14 +31770,36 @@ HTML = r"""<!doctype html>
               <span class="mf-label">Seed</span>
               <input type="number" id="audioStudioSeed" value="-1" placeholder="-1 = random">
             </div>
+            <!-- Start offset into the source file. The pipelines and the render
+                 helper have always taken this; the panel had no control for it,
+                 so every A2V render used the first N seconds of the file and the
+                 only workaround was trimming the audio beforehand (#46). -->
+            <div class="mf-cell">
+              <span class="mf-label">Audio start</span>
+              <input type="number" id="audioStudioStart" value="0" min="0" step="0.5"
+                     title="Seconds into the audio file where the clip starts reading. 0 = from the beginning.">
+            </div>
+          </div>
+          <div class="hint" style="margin-top:4px">
+            Audio start is an offset into the file you loaded — set it to 30 to drive the clip from 0:30 onward.
           </div>
           <div class="mf-cell" style="margin-top:8px">
             <span class="mf-label">Duration</span>
             <div class="range-strip">
               <input type="range" id="audioStudioDuration" min="1" max="30" step="1" value="7"
-                     oninput="document.getElementById('audioStudioDurationVal').textContent=this.value + ' s'">
+                     oninput="audioStudioDurationChanged(this.value)">
               <span id="audioStudioDurationVal" class="range-val">7 s</span>
             </div>
+            <!-- Length warning. Deliberately a warning and NOT a hard cap: the
+                 evidence for where A2V gives out is two independent field
+                 reports converging on ~257 frames (#46 — @blackest hit it here
+                 and on a separate MLX pipeline), not a measurement made here,
+                 and the diagnostic that would tell us whether it is a length
+                 ceiling at all is still outstanding. Silently deleting 11-30 s
+                 from the slider would be asserting a number nobody has measured.
+                 Showing the frame count and the reported wall lets the user
+                 decide with the same information the maintainer has. -->
+            <div class="hint" id="audioStudioDurationWarn" style="margin-top:4px; display:none"></div>
           </div>
           <div class="mf-cell" style="margin-top:8px">
             <span class="mf-label">Audio conditioning strength</span>
@@ -28891,6 +31952,19 @@ HTML = r"""<!doctype html>
           </svg>
           <span class="po-act-label">Extend</span>
         </button>
+        <!-- Pull a good accident from the Video tab into a film. Hidden until
+             at least one board exists on disk — nothing about Storyboard shows
+             up in the rest of the panel until there is a film to show it for. -->
+        <button id="sbAddBtn" class="po-act" type="button" onclick="sbAddActiveToBoard()"
+                style="display:none" title="Add this clip to a storyboard as a shot">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M2 4 H14 M2 8 H14 M2 12 H9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          <span class="po-act-label">To film</span>
+        </button>
+        <select id="sbAddSelect" class="po-finish-select" style="display:none"
+                title="Which film should this clip join?"
+                onchange="sbAddActiveToBoard(this.value)"></select>
         <button id="animateBtn" class="po-act" type="button"
                 onclick="animateActive()" style="display:none" title="Animate this still as an i2v render">
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -28939,6 +32013,155 @@ HTML = r"""<!doctype html>
       <div class="name" id="playerName"></div>
       <div class="actions-bar"></div>
     </div>
+    <!-- ============== STORYBOARD — the stage surface ===================
+         Takes the GALLERY's slot, not the player's. That is deliberate: the
+         player stays exactly where it is, so a shot's thumbnail can call the
+         existing selectOutput() and the whole Params / Extend / Expand /
+         lightbox apparatus keeps working with no storyboard-specific code.
+         Four states live here — board list, empty, planning, plan review —
+         and exactly one is visible at a time. -->
+    <div id="sbStage">
+
+      <!-- Empty: no board open, none on disk. -->
+      <div class="sb-empty" id="sbEmpty" hidden>
+        <div class="sb-empty-icon">
+          <svg width="56" height="56" viewBox="0 0 256 256" aria-hidden="true"><use href="#ph-film-slate"/></svg>
+        </div>
+        <div class="sb-empty-title">One idea in, a film's worth of shots out.</div>
+        <div class="sb-empty-sub">Describe the film on the left and Phosphene writes the shot list — every shot with its own prompt, length and cast. You read it, fix it, then render the lot as cheap drafts overnight.</div>
+        <ul class="sb-empty-steps">
+          <li><b>Plan</b> — a small language model writes the shot list. About a minute.</li>
+          <li><b>Read it</b> — change any prompt, drop a shot, add one. Nothing has rendered yet.</li>
+          <li><b>Draft</b> — every shot small and fast, so you can watch the whole thing before committing.</li>
+          <li><b>Finish</b> — only the shots you keep, at full size, on the same seeds.</li>
+        </ul>
+      </div>
+
+      <!-- Board list: boards exist, none open. -->
+      <div class="sb-plan" id="sbList" hidden>
+        <header class="carousel-head">
+          <h3>Storyboards</h3>
+          <span class="ch-spacer"></span>
+        </header>
+        <ul class="row-list sb-boardlist" id="sbBoardList"></ul>
+      </div>
+
+      <!-- Planning: 30-90 s, and it says what it costs. -->
+      <div class="sb-planning" id="sbPlanning" hidden>
+        <div class="sb-planning-mark" aria-hidden="true"><i></i><i></i><i></i></div>
+        <div class="sb-planning-title" id="sbPlanningTitle" aria-live="polite">Writing the plan…</div>
+        <div class="sb-planning-sub" id="sbPlanningSub">About a minute. Nothing renders yet.</div>
+        <div class="sb-planning-steps" id="sbPlanningSteps">
+          <div class="sb-step" data-step="load"><span class="sb-step-dot"></span>Loading the planner</div>
+          <div class="sb-step" data-step="write"><span class="sb-step-dot"></span>Writing the plan</div>
+          <div class="sb-step" data-step="check"><span class="sb-step-dot"></span>Checking it</div>
+          <div class="sb-step" data-step="repair" hidden><span class="sb-step-dot"></span>Fixing what didn't validate</div>
+          <div class="sb-step" data-step="unload"><span class="sb-step-dot"></span>Giving the memory back</div>
+        </div>
+        <button type="button" class="ghost-btn" id="sbPlanCancel" onclick="sbCancelPlan()">Cancel</button>
+      </div>
+
+      <!-- Planner failed. Does NOT discard the brief — it is still on the left. -->
+      <div class="sb-empty" id="sbPlanFail" hidden>
+        <div class="sb-empty-title">The planner couldn't write a usable plan.</div>
+        <div class="sb-empty-sub" id="sbPlanFailMsg"></div>
+        <div style="display:flex;gap:8px;margin-top:6px">
+          <button type="button" class="primary" style="width:auto;padding:8px 16px" onclick="sbTryAgain()">Try again</button>
+          <button type="button" class="ghost-btn" id="sbPlanFailRaw" onclick="sbShowRaw()" hidden>Show what it returned</button>
+        </div>
+      </div>
+
+      <!-- Plan review — the core screen. Becomes the grading screen once
+           clips exist; it is the same list, not a second one. -->
+      <div class="sb-plan" id="sbPlan" hidden>
+        <header class="carousel-head sb-plan-head">
+          <input class="sb-title" id="sbTitle" value="" spellcheck="false"
+                 onblur="sbTitleSave()" aria-label="Film title">
+          <span class="sb-plan-status" id="sbPlanStatus">Draft plan · not rendered</span>
+          <div class="stage-mode-toggle" id="sbStageToggle" role="group" aria-label="Stage view" hidden>
+            <button type="button" class="smt-btn active" data-sb-stage="list" onclick="sbSetStage('list')">Shot list</button>
+            <button type="button" class="smt-btn" data-sb-stage="player" onclick="sbSetStage('player')">Player</button>
+          </div>
+          <button type="button" class="ghost-btn" onclick="sbBackToList()">All storyboards</button>
+        </header>
+
+        <div class="sb-runbar engine-hint" id="sbRunBar" hidden>
+          <div class="sb-runbar-slot" id="sbRunThumb"></div>
+          <div class="sb-runbar-text">
+            <b id="sbRunTitle">Shot 1</b>
+            <span id="sbRunSub"></span>
+          </div>
+          <div class="sb-runbar-dots" id="sbRunDots"></div>
+          <button type="button" class="qchip" id="sbPauseBtn" onclick="togglePause()"
+                  title="The shot that's rendering finishes. The rest wait.">Pause</button>
+          <button type="button" class="qchip" id="sbStopShotBtn" onclick="sbStopShot()"
+                  title="Stops the shot that's rendering. The rest of the film carries on.">Stop shot</button>
+          <button type="button" class="qchip sb-danger" id="sbStopBtn" onclick="sbStopFilm()">Stop film</button>
+        </div>
+
+        <div class="sb-summary" id="sbSummary">
+          <div class="sb-sum-cell"><b id="sbSumShots">—</b><span id="sbSumRuntime"></span></div>
+          <div class="sb-sum-cell"><b id="sbSumTime">—</b><span id="sbSumTimeSub">drafts, this Mac</span></div>
+          <div class="sb-sum-cell"><b id="sbSumLoads">—</b><span id="sbSumLoadsSub"></span></div>
+          <div class="sb-sum-cell" id="sbSumDiskCell"><b id="sbSumDisk">—</b><span id="sbSumDiskSub">clips land in mlx_outputs/</span></div>
+          <div class="sb-runstrip" id="sbRunStrip" hidden></div>
+          <div class="sb-enginenote" id="sbEngineNote">
+            <span id="sbEngineNoteText"></span>
+            <button type="button" class="help-dot" id="sbEngineHelpBtn" aria-expanded="false"
+                    aria-controls="sbEngineHelpNote" title="Why?" onclick="sbToggleEngineHelp()">?</button>
+          </div>
+          <div class="h3-winhelp" id="sbEngineHelpNote" style="flex:1 1 100%" hidden></div>
+        </div>
+
+        <details class="customize-section" id="sbQualitySection">
+          <summary class="cz-summary">
+            <span class="cz-chevron"><svg class="ph" aria-hidden="true"><use href="#ph-caret-down"/></svg></span>
+            <span class="cz-title">Quality</span>
+            <span class="cz-meta" id="sbQualityMeta"></span>
+          </summary>
+          <div class="cz-body">
+            <div class="cz-control">
+              <div class="cz-label">Draft pass <span class="cz-label-hint">what you watch first</span></div>
+              <div class="pill-group cols-3" id="sbDraftQuality">
+                <button type="button" class="pill-btn active" data-q="quick">Quick<span class="sub">640×480</span></button>
+                <button type="button" class="pill-btn" data-q="balanced">Balanced<span class="sub">768×432</span></button>
+                <button type="button" class="pill-btn" data-q="standard">Standard<span class="sub">1024×576</span></button>
+              </div>
+            </div>
+            <div class="cz-control">
+              <div class="cz-label">Delivery pass <span class="cz-label-hint">what you keep</span></div>
+              <div class="pill-group cols-3" id="sbFinalQuality">
+                <button type="button" class="pill-btn" data-q="balanced">Balanced<span class="sub">1024×576</span></button>
+                <button type="button" class="pill-btn active" data-q="standard">Standard<span class="sub">1024×576</span></button>
+                <button type="button" class="pill-btn" data-q="high" id="sbFinalHigh">High<span class="sub">1024×576 · Q8</span></button>
+              </div>
+            </div>
+          </div>
+        </details>
+
+        <div class="sb-errors" id="sbErrors" hidden></div>
+        <ol class="sb-shots" id="sbShots"></ol>
+        <div class="sb-addrow"><button type="button" class="ghost-btn" onclick="sbAddShot()">+ Add a shot</button></div>
+
+        <div class="sb-actionbar" id="sbActionBar">
+          <button type="button" class="ghost-btn" onclick="sbOpenReplan()">Re-plan…</button>
+          <span class="sb-actionbar-spacer"></span>
+          <span class="sb-actionbar-note" id="sbActionNote"></span>
+          <button type="button" class="primary" id="sbRenderBtn" onclick="sbRenderDrafts()">Render all drafts</button>
+        </div>
+
+        <div class="sb-actionbar sb-tally" id="sbTally" hidden title="Focus a shot and press K, R or C">
+          <span id="sbTallyText">nothing graded yet</span>
+          <span class="sb-actionbar-spacer"></span>
+          <button type="button" class="ghost-btn" id="sbExportBtn" onclick="sbExport()" hidden>Export</button>
+          <button type="button" class="ghost-btn" id="sbRewriteBtn" onclick="sbRewrite()" hidden>Rewrite</button>
+          <button type="button" class="ghost-btn" id="sbResumeBtn" onclick="sbRenderRemaining()" hidden>Render remaining</button>
+          <button type="button" class="primary" id="sbFinishBtn" onclick="sbFinish()">Finish keepers</button>
+        </div>
+        <div class="sb-export-note" id="sbExportNote" hidden>Assembling these into a single cut is a script for now — <code>scripts/</code> has the After Effects pass. One-click assembly is not in this version.</div>
+      </div>
+    </div>
+
     <!-- Combined filter + title row. One row, three regions: title +
          count, kind chips (All/Videos/Photos), visible/hidden segmented
          toggle on the right. Replaces the previous two-row stack. -->
@@ -29240,10 +32463,14 @@ HTML = r"""<!doctype html>
           Maintainer / self-hosting keys
         </summary>
         <div class="hint" style="margin:8px 0">
-          Without a project key this panel opens no network connection at
-          all — analytics is inert and only the local log is written. Point
-          <code>PHOSPHENE_ANALYTICS_HOST</code> at your own receiver to
-          self-host.
+          This build ships Phosphene's own project key, which is why the
+          counts above are sent by default. It is a write-only
+          <code>phc_</code> key — it can send events, it can't read any
+          back. Pasting your own key here <b>overrides</b> it; clearing
+          this field falls back to the shipped key rather than switching
+          sending off, so use the <b>Turn off</b> button above for that.
+          Point <code>PHOSPHENE_ANALYTICS_HOST</code> at your own receiver
+          to self-host. Full schema: <code>docs/ANALYTICS.md</code>.
         </div>
         <div class="token-row">
           <div class="token-label">
@@ -29261,7 +32488,8 @@ HTML = r"""<!doctype html>
                     onclick="clearAnalyticsKey('analytics_key')" style="display:none">clear</button>
           </div>
           <div class="hint">
-            Write-only project key. Pasting one turns the pings on.
+            Write-only project key. Pasting one redirects the pings to your
+            own PostHog project.
           </div>
         </div>
         <div class="token-row">
@@ -29524,6 +32752,45 @@ Third prompt."></textarea>
     <div class="modal-actions">
       <button class="small" onclick="closeBatch()">Cancel</button>
       <button class="small primary" style="padding:6px 14px" onclick="queueBatch().then(closeBatch)">Queue all</button>
+    </div>
+  </div>
+</div>
+
+<!-- Re-plan. The one storyboard surface that needs a modal, because it needs a
+     text field. Written HERE, at column 0, as a direct child of <body> and
+     present at boot on purpose: the global _phosModalScaffold IIFE registers
+     its observers once at boot, so a modal injected later loses Esc-to-close,
+     the focus trap and the body.modal-open scroll lock. -->
+<div class="modal-bg" id="sbReplanModal" onclick="if(event.target===this)sbCloseReplan()">
+  <div class="modal">
+    <h3>Re-plan this film</h3>
+    <div class="hint">The concept and the look stay. Say what was wrong and the planner writes a new shot list. This replaces every shot — clips already rendered stay in your gallery.</div>
+    <textarea class="batch" id="sbReplanNotes" rows="4"
+      placeholder="Too much walking. Start inside the gym. Fewer wide shots."></textarea>
+    <!-- Same control as the brief. This is where changing the engine on an
+         EXISTING film belongs, because the change is a re-plan: an H3 shot and
+         an LTX shot are written in different dialects, so a flip has to rewrite
+         the prompts, not relabel them. -->
+    <div class="cz-control" style="margin-top:12px">
+      <div class="cz-label">Engine <span class="cz-label-hint">who renders the shots</span></div>
+      <div class="pill-group cols-3" id="sbReplanEngineGroup"></div>
+      <div class="sb-enginepick-note" id="sbReplanEngineNote"></div>
+    </div>
+    <div class="hint" style="margin-top:6px">Loads the planner again (~1 min). Nothing renders while it does.</div>
+    <div class="modal-actions">
+      <button class="small" onclick="sbCloseReplan()">Cancel</button>
+      <button class="small primary" style="padding:6px 14px" onclick="sbReplan()">Re-plan</button>
+    </div>
+  </div>
+</div>
+
+<!-- The raw planner reply, for a bug report. Never shown by default. -->
+<div class="modal-bg" id="sbRawModal" onclick="if(event.target===this)document.getElementById('sbRawModal').classList.remove('show')">
+  <div class="modal">
+    <h3>What the planner returned</h3>
+    <pre id="sbRawText" style="max-height:50vh;overflow:auto;font-size:11px;white-space:pre-wrap"></pre>
+    <div class="modal-actions">
+      <button class="small" onclick="document.getElementById('sbRawModal').classList.remove('show')">Close</button>
     </div>
   </div>
 </div>
@@ -32209,6 +35476,46 @@ function audioStudioRenderSlots() {
   }
 }
 
+// Duration slider readout + length warning.
+//
+// The frame arithmetic here is the same one the submit path uses (24 fps,
+// rounded up to the 8k+1 grid), so the number shown is the number the model
+// is actually asked for — not a rounded-down approximation of it.
+//
+// This warns rather than blocks on purpose. What is known about where A2V
+// gives out is two independent field reports converging on ~257 frames
+// (#46): @blackest saw anatomy break around 337f and the picture go white
+// by 433f here, and hit the same wall at 257f on a different MLX pipeline.
+// Nobody has measured it in this repo, and the question that decides whether
+// it is a length ceiling at all — does the AUDIO survive past the point the
+// picture dies — is still unanswered. So the slider keeps its range and the
+// panel stops being silent about the risk. 241f (10 s) is the last 8k+1 stop
+// under 257.
+function _a2vFramesForSeconds(sec) {
+  const target = Math.max(1, Math.round(sec * 24));
+  return ((target - 1 + 7) >> 3 << 3) + 1;   // round up to 8k+1
+}
+function audioStudioDurationChanged(val) {
+  const sec = parseInt(val || '7', 10);
+  const out = document.getElementById('audioStudioDurationVal');
+  if (out) out.textContent = sec + ' s';
+  const warn = document.getElementById('audioStudioDurationWarn');
+  if (!warn) return;
+  const frames = _a2vFramesForSeconds(sec);
+  if (frames > 257) {
+    warn.style.display = '';
+    warn.innerHTML = '<b>' + frames + ' frames</b> — past the ~257-frame point '
+      + 'where Audio → Video has been reported to lose structural coherence '
+      + '(two independent reports, <a href="https://github.com/mrbizarro/Phosphene/issues/46" '
+      + 'target="_blank" rel="noopener">#46</a> — not a limit measured here). '
+      + '10 s = 241 frames is the last stop under it. Longer still renders; '
+      + 'expect anatomy to drift and the picture to wash out toward the end.';
+  } else {
+    warn.style.display = 'none';
+    warn.textContent = '';
+  }
+}
+
 async function audioStudioEnhancePrompt() {
   const ta = document.getElementById('audioStudioPrompt');
   const original = ta.value.trim();
@@ -32246,10 +35553,13 @@ async function audioStudioGenerate() {
   const h = Math.max(32, Math.round(parseInt(document.getElementById('audioStudioHeight').value || '576', 10) / 32) * 32);
   // Duration from slider → frames at 8k+1 cadence the model expects.
   const dur = parseInt(document.getElementById('audioStudioDuration').value || '7', 10);
-  const targetFrames = Math.max(1, Math.round(dur * 24));
-  const frames = ((targetFrames - 1 + 7) >> 3 << 3) + 1;  // round up to 8k+1
+  const frames = _a2vFramesForSeconds(dur);
   const seed = parseInt(document.getElementById('audioStudioSeed').value || '-1', 10);
   const audioConditioningScale = parseFloat(document.getElementById('audioConditioningScale').value || '1.0');
+  // Offset into the source file. Clamped at 0 here as well as server-side —
+  // a negative start would be silently swallowed by load_audio.
+  const audioStartEl = document.getElementById('audioStudioStart');
+  const audioStart = Math.max(0, parseFloat((audioStartEl && audioStartEl.value) || '0') || 0);
 
   AUDIO_STUDIO.busy = true;
   if (btn) btn.disabled = true;
@@ -32270,6 +35580,7 @@ async function audioStudioGenerate() {
     fd.set('frames', String(frames));
     fd.set('seed', String(seed));
     fd.set('audio_conditioning_scale', String(audioConditioningScale));
+    fd.set('audio_start_time', String(audioStart));
     fd.set('quality', 'high');  // A2V is always pipeline-class (Q8 dev or Q4 distilled)
     // No accel, no enhance — A2V uses A2VidPipelineTwoStage's own walks.
     fd.set('accel', 'off');
@@ -34602,7 +37913,11 @@ function engineServesMode(e, mode) {
 // offering a choice that changes nothing.
 function _currentSurface() {
   const wf = (document.body.dataset.workflow || 'manual').toLowerCase();
-  return ({ manual: 'video', studio: 'image', audio: 'audio', train: 'train' })[wf] || 'video';
+  // 'storyboard' MUST be in this map. Without it the `|| 'video'` fallback
+  // leaves the engine switcher visible in a tab that has no engine choice to
+  // offer — the film decides per shot, not a global toggle.
+  return ({ manual: 'video', studio: 'image', audio: 'audio', train: 'train',
+            storyboard: 'storyboard' })[wf] || 'video';
 }
 function engineOnSurface(e) {
   return (e.surfaces || ['video']).indexOf(_currentSurface()) !== -1;
@@ -36891,6 +40206,43 @@ async function repairModel(key) {
   } catch (e) { alert('Repair failed: ' + e); }
 }
 
+// Translate a cryptic engine error into actionable user guidance. Extracted
+// from the Now card 2026-08-11 so a storyboard shot's failure reads EXACTLY
+// like a manual one — one if/else, two callers, no way for the two to drift.
+// "helper died mid-job (no event)" is the SIGKILL-by-jetsam signature on
+// memory-pressured Macs: the helper subprocess gets killed by the OS for using
+// too much RAM and we never get an event back. Tell the user how to recover
+// instead of leaving them with the engine wording.
+function friendlyJobError(raw) {
+  raw = raw || 'unknown error';
+  const rawLower = String(raw).toLowerCase();
+  if (rawLower.includes('sigkill')) {
+    return { friendly: 'Helper killed by the OS — out of memory (jetsam).',
+             hint: 'Close memory-heavy apps (Chrome, Slack, iOS Simulator) and try again, ' +
+                   'or switch Quality to Quick (about half the RAM).' };
+  }
+  if (rawLower.includes('sigsegv') || rawLower.includes('sigbus')) {
+    return { friendly: 'Helper crashed at the native level (MLX/Metal fault).',
+             hint: 'Share the crashlog at ~/Library/Logs/DiagnosticReports/python3.11_*.crash ' +
+                   'on github.com/mrbizarro/phosphene/issues so we can fix it.' };
+  }
+  if (rawLower.includes('sigabrt')) {
+    return { friendly: 'Helper hit a C-level assertion and aborted.',
+             hint: 'Share the crashlog at ~/Library/Logs/DiagnosticReports/python3.11_*.crash ' +
+                   'on github.com/mrbizarro/phosphene/issues.' };
+  }
+  if (rawLower.includes('helper exited from') || rawLower.includes('helper pipe closed') ||
+      rawLower.includes('helper died') || rawLower.includes('helper exited')) {
+    return { friendly: 'Helper exited unexpectedly.',
+             hint: 'Check the log for the last "step:*" breadcrumb (tells us which ' +
+                   'phase died). If memory-pressured, close other apps and retry.' };
+  }
+  if (rawLower.includes('q8') || rawLower.includes('keyframe')) {
+    return { friendly: 'This mode needs the Q8 model.', hint: raw };
+  }
+  return { friendly: 'Job failed.', hint: raw };
+}
+
 async function poll() {
   // Reflect HDR-vs-character mutual exclusion every poll cycle. character_id
   // gets set from multiple code paths (manual chip click, load-params,
@@ -37206,33 +40558,7 @@ async function poll() {
       // killed by the OS for using too much RAM and we never get an
       // event back. Tell the user how to recover instead of leaving them
       // with the engine wording.
-      const raw = (last.error || 'unknown error');
-      const rawLower = raw.toLowerCase();
-      let friendly, hint;
-      if (rawLower.includes('sigkill')) {
-        friendly = 'Helper killed by the OS — out of memory (jetsam).';
-        hint = 'Close memory-heavy apps (Chrome, Slack, iOS Simulator) and try again, ' +
-               'or switch Quality to Quick (about half the RAM).';
-      } else if (rawLower.includes('sigsegv') || rawLower.includes('sigbus')) {
-        friendly = 'Helper crashed at the native level (MLX/Metal fault).';
-        hint = 'Share the crashlog at ~/Library/Logs/DiagnosticReports/python3.11_*.crash ' +
-               'on github.com/mrbizarro/phosphene/issues so we can fix it.';
-      } else if (rawLower.includes('sigabrt')) {
-        friendly = 'Helper hit a C-level assertion and aborted.';
-        hint = 'Share the crashlog at ~/Library/Logs/DiagnosticReports/python3.11_*.crash ' +
-               'on github.com/mrbizarro/phosphene/issues.';
-      } else if (rawLower.includes('helper exited from') || rawLower.includes('helper pipe closed') ||
-                 rawLower.includes('helper died') || rawLower.includes('helper exited')) {
-        friendly = 'Helper exited unexpectedly.';
-        hint = 'Check the log for the last "step:*" breadcrumb (tells us which ' +
-               'phase died). If memory-pressured, close other apps and retry.';
-      } else if (rawLower.includes('q8') || rawLower.includes('keyframe')) {
-        friendly = 'This mode needs the Q8 model.';
-        hint = raw;
-      } else {
-        friendly = 'Job failed.';
-        hint = raw;
-      }
+      const { friendly, hint } = friendlyJobError(last.error || 'unknown error');
       nowCard.querySelector('.ttl').innerHTML =
         `<span style="color: var(--danger, #f85149)"><svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-warning-fill"/></svg>${escapeHtml(friendly)}</span>`;
       nowCard.querySelector('.meta').innerHTML =
@@ -37311,10 +40637,22 @@ async function poll() {
       const params = (j.params.mode === 'image')
         ? `image · ${j.params.aspect || '?'} · n=${j.params.n || '?'}`
         : `${j.params.mode} · ${j.params.width}×${j.params.height} · ${j.params.frames}f`;
+      // Which film this job is a shot of. A pure function of immutable params,
+      // so the qSig memoisation above needs no change.
+      const sb = /^sb:([^#]+)#(\d+)$/.exec(j.params.session_tag || '');
+      const sbTotal = sb ? ((SB.boards.find(b => b.id === sb[1]) || {}).shots || '?') : '';
+      // A queued shot wears the film badge AND its engine: a film's jobs are
+      // not all on one engine, and the queue is where you find out what is
+      // about to run. Same chip, same registry row, as the card and the header.
+      const sbBadge = sb
+        ? `<span class="sb-rowtags"><span class="badge sb-badge" title="${escapeHtml(j.params.label || '')}">S${sb[2].padStart(2,'0')}/${sbTotal}</span>`
+          + sbEngineChip(j.params.engine || 'ltx') + `</span>`
+        : '';
       return `
       <li>
         <span class="pos">#${i+1}</span>
         <span class="ttl" title="${escapeHtml(j.params.prompt)}">${escapeHtml(j.params.label || snippet(j.params.prompt, 60))}</span>
+        ${sbBadge}
         <span class="params">${params}</span>
         <button title="Remove" onclick="removeJob('${j.id}')"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>
       </li>`;
@@ -37401,10 +40739,19 @@ async function poll() {
                  title="Re-submit this job with the same params"
                  onclick='retryJob(${JSON.stringify(j.id)})'>Retry</button>`
       : '';
+    // Same film badge the queue rows carry, so a shot is identifiable
+    // wherever the bottom pane shows it.
+    const hsb = /^sb:([^#]+)#(\d+)$/.exec((j.params || {}).session_tag || '');
+    const hsbTotal = hsb ? ((SB.boards.find(b => b.id === hsb[1]) || {}).shots || '?') : '';
+    const hsbBadge = hsb
+      ? `<span class="sb-rowtags"><span class="badge sb-badge" title="${escapeHtml(j.params.label || '')}">S${hsb[2].padStart(2,'0')}/${hsbTotal}</span>`
+        + sbEngineChip((j.params || {}).engine || 'ltx') + `</span>`
+      : '';
     return `
     <li class="${j.status}">
       <span class="badge">${j.status}</span>
       <span class="ttl" title="${titleAttr}">${titleHtml}</span>
+      ${hsbBadge}
       <span class="params">${fmtMin(j.elapsed_sec)} · ${j.finished_at ? j.finished_at.slice(11) : ''}</span>
       <span>${actionHtml}</span>
     </li>`;
@@ -37505,6 +40852,11 @@ async function poll() {
       }
     }
   }
+
+  // Storyboard — ONE call, no new timer. It sets the tab count during an
+  // overnight run, gates Plan film on the worker being idle, and decides
+  // whether `To film` exists at all. All three are inert with no boards.
+  if (typeof sbPollHook === 'function') { try { sbPollHook(s); } catch (e) {} }
 }
 
 // Balanced chip subtitle — kept in sync with current mode + frames so the
@@ -37903,7 +41255,8 @@ function renderCarousel() {
       <div class="info">
         <div class="name" title="${escapeHtml(o.name)}">${escapeHtml(o.name)}</div>
         <div class="sub" title="Render time · file size">
-          ${_outputDurationLabel(o)} · ${o.size_mb.toFixed(1)} MB
+          ${o.sb ? `<span class="badge sb-badge" title="Shot ${o.sb.n} of a storyboard — click to open it"
+                 onclick="event.stopPropagation(); sbOpenFromClip('${escapeHtml(o.sb.id)}')">S${String(o.sb.n).padStart(2,'0')}</span> · ` : ''}${_outputDurationLabel(o)} · ${o.size_mb.toFixed(1)} MB
         </div>
       </div>
     </div>`;
@@ -38605,6 +41958,13 @@ async function loadParams() {
   // Say it out loud. This whole function ran silently before — the form
   // changed somewhere off-screen and the click read as a dead button.
   _flashActionDone('loadParamsBtn', 'Loaded');
+  // On the Storyboard surface the Video form isn't on screen at all, so the
+  // flash happens somewhere the user can't see and the click reads as dead.
+  // Take them to the form that just changed.
+  if (document.body.dataset.workflow === 'storyboard') {
+    phosToast('Loaded into the Video form.', { kind: 'success' });
+    if (typeof workflowSwitch === 'function') workflowSwitch('manual');
+  }
 }
 
 // Momentary "it worked" state on an action button. The panel has no toast
@@ -42255,7 +45615,7 @@ async function refreshModelsModal({ silent = false } = {}) {
   const repos = data.repos || [];
   const active = data.active_download;
   hint.innerHTML = data.hf_available
-    ? `Each row shows what's on disk. Click <b>Download</b> to fetch missing files via <code>hf download</code>; progress streams to the log at the bottom of the page.`
+    ? `Each row shows what's on disk. Click <b>Download</b> to fetch the missing files; progress streams to the log at the bottom of the page. Everything is resumable and checksum-verified.`
     : `<span style="color:var(--warning,#d29922)"><svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-warning-fill"/></svg><code>hf</code> not found</span> — this Pinokio install doesn't have <code>huggingface_hub&gt;=1.0</code> in the venv. Run Update from Pinokio, then come back.`;
   const rows = repos.map(r => {
     let cls, icon, statusText, btnHtml;
@@ -42766,6 +46126,1551 @@ document.querySelectorAll('#modeGroup .pill-btn').forEach(b => b.addEventListene
 // surfaces: the manual generate form, the Characters tab (LoRA pair +
 // prompt + ship), and Train (character LoRA training).
 
+// ============================================================================
+// STORYBOARD
+// ============================================================================
+// One concept in, a film's worth of shots out. Everything here talks to
+// /storyboard/*; nothing here renders, queues, or tracks progress on its own —
+// a shot is an ordinary job and the bottom pane already knows how to show one.
+//
+// The board poller lives here and ONLY runs while the tab is open (2 s, its own
+// timer). poll() at 1.5 s is already doing a lot and this must not ride on it.
+// The single cross-tab cost is one call at the end of poll(): sbPollHook().
+
+let SB = {
+  id: '',                 // the open board, '' = list/empty
+  payload: null,          // the last /storyboard/get reply
+  timer: null,            // the 2 s board poller
+  saveTimer: null,
+  saveInFlight: false,
+  saveAgain: false,
+  stageMode: 'auto',      // 'auto' | 'list' | 'player'
+  primed: false,          // brief defaults are read from BOOT once, not per entry
+  boards: [],             // /status.storyboards, refreshed by poll()
+  lastUndo: null,
+};
+const SB_BOOT = (typeof BOOT !== 'undefined' && BOOT.storyboard) ? BOOT.storyboard : {};
+
+// The validator's structured errors, in human. Keyed on `code`, never on the
+// message text — that is the whole reason validate_storyboard_detail() exists.
+// `fix` names an action sbFixError() knows how to run.
+const SB_ERR_COPY = {
+  schema_version:      { html: '<b>This storyboard was written by a different version of Phosphene.</b> Nothing here can be rendered safely. Plan a new one.' },
+  board_id_empty:      { html: '<b>This storyboard file is damaged</b> and can\'t be repaired from the panel.' },
+  no_shots:            { html: '<b>No shots.</b> Re-plan, or add one by hand.', fix: 'add', label: 'Add a shot' },
+  shot_not_object:     { html: (e) => `<b>Shot ${e.n} is unreadable.</b> Delete it and add a new one.`, fix: 'delete', label: 'Delete shot' },
+  shot_number:         { html: (e) => `<b>Shot ${e.n} lost its number.</b>`, fix: 'renumber', label: 'Renumber all shots' },
+  shot_duplicate:      { html: (e) => `<b>Two shots are both numbered ${e.n}.</b>`, fix: 'renumber', label: 'Renumber all shots' },
+  bad_mode:            { html: (e) => `<b>Shot ${e.n} asks for a shot type this build doesn't have.</b> Set it to Text or Character.`, fix: 'text', label: 'Make it Text' },
+  empty_prompt:        { html: (e) => `<b>Shot ${e.n} has no prompt.</b> Write what happens in it.`, fix: 'focus', label: 'Write it' },
+  unknown_character:   { html: (e) => `<b>Shot ${e.n} casts <code>${escapeHtml(e.data.character_id || '')}</code>, who isn't on this Mac.</b> Pick someone installed, or train them first.`, fix: 'pickchar', label: 'Pick someone' },
+  missing_trigger:     { html: (e) => `<b>Shot ${e.n}'s prompt doesn't say <code>${escapeHtml(e.data.trigger || '')}</code>,</b> so the trained face won't load and a stranger renders instead.`, fix: 'trigger', label: 'Put it back' },
+  character_without_id:{ html: (e) => `<b>Shot ${e.n} is a Character shot with nobody cast.</b>`, fix: 'pickchar', label: 'Pick someone' },
+  bad_duration:        { html: (e) => `<b>Shot ${e.n} is ${escapeHtml(String(e.data.duration_s))} seconds long.</b> Pick something between 1 and 60.`, fix: 'dur5', label: 'Make it 5 s' },
+  refs_not_list:       { html: (e) => `<b>Shot ${e.n}'s reference images are damaged.</b>`, fix: 'clearrefs', label: 'Clear them' },
+  ref_missing:         { html: (e) => `<b>Shot ${e.n} wants a reference image that isn't there any more:</b> <code>${escapeHtml(e.data.name || '')}</code>`, fix: 'clearrefs', label: 'Clear them' },
+  remix_needs_ref:     { html: (e) => `<b>Shot ${e.n} is a Remix shot with no reference image.</b>`, fix: 'text', label: 'Make it Text' },
+  over_cap:            { html: (e) => `<b>${e.data.pass_name === 'final' ? 'Delivery' : 'Draft'} is set to ${e.data.width}×${e.data.height}; this Mac caps at ${e.data.max_dim}.</b> It'll shrink to fit unless you lower it.`, fix: 'cap', label: 'Use 1024×576' },
+};
+
+function sbEl(id) { return document.getElementById(id); }
+
+// Wall clock, at the scale a film is measured in. Wraps fmtMin so it never
+// shows seconds when the answer is hours.
+function sbFmtWall(secs) {
+  if (!secs || secs < 0) return '—';
+  if (secs < 90) return `${Math.round(secs)} s`;
+  const m = Math.round(secs / 60);
+  if (m < 90) return `about ${m} m`;
+  const h = Math.floor(m / 60), rem = m % 60;
+  return rem ? `about ${h} h ${rem} m` : `about ${h} h`;
+}
+function sbFmtRuntime(secs) {
+  if (!secs) return '';
+  if (secs <= 90) return `${Math.round(secs)} s of film`;
+  const m = Math.floor(secs / 60), s = Math.round(secs % 60);
+  return `${m} m ${s} s of film`;
+}
+function sbShotEst(secs) {
+  if (!secs) return '';
+  return secs < 90 ? `~${Math.round(secs)} s` : `~${Math.round(secs / 60)} m`;
+}
+
+// ---- tab lifecycle ---------------------------------------------------------
+function sbInit() {
+  const help = sbEl('sbRamHelpNote');
+  if (help && !help.textContent) help.textContent = SB_BOOT.ram_help || '';
+  // Draft restore — a restart must not eat what someone typed.
+  try {
+    const draft = localStorage.getItem('phos_sb_draft');
+    const box = sbEl('sbConcept');
+    if (draft && box && !box.value) box.value = draft;
+  } catch (e) {}
+  // Defaults are read from the bootstrap ONCE. sbInit() runs on every tab entry,
+  // and SB_BOOT was captured at page load — re-applying it on re-entry silently
+  // reset Shots and Engine to stale values while disk held the real ones, and
+  // the UI is what sbPlan() submits. After the first entry the in-session choice
+  // IS the truth.
+  if (!SB.primed) {
+    const d = SB_BOOT.defaults || {};
+    _sbShots = Number(d.shots) || 12;
+    _sbEngineMode = d.engine || 'auto';
+    SB.primed = true;
+  }
+  sbSetShots(_sbShots, false);
+  sbRenderEnginePicker();
+  if (typeof refreshManualCharacters === 'function') {
+    Promise.resolve(refreshManualCharacters()).then(sbRenderCast).catch(() => sbRenderCast());
+  } else { sbRenderCast(); }
+  sbConceptInput();
+  sbMustInput();
+  // Restore the last board the user was on, same idiom as phos_workflow.
+  let last = '';
+  try { last = localStorage.getItem('phos_sb_open') || ''; } catch (e) {}
+  sbRefreshBoards().then(() => {
+    if (last && SB.boards.some(b => b.id === last)) sbOpen(last);
+    else if (SB.boards.length) sbShow('list');
+    else sbShow('empty');
+  });
+  if (SB.timer) clearInterval(SB.timer);
+  SB.timer = setInterval(sbTick, 2000);
+}
+
+function sbTeardown() {
+  if (SB.timer) { clearInterval(SB.timer); SB.timer = null; }
+}
+
+async function sbRefreshBoards() {
+  try {
+    const r = await (await fetch('/storyboard/list')).json();
+    SB.boards = r.boards || [];
+  } catch (e) { SB.boards = []; }
+  sbRenderBoardLists();
+  return SB.boards;
+}
+
+// ---- the editing guard -----------------------------------------------------
+// The shot list is innerHTML-rebuilt on every repaint, and the board poller
+// repaints every 2 s. Without these two guards, typing into a prompt loses
+// focus and then loses the text: the tick lands INSIDE the 800 ms save debounce,
+// replaces the textarea with the server's copy, and the debounce then writes the
+// reverted value back to disk. Measured 5/5 by the validator, and "change any
+// prompt" is one of the four promises printed on the empty state.
+//
+// Two different questions, deliberately:
+//   sbTypingInShots() — is the user mid-word? Blocks the DOM rebuild only. A
+//     click on ↑ / a select / a grade button must still repaint, and by then the
+//     focused element is a button or a closed select, not a text field.
+//   sbHoldingShots()  — is the card busy at all (text OR an open select menu)?
+//     Blocks the POLL, so nothing is fetched-and-repainted under an open menu
+//     and no server copy can clobber an edit that hasn't been saved yet.
+function sbTypingInShots() {
+  const a = document.activeElement;
+  if (!a || !a.closest || !a.closest('#sbShots')) return false;
+  const t = (a.tagName || '').toUpperCase();
+  return t === 'TEXTAREA' || (t === 'INPUT' && a.type !== 'button');
+}
+function sbHoldingShots() {
+  const a = document.activeElement;
+  if (a && a.closest && a.closest('#sbShots')) {
+    const t = (a.tagName || '').toUpperCase();
+    if (t === 'TEXTAREA' || t === 'SELECT' || t === 'INPUT') return true;
+  }
+  // An edit typed but not yet flushed is exactly as unsafe to overwrite.
+  return !!SB.saveTimer || SB.saveInFlight;
+}
+
+async function sbTick() {
+  if (document.body.dataset.workflow !== 'storyboard') return;
+  // The global poll skips hidden tabs; this one should too.
+  if (document.hidden) return;
+  if (sbHoldingShots()) {
+    // Don't fetch over someone's typing. The run bar is the one thing that
+    // moves on its own, and it lives outside #sbShots, so keep it live.
+    if (SB.id && SB.payload) { try { sbRenderRunBar(SB.payload); } catch (e) {} }
+    return;
+  }
+  if (SB.id) await sbLoad(SB.id, true);
+  else await sbRefreshBoards();
+}
+
+// ---- the brief -------------------------------------------------------------
+let _sbDraftTimer = null;
+function sbConceptInput() {
+  const box = sbEl('sbConcept');
+  const btn = sbEl('sbPlanBtn');
+  if (btn) {
+    const empty = !box || !box.value.trim();
+    btn.disabled = empty || btn.dataset.busy === '1';
+    if (empty) btn.title = 'Write a couple of sentences about the film first.';
+    else if (btn.dataset.busy !== '1') btn.title = '';
+  }
+  if (_sbDraftTimer) clearTimeout(_sbDraftTimer);
+  _sbDraftTimer = setTimeout(() => {
+    try { localStorage.setItem('phos_sb_draft', (box && box.value) || ''); } catch (e) {}
+  }, 400);
+}
+
+function sbMustInput() {
+  const box = sbEl('sbMust');
+  const meta = sbEl('sbMustMeta');
+  if (!meta) return;
+  const n = ((box && box.value) || '').split('\n').filter(x => x.trim()).length;
+  meta.textContent = n === 0 ? 'none' : (n === 1 ? '1 shot' : `${n} shots`);
+}
+
+let _sbShots = 12;
+function sbSetShots(n, persist) {
+  _sbShots = Number(n) || 12;
+  document.querySelectorAll('#sbLengthGroup .q-chip').forEach(b =>
+    b.classList.toggle('active', Number(b.dataset.sbShots) === _sbShots));
+  if (persist !== false) sbSaveSetting('storyboard_shots', _sbShots);
+}
+function sbShotsValue() {
+  const on = document.querySelector('#sbLengthGroup .q-chip.active');
+  return on ? Number(on.dataset.sbShots) : _sbShots;
+}
+async function sbSaveSetting(key, value) {
+  try {
+    const fd = new URLSearchParams(); fd.set(key, String(value));
+    await fetch('/settings', { method: 'POST', body: fd });
+  } catch (e) {}
+}
+
+function sbToggleRamHelp() {
+  const btn = sbEl('sbRamHelpBtn'), note = sbEl('sbRamHelpNote');
+  if (!btn || !note) return;
+  const open = btn.getAttribute('aria-expanded') === 'true';
+  btn.setAttribute('aria-expanded', open ? 'false' : 'true');
+  note.hidden = open;
+}
+function sbToggleEngineHelp() {
+  const btn = sbEl('sbEngineHelpBtn'), note = sbEl('sbEngineHelpNote');
+  if (!btn || !note) return;
+  const open = btn.getAttribute('aria-expanded') === 'true';
+  btn.setAttribute('aria-expanded', open ? 'false' : 'true');
+  note.hidden = open;
+  if (!note.textContent) note.textContent = SB_BOOT.engine_help || '';
+}
+
+// A small .eng-seg: same glyph, same label, same accent variables, read off the
+// SAME ENGINES registry row the header switcher renders from — so a shot card
+// and the header can never disagree about what an engine looks like.
+function sbEngineChip(id) {
+  const e = (typeof ENGINES !== 'undefined' ? ENGINES : []).find(x => x.id === id)
+         || { id: id, label: (id || 'ltx').toUpperCase(), mark: 'eng-mark-ltx',
+              accent: '', accent_dim: '', accent_soft: '', tagline: '' };
+  const why = id === 'h3'
+    ? 'Renders on Hailuo H3 — video, dialogue and sound together. The optional pack.'
+    : 'Renders on LTX-2.3 — the built-in engine, and the only one that loads a trained character.';
+  return `<span class="sb-chip sb-chip-engine" data-engine="${escapeHtml(e.id)}"
+      style="--eng-accent:${escapeHtml(e.accent)};--eng-dim:${escapeHtml(e.accent_dim)};--eng-soft:${escapeHtml(e.accent_soft)}"
+      title="${escapeHtml(why)}"><span class="eng-mark"><svg class="ph" aria-hidden="true"><use href="#${escapeHtml(e.mark)}"/></svg></span>${escapeHtml(e.label)}</span>`;
+}
+
+// Mirrors _renderManualCharactersList() against the same _manualCharacters
+// array. Single select in v1; click the lit avatar to deselect.
+let _sbCastId = '';
+function sbRenderCast() {
+  const wrap = sbEl('sbCharsList'), empty = sbEl('sbCharsEmpty');
+  if (!wrap) return;
+  const list = (typeof _manualCharacters !== 'undefined' && _manualCharacters) || [];
+  if (!list.length) {
+    wrap.innerHTML = '';
+    if (empty) empty.hidden = false;
+    return;
+  }
+  if (empty) empty.hidden = true;
+  wrap.innerHTML = list.map(c => {
+    const active = c.id === _sbCastId;
+    const name = c.name || c.trigger || c.id;
+    const avatar = c.sample_image_url
+      ? `<img class="chars-avatar-img" src="${escapeHtml(c.sample_image_url)}" alt="">`
+      : `<span class="chars-avatar-ph">${escapeHtml((name || '?').charAt(0).toUpperCase())}</span>`;
+    return `<button type="button" class="chars-avatar-chip ${active ? 'active' : ''}"
+              onclick="sbPickCast(${JSON.stringify(c.id).replace(/"/g, '&quot;')})"
+              title="${escapeHtml(name)}${active ? ' · click to deselect' : ''}">
+              ${avatar}<span class="chars-avatar-name">${escapeHtml(name)}</span></button>`;
+  }).join('');
+}
+function sbPickCast(id) {
+  _sbCastId = (_sbCastId === id) ? '' : id;
+  // Casting under an H3-only film is a promise the engine can't keep, so the
+  // pair snaps back to Auto rather than being quietly ignored at plan time.
+  if (_sbCastId && _sbEngineMode === 'h3') {
+    sbSetEngineMode('auto');
+    phosToast('Auto: Hailuo H3 can’t load a trained character, so their shots go to LTX-2.3.',
+              {duration: 6000});
+  }
+  sbRenderCast();
+  sbRenderEnginePicker();
+}
+
+// ---- the film-level engine -------------------------------------------------
+// The owner's question, verbatim: "I don't get why I cannot select in the
+// storyboard if I'm going to send to LTX or to Hailuo." So he can. Three
+// options, once per film, asked BEFORE the plan exists — because the planner
+// writes H3's three-field dialect or LTX prose depending on the answer, and a
+// prompt written for one engine is not a prompt for the other. Changing it on
+// an existing film is therefore a re-plan, and the Re-plan modal carries the
+// same control.
+let _sbEngineMode = 'auto';
+const SB_ENGINE_OPTS = [
+  { key: 'auto', label: 'Auto',      sub: 'per shot' },
+  { key: 'h3',   label: 'Hailuo H3', sub: 'voice + sound', engine: 'h3' },
+  { key: 'ltx',  label: 'LTX-2.3',   sub: 'characters',    engine: 'ltx' },
+];
+
+function sbH3Installed() {
+  const p = (window._ENGINE_PROBES || {}).h3 || {};
+  return { capable: !!p.capable, available: !!p.available };
+}
+
+function sbEnginePickerHtml(active) {
+  const h3 = sbH3Installed();
+  return SB_ENGINE_OPTS.map(o => {
+    const e = o.engine ? (ENGINES || []).find(x => x.id === o.engine) : null;
+    const blocked = (o.key === 'h3') && !h3.available;
+    const offer = blocked && h3.capable;
+    const cls = 'pill-btn' + (o.key === active ? ' active' : '')
+              + (offer ? ' needs-install' : '');
+    const style = e ? `--eng-accent:${escapeHtml(e.accent)};--eng-dim:${escapeHtml(e.accent_dim)};--eng-soft:${escapeHtml(e.accent_soft)}` : '';
+    const title = o.key === 'auto'
+        ? 'The plan decides per shot: a shot with one of your trained characters goes to LTX-2.3, everything else to Hailuo H3.'
+      : offer ? 'Hailuo H3 isn’t installed yet — install it from the Phosphene sidebar in Pinokio.'
+      : blocked ? 'This Mac can’t run Hailuo H3.'
+      : o.key === 'h3' ? 'Every shot on Hailuo H3 — it renders dialogue, voices and sound with the picture. No trained characters.'
+      : 'Every shot on LTX-2.3 — the built-in engine, and the only one that loads a trained character.';
+    const glyph = e ? `<span class="eng-mark"><svg class="ph" aria-hidden="true"><use href="#${escapeHtml(e.mark)}"/></svg></span>` : '';
+    return `<button type="button" class="${cls}" data-sb-engine="${o.key}" style="${style}"
+        ${blocked && !offer ? 'disabled' : ''} title="${escapeHtml(title)}">
+      ${glyph}${escapeHtml(o.label)}<span class="sub">${escapeHtml(o.sub)}</span></button>`;
+  }).join('');
+}
+
+function sbEnginePickerNote(active) {
+  const h3 = sbH3Installed();
+  if (!h3.available) {
+    return h3.capable
+      ? 'Hailuo H3 isn’t installed — <b>Install Hailuo H3</b> in the Phosphene sidebar in Pinokio, and this film can use it. Until then every shot renders on LTX-2.3.'
+      : 'This Mac can’t run Hailuo H3, so every shot renders on LTX-2.3.';
+  }
+  if (active === 'h3') return 'Every shot on Hailuo H3 — dialogue, voices and sound rendered with the picture. <b>A trained character can’t come along</b>: H3 loads no LoRAs.';
+  if (active === 'ltx') return 'Every shot on LTX-2.3 — every mode, and the only engine that loads a trained character.';
+  return 'A shot with one of your trained characters goes to <b>LTX-2.3</b>; every other shot goes to <b>Hailuo H3</b>.';
+}
+
+function sbRenderEnginePicker() {
+  const g = sbEl('sbEngineGroup');
+  if (g) g.innerHTML = sbEnginePickerHtml(_sbEngineMode);
+  const n = sbEl('sbEnginePickNote');
+  if (n) n.innerHTML = sbEnginePickerNote(_sbEngineMode);
+}
+
+function sbSetEngineMode(key, persist) {
+  const h3 = sbH3Installed();
+  if (key === 'h3' && !h3.available) {
+    // Not installed is not dead — the click IS the install, same as the High
+    // quality chip's needs-install state.
+    // The registry names the install affordance (ENGINES[h3].install_card), so
+    // this opens the SAME card the header switcher opens.
+    const card = ((ENGINES || []).find(x => x.id === 'h3') || {}).install_card;
+    if (h3.capable && card && typeof window[card] === 'function') { try { window[card](); } catch (e) {} }
+    else if (h3.capable) phosToast('Install Hailuo H3 from the Phosphene sidebar in Pinokio.', {duration: 6000});
+    return;
+  }
+  if (key === 'h3' && _sbCastId) {
+    _sbCastId = '';
+    sbRenderCast();
+    phosToast('Cast cleared — Hailuo H3 can’t load a trained character.', {duration: 6000});
+  }
+  _sbEngineMode = key;
+  sbRenderEnginePicker();
+  if (persist !== false) sbSaveSetting('storyboard_engine', key);
+}
+
+// The Re-plan modal's copy of the control. Separate value so opening the modal
+// and cancelling can't change the brief.
+let _sbReplanEngineMode = 'auto';
+function sbRenderReplanEnginePicker() {
+  const g = sbEl('sbReplanEngineGroup');
+  if (g) g.innerHTML = sbEnginePickerHtml(_sbReplanEngineMode);
+  const n = sbEl('sbReplanEngineNote');
+  if (n) n.innerHTML = sbEnginePickerNote(_sbReplanEngineMode);
+}
+
+// ---- plan ------------------------------------------------------------------
+async function sbPlan() {
+  const concept = (sbEl('sbConcept') || {}).value || '';
+  if (!concept.trim()) { phosToast('Write a couple of sentences about the film first.'); return; }
+  const btn = sbEl('sbPlanBtn');
+  if (btn) { btn.dataset.busy = '1'; btn.disabled = true; btn.textContent = 'Planning…'; }
+  const fd = new URLSearchParams();
+  fd.set('concept', concept);
+  fd.set('shots', String(sbShotsValue()));
+  fd.set('style', (sbEl('sbStyle') || {}).value || '');
+  fd.set('must', (sbEl('sbMust') || {}).value || '');
+  fd.set('engine', _sbEngineMode);
+  if (_sbCastId) fd.set('character_id', _sbCastId);
+  let r;
+  try {
+    r = await (await fetch('/storyboard/plan', { method: 'POST', body: fd })).json();
+  } catch (e) { r = { ok: false, error: String(e) }; }
+  if (!r.ok) {
+    sbPlanBtnReset();
+    phosToast(r.error || 'Planning could not start.', { kind: 'danger', duration: 6000 });
+    return;
+  }
+  SB.id = r.id;
+  try { localStorage.setItem('phos_sb_open', SB.id); } catch (e) {}
+  sbShow('planning');
+  sbSetPlanningStage('load');
+  sbLoad(SB.id);
+}
+function sbPlanBtnReset() {
+  const btn = sbEl('sbPlanBtn');
+  if (!btn) return;
+  delete btn.dataset.busy;
+  btn.textContent = 'Plan film';
+  sbConceptInput();
+}
+
+async function sbCancelPlan() {
+  const fd = new URLSearchParams(); fd.set('id', SB.id);
+  try { await fetch('/storyboard/cancel', { method: 'POST', body: fd }); } catch (e) {}
+  phosToast('Planning cancelled.');
+  sbPlanBtnReset();
+  sbLoad(SB.id);
+}
+
+function sbSetPlanningStage(stage) {
+  const map = {
+    load:   ['Loading the planner', 'About a minute. Nothing renders yet.'],
+    write:  ['Writing the plan', 'About a minute. Nothing renders yet.'],
+    check:  ['Checking the plan', 'About a minute. Nothing renders yet.'],
+    repair: ['Fixing the plan', 'It came back slightly malformed. One retry.'],
+    unload: ['Giving the memory back', 'The renderer gets it now.'],
+  };
+  const order = ['load', 'write', 'check', 'repair', 'unload'];
+  const at = order.indexOf(stage);
+  const t = map[stage] || map.load;
+  const ttl = sbEl('sbPlanningTitle'), sub = sbEl('sbPlanningSub');
+  if (ttl) ttl.textContent = t[0];
+  if (sub) sub.textContent = t[1];
+  document.querySelectorAll('#sbPlanningSteps .sb-step').forEach(el => {
+    const i = order.indexOf(el.dataset.step);
+    el.classList.toggle('is-now', i === at);
+    el.classList.toggle('is-done', i >= 0 && at >= 0 && i < at);
+    // The repair row is revealed only when the retry actually fired —
+    // advertising a failure that usually doesn't happen is worse than silence.
+    if (el.dataset.step === 'repair') el.hidden = (stage !== 'repair');
+  });
+}
+
+function sbOpenReplan() {
+  _sbReplanEngineMode = ((SB.payload || {}).engine_mode) || 'auto';
+  sbRenderReplanEnginePicker();
+  sbEl('sbReplanModal').classList.add('show');
+}
+function sbCloseReplan() { sbEl('sbReplanModal').classList.remove('show'); }
+async function sbReplan() {
+  const notes = (sbEl('sbReplanNotes') || {}).value || '';
+  sbCloseReplan();
+  const b = (SB.payload || {}).board || {};
+  const fd = new URLSearchParams();
+  fd.set('id', SB.id);
+  fd.set('concept', b.concept || '');
+  fd.set('style', b.style || '');
+  fd.set('shots', String(b.shots_target || (b.shots || []).length || 12));
+  fd.set('must', (b.must || []).join('\n'));
+  fd.set('notes', notes);
+  fd.set('engine', _sbReplanEngineMode);
+  const cast = (b.cast || [])[0];
+  // An H3-only film carries no cast — the server refuses the pair, so don't
+  // send one it would have to reject.
+  if (cast && cast.id && _sbReplanEngineMode !== 'h3') fd.set('character_id', cast.id);
+  let r;
+  try { r = await (await fetch('/storyboard/plan', { method: 'POST', body: fd })).json(); }
+  catch (e) { r = { ok: false, error: String(e) }; }
+  if (!r.ok) { phosToast(r.error || 'Re-plan could not start.', { kind: 'danger', duration: 6000 }); return; }
+  sbShow('planning'); sbSetPlanningStage('load'); sbLoad(SB.id);
+}
+
+// Try again re-plans THIS board from the brief the board itself stores. It used
+// to call sbPlan(), which sends no id and reads the left-hand form — so a failed
+// "deep-sea welder" board plus an unrelated concept still sitting in the brief
+// produced a second, different film and left the failed one as a dead row.
+async function sbTryAgain() {
+  const b = ((SB.payload || {}).board) || {};
+  if (!SB.id) return sbPlan();
+  const emode = b.engine_mode || 'auto';
+  const fd = new URLSearchParams();
+  fd.set('id', SB.id);
+  fd.set('concept', b.concept || '');
+  fd.set('shots', String(b.shots_target || (b.shots || []).length || 12));
+  fd.set('style', b.style || '');
+  fd.set('must', (b.must || []).join('\n'));
+  fd.set('engine', emode);
+  const cast = (b.cast || [])[0];
+  if (cast && cast.id && emode !== 'h3') fd.set('character_id', cast.id);
+  let r;
+  try { r = await (await fetch('/storyboard/plan', { method: 'POST', body: fd })).json(); }
+  catch (e) { r = { ok: false, error: String(e) }; }
+  if (!r.ok) { phosToast(r.error || 'Planning could not start.', { kind: 'danger', duration: 6000 }); return; }
+  sbShow('planning'); sbSetPlanningStage('load'); sbLoad(SB.id);
+}
+
+function sbShowRaw() {
+  const raw = ((SB.payload || {}).planner || {}).raw || '';
+  sbEl('sbRawText').textContent = raw || '(nothing captured)';
+  sbEl('sbRawModal').classList.add('show');
+}
+
+// ---- board open / load -----------------------------------------------------
+function sbOpen(id) {
+  SB.id = id;
+  try { localStorage.setItem('phos_sb_open', id); } catch (e) {}
+  sbLoad(id);
+}
+function sbBackToList() {
+  SB.id = '';
+  SB.payload = null;
+  try { localStorage.removeItem('phos_sb_open'); } catch (e) {}
+  sbRefreshBoards().then(() => sbShow(SB.boards.length ? 'list' : 'empty'));
+}
+
+async function sbLoad(id, quiet) {
+  let r;
+  try {
+    r = await (await fetch('/storyboard/get?id=' + encodeURIComponent(id))).json();
+  } catch (e) { return; }
+  if (!r || !r.ok) {
+    if (!quiet) phosToast('That storyboard is gone.', { kind: 'danger' });
+    sbBackToList();
+    return;
+  }
+  if (SB.payload && SB.payload.board && r.board && sbTypingInShots()) {
+    // A refresh that lands mid-word keeps what is on screen.
+    sbAdoptLiveEdits(r);
+  }
+  SB.payload = r;
+  const st = (r.planner || {}).state;
+  if (r.planning || st === 'running') {
+    sbShow('planning');
+    sbSetPlanningStage((r.planner || {}).stage || 'load');
+    return;
+  }
+  if (st === 'failed') {
+    sbPlanBtnReset();
+    sbShow('planfail');
+    sbRenderPlanFail(r.planner || {});
+    return;
+  }
+  sbPlanBtnReset();
+  sbShow('plan');
+  sbRenderPlan(r);
+  // The player keeps whatever was last selected globally, so opening a film
+  // showed an unrelated Video-tab render under the film's own title. Put the
+  // film's newest clip up — but only when the current one isn't already one of
+  // this film's, so it never yanks a shot the user just clicked.
+  const mine = (r.board.shots || [])
+    .map(x => x.final_output || x.draft_output).filter(Boolean);
+  if (mine.length && mine.indexOf(activePath) === -1) {
+    try { selectOutput(mine[mine.length - 1]); } catch (e) {}
+  }
+}
+
+function sbRenderPlanFail(p) {
+  const map = {
+    download: 'The planner model didn\'t finish downloading. Check your connection and try again — it resumes where it stopped.',
+    oom: 'Not enough free memory to load the planner. Close some apps and try again.',
+    invalid: 'It produced something this build can\'t read, twice. Trying again usually works — the model isn\'t deterministic. If it keeps failing, shorten the concept.',
+    busy: 'Something else is using the GPU. Wait for the queue to empty and try again.',
+    // The planner never got to finish, so "it couldn't write a usable plan"
+    // would be untrue. The heal path writes this kind at boot.
+    restarted: 'The panel restarted while the planner was running, so the plan never finished. Nothing was lost — press Try again.',
+  };
+  // An unmapped kind falls back to what the server actually said rather than to
+  // a shrug: the sentence was written, it just had nowhere to appear.
+  sbEl('sbPlanFailMsg').textContent = map[p.error_kind]
+    || (p.error ? ('Something went wrong while planning: ' + p.error + '. Try again.')
+                : 'Something went wrong while planning. Try again.');
+  const ttl = document.querySelector('#sbPlanFail .sb-empty-title');
+  if (ttl) ttl.textContent = (p.error_kind === 'restarted')
+    ? 'The plan didn\'t finish.' : 'The planner couldn\'t write a usable plan.';
+  sbEl('sbPlanFailRaw').hidden = !p.raw;
+}
+
+// Exactly one of the five stage states is visible at a time, and body.sb-full
+// is on while there is nothing for the player to show — the same trick the
+// Ideogram layout editor uses to take the whole column.
+function sbShow(which) {
+  const states = { empty: 'sbEmpty', list: 'sbList', planning: 'sbPlanning',
+                   planfail: 'sbPlanFail', plan: 'sbPlan' };
+  Object.keys(states).forEach(k => {
+    const el = sbEl(states[k]);
+    if (el) el.hidden = (k !== which);
+  });
+  // The brief's board list is a way BACK to another film while one is open.
+  // While the stage is already showing the list, it would be the same list
+  // twice in one screen — so it folds away.
+  const boards = sbEl('sbBoards');
+  if (boards) boards.hidden = !SB.boards.length || which === 'list' || which === 'empty';
+  sbSyncStage();
+}
+
+function sbHasClip() {
+  const shots = (((SB.payload || {}).board) || {}).shots || [];
+  return shots.some(s => s.draft_output || s.final_output);
+}
+
+function sbSyncStage() {
+  const on = document.body.dataset.workflow === 'storyboard';
+  const hasClip = on && sbHasClip();
+  let full;
+  if (!on) full = false;
+  else if (SB.stageMode === 'list') full = true;
+  else if (SB.stageMode === 'player') full = false;
+  else full = !hasClip;
+  document.body.classList.toggle('sb-full', !!full);
+  const tog = sbEl('sbStageToggle');
+  if (tog) {
+    tog.hidden = !hasClip;
+    tog.querySelectorAll('.smt-btn').forEach(b =>
+      b.classList.toggle('active', b.dataset.sbStage === (full ? 'list' : 'player')));
+  }
+}
+function sbSetStage(mode) { SB.stageMode = mode; sbSyncStage(); }
+
+// ---- the plan screen -------------------------------------------------------
+function sbRenderPlan(r) {
+  const b = r.board || {};
+  const est = r.estimate || {};
+  const shots = b.shots || [];
+  const title = sbEl('sbTitle');
+  if (title && document.activeElement !== title) title.value = b.title || '';
+
+  // --- summary ---
+  // Per PASS, not per `status`: during delivery, `status === 'done'` still
+  // reads true from the draft that already landed.
+  const outKey = r.pass === 'final' ? 'final_output' : 'draft_output';
+  const done = shots.filter(s => s[outKey]).length;
+  const failed = shots.filter(s => s.status === 'failed').length;
+  const rendering = !!r.rendering;
+  let status;
+  if (r.pass === 'final') {
+    // "Delivery rendering · 4 of 4" is a sentence about a thread that hasn't
+    // released its slot yet, not about the film. Once every shot has its
+    // delivery clip the film is finished, whatever the dispatcher is doing.
+    status = (rendering && done < shots.length)
+      ? `Delivery rendering · ${done} of ${shots.length}`
+      : `Finished · ${done} shot${done === 1 ? '' : 's'}`;
+  } else if (rendering) {
+    status = `Drafts rendering · ${done} of ${shots.length}`;
+  } else if (done && done + failed >= shots.length) {
+    status = failed ? `Drafts done · ${done} of ${shots.length}, ${failed} failed`
+                    : `Drafts done · ${done} of ${shots.length}`;
+  } else if (done) {
+    // Partway through and NOT running — stopped, or a single shot retried.
+    // "Drafts rendering" here would be a sentence that isn't true.
+    status = `Drafts · ${done} of ${shots.length}`;
+  } else {
+    status = 'Draft plan · not rendered';
+  }
+  sbEl('sbPlanStatus').textContent = status;
+
+  // The first two cells describe the work THIS PASS still has to do. With none
+  // left they were reading "0 shots" and "—", which says nothing about the film
+  // you are looking at — so at zero they switch to describing the film itself.
+  const nothingLeft = !est.shots;
+  const runtimeAll = shots.reduce((a, s) => a + (Number(s.duration_s) || 0), 0);
+  sbEl('sbSumShots').textContent = nothingLeft
+    ? (shots.length === 1 ? '1 shot' : `${shots.length} shots`)
+    : (est.shots === 1 ? '1 shot' : `${est.shots} shots`);
+  sbEl('sbSumRuntime').textContent = sbFmtRuntime(nothingLeft ? runtimeAll : est.runtime_secs);
+  sbEl('sbSumTime').textContent = nothingLeft ? 'all rendered' : sbFmtWall(est.total_secs);
+  sbEl('sbSumTimeSub').textContent = nothingLeft
+    ? 'nothing left to render'
+    : (r.pass === 'final' ? 'delivery' : 'drafts') + ', this Mac';
+  const loads = est.pipeline_loads || 0;
+  sbEl('sbSumLoads').textContent = loads === 1 ? '1 model load' : `${loads} model loads`;
+  let loadsSub = loads === 1 ? 'every shot renders back to back' : 'grouped, not in story order';
+  if (est.saved_secs > 0) loadsSub += ` — rendering grouped saves ${sbFmtWall(est.saved_secs).replace('about ', '')}`;
+  sbEl('sbSumLoadsSub').textContent = loadsSub;
+  const freeGb = (r.disk || {}).free_gb;
+  sbEl('sbSumDisk').textContent = (freeGb == null) ? '—' : `${freeGb} GB free`;
+  const tight = (freeGb != null && freeGb < 20);
+  sbEl('sbSumDiskCell').classList.toggle('is-warn', tight);
+  sbEl('sbSumDiskSub').textContent = tight
+    ? 'clips land in mlx_outputs/ — this is tight' : 'clips land in mlx_outputs/';
+
+  // Run strip — one segment per bucket, sized by shot count. A single band
+  // explaining nothing is chrome, so it hides below 4 shots on one bucket.
+  const strip = sbEl('sbRunStrip');
+  const buckets = est.buckets || [];
+  const NAMES = { t2v: 'Text & Character', remix: 'Remix', keyframe: 'Keyframes',
+                  extend: 'Extend', a2v: 'Audio' };
+  if (buckets.length <= 1 && shots.length < 4) {
+    strip.hidden = true;
+  } else {
+    strip.hidden = false;
+    strip.innerHTML = buckets.map(bk => {
+      const ns = bk.shots || [];
+      // "2–6" for [2,4,6] would claim five shots that aren't in this bucket.
+      // A range only when the run really is contiguous; otherwise say which.
+      const contiguous = ns.length > 1 && ns[ns.length - 1] - ns[0] === ns.length - 1;
+      const range = !ns.length ? ''
+        : ns.length === 1 ? `${ns[0]}`
+        : contiguous ? `${ns[0]}–${ns[ns.length - 1]}`
+        : (ns.length > 4 ? `${ns.length} shots` : ns.join(', '));
+      const label = (bk.engine === 'h3' ? 'H3 · ' : '') + (NAMES[bk.kind] || bk.kind);
+      return `<div class="sb-runseg" style="flex-grow:${ns.length}" data-shots="${ns.join(',')}">
+        ${bk.engine === 'h3' ? '' : '<span class="sb-runseg-load" title="One model load, about 90 s">load</span>'}
+        <span class="sb-runseg-name">${escapeHtml(label)}</span>
+        <span class="sb-runseg-shots">${range}</span></div>`;
+    }).join('');
+  }
+
+  // --- quality ---
+  const pol = b.policy || {};
+  const dq = (pol.draft || {}).quality || 'quick';
+  const fq = (pol.final || {}).quality || 'standard';
+  document.querySelectorAll('#sbDraftQuality .pill-btn').forEach(x =>
+    x.classList.toggle('active', x.dataset.q === dq));
+  document.querySelectorAll('#sbFinalQuality .pill-btn').forEach(x =>
+    x.classList.toggle('active', x.dataset.q === fq));
+  sbEl('sbQualityMeta').textContent =
+    `Draft ${(pol.draft || {}).width}×${(pol.draft || {}).height} · ` +
+    `Delivery ${(pol.final || {}).width}×${(pol.final || {}).height}`;
+
+  // --- board-level errors ---
+  const errs = r.errors || [];
+  const boardErrs = errs.filter(e => !e.n);
+  const errBox = sbEl('sbErrors');
+  errBox.hidden = !boardErrs.length;
+  errBox.innerHTML = boardErrs.map(sbErrRow).join('');
+
+  // --- shot cards ---
+  // Rebuilding the list under a cursor is what makes editing impossible, so a
+  // repaint that arrives mid-word repaints everything EXCEPT the cards. The
+  // next repaint after blur (<=2 s) brings the server's copy in.
+  if (!sbTypingInShots()) {
+    sbEl('sbShots').innerHTML = shots.map(s => sbShotCard(s, r, errs)).join('');
+  }
+
+  // --- which engine, and why ---
+  // There is NO engine selection on this tab, and saying so out loud is the
+  // fix for the first thing the owner asked about it. The line states the rule;
+  // the ? carries the Python-owned paragraph; the chips on the cards carry the
+  // per-shot answer.
+  const mix = est.engine_mix || {};
+  const mode = r.engine_mode || 'auto';
+  let engText;
+  if (!r.h3_available) {
+    engText = SB_BOOT.engine_note_no_h3 || '';
+  } else if (mode === 'h3') {
+    engText = 'You set this film to <b>Hailuo H3</b> — every shot.';
+  } else if (mode === 'ltx') {
+    engText = 'You set this film to <b>LTX-2.3</b> — every shot.';
+  } else {
+    engText = SB_BOOT.engine_note || '';
+    if (mix.h3 && mix.ltx) engText += ` <b>${mix.h3} on Hailuo H3, ${mix.ltx} on LTX-2.3.</b>`;
+    else if (mix.h3) engText += ` <b>All ${mix.h3} on Hailuo H3.</b>`;
+    else if (mix.ltx) engText += ` <b>All ${mix.ltx} on LTX-2.3.</b>`;
+  }
+  if (r.h3_available && mode !== 'auto') engText += ' Change it in Re-plan.';
+  sbEl('sbEngineNoteText').innerHTML = engText;
+
+  // --- run bar / action bar ---
+  sbRenderRunBar(r);
+  const graded = shots.filter(s => s.grade).length;
+  const anyClip = sbHasClip();
+  sbEl('sbActionBar').hidden = anyClip;
+  sbEl('sbTally').hidden = !anyClip;
+  const btn = sbEl('sbRenderBtn');
+  btn.disabled = errs.length > 0 || rendering;
+  btn.title = errs.length ? `Fix the ${errs.length} problem${errs.length > 1 ? 's' : ''} above first.` : '';
+  sbEl('sbActionNote').textContent =
+    `${est.shots || 0} shot${est.shots === 1 ? '' : 's'} · ${sbFmtWall(est.total_secs)}`;
+  if (anyClip) sbRenderTally(shots, r);
+  if (!sbTypingInShots()) sbAutoGrowPrompts();
+  sbSyncStage();
+}
+
+// 3-10 rows, sized to the text. A planner prompt is 70-140 words and a fixed
+// 3-row box hides most of it behind a scrollbar — which matters here, because
+// reading the plan before spending render hours is the entire point.
+function sbAutoGrowPrompts(one) {
+  const els = one ? [one] : document.querySelectorAll('#sbShots .sb-shot-prompt');
+  els.forEach(el => {
+    const line = 19.4;                     // 12.5px * 1.55 line-height
+    el.style.height = 'auto';
+    const want = Math.min(Math.max(el.scrollHeight, line * 3), line * 10 + 16);
+    el.style.height = Math.ceil(want) + 'px';
+  });
+}
+
+function sbErrRow(e) {
+  const copy = SB_ERR_COPY[e.code];
+  const html = !copy ? escapeHtml(e.message)
+             : (typeof copy.html === 'function' ? copy.html(e) : copy.html);
+  const fix = copy && copy.fix
+    ? `<button type="button" class="sb-err-fix" onclick="sbFixError('${copy.fix}',${e.n || 0},'${escapeHtml(e.code)}')">${escapeHtml(copy.label)}</button>`
+    : '';
+  return `<div class="sb-err-row"><span class="sb-err-dot"></span><span>${html}</span>${fix}</div>`;
+}
+
+function sbShotCard(s, r, errs) {
+  const n = s.n;
+  const mine = errs.filter(e => e.n === n);
+  const est = (r.per_shot_est || {})[String(n)];
+  const chars = r.characters || [];
+  const locked = (s.status === 'rendering' || s.status === 'queued' || s.status === 'done');
+  // The chip says what will ACTUALLY render, not what the plan wrote. With no
+  // H3 pack the server forces every shot to LTX at enqueue, so a pink Hailuo
+  // chip on a machine that has no Hailuo would be the UI contradicting itself.
+  const engine = r.h3_available ? (s.engine || 'ltx') : 'ltx';
+  const clip = s.final_output || s.draft_output;
+  // A shot whose prompt was just rewritten has no clip of its own yet, but the
+  // take it replaced is still on disk. Show it under the "old take" wash so the
+  // card isn't suddenly blank — and NOT gradeable, because it is not the shot
+  // the plan now describes.
+  const stale = !clip ? (s.stale_output || '') : '';
+  const shots = (r.board || {}).shots || [];
+  const isChar = !!s.character_id;
+  const opts = ['<option value="">— nobody —</option>'].concat(chars.map(c =>
+    `<option value="${escapeHtml(c.id)}" ${c.id === s.character_id ? 'selected' : ''}>${escapeHtml(c.name || c.id)}</option>`)).join('');
+  // With no trained characters on this Mac the cast select can only ever say
+  // "nobody", so it isn't shown at all and the Character button says why.
+  const noCast = !chars.length;
+  const durs = [3, 5, 7, 10];
+  if (durs.indexOf(Math.round(s.duration_s)) === -1) durs.push(Math.round(s.duration_s));
+  const durOpts = durs.sort((a, b) => a - b).map(d =>
+    `<option value="${d}" ${Math.round(s.duration_s) === d ? 'selected' : ''}>${d} s</option>`).join('');
+  const passLabel = r.pass === 'final' ? 'Delivery' : 'Draft';
+  const seedSet = (s.seed != null && s.seed !== -1);
+
+  const outBlock = stale ? `
+    <div class="sb-shot-out car-card is-stale">
+      <div class="car-thumb-wrap" onclick="selectOutput('${escapeHtml(stale)}')">
+        <video class="car-thumb" preload="metadata" muted playsinline
+               src="/file?path=${encodeURIComponent(stale)}"></video>
+      </div>
+      <div class="info"><span class="name">${escapeHtml(stale.split('/').pop())}</span>
+        <span class="sub"><span class="sb-stale-tag">old take</span> · rewritten, not rendered yet</span></div>
+    </div>` : clip ? `
+    <div class="sb-shot-out car-card">
+      <div class="car-thumb-wrap" onclick="sbOpenShotClip(${n})">
+        <video class="car-thumb" preload="metadata" muted playsinline
+               src="/file?path=${encodeURIComponent(clip)}"
+               onmouseenter="this.currentTime=0;this.playbackRate=0.6;this.play().catch(()=>{})"
+               onmouseleave="this.pause();this.currentTime=2.5"></video>
+      </div>
+      <div class="info"><span class="name">${escapeHtml(clip.split('/').pop())}</span>
+        <span class="sub">${s.final_output ? 'delivery' : 'draft'}</span></div>
+      <div class="sb-grade" role="group" aria-label="Grade shot ${n}">
+        <button type="button" class="sb-grade-btn ${s.grade === 'keep' ? 'active' : ''}" data-act="grade" data-g="keep" aria-pressed="${s.grade === 'keep'}">KEEP</button>
+        <button type="button" class="sb-grade-btn ${s.grade === 'reroll' ? 'active' : ''}" data-act="grade" data-g="reroll" aria-pressed="${s.grade === 'reroll'}">RE-ROLL</button>
+        <button type="button" class="sb-grade-btn ${s.grade === 'cut' ? 'active' : ''}" data-act="grade" data-g="cut" aria-pressed="${s.grade === 'cut'}">CUT</button>
+      </div>
+      <textarea class="sb-note" rows="2" data-act="note" ${s.grade === 'reroll' ? '' : 'hidden'}
+        placeholder="What should change? (goes back to the planner)">${escapeHtml(s.note || '')}</textarea>
+    </div>` : '';
+
+  const failBlock = (s.status === 'failed') ? (() => {
+    const fe = friendlyJobError(s.error || '');
+    return `<div class="sb-shot-err"><div class="sb-err-row"><span class="sb-err-dot"></span>
+      <span><b>Shot ${n} failed.</b> ${escapeHtml(fe.friendly)} — ${escapeHtml(fe.hint)}</span>
+      <button type="button" class="sb-err-fix" data-act="retry">Retry this shot</button>
+      <button type="button" class="sb-err-fix" data-act="cut">Cut it</button></div></div>`;
+  })() : '';
+
+  return `<li class="sb-shot ${mine.length ? 'has-error' : ''} ${locked ? 'is-locked' : ''}"
+      data-n="${n}" draggable="${locked ? 'false' : 'true'}" tabindex="0">
+    <div class="sb-shot-head">
+      <span class="sb-shot-n">${String(n).padStart(2, '0')}</span>
+      <div class="sb-seg" role="group" aria-label="Shot type">
+        <button type="button" class="sb-seg-btn ${isChar ? '' : 'active'}" data-act="mode" data-mode="text" ${locked ? 'disabled' : ''}>Text</button>
+        <button type="button" class="sb-seg-btn ${isChar ? 'active' : ''}" data-act="mode" data-mode="character"
+                ${locked || noCast ? 'disabled' : ''} ${noCast ? 'title="No trained characters on this Mac yet — train one in the Train tab."' : ''}>Character</button>
+      </div>
+      <select class="sb-select sb-shot-char" data-act="char" aria-label="Who's in this shot" ${locked ? 'disabled' : ''} ${noCast ? 'hidden' : ''}>${opts}</select>
+      <select class="sb-select sb-shot-dur" data-act="dur" aria-label="Length" ${locked ? 'disabled' : ''}>${durOpts}</select>
+      ${sbEngineChip(engine)}
+      <span class="sb-chip sb-chip-pass" data-act="pass" title="Quality is set for the whole film — click to change it">${passLabel}</span>
+      <span class="sb-shot-est">${sbShotEst(est)}</span>
+      <span class="sb-shot-spacer"></span>
+      <span class="sb-seedwrap" hidden>
+        <input type="number" class="sb-seed" data-act="seed" value="${seedSet ? s.seed : ''}"
+               aria-label="Seed for shot ${n}" ${locked ? 'disabled' : ''}></span>
+      <button type="button" class="sb-icon" data-act="up" title="Move up" aria-label="Move shot ${n} up" ${n === 1 || locked ? 'disabled' : ''}>↑</button>
+      <button type="button" class="sb-icon" data-act="down" title="Move down" aria-label="Move shot ${n} down" ${n === shots.length || locked ? 'disabled' : ''}>↓</button>
+      <button type="button" class="sb-icon ${seedSet ? 'is-set' : ''}" data-act="seedtoggle"
+              title="${seedSet ? `Seed ${s.seed} — same number, same roll of the dice. Fix it so the delivery render matches the draft you approved.` : 'Seed — same number, same roll of the dice. Fix it so the delivery render matches the draft you approved.'}"
+              aria-label="Seed for shot ${n}">🎲</button>
+      <button type="button" class="sb-icon sb-icon-danger" data-act="del" title="${locked ? "This one's already rendering." : 'Delete this shot'}" aria-label="Delete shot ${n}" ${locked && s.status !== 'done' ? 'disabled' : ''}>✕</button>
+      <span class="sb-grip" title="Drag to reorder" aria-hidden="true">⠿</span>
+    </div>
+    <textarea class="sb-shot-prompt" rows="3" spellcheck="false" data-act="prompt"
+      ${locked ? 'readonly' : ''} title="${escapeHtml(s.title || '')}">${escapeHtml(s.prompt || '')}</textarea>
+    ${mine.length ? `<div class="sb-shot-err">${mine.map(sbErrRow).join('')}</div>` : ''}
+    ${failBlock}
+    ${outBlock}
+  </li>`;
+}
+
+function sbRenderTally(shots, r) {
+  const keep = shots.filter(s => s.grade === 'keep').length;
+  const rr = shots.filter(s => s.grade === 'reroll').length;
+  const cut = shots.filter(s => s.grade === 'cut').length;
+  const graded = keep + rr + cut;
+  const un = shots.length - graded;
+  sbEl('sbTallyText').innerHTML = graded === 0 ? 'nothing graded yet'
+    : `<b>${keep} keep</b> · ${rr} re-roll · ${cut} cut${un ? ` · ${un} ungraded` : ''}`;
+  // The tally bar REPLACES the action bar the moment a clip exists — which,
+  // after a Stop or a single retry, would leave no way to render the shots
+  // that never got a draft. So it carries that button when there are any.
+  const pending = shots.filter(s => s.status !== 'skipped' && !s.draft_output).length;
+  const resume = sbEl('sbResumeBtn');
+  resume.hidden = !pending || !!(r && r.rendering);
+  resume.textContent = `Render ${pending} remaining`;
+  const rw = sbEl('sbRewriteBtn');
+  rw.hidden = !rr;
+  rw.textContent = rr === 1 ? 'Rewrite 1 shot' : `Rewrite ${rr} shots`;
+  const fin = sbEl('sbFinishBtn');
+  fin.textContent = keep ? `Finish ${keep} keeper${keep === 1 ? '' : 's'}` : 'Finish keepers';
+  fin.disabled = !keep;
+  fin.title = keep ? '' : 'Mark at least one shot KEEP first.';
+  const canExport = shots.some(s => s.final_output);
+  sbEl('sbExportBtn').hidden = !canExport;
+  sbEl('sbExportNote').hidden = !canExport;
+}
+
+// The shots that never got a draft — after a Stop, or when a shot was added by
+// hand to a film that already rendered.
+function sbRenderRemaining() {
+  const shots = (((SB.payload || {}).board) || {}).shots || [];
+  const ns = shots.filter(s => s.status !== 'skipped' && !s.draft_output).map(s => s.n);
+  if (!ns.length) return;
+  const est = (SB.payload || {}).estimate || {};
+  if (!confirm(
+      `Render ${ns.length} draft${ns.length === 1 ? '' : 's'}?\n\n` +
+      `${sbFmtWall(est.total_secs).replace(/^about /, 'About ')} on this Mac. ` +
+      'The shots you already have are untouched.\n\n' +
+      'You can pause or stop after any shot.')) return;
+  sbRenderPass('draft', ns);
+}
+
+function sbRenderRunBar(r) {
+  const bar = sbEl('sbRunBar');
+  const shots = (r.board || {}).shots || [];
+  if (!r.rendering) { bar.hidden = true; return; }
+  bar.hidden = false;
+  const cur = (LAST_STATUS && LAST_STATUS.current) || null;
+  const tag = cur ? _sbTagOf(cur) : null;
+  const active = (tag && tag.id === SB.id) ? shots.find(s => s.n === tag.n) : null;
+  const outKey = (r.pass === 'final') ? 'final_output' : 'draft_output';
+  const done = shots.filter(s => s[outKey]).length;
+  const paused = LAST_STATUS && LAST_STATUS.paused;
+  sbEl('sbRunTitle').textContent = paused
+    ? `Paused · ${done} of ${shots.length} done`
+    : (active ? `Shot ${active.n} of ${shots.length}` : `${done} of ${shots.length} done`);
+  let sub = '';
+  if (active) sub = `S${String(active.n).padStart(2, '0')} · ${snippet(active.prompt, 40)}`;
+  // The remaining time is a SERVER number. /status.eta_sec is the sum of
+  // per-job ETAs and is trustworthy when every queued job is this film's.
+  const q = (LAST_STATUS && LAST_STATUS.queue) || [];
+  const allMine = q.length && q.every(j => { const t = _sbTagOf(j); return t && t.id === SB.id; });
+  if (allMine && LAST_STATUS.eta_sec) sub += ` · ${sbFmtWall(LAST_STATUS.eta_sec)} left`;
+  sbEl('sbRunSub').textContent = sub;
+  sbEl('sbPauseBtn').textContent = paused ? 'Resume' : 'Pause';
+  sbEl('sbRunDots').innerHTML = shots.map(s => {
+    const cls = s[outKey] ? 'is-done'
+              : s.status === 'failed' ? 'is-failed'
+              : s.status === 'rendering' ? 'is-running'
+              : s.status === 'skipped' ? 'is-cut' : '';
+    return `<button type="button" class="sb-dot ${cls}" onclick="sbScrollToShot(${s.n})"
+      title="S${String(s.n).padStart(2, '0')} · ${escapeHtml(snippet(s.prompt, 40))}"
+      aria-label="Shot ${s.n}"></button>`;
+  }).join('');
+  // Designed now, empty today: fill from the server's preview_url the day one
+  // exists. No layout shift either way — the box is always the same size.
+  const pv = ((cur || {}).progress || {}).preview_url;
+  sbEl('sbRunThumb').innerHTML = pv
+    ? `<img src="${escapeHtml(pv)}?t=${Date.now()}" alt="">`
+    : `<svg width="26" height="26" viewBox="0 0 256 256" style="opacity:.18" aria-hidden="true"><use href="#ph-film-slate"/></svg>`;
+}
+
+function _sbTagOf(job) {
+  const m = /^sb:([^#]+)#(\d+)$/.exec(((job || {}).params || {}).session_tag || '');
+  return m ? { id: m[1], n: Number(m[2]) } : null;
+}
+function sbScrollToShot(n) {
+  const el = document.querySelector(`.sb-shot[data-n="${n}"]`);
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+function sbOpenShotClip(n) {
+  const s = (((SB.payload || {}).board) || {}).shots.find(x => x.n === n);
+  const clip = s && (s.final_output || s.draft_output);
+  if (!clip) return;
+  if (SB.stageMode === 'list') SB.stageMode = 'auto';
+  sbSyncStage();
+  selectOutput(clip);
+}
+
+// ---- editing ---------------------------------------------------------------
+function sbShotById(n) {
+  return (((SB.payload || {}).board) || {}).shots.find(s => s.n === n);
+}
+
+// Every edit patches the board client-side then POSTs it. The server
+// re-validates, re-injects triggers, renumbers and returns a fresh estimate —
+// there is NO client-side validation at all, which is what stops the panel's
+// copy from drifting away from storyboard.py.
+function sbQueueSave(immediate) {
+  if (SB.saveTimer) clearTimeout(SB.saveTimer);
+  SB.saveTimer = setTimeout(() => { SB.saveTimer = null; sbFlushSave(); },
+                            immediate ? 0 : 600);
+}
+
+// While a save is in flight the user can keep typing, and the reply carries the
+// board as it was when we SENT it. Replacing SB.payload with that reply would
+// silently roll those keystrokes back — the same class of bug as the tick
+// clobbering the textarea. So: whatever is in a focused editor right now is the
+// truth, and it is re-applied over the reply (and re-saved).
+function sbAdoptLiveEdits(payload) {
+  let dirty = false;
+  document.querySelectorAll('#sbShots .sb-shot').forEach(li => {
+    const n = Number(li.dataset.n);
+    const shot = (payload.board.shots || []).find(x => x.n === n);
+    if (!shot) return;
+    const box = li.querySelector('textarea[data-act="prompt"]');
+    if (box && document.activeElement === box && box.value !== shot.prompt) {
+      shot.prompt = box.value; dirty = true;
+    }
+    const note = li.querySelector('textarea[data-act="note"]');
+    if (note && document.activeElement === note && note.value !== (shot.note || '')) {
+      shot.note = note.value; dirty = true;
+    }
+  });
+  return dirty;
+}
+
+async function sbFlushSave() {
+  if (SB.saveInFlight) { SB.saveAgain = true; return; }
+  const board = ((SB.payload || {}).board);
+  if (!board) return;
+  SB.saveInFlight = true;
+  try {
+    const r = await (await fetch('/storyboard/save', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: SB.id, board: board }),
+    })).json();
+    if (r && r.ok) {
+      SB.payload = r;
+      if (sbAdoptLiveEdits(r)) SB.saveAgain = true;
+      sbRenderPlan(r);
+    }
+  } catch (e) {
+  } finally {
+    SB.saveInFlight = false;
+    if (SB.saveAgain) { SB.saveAgain = false; sbQueueSave(true); }
+  }
+}
+
+function sbShotAction(n, act, el, ev) {
+  const board = ((SB.payload || {}).board);
+  const s = sbShotById(n);
+  if (!board || !s) return;
+  switch (act) {
+    case 'mode': {
+      const m = el.dataset.mode;
+      if (m === 'character') {
+        // Nobody cast — take the first installed character rather than saving
+        // an incoherent shot. The server injects the trigger on save.
+        if (!s.character_id) {
+          const first = ((SB.payload.characters || [])[0] || {}).id;
+          if (!first) { phosToast('No trained characters on this Mac yet.'); return; }
+          s.character_id = first;
+        }
+        s.mode = 'character';
+      } else {
+        // Text clears the cast but LEAVES THE PROMPT ALONE — deleting someone's
+        // words is never the right default.
+        delete s.character_id; delete s.trigger;
+        s.mode = 'text';
+      }
+      break;
+    }
+    case 'char': {
+      const v = el.value;
+      if (v) { s.character_id = v; s.mode = 'character'; }
+      else { delete s.character_id; delete s.trigger; s.mode = 'text'; }
+      break;
+    }
+    case 'dur': s.duration_s = Number(el.value); break;
+    case 'prompt': s.prompt = el.value; break;
+    case 'seed': s.seed = el.value === '' ? -1 : Number(el.value); break;
+    case 'seedtoggle': {
+      const wrap = el.closest('.sb-shot-head').querySelector('.sb-seedwrap');
+      if (wrap) { wrap.hidden = !wrap.hidden; if (!wrap.hidden) wrap.querySelector('.sb-seed').focus(); }
+      return;
+    }
+    case 'pass':
+      sbEl('sbQualitySection').open = true;
+      sbEl('sbQualitySection').scrollIntoView({ behavior: 'smooth', block: 'center' });
+      phosToast('Quality is set for the whole film.');
+      return;
+    case 'up': case 'down': {
+      const i = board.shots.indexOf(s);
+      const j = act === 'up' ? i - 1 : i + 1;
+      if (j < 0 || j >= board.shots.length) return;
+      board.shots.splice(j, 0, board.shots.splice(i, 1)[0]);
+      board.shots.forEach((x, k) => { x.n = k + 1; });
+      break;
+    }
+    case 'del': {
+      if (s.draft_output || s.final_output) {
+        if (!confirm(`Remove shot ${n} from the film?\n\nThe clip stays in mlx_outputs/.`)) return;
+      } else {
+        SB.lastUndo = { index: board.shots.indexOf(s), shot: JSON.parse(JSON.stringify(s)) };
+        const t = phosToast(`Shot ${n} removed.`, { kind: 'success', duration: 6000 });
+        if (t) {
+          const u = document.createElement('button');
+          u.className = 'phos-toast-undo'; u.textContent = 'Undo';
+          u.style.pointerEvents = 'auto';
+          u.onclick = () => { sbUndoDelete(); t.remove(); };
+          t.appendChild(u);
+        }
+      }
+      board.shots = board.shots.filter(x => x !== s);
+      board.shots.forEach((x, k) => { x.n = k + 1; });
+      break;
+    }
+    case 'grade': {
+      const g = (s.grade === el.dataset.g) ? null : el.dataset.g;
+      sbGrade(n, g, s.note || '');
+      return;
+    }
+    case 'note': s.note = el.value; sbGrade(n, s.grade, el.value); return;
+    case 'retry': sbRenderPass(SB.payload.pass || 'draft', [n]); return;
+    case 'cut': sbGrade(n, 'cut', s.note || ''); return;
+    default: return;
+  }
+  sbRenderPlan(SB.payload);
+  sbQueueSave(act !== 'prompt');
+}
+
+function sbUndoDelete() {
+  const board = ((SB.payload || {}).board);
+  if (!board || !SB.lastUndo) return;
+  board.shots.splice(SB.lastUndo.index, 0, SB.lastUndo.shot);
+  board.shots.forEach((x, k) => { x.n = k + 1; });
+  SB.lastUndo = null;
+  sbRenderPlan(SB.payload);
+  sbQueueSave(true);
+}
+
+function sbAddShot() {
+  const board = ((SB.payload || {}).board);
+  if (!board) return;
+  // Follow the film's own rule rather than hardcoding LTX: in an Auto film on a
+  // machine with the H3 pack, an uncast shot belongs on H3 like every other
+  // uncast shot — otherwise the card contradicts the note printed above it.
+  const em = (SB.payload || {}).engine_mode || 'auto';
+  const eng = !((SB.payload || {}).h3_available) ? 'ltx' : (em === 'ltx' ? 'ltx' : 'h3');
+  board.shots.push({ n: board.shots.length + 1, mode: 'text', engine: eng,
+                     prompt: '', duration_s: 5, seed: -1, refs: [], status: 'pending' });
+  sbRenderPlan(SB.payload);
+  sbQueueSave(true);
+  const last = document.querySelector('.sb-shot:last-child .sb-shot-prompt');
+  if (last) last.focus();
+}
+
+function sbTitleSave() {
+  const board = ((SB.payload || {}).board);
+  if (!board) return;
+  board.title = sbEl('sbTitle').value;
+  sbQueueSave(true);
+}
+
+async function sbGrade(n, grade, note) {
+  const fd = new URLSearchParams();
+  fd.set('id', SB.id); fd.set('n', String(n));
+  if (grade) fd.set('grade', grade);
+  fd.set('note', note || '');
+  try {
+    const r = await (await fetch('/storyboard/grade', { method: 'POST', body: fd })).json();
+    if (r && r.ok) { SB.payload = r; sbRenderPlan(r); }
+  } catch (e) {}
+}
+
+function sbFixError(fix, n, code) {
+  const board = ((SB.payload || {}).board);
+  if (!board) return;
+  const s = n ? sbShotById(n) : null;
+  if (fix === 'add') return sbAddShot();
+  if (fix === 'renumber') {
+    board.shots.forEach((x, k) => { x.n = k + 1; });
+  } else if (fix === 'delete' && n) {
+    board.shots.splice(n - 1, 1);
+    board.shots.forEach((x, k) => { x.n = k + 1; });
+  } else if (fix === 'text' && s) {
+    s.mode = 'text'; delete s.character_id; delete s.trigger; s.refs = [];
+  } else if (fix === 'focus' && n) {
+    const el = document.querySelector(`.sb-shot[data-n="${n}"] .sb-shot-prompt`);
+    if (el) el.focus();
+    return;
+  } else if (fix === 'pickchar' && n) {
+    const el = document.querySelector(`.sb-shot[data-n="${n}"] .sb-shot-char`);
+    if (el) { el.focus(); if (el.showPicker) { try { el.showPicker(); } catch (e) {} } }
+    return;
+  } else if (fix === 'trigger' && s) {
+    // The server owns ensure_trigger(); a save with the character still set is
+    // all it takes, and the canonical text comes back in the reply.
+    sbQueueSave(true);
+    return;
+  } else if (fix === 'dur5' && s) {
+    s.duration_s = 5;
+  } else if (fix === 'clearrefs' && s) {
+    s.refs = [];
+  } else if (fix === 'cap') {
+    ['draft', 'final'].forEach(k => {
+      const p = (board.policy || {})[k];
+      if (p && Math.max(p.width, p.height) > 1024) { p.width = 1024; p.height = 576; }
+    });
+  }
+  sbRenderPlan(SB.payload);
+  sbQueueSave(true);
+}
+
+// ---- render ----------------------------------------------------------------
+function sbRenderDrafts() {
+  const est = (SB.payload || {}).estimate || {};
+  const nshots = est.shots || 0;
+  const loads = est.pipeline_loads || 1;
+  if (!confirm(
+      `Render ${nshots} draft${nshots === 1 ? '' : 's'}?\n\n` +
+      `${sbFmtWall(est.total_secs).replace(/^about /, 'About ')} on this Mac. ` +
+      `${loads === 1 ? 'One model load, then every shot back to back.' : `${loads} model loads, grouped.`}\n` +
+      'Clips land in mlx_outputs/ and show up in your gallery like any other render.\n\n' +
+      'You can pause or stop after any shot.')) return;
+  sbRenderPass('draft', null);
+}
+
+async function sbRenderPass(passName, only) {
+  const fd = new URLSearchParams();
+  fd.set('id', SB.id); fd.set('pass', passName);
+  if (only && only.length) fd.set('only', only.join(','));
+  let r;
+  try { r = await (await fetch('/storyboard/render', { method: 'POST', body: fd })).json(); }
+  catch (e) { r = { ok: false, error: String(e) }; }
+  if (!r.ok) {
+    phosToast(r.error || 'Could not start the render.', { kind: 'danger', duration: 6000 });
+    return;
+  }
+  sbLoad(SB.id);
+  poll();
+}
+
+async function sbFinish() {
+  const shots = (((SB.payload || {}).board) || {}).shots || [];
+  const keep = shots.filter(s => s.grade === 'keep').map(s => s.n);
+  if (!keep.length) return;
+  const fd = new URLSearchParams();
+  fd.set('id', SB.id); fd.set('pass', 'final'); fd.set('only', keep.join(','));
+  let est = {};
+  try { est = ((await (await fetch('/storyboard/estimate', { method: 'POST', body: fd })).json()) || {}).estimate || {}; }
+  catch (e) {}
+  const pol = (((SB.payload || {}).board) || {}).policy || {};
+  const f = pol.final || {};
+  if (!confirm(
+      `Finish ${keep.length} shot${keep.length === 1 ? '' : 's'}?\n\n` +
+      `Delivery pass, ${f.width}×${f.height}, ${(f.quality || '').replace(/^./, c => c.toUpperCase())}. ` +
+      `${sbFmtWall(est.total_secs).replace(/^about /, 'About ')} on this Mac.\n` +
+      "Each shot re-renders at its draft's seed, so you get the take you approved — bigger.\n" +
+      'The drafts stay in your gallery.')) return;
+  sbRenderPass('final', keep);
+}
+
+async function sbRewrite() {
+  const shots = (((SB.payload || {}).board) || {}).shots || [];
+  const ns = shots.filter(s => s.grade === 'reroll').map(s => s.n);
+  if (!ns.length) return;
+  if (!confirm(
+      `Rewrite ${ns.length} shot${ns.length === 1 ? '' : 's'}?\n\n` +
+      `The planner loads again (~1 min) and rewrites just ${ns.length === 1 ? 'this one' : 'these'}, using your notes.\n` +
+      'The rest of the film is untouched. Nothing renders while it runs.')) return;
+  const fd = new URLSearchParams();
+  fd.set('id', SB.id); fd.set('ns', ns.join(','));
+  let r;
+  try { r = await (await fetch('/storyboard/replan-shots', { method: 'POST', body: fd })).json(); }
+  catch (e) { r = { ok: false, error: String(e) }; }
+  if (!r.ok) { phosToast(r.error || 'Could not start the rewrite.', { kind: 'danger', duration: 6000 }); return; }
+  sbShow('planning'); sbSetPlanningStage('load'); sbLoad(SB.id);
+}
+
+function sbStopShot() { api('/stop', 'POST').then(poll); }
+
+async function sbStopFilm() {
+  const shots = (((SB.payload || {}).board) || {}).shots || [];
+  const waiting = shots.filter(s => s.status === 'queued').length;
+  if (!confirm('Stop this storyboard?\n\n' +
+      `The shot that's rendering will finish. The ${waiting} shot${waiting === 1 ? '' : 's'} still waiting ${waiting === 1 ? 'is' : 'are'} removed from the queue.\n` +
+      'Everything already rendered stays.')) return;
+  const fd = new URLSearchParams(); fd.set('id', SB.id);
+  try { await fetch('/storyboard/stop', { method: 'POST', body: fd }); } catch (e) {}
+  sbLoad(SB.id); poll();
+}
+
+async function sbExport() {
+  const fd = new URLSearchParams(); fd.set('id', SB.id);
+  let r;
+  try { r = await (await fetch('/storyboard/export', { method: 'POST', body: fd })).json(); }
+  catch (e) { r = { ok: false, error: String(e) }; }
+  if (!r.ok) { phosToast(r.error || 'Export failed.', { kind: 'danger' }); return; }
+  phosToast(`Exported ${r.files.length} clips + a shot list to ${r.dir}`,
+            { kind: 'success', duration: 6000 });
+  const btn = sbEl('sbExportBtn');
+  const prev = btn.textContent;
+  btn.textContent = 'Show in Finder';
+  btn.onclick = () => fetch('/storyboard/reveal', { method: 'POST', body: fd });
+  setTimeout(() => { btn.textContent = prev; btn.onclick = sbExport; }, 10000);
+}
+
+// ---- board lists -----------------------------------------------------------
+function sbBoardChip(b) {
+  if (b.planning) return 'planning';
+  if (b.running) return 'rendering';
+  if (b.failed) return `${b.failed} failed`;
+  if (!b.done) return 'plan only';
+  if (b.done >= b.shots) return 'drafts done';
+  // Partway and idle — stopped, or one shot retried. Saying "rendering" here
+  // would be the chip claiming something the machine isn't doing.
+  return `${b.done} of ${b.shots}`;
+}
+function sbRenderBoardLists() {
+  const rows = SB.boards.map(b => `
+    <li data-id="${escapeHtml(b.id)}" class="${b.running || b.planning ? 'is-live' : ''}"
+        onclick="sbOpen('${escapeHtml(b.id)}')">
+      <span class="ttl">${escapeHtml(b.title || 'Untitled film')}</span>
+      <span class="params">${b.shots} shots · ${b.done} rendered</span>
+      <span class="badge">${escapeHtml(sbBoardChip(b))}</span>
+      <button title="Delete this storyboard" onclick="event.stopPropagation();sbDeleteBoard('${escapeHtml(b.id)}','${escapeHtml((b.title || '').replace(/'/g, ''))}')"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>
+    </li>`).join('');
+  const full = sbEl('sbBoardList');
+  if (full) full.innerHTML = rows || '<li class="empty-state"><span></span><span>No storyboards yet</span><span></span><span></span></li>';
+  const mini = sbEl('sbBoardListMini');
+  if (mini) mini.innerHTML = rows;
+}
+async function sbDeleteBoard(id, title) {
+  if (!confirm(`Delete "${title || 'this storyboard'}"?\n\nDeletes the plan. The clips it already rendered stay in mlx_outputs/.`)) return;
+  const fd = new URLSearchParams(); fd.set('id', id);
+  const r = await (await fetch('/storyboard/delete', { method: 'POST', body: fd })).json();
+  if (!r.ok) { phosToast(r.error || 'Could not delete.', { kind: 'danger' }); return; }
+  if (SB.id === id) { SB.id = ''; SB.payload = null; try { localStorage.removeItem('phos_sb_open'); } catch (e) {} }
+  await sbRefreshBoards();
+  sbShow(SB.boards.length ? 'list' : 'empty');
+}
+
+// ---- shared state: pull a normal generation INTO a film ---------------------
+async function sbAddActiveToBoard(chosen) {
+  if (!activePath) return;
+  const sel = sbEl('sbAddSelect');
+  if (!chosen && SB.boards.length > 1 && sel && sel.style.display === 'none') {
+    sel.innerHTML = SB.boards.map(b =>
+      `<option value="${escapeHtml(b.id)}">${escapeHtml(b.title || 'Untitled film')}</option>`).join('')
+      + '<option value="new">— new storyboard —</option>';
+    sel.style.display = '';
+    return;
+  }
+  const id = chosen || (SB.boards.length === 1 ? SB.boards[0].id : (SB.boards[0] || {}).id) || 'new';
+  if (sel) sel.style.display = 'none';
+  const fd = new URLSearchParams();
+  fd.set('id', id); fd.set('path', activePath);
+  let r;
+  try { r = await (await fetch('/storyboard/add-shot', { method: 'POST', body: fd })).json(); }
+  catch (e) { r = { ok: false, error: String(e) }; }
+  if (!r.ok) { phosToast(r.error || 'Could not add the clip.', { kind: 'danger' }); return; }
+  phosToast(`Added to "${r.title || 'the film'}" as shot ${r.n}.`, { kind: 'success' });
+  _flashActionDone('sbAddBtn', 'Added');
+  sbRefreshBoards();
+}
+
+// One badge, one click, no new surface: a gallery card that is a shot of a film
+// opens that film.
+function sbOpenFromClip(id) {
+  workflowSwitch('storyboard');
+  setTimeout(() => sbOpen(id), 30);
+}
+
+// ---- the one cross-tab hook, called at the end of poll() -------------------
+function sbPollHook(s) {
+  SB.boards = s.storyboards || [];
+  const live = SB.boards.filter(b => b.running);
+  const count = sbEl('sbTabCount');
+  if (count) {
+    if (live.length) {
+      const b = live[0];
+      count.hidden = false;
+      count.textContent = `${b.done}/${b.shots}`;
+    } else { count.hidden = true; count.textContent = ''; }
+  }
+  const add = sbEl('sbAddBtn');
+  if (add) add.style.display = SB.boards.length ? '' : 'none';
+  // Plan film is blocked while the worker is busy — constraint 1, made visible.
+  const btn = sbEl('sbPlanBtn');
+  if (btn && btn.dataset.busy !== '1') {
+    const busy = !!s.running || !!(s.queue || []).length;
+    const empty = !((sbEl('sbConcept') || {}).value || '').trim();
+    btn.disabled = busy || empty;
+    btn.title = busy ? 'The renderer is using the memory. Planning can start when the queue is empty.'
+              : empty ? 'Write a couple of sentences about the film first.' : '';
+  }
+  if (document.body.dataset.workflow === 'storyboard' && SB.id) sbRenderRunBar(SB.payload || {});
+}
+
+// ---- wiring ----------------------------------------------------------------
+document.addEventListener('click', (ev) => {
+  const chip = ev.target.closest && ev.target.closest('#sbLengthGroup .q-chip');
+  if (chip) { sbSetShots(Number(chip.dataset.sbShots)); return; }
+  const eng = ev.target.closest && ev.target.closest('#sbEngineGroup [data-sb-engine]');
+  if (eng) { sbSetEngineMode(eng.dataset.sbEngine); return; }
+  const reng = ev.target.closest && ev.target.closest('#sbReplanEngineGroup [data-sb-engine]');
+  if (reng) {
+    const h3 = sbH3Installed();
+    if (reng.dataset.sbEngine === 'h3' && !h3.available) { sbSetEngineMode('h3'); return; }
+    _sbReplanEngineMode = reng.dataset.sbEngine;
+    sbRenderReplanEnginePicker();
+    return;
+  }
+  const q = ev.target.closest && ev.target.closest('#sbDraftQuality .pill-btn, #sbFinalQuality .pill-btn');
+  if (q) {
+    const board = ((SB.payload || {}).board);
+    if (!board) return;
+    const which = q.closest('#sbDraftQuality') ? 'draft' : 'final';
+    const table = { quick: [640, 480], balanced: [768, 432], standard: [1024, 576], high: [1024, 576] };
+    const dims = table[q.dataset.q] || [1024, 576];
+    board.policy = board.policy || {};
+    board.policy[which] = Object.assign({}, board.policy[which],
+      { quality: q.dataset.q, width: dims[0], height: dims[1] });
+    sbSaveSetting(which === 'draft' ? 'storyboard_draft_quality' : 'storyboard_final_quality', q.dataset.q);
+    sbRenderPlan(SB.payload);
+    sbQueueSave(true);
+    return;
+  }
+  const act = ev.target.closest && ev.target.closest('#sbShots [data-act]');
+  if (act) {
+    const li = act.closest('.sb-shot');
+    if (li) sbShotAction(Number(li.dataset.n), act.dataset.act, act, ev);
+    return;
+  }
+  const seg = ev.target.closest && ev.target.closest('.sb-runseg');
+  if (seg) {
+    const ns = (seg.dataset.shots || '').split(',');
+    document.querySelectorAll('.sb-shot').forEach(el =>
+      el.classList.toggle('is-lit', ns.indexOf(el.dataset.n) !== -1));
+  }
+});
+document.addEventListener('mouseover', (ev) => {
+  const seg = ev.target.closest && ev.target.closest('.sb-runseg');
+  if (!seg) return;
+  const ns = (seg.dataset.shots || '').split(',');
+  document.querySelectorAll('.sb-shot').forEach(el =>
+    el.classList.toggle('is-lit', ns.indexOf(el.dataset.n) !== -1));
+});
+document.addEventListener('mouseout', (ev) => {
+  if (ev.target.closest && ev.target.closest('.sb-runseg'))
+    document.querySelectorAll('.sb-shot.is-lit').forEach(el => el.classList.remove('is-lit'));
+});
+document.addEventListener('change', (ev) => {
+  const el = ev.target.closest && ev.target.closest('#sbShots [data-act]');
+  if (!el) return;
+  const li = el.closest('.sb-shot');
+  if (li) sbShotAction(Number(li.dataset.n), el.dataset.act, el, ev);
+});
+// Leaving a card is the moment the guard lifts — repaint straight away rather
+// than leaving the user looking at a stale card for up to 2 s.
+document.addEventListener('focusout', (ev) => {
+  if (!ev.target.closest || !ev.target.closest('#sbShots')) return;
+  setTimeout(() => {
+    if (sbTypingInShots() || !SB.payload) return;
+    if (document.body.dataset.workflow !== 'storyboard') return;
+    try { sbRenderPlan(SB.payload); } catch (e) {}
+  }, 60);
+});
+
+let _sbPromptTimer = null;
+document.addEventListener('input', (ev) => {
+  const el = ev.target.closest && ev.target.closest('#sbShots textarea[data-act="prompt"]');
+  if (!el) return;
+  const li = el.closest('.sb-shot');
+  const s = sbShotById(Number(li.dataset.n));
+  if (!s) return;
+  s.prompt = el.value;
+  sbAutoGrowPrompts(el);
+  if (_sbPromptTimer) clearTimeout(_sbPromptTimer);
+  _sbPromptTimer = setTimeout(() => sbQueueSave(true), 800);
+});
+// Grade keys: K / R / C with a card focused. Surfaced in the tally bar's title,
+// not as visible chrome.
+document.addEventListener('keydown', (ev) => {
+  if (document.body.dataset.workflow !== 'storyboard') return;
+  const li = document.activeElement && document.activeElement.closest
+           && document.activeElement.closest('.sb-shot');
+  if (!li || /^(INPUT|TEXTAREA|SELECT)$/.test((ev.target.tagName || ''))) return;
+  const g = { k: 'keep', r: 'reroll', c: 'cut' }[ev.key.toLowerCase()];
+  if (!g) return;
+  const n = Number(li.dataset.n);
+  const s = sbShotById(n);
+  if (!s || !(s.draft_output || s.final_output)) return;
+  ev.preventDefault();
+  sbGrade(n, s.grade === g ? null : g, s.note || '');
+});
+// Drag to reorder — ~20 lines, no library. The ↑ / ↓ buttons are the primary
+// affordance (keyboard- and touch-reachable); drag is the enhancement.
+let _sbDragN = null;
+document.addEventListener('dragstart', (ev) => {
+  const li = ev.target.closest && ev.target.closest('.sb-shot');
+  if (!li || li.getAttribute('draggable') === 'false') return;
+  _sbDragN = Number(li.dataset.n);
+  li.classList.add('is-dragging');
+  try { ev.dataTransfer.setData('text/plain', String(_sbDragN)); } catch (e) {}
+});
+document.addEventListener('dragover', (ev) => {
+  const li = ev.target.closest && ev.target.closest('.sb-shot');
+  if (!li || _sbDragN == null) return;
+  ev.preventDefault();
+  const r = li.getBoundingClientRect();
+  const after = (ev.clientY - r.top) > r.height / 2;
+  document.querySelectorAll('.sb-shot').forEach(el =>
+    el.classList.remove('sb-drop-before', 'sb-drop-after'));
+  li.classList.add(after ? 'sb-drop-after' : 'sb-drop-before');
+});
+document.addEventListener('drop', (ev) => {
+  const li = ev.target.closest && ev.target.closest('.sb-shot');
+  if (!li || _sbDragN == null) return;
+  ev.preventDefault();
+  const board = ((SB.payload || {}).board);
+  const from = board.shots.findIndex(s => s.n === _sbDragN);
+  let to = board.shots.findIndex(s => s.n === Number(li.dataset.n));
+  const r = li.getBoundingClientRect();
+  if ((ev.clientY - r.top) > r.height / 2) to += 1;
+  if (from < 0 || to < 0) return;
+  const moved = board.shots.splice(from, 1)[0];
+  board.shots.splice(to > from ? to - 1 : to, 0, moved);
+  board.shots.forEach((x, k) => { x.n = k + 1; });
+  sbRenderPlan(SB.payload);
+  sbQueueSave(true);
+});
+document.addEventListener('dragend', () => {
+  _sbDragN = null;
+  document.querySelectorAll('.sb-shot').forEach(el =>
+    el.classList.remove('is-dragging', 'sb-drop-before', 'sb-drop-after'));
+});
+document.getElementById('sbStyle') && document.getElementById('sbStyle')
+  .addEventListener('input', () => {});
+
 function workflowSwitch(name) {
   // 2026-05-17 — Characters is no longer its own top-level tab. The
   // chip strip is integrated into Manual (T2V). If we get a stale
@@ -42778,6 +47683,7 @@ function workflowSwitch(name) {
   const studio = document.getElementById('studioSection');
   const train = document.getElementById('trainSection');
   const audioTab = document.getElementById('audioSectionTab');
+  const sbTab = document.getElementById('sbSectionTab');
   const characters = document.getElementById('charactersSection');  // dead HTML; hide defensively
   // Set body data attribute so CSS can switch the layout per workflow.
   document.body.setAttribute('data-workflow', name);
@@ -42785,8 +47691,22 @@ function workflowSwitch(name) {
   if (studio) studio.classList.remove('show');
   if (train) train.classList.remove('show');
   if (audioTab) audioTab.style.display = 'none';
+  if (sbTab) sbTab.style.display = 'none';
   if (characters) characters.classList.remove('show');
-  if (name === 'studio') {
+  // The board poller is the Storyboard tab's only timer and it stops on exit —
+  // no new polling loop runs while the tab is closed.
+  if (name !== 'storyboard') {
+    if (typeof sbTeardown === 'function') sbTeardown();
+    document.body.classList.remove('sb-full');
+  }
+  if (name === 'storyboard') {
+    // Storyboard is a layer ABOVE the video modes, not one of them: it submits
+    // a brief to a planner and its output is a plan, not a clip. Hence a
+    // workflow tab rather than a 6th chip in #modeGroup.
+    if (manual) manual.style.display = 'none';
+    if (sbTab) sbTab.style.display = 'block';
+    if (typeof sbInit === 'function') sbInit();
+  } else if (name === 'studio') {
     // Studio is its own top-level tab now (was a mode chip inside
     // Manual). The setMode('image') logic still wires up the studio
     // pane + portals the LoRA picker into the studio composer; just
@@ -42837,7 +47757,10 @@ try {
   // 2026-05-17 — Characters tab removed; 'characters' now snaps to
   // 'manual' (workflowSwitch handles the alias). 'studio' is new.
   // 2026-05-18 — 'audio' is the Audio → Video workflow tab.
-  if (saved === 'studio' || saved === 'train' || saved === 'characters' || saved === 'audio') {
+  // 2026-08-11 — 'storyboard' is the plan-a-film workflow tab. It MUST be in
+  // this list or the tab simply never restores across a reload.
+  if (saved === 'studio' || saved === 'train' || saved === 'characters' ||
+      saved === 'audio' || saved === 'storyboard') {
     workflowSwitch(saved);
   }
   // Clear any stale agent-fullscreen flag from the removed chat surface.
@@ -42937,6 +47860,7 @@ if __name__ == "__main__":
     # BEFORE worker_loop starts, or the resumed job races an orphan that is
     # still holding 40 GiB of the same GPU.
     reap_orphan_subprocesses()
+    _sb_boot_reconcile()
     load_hidden()
     load_queue()
     threading.Thread(target=worker_loop, daemon=True).start()
@@ -42952,8 +47876,10 @@ if __name__ == "__main__":
     # Anonymous usage analytics — one app_boot event plus any optional-pack
     # transitions since the last boot, then nothing until a job finishes.
     # Deliberately here in __main__ and not at import time, so `import
-    # mlx_ltx_panel` from a script or a test never emits anything. Inert
-    # unless a PostHog key is configured; see the analytics section above.
+    # mlx_ltx_panel` from a script or a test never emits anything. A stock
+    # install DOES report (the project key ships); the Settings toggle and
+    # PHOSPHENE_ANALYTICS_DISABLED are the off switches. See the analytics
+    # section above and docs/ANALYTICS.md.
     _analytics_boot()
     # Pre-flight: bind in a try/except so a busy port surfaces an actionable
     # one-liner instead of a 6-frame Python traceback. The bare OSError

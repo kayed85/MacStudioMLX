@@ -32,11 +32,11 @@ Key differences from the standard A2V path:
 
 </p>
 
-> **Current release: v3.0.6.** Latest on the v3.0 line — character training, Audio-to-Video, the Image Studio tab, hardware capability tiering, and a run of stabilization fixes since launch.
+> **Current release: v3.8.0.** Storyboard — describe a film in a sentence, get a shot list you can edit before anything renders. Also fixes the install failure that had been breaking every fresh install and every Update since hatchling 1.32.0 shipped. Full notes on the [releases page](https://github.com/mrbizarro/phosphene/releases).
 
 ## Overview
 
-Phosphene is a local generative-media panel for Apple Silicon. It runs [LTX-Video 2.3](https://github.com/Lightricks/LTX-Video) (MLX port) for joint audio-and-video synthesis, [Qwen-Image-Edit-2509](https://huggingface.co/Qwen/Qwen-Image-Edit-2509) (with a Lightning 4-step fast tier) for stills, and ships an in-panel LoRA training pipeline for character identity (face + optional voice from a single dataset). Everything runs on-device. No cloud, no API keys, no telemetry.
+Phosphene is a local generative-media panel for Apple Silicon. It runs [LTX-Video 2.3](https://github.com/Lightricks/LTX-Video) (MLX port) for joint audio-and-video synthesis, [Qwen-Image-Edit-2509](https://huggingface.co/Qwen/Qwen-Image-Edit-2509) (with a Lightning 4-step fast tier) for stills, and ships an in-panel LoRA training pipeline for character identity (face + optional voice from a single dataset). Everything runs on-device: no cloud, no API keys, and no prompt, image, video or filename ever leaves your Mac. It does send anonymous usage counts (version, hardware class, render stats) — every field is listed in [docs/ANALYTICS.md](docs/ANALYTICS.md), and one click in Settings turns it off.
 
 3.0 introduces in-panel character training (face + voice LoRA from one dataset), the Audio-to-Video workflow, the Image Studio tab, hardware capability tiering, and an agentic prompt enhancer driven by the same local Gemma 3 12B used for auto-captioning.
 
@@ -129,11 +129,15 @@ If you have a Hugging Face token, paste it under **Settings** in the panel. Down
 ### Manual install
 
 ```bash
-# 1. Clone Phosphene + the upstream MLX port (pinned to v0.14.8).
+# 1. Clone Phosphene + the MLX port (pinned to our LTX-2.5 fork build).
 git clone https://github.com/mrbizarro/phosphene.git
 cd phosphene
 git clone https://github.com/dgrauet/ltx-2-mlx.git ltx-2-mlx
-cd ltx-2-mlx && git checkout v0.14.8 && cd ..
+cd ltx-2-mlx
+git remote add fork https://github.com/mrbizarro/ltx-2-mlx.git
+git fetch fork feat/ltx-2.5
+git checkout 871694ddaa09c1598d663a49005a2f91ae6b4ed2
+cd ..
 
 # 2. Create the Python 3.11 venv inside ltx-2-mlx (uv-managed).
 cd ltx-2-mlx
@@ -143,7 +147,11 @@ uv venv --python 3.11 --seed env
 #    0.31.2 attenuates the LTX vocoder by 22 dB.
 ./env/bin/uv pip install --python env/bin/python \
   'mlx==0.31.1' 'mlx-lm==0.31.1' 'mlx-metal==0.31.1'
+# --build-constraints pins hatchling below 1.32, which rejects upstream's
+# `readme = "../../README.md"` and fails metadata generation. See
+# pip-build-constraints.txt.
 ./env/bin/uv pip install --python env/bin/python \
+  --build-constraints ../pip-build-constraints.txt \
   ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx ./packages/ltx-trainer
 ./env/bin/uv pip install --python env/bin/python \
   pyyaml pydantic tqdm rich
@@ -177,7 +185,7 @@ HF_HUB_ENABLE_HF_TRANSFER=1 ./ltx-2-mlx/env/bin/hf download \
 ./ltx-2-mlx/env/bin/python3.11 mlx_ltx_panel.py
 ```
 
-About the version pins: `mlx 0.31.2` attenuates the LTX vocoder by 22 dB. Stay on 0.31.1. `ltx-2-mlx` is pinned to `v0.14.8` — we track a known-good tag, never upstream `main`. `mflux 0.17.5` is the version `patch_mflux_fbcache.py` is line-targeted against.
+About the version pins: `mlx 0.31.2` attenuates the LTX vocoder by 22 dB. Stay on 0.31.1. `ltx-2-mlx` is pinned to the fork build `871694d` (`mrbizarro/ltx-2-mlx`, branch `feat/ltx-2.5`) — v0.14.19 plus the LTX-2.5 port, because upstream has no 2.5 branch. We track a known-good commit, never upstream `main`; the installed packages report `0.14.19+ltx25.1` and `_LTX_EXPECTED_VERSION` must match that string exactly. `mflux 0.17.5` is the version `patch_mflux_fbcache.py` is line-targeted against. `hatchling<1.32` (in `pip-build-constraints.txt`) is a *build-time* pin: 1.32 rejects the `readme = "../../README.md"` that all three upstream packages declare, which fails the wheel build on every tag.
 
 ## Interface
 
@@ -229,7 +237,7 @@ Behavioral changes worth noting in 3.0:
 - `mlx_ltx_panel.py` is the panel HTTP server. One file, around 22k lines, with HTML, CSS, and JS inlined as the page string. Worker thread plus helper subprocess management plus capability tier detection.
 - `mlx_warm_helper.py` is the long-running inference subprocess. Holds T2V, I2V, Extend, HQ, and Keyframe pipelines. Reads job specs from stdin, emits events to stdout.
 - `image_engine.py` dispatches the Image tab. Backends `hidream`, `mflux`, `mock`. Each spawns its own subprocess with `start_new_session=True` so `/stop` kills the whole tree.
-- `patch_ltx_codec.py` applies one idempotent runtime patch: lossless H.264 output (yuv444p). As of the v0.14.8 pin the memory-frees, VAE streaming, Metal-watchdog and frame_rate patches are all native upstream.
+- `patch_ltx_codec.py` applies one idempotent runtime patch: lossless H.264 output (yuv444p). As of the v0.14.8 pin the memory-frees, VAE streaming, Metal-watchdog and frame_rate patches are all native upstream; the v0.14.19 pin keeps that shape — one edit, one line.
 - `lora_lab/` is vendored from the [`lora-lab`](https://github.com/mrbizarro/lora-lab) authoring tree. Training works out of the box; set `LTX_LORA_LAB_ROOT` to iterate against an external clone.
 - `mlx_models/` and `mlx_outputs/` both persist across Pinokio Reset via fs.link.
 
@@ -269,4 +277,8 @@ Phosphene is free and open source.
 
 ## Network note
 
-Phosphene runs locally. No telemetry. A clean production install checks GitHub every 30 minutes for an update badge, and only touches Hugging Face or CivitAI when you download models or LoRAs. Disable the update check with `PHOSPHENE_DISABLE_VERSION_CHECK=1`. The panel binds to `127.0.0.1` with no auth. It's not designed for LAN exposure or tunneling.
+Phosphene renders locally — no prompt, model input or output is ever uploaded. A clean production install makes three kinds of outbound request, and no others: it checks GitHub every 30 minutes for an update badge (disable with `PHOSPHENE_DISABLE_VERSION_CHECK=1`); it touches Hugging Face or CivitAI when you download models or LoRAs; and it sends anonymous usage counts — one event per panel start and one per finished render, carrying the panel version, a hardware class such as `M4 Max / 64 GB`, and render stats like engine, tier and a bucketed duration. Never content of any kind.
+
+That last one is **on by default and the build ships a working key**, so a fresh clone does report. Every event and field is specified in [docs/ANALYTICS.md](docs/ANALYTICS.md), mirrored in plain text to `state/usage-log.jsonl` so you can read exactly what was sent, and switched off in one click in Settings → *Anonymous usage analytics* (or with `PHOSPHENE_ANALYTICS_DISABLED=1`).
+
+The panel binds to `127.0.0.1` with no auth. It's not designed for LAN exposure or tunneling.

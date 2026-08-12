@@ -9,21 +9,34 @@ run on a machine that is mid-render without touching anything.
 
 What it is actually here to prove, in priority order:
 
-  1. NOTHING FIRES WITH NO KEY. The public tree ships ANALYTICS_KEY_DEFAULT
-     = "", and that must mean zero sockets — not "a request that fails".
+  1. THE OFF SWITCH IS THE OFF SWITCH. Since acfbdc7 the tree ships a live
+     phc_ project key, so a stock install reports by default — which makes
+     the toggle (and PHOSPHENE_ANALYTICS_DISABLED) the only thing standing
+     between a user who said no and a socket. Both must produce zero
+     sockets AND zero local-log lines. Clearing the key field is NOT an
+     opt-out and is asserted not to be mistaken for one.
   2. NOTHING LEAKS. No prompt, path, filename or media string may appear in
      any outgoing payload, including via the one free-text field
      (error_signature) and including when a caller is careless.
   3. THE SCHEMA IS THE SCHEMA. Each event's property set is asserted
-     field-by-field against docs/ANALYTICS.md, so the doc can't silently
-     drift from the code.
+     field-by-field against docs/ANALYTICS.md, and every event name the
+     panel can fire is asserted to appear in that page — app_installed
+     shipped undocumented for two releases and this is the guard for it.
   4. IT CANNOT BREAK A RENDER. Capture never raises, even on garbage input
      and even when the transport blows up.
+
+A note for whoever edits this file next: the three assertions that used to
+sit under a heading called "inert without a key" were correct until
+2026-08-09 and false afterwards, and a RED suite protects nothing. They
+were rewritten (not deleted) on 2026-08-12 to pin the posture that actually
+shipped. If a future commit changes the posture again, rewrite them again —
+deleting a guard is how the drift goes unnoticed the next time.
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -105,7 +118,10 @@ def drain(timeout: float = 5.0) -> None:
 
 
 class AnalyticsTestCase(unittest.TestCase):
-    """Common fixture: clean state dir, spy installed, analytics ON, no key."""
+    """Common fixture: clean state dir, spy installed, analytics ON, and no
+    key OVERRIDE — which is the stock-install case, since an empty
+    `analytics_key` falls back to the shipped ANALYTICS_KEY_DEFAULT.
+    Subclasses that want a predictable key on the wire set their own."""
 
     def setUp(self):
         self.spy = Spy()
@@ -133,24 +149,68 @@ class AnalyticsTestCase(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
-# 1. Inert without a key
+# 1. The shipped key, and the two things that switch it off
 # --------------------------------------------------------------------------
 
-class TestInertWithoutKey(AnalyticsTestCase):
+class TestShippedKeyAndOptOut(AnalyticsTestCase):
 
-    def test_shipped_default_key_is_empty(self):
-        """The public tree must never carry a real key."""
-        self.assertEqual(P.ANALYTICS_KEY_DEFAULT, "")
+    def test_shipped_key_is_a_write_only_project_key(self):
+        """What ships must be a phc_ PROJECT key: write-only, able to send
+        events and nothing else, which is what makes committing it to a
+        source-distributed app defensible (docs/ANALYTICS.md says exactly
+        this to users). The failure this guards is not "a key exists" — it
+        is a READ-capable personal key (phx_/phs_) reaching the tree, which
+        would hand every cloner the whole project's data."""
+        key = P.ANALYTICS_KEY_DEFAULT
+        self.assertTrue(key.startswith("phc_"),
+                        f"shipped capture key is not a phc_ project key: {key[:8]!r}...")
+        self.assertGreaterEqual(len(key), 32, "shipped key looks truncated")
+        for readable in ("phx_", "phs_"):
+            self.assertFalse(key.startswith(readable),
+                             "a READ-capable personal key must never be committed")
+        # The stock-install path: no env override, no saved override.
+        self.assertEqual(P._analytics_key(), key,
+                         "an empty analytics_key setting must fall back to the "
+                         "shipped key — it is an override field, not a switch")
 
-    def test_no_key_means_no_socket(self):
+    def test_opt_out_is_the_toggle_not_the_key(self):
+        """The whole post-acfbdc7 contract in one test, in the order a user
+        would discover it: a stock install really does send under the
+        shipped key; clearing the key field really does NOT stop that; the
+        toggle really does, for the socket and the local mirror alike."""
+        # 1. Stock install -> exactly one POST, carrying the shipped key.
         P._analytics_capture("app_boot", {"version": "3.4.1"})
         drain()
-        self.assertEqual(self.spy.calls, [],
-                         "analytics opened a socket with no key configured")
+        self.assertEqual(len(self.spy.calls), 1,
+                         "a stock install must report — the project key ships")
+        self.assertEqual(self.spy.bodies[0]["api_key"], P.ANALYTICS_KEY_DEFAULT,
+                         "the shipped key must be the one on the wire")
 
-    def test_no_key_still_writes_the_local_mirror(self):
-        """The local log is the always-on debugging view; it does not
-        depend on a PostHog key."""
+        # 2. Clearing the key field is not an opt-out, and the doc says so.
+        self.configure(analytics_key="")
+        P._analytics_capture("app_boot", {"version": "3.4.1"})
+        drain()
+        self.assertEqual(len(self.spy.calls), 2,
+                         "an empty analytics_key means 'no override', not 'off'; "
+                         "if this ever becomes an off switch, fix docs/ANALYTICS.md "
+                         "in the same commit")
+
+        # 3. The toggle is. Nothing on the wire, nothing in the mirror —
+        #    _analytics_capture() returns before it builds a payload.
+        rows_before = len(self.log_lines())
+        self.configure(analytics_enabled=False)
+        P._analytics_capture("app_boot", {"version": "3.4.1"})
+        P._analytics_render_event({"status": "done", "params": {"mode": "t2v"}})
+        drain()
+        self.assertEqual(len(self.spy.calls), 2,
+                         "opt-out must open no socket, shipped key or not")
+        self.assertEqual(len(self.log_lines()), rows_before,
+                         "opt-out must stop the local log too")
+
+    def test_every_capture_writes_the_local_mirror(self):
+        """The local log is the always-on audit view: it is written before
+        the network is touched, so the user can read back exactly what left
+        (or would have left, when the endpoint was down)."""
         P._analytics_capture("app_boot", {"version": "3.4.1"})
         drain()
         rows = self.log_lines()
@@ -158,6 +218,8 @@ class TestInertWithoutKey(AnalyticsTestCase):
         self.assertEqual(rows[0]["event"], "app_boot")
 
     def test_disabled_writes_nothing_anywhere(self):
+        """Same guarantee as above via _analytics_boot()'s three call sites,
+        with the shipped key live — this is the stock user who said no."""
         self.configure(analytics_enabled=False)
         P._analytics_capture("app_boot", {"version": "3.4.1"})
         P._analytics_render_event({"status": "done", "params": {"mode": "t2v"}})
@@ -388,10 +450,21 @@ class TestEventSchemas(AnalyticsTestCase):
         self.configure(analytics_key="phc_fake_key_for_tests")
 
     def props_of(self, event: str) -> dict:
+        """This event's own properties, with the receiver directives removed.
+
+        The $-prefixed keys are instructions to PostHog, not part of an
+        event's schema — they are asserted as a set, on every event, in
+        TestReceiverDirectives. Anything else beginning with $ is a key
+        nobody declared, so fail on it here rather than let it ride along
+        into the next schema that gets written."""
         for body in self.spy.bodies:
             if body["event"] == event:
                 p = dict(body["properties"])
-                p.pop("$process_person_profile", None)
+                for k in P._ANALYTICS_RECEIVER_DIRECTIVES:
+                    p.pop(k, None)
+                stray = sorted(k for k in p if k.startswith("$"))
+                self.assertEqual(stray, [], f"undeclared receiver key(s) on "
+                                            f"{event}: {stray}")
                 return p
         self.fail(f"no {event} event was captured")
 
@@ -428,7 +501,7 @@ class TestEventSchemas(AnalyticsTestCase):
         P._analytics_render_event({
             "status": "failed", "error": "OOM during VAE decode",
             "elapsed_sec": 61.0,
-            "params": {"mode": "i2v", "engine": "h3", "h3_tier": "5s",
+            "params": {"mode": "i2v", "engine": "h3", "h3_tier": "hq_5s",
                        "width": 1280, "height": 720, "frames": 90},
         })
         drain()
@@ -436,8 +509,37 @@ class TestEventSchemas(AnalyticsTestCase):
         self.assertEqual(set(p), {
             "engine", "mode", "tier", "duration_bucket", "resolution",
             "frames", "error_signature"})
-        self.assertEqual(p["tier"], "5s", "H3 jobs report h3_tier as tier")
+        # h3_tier is the wire format, and every legacy key still resolves to
+        # the cell it means: the quality x length refactor renamed hq_5s to
+        # standard_5s, and a job replayed from an older sidecar must land in
+        # that bucket rather than inventing one. (The fixture here used to be
+        # "5s", which is a LENGTH and was never a tier key — see
+        # test_unrecognised_h3_tier_collapses_to_unknown for where it goes.)
+        self.assertEqual(p["tier"], "standard_5s",
+                         "a legacy h3_tier must resolve to its current cell")
         self.assertEqual(p["duration_bucket"], "<2m")
+
+    def test_app_installed_fields(self):
+        """Fires once per install, ever, immediately before its first
+        app_boot. Documented in docs/ANALYTICS.md since 2026-08-12 — it had
+        been shipping and firing unnamed there, which by that page's own
+        opening rule was a bug."""
+        self.configure(analytics_install_reported=False)
+        P._analytics_boot()
+        drain()
+        p = self.props_of("app_installed")
+        self.assertEqual(set(p), {"version", "chip_family", "ram_gb"})
+        self.assertIsInstance(p["ram_gb"], int)
+        self.assertEqual([b["event"] for b in self.spy.bodies][:2],
+                         ["app_installed", "app_boot"],
+                         "app_installed must precede the first app_boot")
+        # Once ever: the flag is persisted, so a reboot never re-counts.
+        self.assertTrue(P.get_settings().get("analytics_install_reported"))
+        self.spy.calls.clear()
+        P._analytics_boot()
+        drain()
+        self.assertNotIn("app_installed", [b["event"] for b in self.spy.bodies],
+                         "app_installed re-fired on a second boot")
 
     def test_cancelled_jobs_are_not_reported(self):
         P._analytics_render_event({"status": "cancelled", "params": {"mode": "t2v"}})
@@ -489,9 +591,150 @@ class TestBucketsAndParsing(unittest.TestCase):
         got = P._analytics_chip_family()
         self.assertRegex(got, r"^(M\d+( (Pro|Max|Ultra))?|unknown|non-apple-silicon)$")
 
+    def test_unrecognised_h3_tier_collapses_to_unknown(self):
+        """Closed vocabulary: a tier key the panel does not recognise becomes
+        "unknown" rather than riding through as free text. Every string we
+        transmit has to be drawn from a set defined in the source, or the
+        "no free text" promise is only true of the fields we remembered."""
+        for bogus in ("5s", "not_a_tier_at_all", "", None):
+            self.assertEqual(
+                P._analytics_render_tier({"h3_tier": bogus}, "h3"), "unknown",
+                f"unrecognised h3_tier {bogus!r} escaped the vocabulary")
+
+
+class TestDocumentationParity(unittest.TestCase):
+    """docs/ANALYTICS.md opens with "If the panel ever sends something that
+    isn't listed here, that's a bug." app_installed was exactly that bug, for
+    two releases, because nothing checked. This makes the promise executable:
+    every event name the panel can capture must be named on that page."""
+
+    def test_every_event_the_panel_fires_is_documented(self):
+        src = (REPO / "mlx_ltx_panel.py").read_text(encoding="utf-8")
+        fired = set(re.findall(r'_analytics_capture\(\s*"([a-z_]+)"', src))
+        self.assertTrue(fired, "no literal event names found — did the call "
+                               "sites stop passing string literals?")
+        doc = (REPO / "docs" / "ANALYTICS.md").read_text(encoding="utf-8")
+        for name in sorted(fired):
+            self.assertIn(f"`{name}`", doc,
+                          f"{name} is captured by the panel but docs/"
+                          f"ANALYTICS.md never names it")
+
 
 # --------------------------------------------------------------------------
-# 5. Local aggregation + the /stats/usage payload
+# 5. Receiver directives — the things every event tells PostHog NOT to do
+# --------------------------------------------------------------------------
+
+class TestReceiverDirectives(AnalyticsTestCase):
+    """The panel sends no location field. It also has to stop the receiver
+    deriving one, which is a different promise and needs its own guard.
+
+    Three $-prefixed keys ride on every payload: no person profile, no GeoIP
+    enrichment, and an $ip the panel supplies itself so the connecting
+    address is never written onto the stored event. All three are attached
+    centrally in _analytics_post — which is exactly why this fires EVERY
+    event type rather than a representative one. A refactor that built a
+    payload anywhere else would drop all three at once, silently, and
+    nothing else in this suite would notice."""
+
+    def setUp(self):
+        super().setUp()
+        self.configure(analytics_key="phc_fake_key_for_tests",
+                       analytics_install_reported=False)
+
+    def fire_every_event(self) -> dict[str, dict]:
+        """One of each event the panel can emit → {event: properties}."""
+        packs = dict(P._analytics_pack_state())
+        self.configure(analytics_last_packs=dict(packs, h3=not packs["h3"]))
+        P._analytics_boot()      # app_installed + app_boot + pack_state_change
+        P._analytics_render_event({
+            "status": "done", "elapsed_sec": 120.0,
+            "params": {"mode": "t2v", "engine": "ltx", "quality": "standard",
+                       "width": 1216, "height": 704, "frames": 121}})
+        P._analytics_render_event({
+            "status": "failed", "error": "OOM during VAE decode",
+            "elapsed_sec": 30.0,
+            "params": {"mode": "i2v", "engine": "h3", "h3_tier": "hq_5s"}})
+        drain()
+        seen = {b["event"]: b["properties"] for b in self.spy.bodies}
+        # Coverage, read off the source rather than trusted: if someone adds a
+        # sixth event type, this test must be taught to fire it instead of
+        # quietly checking five out of six.
+        src = (REPO / "mlx_ltx_panel.py").read_text(encoding="utf-8")
+        firable = set(re.findall(r'_analytics_capture\(\s*"([a-z_]+)"', src))
+        self.assertEqual(sorted(firable - set(seen)), [],
+                         "an event type exists that this test never fires, so "
+                         "its payload goes unchecked — add it above")
+        return seen
+
+    def test_every_event_carries_every_receiver_directive(self):
+        for event, props in self.fire_every_event().items():
+            self.assertEqual(
+                {k: props.get(k) for k in P._ANALYTICS_RECEIVER_DIRECTIVES},
+                dict(P._ANALYTICS_RECEIVER_DIRECTIVES),
+                f"{event} reached the wire without the directives intact")
+            self.assertIs(props["$geoip_disable"], True,
+                          f"{event} would be geolocated by the receiver")
+            self.assertIs(props["$process_person_profile"], False,
+                          f"{event} would build a person profile")
+
+    def test_no_location_property_is_sent_or_invited(self):
+        """We add no location field, and $geoip_disable is the only $geoip_*
+        key that may appear — everything else in that namespace is something
+        the receiver would have derived."""
+        for event, props in self.fire_every_event().items():
+            geo = sorted(k for k in props
+                         if k.startswith("$geoip_") and k != "$geoip_disable")
+            self.assertEqual(geo, [], f"{event} carried location data: {geo}")
+        raw = self.spy.raw().lower()
+        for word in ("country", "city", "latitude", "longitude", "timezone",
+                     "time_zone", "subdivision", "locale", "continent"):
+            self.assertNotIn(word, raw, f"a payload mentions {word!r}")
+
+    def test_the_ip_placeholder_is_truthy_and_not_a_spoof_trigger(self):
+        """Both ways of writing this so that it does nothing.
+
+        PostHog's ingest fills properties.$ip from the socket only when the
+        event did not bring one — `if (!properties['$ip'] && event.ip)`. Any
+        falsy value (None, "", 0) is therefore not suppression, it is the
+        default with extra steps, and the real address lands on the event
+        anyway. Separately, the GeoIP transformation rewrites 127.0.0.1 and
+        192.168.* to a real address in Sweden as a local-dev convenience, so
+        a loopback placeholder would manufacture a location the day the
+        disable flag got dropped. Hence: truthy, and neither of those."""
+        ip = P.ANALYTICS_IP_PLACEHOLDER
+        self.assertIsInstance(ip, str)
+        self.assertTrue(ip, "a falsy $ip is silently replaced by the real one")
+        self.assertNotEqual(ip, "127.0.0.1")
+        self.assertFalse(ip.startswith("192.168."))
+        P._analytics_capture("app_boot", {"version": "3.7.0"})
+        drain()
+        self.assertEqual(self.spy.bodies[0]["properties"]["$ip"], ip,
+                         "the placeholder never reached the wire")
+
+    def test_a_call_site_cannot_override_a_directive(self):
+        """The directives are spread last for this reason. A props dict is
+        built from job params in places this module does not own."""
+        P._analytics_capture("app_boot", {"$geoip_disable": False,
+                                          "$ip": "203.0.113.7",
+                                          "$process_person_profile": True})
+        drain()
+        props = self.spy.bodies[0]["properties"]
+        self.assertIs(props["$geoip_disable"], True)
+        self.assertIs(props["$process_person_profile"], False)
+        self.assertEqual(props["$ip"], P.ANALYTICS_IP_PLACEHOLDER)
+
+    def test_the_local_mirror_records_only_our_own_properties(self):
+        """The directives are transport, not data: state/usage-log.jsonl is
+        the user's readable copy of what the panel MEANT, and padding it with
+        receiver plumbing would make the page harder to check, not easier."""
+        P._analytics_capture("app_boot", {"version": "3.7.0"})
+        drain()
+        props = self.log_lines()[0]["props"]
+        self.assertEqual(sorted(k for k in props if k.startswith("$")), [])
+
+
+# --------------------------------------------------------------------------
+# 6. Local aggregation + the /stats/usage payload
 # --------------------------------------------------------------------------
 
 class TestUsageReport(AnalyticsTestCase):

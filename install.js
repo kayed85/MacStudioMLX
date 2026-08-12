@@ -106,19 +106,37 @@ module.exports = {
       next: null
     },
 
-    // ---- ltx-2-mlx version: PIN to v0.14.8 (2026-06-01 catch-up). dgrauet asked on 2026-05-12
-    //      to lock onto a tag because he's about to push breaking changes
+    // ---- ltx-2-mlx version: PIN to v0.14.19 (2026-08-11 catch-up). dgrauet asked on
+    //      2026-05-12 to lock onto a tag because he pushes breaking changes
     //      upstream to sync with the official Lightricks repo. Without a
     //      tag pin, every fresh install (and every Update) would pull the
     //      next breaking push and Phosphene would fail to start.
     //
-    //      v0.14.8 is the pinned tag against which the current panel +
-    //      helper + patch_ltx_codec.py were validated (2026-06-01 catch-up
-    //      from v0.14.0). The bump pulled dgrauet's native fixes —
-    //      `_pre_denoise_flush` (the Metal-watchdog fix that resolves the
-    //      I2V "mosaic" on memory-pressured Macs, #17), budget-aware VAE
-    //      decode tiling, and first-class `frame_rate` — which let us DROP
-    //      6 of our 7 runtime patches (only the lossless-codec patch remains).
+    //      v0.14.19 is the pinned tag against which the current panel +
+    //      helper + patch_ltx_codec.py are validated (2026-08-11 catch-up
+    //      from v0.14.8, 11 releases). What it brings, in the order it
+    //      matters to us:
+    //        - 0.14.11 — the AV cross-attention gate is finally read FROM the
+    //          checkpoint (`av_ca_timestep_scale_multiplier` 1000, not the
+    //          dataclass default 1). Audio/dialogue weighting changes for
+    //          every render, toward upstream parity. This also lands
+    //          `LTXModelConfig.from_checkpoint_dir()` — a metadata-driven
+    //          config path we need for any second model generation.
+    //        - 0.14.15 — `frame_rate` forwarded at the A2V/lipdub call sites
+    //          (our `_install_a2v_frame_rate_patch` shim is now inert there),
+    //          and muxed video is no longer truncated to the shortest stream.
+    //        - 0.14.16 — quantized transformers load at ANY group_size, not
+    //          just 64; ic-lora dev mode fuses the distilled LoRA correctly.
+    //        - 0.14.19 — macOS GPU-watchdog kills are explained instead of
+    //          dying cryptically; the DiT is freed before VAE decode in
+    //          low-memory mode; the Gemma encoder stops widening a stricter
+    //          cache limit.
+    //      Weight layout is UNCHANGED by this bump. 0.14.13+ prefers a
+    //      versioned `transformer-distilled-*.safetensors` when one exists
+    //      and falls back to the unversioned name — our shipped model dirs
+    //      have no `-1.1` files (update.js trims them), so resolution is
+    //      byte-identical to v0.14.8. No re-download, no manifest change.
+    //
     //      STAY PINNED here: do not auto-track upstream main. Tag-bumps are a
     //      deliberate decision — read his release notes, smoke-test the full
     //      modality matrix on dev, bump `_LTX_EXPECTED_VERSION` in
@@ -126,13 +144,36 @@ module.exports = {
     //
     //      Idempotent — works on a fresh clone (already on the cloned
     //      branch's tip) AND on a re-install where the clone exists.
+    //      2026-08-12 — THE PIN IS NOW A FORK BUILD, NOT AN UPSTREAM TAG.
+    //      Vendored: mrbizarro/ltx-2-mlx `feat/ltx-2.5` @ 871694d, which is
+    //      v0.14.19 (1192051) plus the LTX-2.5 port — keyframe pos-emb, the
+    //      vendored Gemma 4 tower, the Euler-ancestral sampler, the duration
+    //      head. dgrauet has no 2.5 branch; if he ports it we drop ours and
+    //      go back to a tag.
+    //
+    //      This is what lets LTX-2.5 render THROUGH the panel. v0.14.19 could
+    //      register the 2.5 packs but never load them: it does not build
+    //      keyframes_abs_pos_embedding and cannot construct a Gemma 4 tower.
+    //
+    //      Every 2.5 flag defaults to its 2.3 value, so an unversioned
+    //      checkpoint builds exactly what it built before — proven here by
+    //      802/22 on the vendored suite, a byte-identical job-dict capture
+    //      across 18 form shapes, and a real 2.3 draft render.
+    //
+    //      The packages report `0.14.19+ltx25.1`, and `_LTX_EXPECTED_VERSION`
+    //      in mlx_warm_helper.py must equal that string. The local segment is
+    //      the ONLY thing distinguishing this tree from upstream v0.14.19 at
+    //      runtime — the release segment is deliberately unchanged. Move the
+    //      two together.
     {
       method: "shell.run",
       params: {
         path: "ltx-2-mlx",
         message: [
           "git fetch --tags origin",
-          "git checkout v0.14.8",
+          "git remote get-url fork > /dev/null 2>&1 || git remote add fork https://github.com/mrbizarro/ltx-2-mlx.git",
+          "git fetch fork feat/ltx-2.5",
+          "git checkout 871694ddaa09c1598d663a49005a2f91ae6b4ed2",
           "git rev-parse --short HEAD"
         ]
       }
@@ -290,7 +331,17 @@ module.exports = {
           // the venv, the trainer subprocess fails at `import yaml` because
           // pyyaml is a transitive dep of ltx-trainer (declared in its
           // pyproject). Codex pre-ship review 2026-05-18 caught this.
-          "uv pip install --python env/bin/python ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx ./packages/ltx-trainer",
+          //
+          // `--build-constraints ../pip-build-constraints.txt` pins the wheel
+          // BUILD backend (hatchling<1.32). Upstream's three pyprojects all
+          // declare `readme = "../../README.md"` — a path outside the package
+          // dir — which hatchling 1.32.0 turned into a hard error
+          // ("Readme path must be within the project directory" →
+          // metadata-generation-failed). uv resolves the build backend fresh
+          // from PyPI into an isolated env, so from the day 1.32.0 shipped
+          // this step failed for every NEW install on every pinned tag. See
+          // pip-build-constraints.txt; update.js carries the pip equivalent.
+          "uv pip install --python env/bin/python --build-constraints ../pip-build-constraints.txt ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx ./packages/ltx-trainer",
           // Auto-caption (Gemma 3 12B via mlx-vlm) needs the mlx-vlm
           // package. Pinned to 0.4.4 — caption_with_gemma.py's import
           // surface (load, generate, prompt_utils.apply_chat_template)

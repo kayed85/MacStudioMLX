@@ -52,24 +52,41 @@ module.exports = {
         ].join("\n")
       }
     },
-    // ltx-2-mlx is PINNED to v0.14.8 (2026-06-01 catch-up from v0.14.0;
+    // ltx-2-mlx is PINNED to v0.14.19 (2026-08-11 catch-up from v0.14.8;
     // dgrauet's original tag-pin request 2026-05-12 — he pushes breaking
     // changes upstream to sync with the official Lightricks repo). Update
     // no longer tracks main; it fetches tags and re-checks-out the pinned
     // tag so a previously-installed user converges to a known-good state,
     // never to a moving HEAD. The ltx-package re-install step below then
-    // force-copies the v0.14.8 source into site-packages (non-editable),
-    // so an existing user's runtime actually moves to 0.14.8 — a bare
+    // force-copies the v0.14.19 source into site-packages (non-editable),
+    // so an existing user's runtime actually moves to 0.14.19 — a bare
     // checkout alone would leave the old copy installed. To bump the pin:
     // edit BOTH install.js and update.js to the new tag, bump
     // _LTX_EXPECTED_VERSION in mlx_warm_helper.py, smoke-test on dev, push.
+    //
+    // The v0.14.19 bump needs NO model re-download. See install.js for the
+    // per-release notes; the one weight-adjacent change is that 0.14.13+
+    // prefers a versioned `transformer-distilled-*.safetensors` when one
+    // exists and falls back to the unversioned name — and the trim step at
+    // the bottom of this file removes the `-1.1` variants, so resolution
+    // lands on exactly the files v0.14.8 loaded.
+    // 2026-08-12: the pin is a FORK BUILD — mrbizarro/ltx-2-mlx
+    // `feat/ltx-2.5` @ 871694d (v0.14.19 + the LTX-2.5 port). An existing
+    // install has only dgrauet as `origin`, so Update adds the fork remote
+    // before it can check the SHA out. Both steps are idempotent: the remote
+    // is added only when absent, and re-checking-out the same SHA is a no-op.
+    // The ltx-package re-install step below is what actually moves the
+    // runtime — a bare checkout leaves the old copy in site-packages.
+    // See install.js for why this is a SHA and not a tag.
     {
       method: "shell.run",
       params: {
         path: "ltx-2-mlx",
         message: [
           "git fetch --tags origin",
-          "git checkout v0.14.8",
+          "git remote get-url fork > /dev/null 2>&1 || git remote add fork https://github.com/mrbizarro/ltx-2-mlx.git",
+          "git fetch fork feat/ltx-2.5",
+          "git checkout 871694ddaa09c1598d663a49005a2f91ae6b4ed2",
           "git rev-parse --short HEAD"
         ]
       }
@@ -100,11 +117,38 @@ module.exports = {
     // trainer subprocess fails at `import yaml` without pyyaml, which
     // is a transitive dep of ltx-trainer-mlx — installing the local
     // package brings it cleanly.
+    //
+    // `--build-constraints` pins the wheel BUILD backend (hatchling<1.32).
+    // All three upstream pyprojects declare `readme = "../../README.md"` — a
+    // path outside the package dir — which hatchling 1.32.0 turned into a
+    // hard error ("Readme path must be within the project directory" →
+    // metadata-generation-failed). The build runs in an isolated env that
+    // pulls the newest backend from PyPI, so from the day 1.32.0 shipped
+    // EVERY Update click died here, on every pinned tag — a moving
+    // third-party dependency breaking a frozen source tree, not a pin
+    // regression. See pip-build-constraints.txt.
+    //
+    // THIS STEP USES uv, NOT pip, AND THAT IS THE FIX. The obvious spelling
+    // is `PIP_CONSTRAINT=... ./env/bin/pip install ...`, which is what the
+    // pip docs used to recommend. It does not work on current pip: when pip
+    // installs build dependencies it now spawns that sub-install with
+    // `_PIP_IN_BUILD_IGNORE_CONSTRAINTS=1`, deliberately ignoring the
+    // environment constraint (verified against pip 26.1 and 26.2.1 — the
+    // build env resolved hatchling 1.32.0 and the install failed with the
+    // readme error anyway, with the file at both a relative and an absolute
+    // path). pip's supported spelling is the newer `--build-constraint`
+    // flag, but that flag does not exist on older pips, and this step runs
+    // on installs whose venv was seeded years apart — passing it would turn
+    // a working Update into "no such option" for them. uv takes the
+    // constraint on every version we ship with, needs no pip at all, and is
+    // already assumed present by the uv steps further down this file. It is
+    // also now literally the same mechanism install.js uses, which is the
+    // point: one lane, one failure mode.
     {
       method: "shell.run",
       params: {
         path: "ltx-2-mlx",
-        message: "./env/bin/pip install --force-reinstall --no-deps ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx ./packages/ltx-trainer"
+        message: "uv pip install --python env/bin/python --reinstall --no-deps --build-constraints ../pip-build-constraints.txt ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx ./packages/ltx-trainer"
       }
     },
     // 3.0: pyyaml + pydantic + tqdm + rich are ltx-trainer-mlx's

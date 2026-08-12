@@ -1,0 +1,42 @@
+# Build-backend constraints for the vendored ltx-2-mlx wheels.
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# `packages/ltx-{core,pipelines,trainer}*/pyproject.toml` all declare
+#   readme = "../../README.md"
+# i.e. a path OUTSIDE the package directory (they share the repo-root README).
+# hatchling accepted that for years. **hatchling 1.32.0 made it a hard error:**
+#
+#   ValueError: Readme path must be within the project directory: ../../README.md
+#   error: metadata-generation-failed
+#
+# Both installer paths build those three packages from source, and both create
+# an isolated build env that resolves the build backend fresh from PyPI — so
+# from the day 1.32.0 landed, EVERY fresh install (install.js) and EVERY
+# Update click (update.js) fails at that step, on every pinned tag. It is not
+# a pin-bump regression; it is a moving third-party dependency breaking a
+# frozen source tree.
+#
+# HOW IT IS WIRED
+# ---------------
+#   install.js  →  uv pip install --build-constraints ../pip-build-constraints.txt ...
+#   update.js   →  uv pip install --build-constraints ../pip-build-constraints.txt ...
+#
+# Both are relative to the `ltx-2-mlx` working directory those steps run in.
+#
+# NOT `PIP_CONSTRAINT=... ./env/bin/pip install ...`. That was the documented
+# trick for years, and current pip breaks it on purpose: the sub-install that
+# populates the isolated build env is spawned with
+# `_PIP_IN_BUILD_IGNORE_CONSTRAINTS=1`, so the environment constraint is
+# dropped and hatchling 1.32.0 gets resolved anyway (verified on pip 26.1 and
+# 26.2.1, relative and absolute paths alike). pip's replacement is the
+# `--build-constraint` flag, which older pips reject outright — and Update
+# runs on venvs seeded across many uv versions. uv honours the constraint on
+# all of them, so both installer paths use uv and share one failure mode.
+#
+# WHEN TO REMOVE IT
+# -----------------
+# When a pinned upstream tag stops pointing `readme` outside the package dir
+# (or hatchling relaxes the rule). Until then this stays: dropping it silently
+# re-breaks install AND update for everyone.
+hatchling<1.32
