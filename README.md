@@ -1,22 +1,3 @@
-## About this fork
-
-This fork adds audio-to-video mode for low memory pipeline.
-
-Adds A2V Distilled Pipeline (a2vid_distilled.py) in phosphene root for
-Q4-distilled audio-to-video generation. No ltx-2-mlx modifications
-required — imports from stock ltx-pipelines-mlx package.
-
-Key differences from the standard A2V path:
-- a2vid_distilled.py lives in phosphene root (not inside ltx-2-mlx)
-- mlx_warm_helper.py imports from the local a2vid_distilled module
-- Distilled path (generate_a2v_distilled) passes audio_conditioning_scale
-  (built into a2vid_distilled.py)
-- Non-distilled path (generate_a2v) omits audio_conditioning_scale
-  (upstream A2VidPipelineTwoStage does not accept it)
-- patch_ltx_codec.py is unchanged (codec patch only)
-
-
-
 <p align="center">
   <img src="assets/phosphene_banner.png" alt="Phosphene" width="100%">
 </p>
@@ -32,11 +13,11 @@ Key differences from the standard A2V path:
 
 </p>
 
-> **Current release: v3.8.3 — the fix for an install that hung Pinokio before it started.** On Pinokio 8.0.x a fresh install could freeze at 100% CPU right after `git rev-parse --short HEAD`, with no child process and no error, until you force-quit. v3.6.2 shortened the shell lines for this and it was not enough: what Pinokio writes to its shell is the whole joined step, and the LTX venv step handed it 1,417 characters in one go. Those payloads now live in `scripts/pinokio/*.sh` and each step dispatches one short line, with a gate that measures what is actually dispatched. Also: installing Hailuo H3 no longer tells you to look for an "Engine row" in the Video tab — the engine switcher is in the top right of the header. v3.8.2 fixed an update that silently skipped the video-encoder patch and encoded every render 4:2:0; v3.8.1 fixed an Update that could abort at the video-engine pin and never be retried; v3.8.0 brought Storyboard plus the fix for the install failure that had been breaking every fresh install since hatchling 1.32.0 shipped. Full notes on the [releases page](https://github.com/mrbizarro/phosphene/releases).
+> **Current release: v4.0.0.** LTX-2.5 is the engine Phosphene renders with — the first native Mac build of it, and the generation a fresh install now downloads. A live preview of the frame being made, a Stop early that saves the wait, trained characters in about two and a half minutes, and the five control modes fixed. Full notes on the [releases page](https://github.com/mrbizarro/phosphene/releases).
 
 ## Overview
 
-Phosphene is a local generative-media panel for Apple Silicon. It runs [LTX-Video 2.3](https://github.com/Lightricks/LTX-Video) (MLX port) for joint audio-and-video synthesis, [Qwen-Image-Edit-2509](https://huggingface.co/Qwen/Qwen-Image-Edit-2509) (with a Lightning 4-step fast tier) for stills, and ships an in-panel LoRA training pipeline for character identity (face + optional voice from a single dataset). Everything runs on-device: no cloud, no API keys, and no prompt, image, video or filename ever leaves your Mac. It does send anonymous usage counts (version, hardware class, render stats) — every field is listed in [docs/ANALYTICS.md](docs/ANALYTICS.md), and one click in Settings turns it off.
+Phosphene is a local generative-media panel for Apple Silicon. It runs [LTX-Video 2.5](https://github.com/Lightricks/LTX-Video) (MLX port) for joint audio-and-video synthesis, [Qwen-Image-Edit-2509](https://huggingface.co/Qwen/Qwen-Image-Edit-2509) (with a Lightning 4-step fast tier) for stills, and ships an in-panel LoRA training pipeline for character identity (face + optional voice from a single dataset). Everything runs on-device: no cloud, no API keys, and no prompt, image, video or filename ever leaves your Mac. It does send anonymous usage counts (version, hardware class, render stats) — every field is listed in [docs/ANALYTICS.md](docs/ANALYTICS.md), and one click in Settings turns it off.
 
 3.0 introduces in-panel character training (face + voice LoRA from one dataset), the Audio-to-Video workflow, the Image Studio tab, hardware capability tiering, and an agentic prompt enhancer driven by the same local Gemma 3 12B used for auto-captioning.
 
@@ -77,7 +58,7 @@ New workflow tab in 3.0. WAV or MP3 in, MP4 out — the audio drives motion in t
 
 ### LoRAs
 
-Drop `.safetensors` into `mlx_models/loras/` for immediate use, or browse and install LTX 2.3 LoRAs from CivitAI inside the panel (per-row rename, download, companion-aware delete). Character bundles live alongside style LoRAs and are filtered out of the regular picker so they don't show up twice.
+Drop `.safetensors` into `mlx_models/loras/` for immediate use, or browse and install LTX LoRAs from CivitAI inside the panel (per-row rename, download, companion-aware delete). Character bundles live alongside style LoRAs and are filtered out of the regular picker so they don't show up twice.
 
 ### HTTP API
 
@@ -104,12 +85,14 @@ Apple Silicon only. MLX is Apple-only by design.
 
 | RAM | Tier | What runs |
 |---|---|---|
-| Under 48 GB | Compact (Q4 surface) | Text and image-to-video at smaller sizes. Image tab works. Character, FFLF, Extend, and HQ are hidden. They need Q8. |
+| Under 48 GB | Compact (Q4 surface) | Text and image-to-video at smaller sizes. Image tab works. FFLF, Extend and High are hidden — they need more memory than this tier has. |
 | 48 to 79 GB | Comfortable (Q8 surface) | The canonical tier, built on M4 Max 64 GB. Everything works. FFLF and Extend capped at 768 px long side. |
 | 80 to 119 GB | Roomy | Most modes at full size. FFLF and Extend up to 1024 px. |
 | 120 GB+ | Studio | No size limits. |
 
 Working-memory footprint is non-negotiable: standard 1280×704 generation peaks at roughly 22 GiB resident, and HQ with the Q8 dev transformer at roughly 38 GiB. Tier is detected once at boot from RAM and exposed to the UI via `body[data-cap-tier="q4|q8"]`. Set `LTX_FORCE_CAP_TIER=q4` to preview the Compact surface from a higher-tier machine.
+
+**RAM is not the only gate, and on LTX-2.5 it is not the interesting one.** The table above answers "what can this Mac's memory serve". Whether trained **characters** render faithfully, and whether the **High** tier exists at all, are questions about which weight packs are on disk — a 64 GB Mac holding only the base pack is Comfortable-tier and still cannot do either. The panel tracks that separately (`body[data-q8-pack]`), and every surface that offers a download says which pack and how big.
 
 ## Install
 
@@ -120,9 +103,13 @@ Working-memory footprint is non-negotiable: standard 1280×704 generation peaks 
 3. Click **Install**.
 4. Click **Start** -> **Open Panel** -> http://127.0.0.1:8198.
 
-Pinokio handles the hardware gate, the upstream `dgrauet/ltx-2-mlx` clone, the uv-managed Python 3.11 venv, the runtime patches, and the filtered model download (~28 GB: Q4 plus the Gemma encoder).
+Pinokio handles the hardware gate, the vendored `ltx-2-mlx` clone at its pinned tag, the uv-managed Python 3.11 venv, the runtime patches, and the model download.
 
-For the Q8 HQ tier (required for Character, FFLF, Extend), click **Download Q8** in the panel sidebar after first launch. About 37 GB, one time.
+**What a fresh install fetches (~37 GB):** LTX-2.5's engine (20.74 GB) and its Gemma 4 text encoder (6.73 GB) — the generation the panel renders with — plus the 22 MB live-preview decoder; Gemma 3 (~6 GB), which is what **Enhance** and the **Storyboard planner** run on; and three control LoRAs (~4 GB) for the **Colorize / Restore**, **Ingredients** and **Control** modes. Every step is resumable. (**HDR** uses a fourth, gated LoRA — add a Hugging Face token in Settings and the panel fetches it on first use.)
+
+**LTX-2.3 is not downloaded.** It is needed only to *train* a character — the trainer runs against 2.3, not 2.5 — so the panel offers it (~20 GB, plus the ~21 GB full-precision dev transformer) the moment you open the **Train Character** tab, and in **Settings → Models** any time. Everything else, including all four control-LoRA modes, renders on LTX-2.5.
+
+For trained characters and voices, install the **LTX-2.5 Q8 weights** (30.02 GB) from **Settings → Models**. The **High** tier additionally needs the **High add-on** (29.50 GB), which installs into the same folder.
 
 If you have a Hugging Face token, paste it under **Settings** in the panel. Downloads run roughly 10x faster, and the same token unlocks the gated LoRAs (HDR and Lightricks Control).
 
@@ -135,8 +122,8 @@ cd phosphene
 git clone https://github.com/dgrauet/ltx-2-mlx.git ltx-2-mlx
 cd ltx-2-mlx
 git remote add fork https://github.com/mrbizarro/ltx-2-mlx.git
-git fetch fork feat/ltx-2.5
-git checkout 871694ddaa09c1598d663a49005a2f91ae6b4ed2
+git fetch fork +refs/tags/v0.14.19+ltx25.3:refs/tags/v0.14.19+ltx25.3
+git checkout v0.14.19+ltx25.3
 cd ..
 
 # 2. Create the Python 3.11 venv inside ltx-2-mlx (uv-managed).
@@ -165,11 +152,16 @@ cd ..
 # 4. Apply the runtime patches (idempotent, fail loud on upstream drift).
 ./ltx-2-mlx/env/bin/python3.11 patch_ltx_codec.py
 
-# 5. Download the Q4 LTX weights + the Gemma 3 4-bit encoder (~28 GB total).
-HF_HUB_ENABLE_HF_TRANSFER=1 ./ltx-2-mlx/env/bin/hf download \
-  dgrauet/ltx-2.3-mlx-q4 --local-dir mlx_models/ltx-2.3-mlx-q4
-HF_HUB_ENABLE_HF_TRANSFER=1 ./ltx-2-mlx/env/bin/hf download \
-  mlx-community/gemma-3-12b-it-4bit --local-dir mlx_models/gemma-3-12b-it-4bit
+# 5. Download LTX-2.5 — the base install: the engine (20.74 GB), its Gemma 4
+#    text encoder (6.73 GB) and the 22 MB live-preview decoder. 27.5 GB total,
+#    resumable and sha256-verified. NOT `hf download`: these are our own
+#    quantisation of a gated upstream, mirrored as GitHub release assets.
+./ltx-2-mlx/env/bin/python3.11 scripts/fetch_pack_release.py \
+  --repo-key q4_25 --repo-key gemma4_25 --repo-key tae
+
+# 5b. (Optional) The Q8 weights (30.02 GB) — what trained characters and
+#     voices need. The High tier additionally needs the High add-on (29.50 GB).
+./ltx-2-mlx/env/bin/python3.11 scripts/fetch_pack_release.py --repo-key q8_25
 
 # 6. (Optional) Image tab — install mflux + apply the FBCache patch.
 ./ltx-2-mlx/env/bin/pip install 'mflux==0.17.5'
@@ -185,7 +177,7 @@ HF_HUB_ENABLE_HF_TRANSFER=1 ./ltx-2-mlx/env/bin/hf download \
 ./ltx-2-mlx/env/bin/python3.11 mlx_ltx_panel.py
 ```
 
-About the version pins: `mlx 0.31.2` attenuates the LTX vocoder by 22 dB. Stay on 0.31.1. `ltx-2-mlx` is pinned to the fork build `871694d` (`mrbizarro/ltx-2-mlx`, branch `feat/ltx-2.5`) — v0.14.19 plus the LTX-2.5 port, because upstream has no 2.5 branch. We track a known-good commit, never upstream `main`; the installed packages report `0.14.19+ltx25.1` and `_LTX_EXPECTED_VERSION` must match that string exactly. `mflux 0.17.5` is the version `patch_mflux_fbcache.py` is line-targeted against. `hatchling<1.32` (in `pip-build-constraints.txt`) is a *build-time* pin: 1.32 rejects the `readme = "../../README.md"` that all three upstream packages declare, which fails the wheel build on every tag.
+About the version pins: `mlx 0.31.2` attenuates the LTX vocoder by 22 dB. Stay on 0.31.1. `ltx-2-mlx` is pinned to the fork **tag** `v0.14.19+ltx25.3` (`mrbizarro/ltx-2-mlx`, commit `7cada57`) — v0.14.19 plus the LTX-2.5 port, because upstream has no 2.5 branch. A tag, not a bare SHA: a force-push upstream would strand every install with an un-fetchable pin and a dead Update button. The installed packages report `0.14.19+ltx25.3` and `_LTX_EXPECTED_VERSION` must match that string exactly, or every render logs a VERSION SKEW warning. `scripts/pinokio/ltx_checkout.sh` holds the pin and `node scripts/check_ltx_pin.js` enforces the agreement. `mflux 0.17.5` is the version `patch_mflux_fbcache.py` is line-targeted against. `hatchling<1.32` (in `pip-build-constraints.txt`) is a *build-time* pin: 1.32 rejects the `readme = "../../README.md"` that all three upstream packages declare, which fails the wheel build on every tag.
 
 ## Interface
 
@@ -245,11 +237,11 @@ Behavioral changes worth noting in 3.0:
 
 ## License and credits
 
-Panel: MIT, see [LICENSE](LICENSE). LTX-Video 2.3 weights: Lightricks' license. MLX: Apache 2.0. Gemma 3 12B: Google's terms. PiperSR: AGPL-3.0.
+Panel: MIT, see [LICENSE](LICENSE). LTX-Video 2.5 weights: Lightricks' license. MLX: Apache 2.0. Gemma 3 12B: Google's terms. PiperSR: AGPL-3.0.
 
 Phosphene depends on the following projects:
 
-- [Lightricks](https://github.com/Lightricks/LTX-Video) — LTX 2.3 and the joint audio + video architecture
+- [Lightricks](https://github.com/Lightricks/LTX-Video) — LTX 2.5 and the joint audio + video architecture
 - [@dgrauet](https://github.com/dgrauet/ltx-2-mlx) — MLX port of LTX-Video; the foundation everything else builds on
 - [Apple ML team](https://github.com/ml-explore/mlx) — MLX
 - [HiDream-ai](https://huggingface.co/HiDream-ai/HiDream-O1-Image-Dev) — HiDream-O1 weights and reference implementation

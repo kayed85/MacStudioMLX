@@ -23,9 +23,9 @@ the dev codename that became v3.0.0). The `VERSION` file should read
 comments still use the `Y1.NNN` counter (Y1.001 → Y1.039) — historical;
 do not introduce new `Y` labels.
 
-The authoritative current engineering snapshot is
-`~/AI/projects/phosphene/notes/DEEP_REVIEW_2026-05.md` (verified risk
-register + 5-phase stabilization plan). The `## 2.0` capability list
+The authoritative current engineering snapshot is `docs/STATE.md`
+(current capabilities, version history, known bugs). The `## 2.0`
+capability list
 below is retained as historical baseline — everything in it shipped; the
 v3.0 additions (Characters, voice LoRA, Image Studio, A2V, Train tab,
 capability tiers) are now baseline too.
@@ -197,8 +197,8 @@ These are not arbitrary — every pin is a paid lesson:
 | `mlx==0.31.1` | mlx 0.31.2 introduced a numerical regression that attenuates LTX 2.3 vocoder output by ~22 dB. Verified: same model + same prompt + same seed → -42 dB peak on 0.31.2 vs -9 dB peak on 0.31.1. |
 | `mlx-lm==0.31.1` `mlx-metal==0.31.1` | Same release line, kept consistent with mlx. |
 | `huggingface-hub>=1.0` | `hf` CLI replaced `huggingface-cli`; older Pinokio bundles ship < 1.0. |
-| `ltx-2-mlx` PINNED to the FORK BUILD **`871694d`** (`mrbizarro/ltx-2-mlx` `feat/ltx-2.5` = v0.14.19 `1192051` + the LTX-2.5 port) | install.js + update.js add a `fork` remote, `git fetch fork feat/ltx-2.5` and `git checkout 871694d` (**a SHA, not a tag** — upstream has no 2.5 branch; if dgrauet ports 2.5 we drop ours and go back to a tag). The packages report **`0.14.19+ltx25.1`**; `_LTX_EXPECTED_VERSION` in mlx_warm_helper.py must equal that string or every render logs VERSION SKEW — move the two together. This pin is what lets **LTX-2.5 render through the panel** — but 2.5 is NOT registered in this release and **LTX-2.3 is the only generation**, because the 2.5 weight packs are not publicly downloadable yet. Every 2.5 flag in the vendored port defaults to its 2.3 value, so an unversioned checkpoint builds exactly what it built before. The base tag v0.14.19 landed 2026-08-11 (a catch-up from v0.14.8, itself a 2026-06-01 catch-up from v0.14.0). **STAY PINNED** — this is NOT "main HEAD", and not upstream's tip either. The v0.14.8 bump had pulled dgrauet's native `_pre_denoise_flush` (the Metal-watchdog fix for the I2V "mosaic" on memory-pressured Macs, #17), budget-aware VAE decode tiling and first-class `frame_rate`, which cut us from 7 runtime patches to 1 (codec-only). The v0.14.19 bump keeps that shape and adds: checkpoint-read `av_ca_timestep_scale_multiplier` (0.14.11 — **audio/dialogue weighting changes on every render**, toward upstream parity, plus `LTXModelConfig.from_checkpoint_dir()`), `frame_rate` forwarded at the A2V/lipdub call sites and no more shortest-stream mux truncation (0.14.15), quantized transformers at any `group_size` (0.14.16), and GPU-watchdog explanation + DiT-freed-before-VAE-decode + a Gemma cache-limit fix (0.14.19). **No model re-download**: 0.14.13+ prefers a versioned `transformer-distilled-*.safetensors` and falls back to the unversioned name, and update.js trims the `-1.1` variants, so file resolution is identical to v0.14.8. Bumping the pin further is a deliberate, tested operation — read the release notes, bump `_LTX_EXPECTED_VERSION` in mlx_warm_helper.py, smoke-test the matrix on dev, then bump BOTH install.js and update.js in one commit. The historic `dcd639e (0.1.0)` detour broke the Extend `cfg_scale` API; do not revisit. |
-| `hatchling<1.32` (build-time only, `pip-build-constraints.txt`) | Not a runtime dep — the **wheel build backend** for the three vendored `ltx-*` packages. All three declare `readme = "../../README.md"`, which hatchling 1.32.0 turned into a hard error, so both installer paths (uv in install.js, pip in update.js) died at `metadata-generation-failed` on *every* pinned tag from the day 1.32 shipped. Wired as `--build-constraints` (uv) / `PIP_CONSTRAINT=` (pip). Remove only when a pinned upstream tag stops pointing `readme` outside the package dir. |
+| `ltx-2-mlx` PINNED to the FORK TAG **`v0.14.19+ltx25.3`** (`mrbizarro/ltx-2-mlx`, commit `7cada57` on `release/ltx25.3` = v0.14.19 `1192051` + the LTX-2.5 port + the schedule/sampler/live-preview work) | **The pin is a TAG and it lives in `scripts/pinokio/ltx_checkout.sh`**, which is the ONE checkout implementation both lanes call (install.js dispatches it; scripts/post_update.sh calls it). It was a bare SHA through v3.8.3 and was reachable only by luck — a force-push would have stranded every install with an un-fetchable pin and a dead Update button. `check_ltx_pin.js` is the gate. The packages report **`0.14.19+ltx25.3`**; `_LTX_EXPECTED_VERSION` in mlx_warm_helper.py must equal that string or every render logs VERSION SKEW — move the two together. This pin is what lets **LTX-2.5 render through the panel**, and on **dev/beta** 2.5 is the registry DEFAULT (2.3 stays installed, selectable via `LTX_MODEL_VERSION=ltx23`). **v3.8.x did NOT register `ltx25` at all** and shipped 2.3 as the only generation, because the 2.5 weight packs were not publicly downloadable when it was cut — a fresh install would have booted into a generation it could not fetch. They are published now, and **v4.0.0 closes that divergence**: 2.5 is the registered default everywhere. If you ever need to curate a release back to a single generation, it is one `MODEL_VERSIONS` dict plus its three `required_files.json` rows (watch the `kind: "base"` trap: any base row is mandatory for an install to read complete, in the panel *and* in `pinokio.js`). The **pin diverged for the same reason**: v3.8.x shipped `871694d` / `0.14.19+ltx25.1`, one commit behind, because `e6be9d6` (the 2.5 sampler + stage-2 schedule, below) had no 2.3 regression evidence behind it at cut time. It does now — a 2.3 sha256-identity pair across the change — so the next release should choose the pin deliberately rather than inherit either. The base tag v0.14.19 landed 2026-08-11 (a catch-up from v0.14.8, itself a 2026-06-01 catch-up from v0.14.0). **STAY PINNED** — this is NOT "main HEAD", and not upstream's tip either. The v0.14.8 bump had pulled dgrauet's native `_pre_denoise_flush` (the Metal-watchdog fix for the I2V "mosaic" on memory-pressured Macs, #17), budget-aware VAE decode tiling and first-class `frame_rate`, which cut us from 7 runtime patches to 1 (codec-only). The v0.14.19 bump keeps that shape and adds: checkpoint-read `av_ca_timestep_scale_multiplier` (0.14.11 — **audio/dialogue weighting changes on every render**, toward upstream parity, plus `LTXModelConfig.from_checkpoint_dir()`), `frame_rate` forwarded at the A2V/lipdub call sites and no more shortest-stream mux truncation (0.14.15), quantized transformers at any `group_size` (0.14.16), and GPU-watchdog explanation + DiT-freed-before-VAE-decode + a Gemma cache-limit fix (0.14.19). **The `+ltx25.2` bump (2026-08-12) is the first one that changes what a 2.5 render computes**, and only a 2.5 render: (a) the **euler-ancestral sampler is finally REACHED** — it had been implemented with 48 tests and zero callers, so every prior 2.5 render silently used the 2.3 Euler step, against upstream's own `ANCESTRAL_SAMPLER_SINCE_VERSION = (2, 5)` and all three official ComfyUI 2.5 templates; keyframe/flf2v deliberately stays on Euler because the flf2v template pins eta to 0. (b) **stage 2's first sigma is now the vendor's 0.85**, read from `video_ltx2_5_t2v.json` node 395, where we had been using 2.3's 0.909375 — a refine pass starting at the wrong noise level. Both are version-keyed off the checkpoint's own `model_version`, and 2.3 output is proven **sha256-identical** before and after. **No model re-download**: 0.14.13+ prefers a versioned `transformer-distilled-*.safetensors` and falls back to the unversioned name, and update.js trims the `-1.1` variants, so file resolution is identical to v0.14.8. Bumping the pin further is a deliberate, tested operation — read the release notes, bump `_LTX_EXPECTED_VERSION` in mlx_warm_helper.py, smoke-test the matrix on dev, then bump BOTH install.js and update.js in one commit. The historic `dcd639e (0.1.0)` detour broke the Extend `cfg_scale` API; do not revisit. |
+| `hatchling<1.32` (build-time only, `pip-build-constraints.txt`) | Not a runtime dep — the **wheel build backend** for the three vendored `ltx-*` packages. All three declare `readme = "../../README.md"`, which hatchling 1.32.0 turned into a hard error, so both installer paths died at `metadata-generation-failed` on *every* pinned tag from the day 1.32 shipped. **Both are now `uv pip install --build-constraints ../pip-build-constraints.txt`** — install.js always was, update.js as of the v3.8.0 port-back. **NOT `PIP_CONSTRAINT=`**: modern pip spawns its build-dependency sub-install with `_PIP_IN_BUILD_IGNORE_CONSTRAINTS=1` and drops the env constraint on purpose, so that spelling silently resolved hatchling 1.32.0 and failed anyway (proven on pip 26.1/26.2.1, relative and absolute paths). pip's `--build-constraint` flag would work but does not exist on older pips, and Update runs on venvs seeded years apart. Remove only when a pinned upstream tag stops pointing `readme` outside the package dir. |
 
 When changing a version, document the test that proved the new pin is OK.
 The v0.14.19 pin was proved by: 607 passed / 22 skipped on the vendored
@@ -445,6 +445,51 @@ that already pulled 0.31.2 can recover by clicking Update.
   click Stop + Start in Pinokio, or `pkill -f mlx_ltx_panel.py`
   and click Start.
 
+### The GPU lock — BOTH of them, and staleness is a TIMESTAMP
+
+This machine runs several agents at once and one 40 GiB render. Two of
+them do not fit. Every render, benchmark or experiment that touches the
+GPU takes **both** locks for its whole duration and releases both after:
+
+| lock | shape | who introduced it |
+|---|---|---|
+| `~/AI/projects/hailuo-mlx/.gpu_lock` | a **directory** (`mkdir` = atomic acquire, `rmdir` = release) | the H3 tree |
+| `/tmp/phosphene_gpu.lock` | a **file** (`set -o noclobber` + `>` = atomic create-or-fail) | the Phosphene agents |
+
+**A lock only one party reads is not a lock.** Both exist, both are
+live, and an agent that honours one of them will happily start a second
+render next to an agent honouring the other. That is not hypothetical:
+on 2026-08-05 two ~40 GiB jobs overlapped and the OS killed the panel
+*and* its child mid-test.
+
+Acquire in that order (directory first, then file; release in reverse),
+so two agents racing cannot each hold one and deadlock. `gpu_lock.sh` in
+the LTX-2.5 port working tree is the reference implementation.
+
+**Staleness is decided by the lock's TIMESTAMP, never by a PID.**
+Write the owner string into the file for humans to read, but do not
+parse a pid out of it and do not ask whether that pid is alive:
+
+- pids are recycled, so "that pid exists" is not "that render is
+  running" — the crash-reap work already learned this the hard way and
+  matches on the process **cmdline**, not the number alone;
+- the holder may be a *different container of work* than the process
+  that wrote the file (a driver script that spawns the render), so the
+  writer can legitimately be gone while the GPU is still busy;
+- and a pid check invites the failure it is meant to prevent: an agent
+  that concludes "stale" and steals the lock starts the second render.
+
+Use an age threshold longer than any render this repo can produce
+(the longest measured is a 15 s H3 chain at ~27 min, so **60 minutes**
+is the floor), announce that you are overriding, and say so in the
+session record. If in doubt, **wait** — a blocked agent costs minutes,
+a collided render costs the machine.
+
+**Never touch `:8199`.** It is the owner's daemon. Do not kill it, do
+not restart it, do not queue to it. Test instances go on **:8240+**
+with isolated `LTX_STATE_DIR` / `LTX_OUTPUT_DIR` / `LTX_UPLOADS_DIR`,
+and are killed by the PID you saved when you started them.
+
 ### Disk consolidation
 - Old `~/Documents/Codex/...` dev folder was deleted.
   Don't recreate. The Pinokio install is canonical.
@@ -454,6 +499,41 @@ that already pulled 0.31.2 can recover by clicking Update.
   symlinks.
 
 ## 8. Test workflow
+
+### The gates — run these before pushing anything they cover
+
+Each exists because the thing it guards broke in the field at least once,
+and each is cheap enough that "I forgot" is not a reason.
+
+| gate | run it when you touch | what it refuses |
+|---|---|---|
+| `node scripts/check_pinokio_scripts.js` | any launcher `.js` | a single dispatch over 500 chars — Pinokio 8.0.x wedges at 764 and at 1,417 |
+| `node scripts/check_ltx_pin.js` | the vendored pin, `update.js`, `install.js`, `_LTX_EXPECTED_VERSION` | a pin that is a bare SHA, a pin that disagrees with the version the runtime reports, a second checkout implementation, or anything in `update.js` that belongs post-pull |
+| `node scripts/check_post_update.js` | `scripts/post_update.sh` | the codec patch running before the reinstall or after anything optional, and a load-bearing step that cannot fail the Update |
+| `./ltx-2-mlx/env/bin/python3.11 scripts/assert_registry.py` | `MODEL_VERSIONS`, `required_files.json`, pack paths, the text-encoder seam, deep-verify sources | a generation that resolves another generation's weights or text encoder — the two bugs that shipped silently on 2026-08-12, neither of which raised anything |
+| `./ltx-2-mlx/env/bin/python3.11 scripts/assert_schedules.py` | `make_job`, any `*_steps` default, a new render mode, a pin move | a job dict that asks a checkpoint to PAD a fixed sigma table — the class that let Colorize/Restore/Ingredients/Control/HDR burn 218 s and die on "cannot thin a 9-point schedule (8 steps) up to 10 steps" |
+| `./ltx-2-mlx/env/bin/python3.11 patch_ltx_codec.py` | the vendored pin, any package reinstall | a bypassed codec patch — v3.8.1 shipped silent 4:2:0 for a whole release because this ran eleven steps too late and never executed |
+
+**The codec rule, stated correctly.** It has been passed around as *"`grep -rn
+libx264` in the vendored tree must return exactly one hit"*, and read literally
+that is false — repo-wide the grep is 8 (the trainer's `video_utils` and
+`slice_clips`, `media_io`, `video_vae`). What the rule actually asserts:
+
+> `grep -rn --include="*.py" libx264 ltx-2-mlx/packages/ltx-core-mlx` returns
+> **exactly one** hit — the UNPATCHED source at `video_vae.py:487` — while the
+> installed copy in `ltx-2-mlx/env/lib/python3.11/site-packages/` is patched.
+> `patch_ltx_codec.py` resolves its target through the INTERPRETER and verifies
+> its own work, so its own exit code is the real gate; the grep is the
+> human-readable cross-check that the source tree was left clean.
+
+A second hit in `ltx-core-mlx` means the patch was applied to the git-tracked
+source instead of site-packages — the editable-install failure that made every
+v3.8.0 pin move fail.
+
+`assert_registry.py` also **pins known defects**: it asserts the current
+*wrong* value, prints a `DEFECT` banner every run, and turns RED when
+somebody fixes it, so a fix cannot land without the marker being removed.
+A pinned defect is not a pass — read the banners.
 
 For HTML/UI/JS changes:
 1. Edit `mlx_ltx_panel.py`

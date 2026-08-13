@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import os
 import shutil
 import sys
@@ -301,10 +302,16 @@ def test_the_shipped_registry_mirrors_are_well_formed():
     root = Path(__file__).resolve().parents[1]
     reg = json.loads((root / "required_files.json").read_text())
     mirrored = [r for r in reg["repos"] if r.get("mirror")]
-    # A release may legitimately ship no mirrored pack — v3.8.0 does, because
-    # the 2.5 packs are curated out until their mirror is published. What must
-    # never happen is a mirror block the fetcher cannot act on, so this asserts
-    # the SHAPE of whatever is declared rather than that something is.
+    # This asserted `mirrored` was non-empty. A tree may legitimately declare
+    # no mirrored pack — public v3.8.0 does, because the 2.5 entries are
+    # curated out of a release until their mirror is published, and the 2.3
+    # lane comes from HuggingFace. The assertion turned that correct state
+    # into a red test. What must never happen is a mirror block the fetcher
+    # cannot act on, so this asserts the SHAPE of whatever is declared rather
+    # than that something is. (dev declares three today: q4_25, q8_25,
+    # gemma4_25 — and `test_a_pack_with_no_mirror_yet_is_not_advertised_as_
+    # fetchable` is what guards the other direction, a pack whose files exist
+    # with no lane behind them.)
     for repo in mirrored:
         m = repo["mirror"]
         assert m["kind"] == "github-release"
@@ -313,6 +320,119 @@ def test_the_shipped_registry_mirrors_are_well_formed():
         assert m["tag"]
         # Every mandatory file has to be fetchable through this lane.
         assert repo.get("files"), f"{repo['key']} declares no required files"
+
+
+def _registry():
+    root = Path(__file__).resolve().parents[1]
+    return root, json.loads((root / "required_files.json").read_text())
+
+
+def test_the_hq_addon_is_its_own_download_unit_in_the_q8_directory():
+    """The split: q8_25 is the pack, hq_25 is the two files loaded out of it.
+
+    They share a directory on purpose -- the HQ weights are loaded from the q8
+    pack BY NAME -- but they are separate download units, because they are
+    separate builds and a unit has to be publishable the moment its bytes
+    exist. Folding them together held a complete 20.6 GB pack hostage to a
+    42 GB download.
+    """
+    _, reg = _registry()
+    q8 = next(r for r in reg["repos"] if r["key"] == "q8_25")
+    hq = next(r for r in reg["repos"] if r["key"] == "hq_25")
+    assert hq["local_dir"] == q8["local_dir"], "the add-on must land in the q8 pack"
+    overlap = set(q8["files"]) & set(hq["files"])
+    assert not overlap, f"a file must belong to exactly one download unit: {overlap}"
+    for f in ("transformer-dev.safetensors", "ltx-2.5-22b-distilled-lora-450.safetensors"):
+        assert f in hq["files"], f
+        assert f not in q8["files"], f"{f} must not hold the q8 pack hostage"
+
+
+def test_the_addon_file_names_match_the_names_the_loader_asks_for():
+    """The drift that would be invisible until a render.
+
+    `hq_weights` in mlx_ltx_panel.py names the two files the pipeline loads;
+    required_files.json names the two files the installer fetches. Rename one
+    and not the other and the download succeeds, the pack reports complete, and
+    High fails at load time with a file that was never asked for. Read out of
+    the panel SOURCE rather than by importing it, the way the analytics
+    coverage guard does.
+    """
+    root, reg = _registry()
+    src = (root / "mlx_ltx_panel.py").read_text()
+    block = re.search(r'"config_key":\s*"ltx-2\.5".*?"hq_weights":\s*\{(.*?)\}', src, re.S)
+    assert block, "could not find the 2.5 hq_weights block"
+    declared = set(re.findall(r'"([^"]+\.safetensors)"', block.group(1)))
+    assert declared, "2.5 declares no hq_weights"
+    hq = next(r for r in reg["repos"] if r["key"] == "hq_25")
+    assert declared == set(hq["files"]), (
+        f"panel loads {sorted(declared)}, installer fetches {sorted(hq['files'])}")
+
+
+def test_an_addon_publishes_only_its_own_files_not_its_hosts_directory(tmp_path, monkeypatch):
+    """Two entries, one directory -- the guest must not claim the host's files.
+
+    Caught in production, mid-publish: the HQ add-on's weights landed in the q8
+    pack directory and the q8 run, which publishes "the directory", started
+    uploading 29 GB of add-on under a `q8_25__` prefix. That would have put the
+    add-on inside the q8 manifest and forced every q8 install to download
+    weights it did not ask for -- the exact coupling the split removed.
+
+    Both directions are asserted: the host excludes the guest's declared files,
+    and the guest (`publish_scope: "files"`) publishes ONLY what it declares, so
+    it cannot sweep up the sidecar JSON the host owns.
+    """
+    root = tmp_path / "app"
+    root.mkdir()
+    pack = _write_pack(root)
+    (pack / "addon.safetensors").write_bytes(b"\xAA" * 300)
+    reg = json.loads((root / "required_files.json").read_text())
+    host = reg["repos"][0]
+    reg["repos"].append({
+        "key": "addon", "kind": "optional", "name": "Add-on",
+        "repo_id": "nobody/addon", "local_dir": host["local_dir"],
+        "size_gb": 1, "publish_scope": "files",
+        "files": ["addon.safetensors"],
+        "mirror": dict(host["mirror"],
+                       manifest_asset="addon__phosphene_release_manifest.json"),
+    })
+    (root / "required_files.json").write_text(json.dumps(reg))
+    registry = publisher.load_registry(root)
+
+    host_files = publisher.pack_files(pack, host, registry)
+    assert "addon.safetensors" not in host_files, "the host published the guest's file"
+    assert "config.json" in host_files, "the host must still pick up its own sidecars"
+
+    guest = next(r for r in registry["repos"] if r["key"] == "addon")
+    guest_files = publisher.pack_files(pack, guest, registry)
+    assert guest_files == ["addon.safetensors"], guest_files
+    assert "config.json" not in guest_files, "the guest claimed its host's sidecar"
+
+
+def test_small_assets_are_always_reuploaded_even_when_the_size_matches():
+    """GitHub publishes no checksum for an asset, so resume can only compare
+    size -- and a file whose content changed without its size changing would be
+    skipped. Not hypothetical: the in-pack quant manifest was rewritten by
+    another agent between two publishes. Anything small is re-uploaded rather
+    than trusted."""
+    assert publisher.ALWAYS_REUPLOAD_MAX_BYTES >= (1 << 20), "too small to cover sidecars"
+    assert publisher.ALWAYS_REUPLOAD_MAX_BYTES < publisher.SHARD_BYTES, "would defeat resume"
+
+
+def test_a_pack_with_no_mirror_yet_is_not_advertised_as_fetchable():
+    """hq_25 must not claim a mirror until its assets are published.
+
+    A file in files[] with no download lane behind it is the June-2026 failure
+    verbatim: the pack reports incomplete on arrival and nothing can fix it.
+    When the dev build lands, the mirror block and the assets go live in the
+    SAME commit -- so this test is expected to be UPDATED then, not deleted.
+    """
+    root, reg = _registry()
+    hq = next(r for r in reg["repos"] if r["key"] == "hq_25")
+    on_disk = all((root / hq["local_dir"] / f).exists() for f in hq["files"])
+    if hq.get("mirror"):
+        assert on_disk, "a mirror block was added before the files existed"
+    else:
+        assert not on_disk, "the files exist -- publish them and add the mirror block"
 
 
 if __name__ == "__main__":

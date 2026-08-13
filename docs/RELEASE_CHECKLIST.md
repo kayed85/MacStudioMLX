@@ -49,8 +49,8 @@ Only applies to packs whose `required_files.json` entry has a `mirror` block
 (the LTX-2.5 ones). They are quantised by us and published as release assets, so
 unlike an `hf download` repo **nothing publishes them but us** — and a pack that
 is not published is a fresh install with no weights, silently, only for new
-users. LTX-2.5 came within one commit of being released as the default
-generation with no download step behind it; this gate is why it wasn't.
+users. That is exactly how LTX-2.5 shipped as the default generation with no
+download step behind it.
 
 If you touched a mirrored pack's contents, its file list, or its `tag`:
 

@@ -145,7 +145,7 @@ module.exports = {
     //      Idempotent — works on a fresh clone (already on the cloned
     //      branch's tip) AND on a re-install where the clone exists.
     //      2026-08-12 — THE PIN IS NOW A FORK BUILD, NOT AN UPSTREAM TAG.
-    //      Vendored: mrbizarro/ltx-2-mlx `feat/ltx-2.5` @ 871694d, which is
+    //      Vendored: mrbizarro/ltx-2-mlx `feat/ltx-2.5` @ e6be9d6, which is
     //      v0.14.19 (1192051) plus the LTX-2.5 port — keyframe pos-emb, the
     //      vendored Gemma 4 tower, the Euler-ancestral sampler, the duration
     //      head. dgrauet has no 2.5 branch; if he ports it we drop ours and
@@ -157,37 +157,52 @@ module.exports = {
     //
     //      Every 2.5 flag defaults to its 2.3 value, so an unversioned
     //      checkpoint builds exactly what it built before — proven here by
-    //      802/22 on the vendored suite, a byte-identical job-dict capture
-    //      across 18 form shapes, and a real 2.3 draft render.
+    //      876/22 on the vendored suite, a byte-identical job-dict capture
+    //      across 18 form shapes, and THREE real 2.3 draft renders whose mp4s
+    //      are sha256-identical to the one recorded before any of this work
+    //      (three arms, the last of which renders out of the INSTALLED
+    //      packages with no PYTHONPATH override — i.e. the thing a user
+    //      actually runs).
     //
-    //      The packages report `0.14.19+ltx25.1`, and `_LTX_EXPECTED_VERSION`
+    //      What this pin CHANGES, and only on 2.5: the Euler-ancestral sampler
+    //      is finally reached (it had zero callers, so every prior 2.5 render
+    //      used the 2.3 Euler step), and stage 2 starts at the vendor's 0.85
+    //      instead of 2.3's 0.909375. Both are keyed off the checkpoint's own
+    //      model_version, which is why 2.3 can be byte-stable across a change
+    //      this large.
+    //
+    //      The packages report `0.14.19+ltx25.2`, and `_LTX_EXPECTED_VERSION`
     //      in mlx_warm_helper.py must equal that string. The local segment is
     //      the ONLY thing distinguishing this tree from upstream v0.14.19 at
     //      runtime — the release segment is deliberately unchanged. Move the
     //      two together.
+    //      2026-08-13 (v4.0) — THE PIN IS A TAG, AND IT NO LONGER LIVES IN A
+    //      LAUNCHER SCRIPT. Both lanes now call the one implementation in
+    //      `scripts/pinokio/ltx_checkout.sh`, which holds the literal:
+    //
+    //          v0.14.19+ltx25.3   on mrbizarro/ltx-2-mlx
+    //
+    //      Two reasons, both structural. (1) A SHA on a branch is not a pin:
+    //      v3.8.x fetched `feat/ltx-2.5` and checked out a SHA that the branch
+    //      head had ALREADY moved past, so one rebase upstream would have
+    //      stranded every existing install with an un-fetchable pin and a dead
+    //      Update button. (2) A pin written in `update.js` can only ever move
+    //      ONE CLICK LATE — Pinokio loads that file before our own step pulls
+    //      the repo — so it has to live in the post-pull tree. install.js has
+    //      no such constraint but shares the file anyway: before v4.0 the two
+    //      lanes carried byte-identical copies of this block, and a duplicated
+    //      fix is a fix that half-lands.
+    //
+    //      The packages report `0.14.19+ltx25.3`, and `_LTX_EXPECTED_VERSION`
+    //      in mlx_warm_helper.py must equal that string. The local segment is
+    //      the ONLY thing distinguishing this tree from upstream v0.14.19 at
+    //      runtime — the release segment is deliberately unchanged. Move the
+    //      two together. `node scripts/check_ltx_pin.js` is the gate that keeps
+    //      this comment, the shell script and the helper constant in agreement.
     {
       method: "shell.run",
       params: {
-        path: "ltx-2-mlx",
-        message: [
-          "git fetch --tags origin",
-          "git remote get-url fork > /dev/null 2>&1 || git remote add fork https://github.com/mrbizarro/ltx-2-mlx.git",
-          "git fetch fork feat/ltx-2.5",
-          // 3.8.1 HOTFIX — the same guard as update.js, and it matters here
-          // too. ltx-2-mlx is a uv workspace, so the package step below links
-          // its members EDITABLE; patch_ltx_codec.py (further down this file)
-          // therefore lands on the git-tracked source instead of
-          // site-packages, and every successful install leaves this tree with
-          // a modified video_vae.py. "Click Install again" — the recovery we
-          // tell people to take — then aborts right here with "Your local
-          // changes ... would be overwritten by checkout", and no retry can
-          // clear it. The tree is app-managed: nothing user-owned lives in it,
-          // and reset --hard leaves the ignored env/ venv alone. See update.js
-          // for the full rationale.
-          "if [ -f packages/ltx-core-mlx/pyproject.toml ]; then echo 'vendored tree is app-managed; discarding local edits before the pin move:'; git status --porcelain | head -20; git reset --hard HEAD; else echo 'WARN: not the vendored ltx-2-mlx tree - skipping reset'; fi",
-          "git checkout 871694ddaa09c1598d663a49005a2f91ae6b4ed2",
-          "git rev-parse --short HEAD"
-        ]
+        message: "bash scripts/pinokio/ltx_checkout.sh"
       }
     },
 
@@ -274,8 +289,31 @@ module.exports = {
           // metadata-generation-failed). uv resolves the build backend fresh
           // from PyPI into an isolated env, so from the day 1.32.0 shipped
           // this step failed for every NEW install on every pinned tag. See
-          // pip-build-constraints.txt; update.js carries the pip equivalent.
+          // pip-build-constraints.txt; update.js runs the same uv command
+          // (it used to spell it `PIP_CONSTRAINT=`, which modern pip ignores
+          // by design — one lane now, one failure mode).
           "uv pip install --python env/bin/python --build-constraints ../pip-build-constraints.txt ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx ./packages/ltx-trainer",
+          // v4.0 — THE SECOND PASS IS THE POINT, and it closes a trap that has
+          // shipped since the workspace landed. `ltx-2-mlx` is a uv WORKSPACE:
+          // the line above (with deps, without --reinstall) links its members
+          // EDITABLE. site-packages gets `_editable_impl_ltx_core_mlx.pth`
+          // instead of a copy, so `import ltx_core_mlx` resolves to
+          // `packages/ltx-core-mlx/src/...` — the GIT-TRACKED source. The codec
+          // patch further down then finds no ltx_core_mlx directory in
+          // site-packages and patches the tracked file, which is why a
+          // PERFECTLY SUCCESSFUL install ended with
+          //     M packages/ltx-core-mlx/src/.../video_vae.py
+          // every single time — and why the v3.8.0 pin move hit "your local
+          // changes would be overwritten by checkout" for the whole fleet.
+          //
+          // v3.8.1 made the pin move survive that (reset --hard first) and
+          // v3.8.1's own notes filed this as the follow-up: cure the cause, so
+          // a FRESH install no longer starts dirty. `--reinstall --no-deps`
+          // replaces the .pth links with real copies and re-resolves nothing;
+          // it is the exact command update.js has run for many releases, so
+          // the end state is one every install already converges to on its
+          // first Update. One lane, one runtime shape.
+          "uv pip install --python env/bin/python --reinstall --no-deps --build-constraints ../pip-build-constraints.txt ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx ./packages/ltx-trainer",
           // Auto-caption (Gemma 3 12B via mlx-vlm) needs the mlx-vlm
           // package. Pinned to 0.4.4 — caption_with_gemma.py's import
           // surface (load, generate, prompt_utils.apply_chat_template)
@@ -384,29 +422,6 @@ module.exports = {
     // upscalers we don't use. Without filters `hf download` grabs the full
     // 56 GB tree; the panel only needs ~20 GB. Keep this list in sync with
     // required_files.json → repos[q4].download_include.
-    {
-      method: "shell.run",
-      params: {
-        venv: "env",
-        path: "ltx-2-mlx",
-        // Y1.022: HF_HUB_ENABLE_HF_TRANSFER=1 enables the Rust accelerator,
-        // ~5-10× faster on 20 GB. Falls back gracefully if hf_transfer
-        // isn't yet on disk (warning + plain Python downloader).
-        env: { HF_HUB_ENABLE_HF_TRANSFER: "1" },
-        message: [
-          // Short lines over shell continuations — Pinokio 8.0.x hangs on very
-          // long single lines (#50); still one hf invocation.
-          [
-            "hf download dgrauet/ltx-2.3-mlx-q4 --local-dir ../mlx_models/ltx-2.3-mlx-q4 \\",
-            "  --include '*.json' --include 'transformer-distilled.safetensors' \\",
-            "  --include 'connector.safetensors' \\",
-            "  --include 'vae_decoder.safetensors' --include 'vae_encoder.safetensors' \\",
-            "  --include 'audio_vae.safetensors' --include 'vocoder.safetensors' \\",
-            "  --include 'spatial_upscaler_x2_v1_1.safetensors'",
-          ].join("\n")
-        ]
-      }
-    },
 
     // ---- (no transformer.safetensors symlink needed on HEAD — 0.2.0 reads
     //      split_model.json to resolve transformer-distilled.safetensors.
@@ -422,6 +437,46 @@ module.exports = {
         message: [
           "hf download mlx-community/gemma-3-12b-it-4bit --local-dir ../mlx_models/gemma-3-12b-it-4bit"
         ]
+      }
+    },
+
+    // ---- Download LTX-2.5, the DEFAULT generation (~28 GB) ----------------
+    // SHIP-BLOCKER, closed 2026-08-12. LTX-2.5 became the default generation
+    // while nothing in this file downloaded it: `q4_25` and `gemma4_25` name
+    // `mrbizarro/...` HuggingFace repos that DO NOT EXIST (our HF token is
+    // read-only, and these packs are our own quantisation of a gated upstream).
+    // On the machine that built them the default lane worked; on a FRESH
+    // INSTALL there were no weights at all for the generation the panel boots
+    // into. That is what these two steps fix.
+    //
+    // Not `hf download`: the packs are mirrored as assets on a release of the
+    // public repo, the same lane the sample-character LoRA takes. Files over
+    // GitHub's 2 GiB asset cap are published as 1.9 GB shards;
+    // scripts/fetch_pack_release.py downloads them, checks each shard's
+    // sha256, reassembles, and only renames a file into place once the
+    // whole-file sha256 matches the published manifest. It is resumable and
+    // idempotent, so Resume Install re-runs it for the price of a read pass
+    // and re-downloads only what is actually missing.
+    //
+    // Both packs are REQUIRED, not optional. 2.5 conditions on its own Gemma 4
+    // fine-tune and cannot use the Gemma 3 encoder above — the mismatch does
+    // not raise, it silently encodes wrongly — so the two are fetched together
+    // and the install stops if either fails, instead of marching on to a panel
+    // that cannot render.
+    //
+    // 3.8.3: body moved to scripts/pinokio/ltx25_weights.sh. It was a
+    // "\n"-joined string — ONE 748-char dispatch, not the short lines the old
+    // note here claimed, because that is not what Pinokio writes to the pty.
+    {
+      method: "notify",
+      params: {
+        html: "<b>Downloading LTX-2.5 (~27 GB)…</b><br>The engine and its text encoder — this is what the panel renders with. Resumable: if this stops, run Install again and it picks up where it left off.<br><br>A full install is about <b>37 GB</b>: this, the Gemma 3 language model that Enhance and the Storyboard planner run on, and three small control LoRAs. <b>LTX-2.3 is no longer downloaded</b> — it is only needed to TRAIN a character, and the panel offers it in Settings → Models the moment you want it."
+      }
+    },
+    {
+      method: "shell.run",
+      params: {
+        message: "bash scripts/pinokio/ltx25_weights.sh"
       }
     },
 

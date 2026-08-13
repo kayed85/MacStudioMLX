@@ -717,9 +717,43 @@ def _install_lora_fusion_patches() -> None:
     if not classes:
         return  # very old install — nothing to patch
 
-    from ltx_core_mlx.model.transformer.model import LTXModel
+    from ltx_core_mlx.model.transformer.model import LTXModel, LTXModelConfig
     from ltx_core_mlx.utils.memory import aggressive_cleanup
     from ltx_core_mlx.utils.weights import apply_quantization, load_split_safetensors
+
+    def _new_dit(tx_path):
+        """An LTXModel shaped by the PACK'S OWN CONFIG, exactly as the library
+        builds it (`_base.py`: LTXModel(LTXModelConfig.from_checkpoint_dir(...))).
+
+        This used to be a bare `LTXModel()`, i.e. LTXModelConfig's DEFAULTS. On
+        2.3 that was harmless because every default matched. On 2.5 it is not:
+        the packs set `use_keyframes_abs_pos_embedding: true` and their
+        checkpoints carry `transformer.keyframes_abs_pos_embedding`, while the
+        default is False — so the model was built WITHOUT that parameter and
+        load_weights refused the checkpoint with
+
+            Received 1 parameters not in model: keyframes_abs_pos_embedding.
+
+        Every LTX-2.5 render with a LoRA attached died there, which is every
+        character render on the distilled path. It went unnoticed because the
+        panel had been routing Balanced characters to the HQ pipeline (a 2.3
+        speed optimisation, now version-gated), and that path builds its DiT
+        somewhere else.
+
+        Ask the pack, never assume: a future generation that adds another
+        config-gated parameter is then right by construction rather than one
+        more line here."""
+        try:
+            return LTXModel(LTXModelConfig.from_checkpoint_dir(Path(tx_path).parent))
+        except Exception as exc:                      # noqa: BLE001
+            # Degrade to the previous behaviour rather than failing the render:
+            # an older library without from_checkpoint_dir, or a pack with no
+            # readable config, is exactly the 2.3 case this used to serve.
+            emit({"event": "log",
+                  "line": f"WARN: could not read the transformer config next to "
+                          f"{os.path.basename(str(tx_path))} ({exc}); building "
+                          f"the DiT from defaults."})
+            return LTXModel()
 
     distilled_cls = next(
         (c for c in classes if c.__name__ == "DistilledPipeline"), None
@@ -764,7 +798,7 @@ def _install_lora_fusion_patches() -> None:
                               f"{os.path.basename(str(tx_path))}..."})
                 weights = load_split_safetensors(tx_path, prefix="transformer.")
                 weights = self._fuse_pending_loras(weights, pending)
-                self.dit = LTXModel()
+                self.dit = _new_dit(tx_path)
                 apply_quantization(self.dit, weights)
                 self.dit.load_weights(list(weights.items()))
                 aggressive_cleanup()
@@ -803,7 +837,7 @@ def _install_lora_fusion_patches() -> None:
                               f"{os.path.basename(str(tx_path))}..."})
                 weights = load_split_safetensors(tx_path, prefix="transformer.")
                 weights = self._fuse_pending_loras(weights, pending)
-                dit = LTXModel()
+                dit = _new_dit(tx_path)
                 apply_quantization(dit, weights)
                 dit.load_weights(list(weights.items()))
                 aggressive_cleanup()
@@ -1014,6 +1048,124 @@ _hq_lora_key: str | None = None
 # across that switch would refine stage 2 with the previous generation's LoRA
 # — which fuses, renders, and is wrong with nothing to attribute it to.
 _hq_weight_key: tuple[str | None, str | None] | None = None
+
+
+def _checkpoint_generation(model_dir: str) -> tuple[int, ...]:
+    """The generation of the checkpoint in ``model_dir``, e.g. ``(2, 5)``.
+
+    Returns the empty tuple when it cannot be read, which every
+    generation-keyed default in the vendored library treats as "older than
+    anything" and therefore answers with the legacy value. A pack whose
+    config we cannot parse must render exactly as it did before.
+
+    Reads `config.json` / `embedded_config.json` — the sidecars the quantiser
+    writes next to the weights — and parses with the LIBRARY's own
+    ``parse_model_version``, so the panel cannot disagree with the pipeline
+    about what "2.5" means. Costs one small JSON read, no weights.
+    """
+    try:
+        from ltx_core_mlx.model.transformer.model import parse_model_version
+    except Exception:  # noqa: BLE001 — older library: no generations exist
+        return ()
+    import json as _json
+    from pathlib import Path as _Path
+    base = _Path(str(model_dir))
+    for name in ("config.json", "embedded_config.json"):
+        try:
+            raw = _json.loads((base / name).read_text())
+        except Exception:  # noqa: BLE001 — absent/unreadable/not JSON
+            continue
+        version = raw.get("model_version")
+        if version is None:
+            version = (raw.get("transformer") or {}).get("model_version")
+        if version is None:
+            continue
+        try:
+            return tuple(parse_model_version(str(version)))
+        except Exception:  # noqa: BLE001
+            continue
+    return ()
+
+
+def _hq_modality_scale(model_dir: str) -> float:
+    """The HQ path's default ``modality_scale`` for this checkpoint.
+
+    The detail-guidance slider (STG) has to hand the pipeline EXPLICIT guider
+    params to make `stg_blocks=[28]` bite, and those params carry every other
+    field too. Hardcoding `modality_scale=3.0` there meant the slider changed
+    TWO things at once on LTX-2.5: the pipeline's own default became 1.0 in
+    the v4.0 pin (isolated-modality guidance off — an owner-graded output
+    change worth −60.7 s), but any render with detail guidance above 0 would
+    silently re-enable the dead pass and pay for it again.
+
+    So the value is asked of the library rather than restated here: the panel
+    and `TI2VidTwoStagesHQPipeline` resolve it through the SAME function, and
+    a future generation cannot make the two disagree. On a library that
+    predates the keying — any older pin — the import fails and 3.0 comes back,
+    which is byte-identical to what shipped before.
+    """
+    try:
+        from ltx_pipelines_mlx.ti2vid_two_stages_hq import resolve_modality_scale
+    except Exception:  # noqa: BLE001 — pre-25b9b8e library: 3.0 was the only value
+        return 3.0
+    try:
+        return float(resolve_modality_scale(_checkpoint_generation(model_dir)))
+    except Exception:  # noqa: BLE001 — never let this block a render
+        return 3.0
+
+
+def _thin_table_caps(model_dir: str) -> tuple[int, int] | None:
+    """(stage1, stage2) step ceilings for the FIXED tables this checkpoint
+    thins, or None when they cannot be read."""
+    try:
+        from ltx_pipelines_mlx.scheduler import distilled_presets_for
+    except Exception:  # noqa: BLE001 — older library: leave requests alone
+        return None
+    try:
+        vendor = (distilled_presets_for(_checkpoint_generation(model_dir)) or {}).get("vendor")
+        if not vendor:
+            return None
+        return (max(1, len(vendor.stage1) - 1), max(1, len(vendor.stage2) - 1))
+    except Exception:  # noqa: BLE001 — never block a render on a probe
+        return None
+
+
+def _thin_cap(model_dir: str, key: str, want: int) -> int:
+    """Clamp a step count to what THIS checkpoint's fixed table can serve.
+
+    A step count on a thinning lane means "give me N of the checkpoint's own
+    steps" — it thins a fixed table. Asking for more than the table holds is
+    asking it to PAD, which is a different operation with a different answer,
+    so `thin_sigmas` refuses it. Correctly: a padded schedule is not a longer
+    render, it is a made-up one.
+
+    The panel must therefore never ask, and this is the belt behind that.
+    It clamps the RESOLVED value — after a lane's own `p.get(key, default)` —
+    because the value that broke Colorize came from a default, not from the
+    form. An earlier version of this guard only inspected incoming params and
+    sailed straight past HDR's own `stage1_steps=10`.
+
+    Clamping rather than raising is deliberate: the user asked for a finer
+    schedule than the checkpoint can serve, and its finest with a log line is a
+    better answer than a dead render four minutes in.
+
+    Only ever called from the lanes that thin a FIXED table (ICLoraPipeline:
+    Colorize / Restore / Ingredients / Control / HDR). The CFG-dev lanes
+    (`generate_hq` res_2s, `generate_keyframe`) COMPUTE a schedule of whatever
+    length they are asked for, and their 10 and 20 are graded values — clamping
+    those would silently change owner-approved output.
+    """
+    caps = _thin_table_caps(model_dir)
+    if not caps:
+        return want
+    cap = caps[0] if key.startswith("stage1") else caps[1]
+    if want > cap:
+        emit({"event": "log",
+              "line": f"{key}={want} exceeds what this checkpoint's schedule "
+                      f"holds ({cap} steps); using {cap}. A step count thins "
+                      f"the checkpoint's own table — it cannot pad it."})
+        return cap
+    return want
 
 
 def get_hq_pipe(model_dir: str, loras: list[dict] | None = None,
@@ -1356,6 +1508,42 @@ def _free_pipe_for_decode(pipe):
             pass
 
 
+def _build_live_preview(kwargs: dict):
+    """A LivePreviewMonitor for this job, or None when the preview is off.
+
+    THE LANE RULES ARE THE PANEL'S, NOT OURS. `live_preview_every` arrives in
+    the job spec because the right value differs per PIPELINE — 1 on the
+    distilled lane, 2 on res_2s, which evaluates the denoiser twice per stage-2
+    step and whose odd anchor estimates come back patchy — and a client counting
+    estimates would have to know which schedule is running. We take the number
+    and use it.
+
+    Never fatal. A missing checkpoint, an unreadable directory or a library
+    without the module means the render proceeds with no preview: this is a
+    monitor, and a monitor must not be able to stop the thing it watches."""
+    d = kwargs.get("live_preview_dir")
+    tae = kwargs.get("live_preview_tae")
+    if not d or not tae:
+        return None
+    try:
+        from ltx_pipelines_mlx.live_preview import LivePreviewMonitor
+    except Exception as exc:                          # noqa: BLE001
+        emit({"event": "log",
+              "line": f"live preview unavailable in this engine build ({exc}) — "
+                      f"rendering without it."})
+        return None
+    try:
+        return LivePreviewMonitor(
+            Path(d), Path(tae),
+            output=Path(kwargs["output_path"]),
+            every=max(1, int(kwargs.get("live_preview_every") or 1)),
+        )
+    except Exception as exc:                          # noqa: BLE001
+        emit({"event": "log",
+              "line": f"live preview could not start ({exc}) — rendering without it."})
+        return None
+
+
 def _generate_latents(pipe, *, needs_image: bool, kwargs: dict):
     # On second+ runs the video/audio decoders (~2.5 GB combined) remain
     # resident from the previous job's decode phase.  During the
@@ -1444,6 +1632,11 @@ def _generate_latents(pipe, *, needs_image: bool, kwargs: dict):
             )
             if "frame_rate" in sig.parameters:
                 call_kwargs["frame_rate"] = kwargs.get("frame_rate", 24.0)
+            # Only when the installed pipeline actually takes it — the panel
+            # must never die in argparse-equivalent 30 s into a render because
+            # an older engine build does not have the parameter.
+            if "live_preview" in sig.parameters and kwargs.get("_live_preview") is not None:
+                call_kwargs["live_preview"] = kwargs["_live_preview"]
             return pipe.generate(**call_kwargs)
         except TypeError:
             # New DistilledPipeline.generate inherits from the two-stage
@@ -1457,7 +1650,7 @@ def _generate_latents(pipe, *, needs_image: bool, kwargs: dict):
         emit({"event": "log",
               "line": "[t2v-two-stage] PHOSPHENE_T2V_TWO_STAGE=1 — routing T2V Standard through generate_two_stage (half-res → 2× upsample → Stage-2 refine)."})
     # Unified new-API fallback (post-refactor packages).
-    return pipe.generate_two_stage(
+    _two_stage_kwargs = dict(
         prompt=kwargs["prompt"],
         image=kwargs.get("image") if needs_image else None,
         height=kwargs["height"],
@@ -1471,6 +1664,14 @@ def _generate_latents(pipe, *, needs_image: bool, kwargs: dict):
         frame_rate=kwargs.get("frame_rate", 24.0),
         num_steps=kwargs.get("num_steps"),
     )
+    if kwargs.get("_live_preview") is not None:
+        try:
+            import inspect as _inspect
+            if "live_preview" in _inspect.signature(pipe.generate_two_stage).parameters:
+                _two_stage_kwargs["live_preview"] = kwargs["_live_preview"]
+        except (TypeError, ValueError):
+            pass
+    return pipe.generate_two_stage(**_two_stage_kwargs)
 
 
 # ---- LTX 2.3 spatial latent upscaler (Y1.021+) ------------------------------
@@ -1917,17 +2118,29 @@ def configure_acceleration(mode: str) -> str:
 # of letting it surface as an un-triageable TypeError mid-render.
 #
 # 2026-08-12: this is a FORK BUILD, not an upstream tag. The vendored checkout
-# is mrbizarro/ltx-2-mlx `feat/ltx-2.5` at 871694d — v0.14.19 plus the LTX-2.5
-# port (keyframe pos-emb, Gemma 4 tower, ancestral sampler). The release
-# segment stays 0.14.19 because that is genuinely what it branches from; the
-# `+ltx25.1` local segment is what makes the two distinguishable.
+# is mrbizarro/ltx-2-mlx at the immutable tag `v0.14.19+ltx25.3` — v0.14.19 plus
+# the LTX-2.5 port (keyframe pos-emb, Gemma 4 tower, ancestral sampler). The
+# release segment stays 0.14.19 because that is genuinely what it branches from;
+# the `+ltx25.N` local segment is what makes the two distinguishable.
+#
+# The N moves whenever the fork changes what a render COMPUTES, not merely when
+# the SHA moves. `.2` was the ancestral sampler actually being reached on 2.5
+# plus the vendor's stage-2 first sigma (0.85, not 2.3's 0.909375). `.3` is the
+# v4.0 pin: isolated-modality guidance off by default on the 2.5 HQ path, the
+# distilled lane refining in 2 steps, and a step count thinning the checkpoint's
+# table instead of truncating it. All three change output on 2.5; none touches
+# 2.3.
+#
+# The TAG is the pin, not the SHA. A branch tip moves and a SHA on a rebased
+# branch stops being fetchable; a tag is the only form of this reference that
+# cannot rot under an existing install. install.js / update.js fetch the tag.
 #
 # That local segment exists FOR this gate. The fork originally carried the bare
 # string "0.14.19", so a 2.5 runtime reported `match: true` against the 2.3 pin
 # — a skew gate blind to the one skew that mattered. Bumping the pin here
 # without bumping the packages (or the reverse) puts it back into permanent
 # SKEW warnings, so the two move together or not at all.
-_LTX_EXPECTED_VERSION = "0.14.19+ltx25.1"
+_LTX_EXPECTED_VERSION = "0.14.19+ltx25.3"
 
 
 def _detect_ltx_version() -> dict:
@@ -2051,6 +2264,13 @@ for line in sys.__stdin__:
     _last_activity = time.time()
     action = msg.get("action")
 
+    # ONE CHOKE POINT for schedule step counts, before any action reads them.
+    # Every generate_* lane resolves its own stage1/stage2 defaults, and any of
+    # them can be handed an explicit value by the form, by Load Params, or by a
+    # sidecar replayed from another generation. Clamping here — once, against
+    # the pack this job actually names — means no lane can ask a checkpoint to
+    # pad a table it does not have, and a lane added tomorrow is covered
+    # without anyone remembering to add it.
     if action == "exit":
         emit({"event": "exit", "reason": "shutdown"})
         os._exit(0)
@@ -2123,6 +2343,19 @@ for line in sys.__stdin__:
             # generate() so it propagates through the whole chain (the patched
             # decode_and_stream reads os.environ at decode call time).
             _apply_vae_streaming_decision(kwargs["num_frames"])
+            # LIVE PREVIEW. Read-only: the thumbnail is a decode of the x0
+            # estimate the denoise loop ALREADY HOLDS, so nothing is
+            # recomputed, no scheduler is re-entered and no tensor the
+            # denoiser owns is written. A render with it on is byte-identical
+            # to the same render with it off — proven by hash, not asserted.
+            for _k in ("live_preview_dir", "live_preview_tae", "live_preview_every"):
+                if p.get(_k) is not None:
+                    kwargs[_k] = p[_k]
+            kwargs["_live_preview"] = _build_live_preview(kwargs)
+            if kwargs["_live_preview"] is not None:
+                emit({"event": "log",
+                      "line": f"live preview on — every {kwargs.get('live_preview_every', 1)} "
+                              f"estimate(s) → {p.get('live_preview_dir')}"})
             if needs_image:
                 src_image = p.get("image")
                 if src_image:
@@ -2235,7 +2468,36 @@ for line in sys.__stdin__:
                 pass
         except Exception as exc:
             _last_activity = time.time()
-            emit({"event": "error", "id": job_id, "error": str(exc), "trace": traceback.format_exc()})
+            # A USER STOP IS NOT A FAILURE. The abort sentinel raises
+            # LivePreviewAborted between forwards, and the CLI turns that into
+            # exit 75 precisely so a supervisor can tell "the user stopped this"
+            # apart from "this crashed" without parsing anything. The panel is
+            # that supervisor, and it gets a distinct event rather than a red
+            # card: nothing was saved, but nothing went wrong either.
+            if type(exc).__name__ == "LivePreviewAborted":
+                # DROP THE WARM PIPELINE. The abort raises from BETWEEN two
+                # forwards, so the pipeline is left mid-generate: latents,
+                # scheduler position and the monitor's own state all belong to
+                # a render that will never finish. The helper's whole point is
+                # that it keeps that object alive for the next job — so the
+                # next job inherited the wreckage and died instantly with an
+                # empty error, and every job after it did too. Stop early
+                # bricked the render lane until the panel was restarted.
+                #
+                # Found by rendering AFTER a stop rather than stopping and
+                # walking away, which is the thing a user does and a curl test
+                # does not. The next job pays one pipeline reload (~7 s) and
+                # everything downstream is clean.
+                try:
+                    with _pipe_lock:
+                        release_pipelines(None)
+                except Exception:
+                    pass
+                emit({"event": "stopped", "id": job_id, "reason": str(exc),
+                      "exit_code": 75})
+            else:
+                emit({"event": "error", "id": job_id, "error": str(exc),
+                      "trace": traceback.format_exc()})
         finally:
             try:
                 configure_acceleration("off")
@@ -2428,25 +2690,34 @@ for line in sys.__stdin__:
             # other defaults verbatim (cfg/rescale/modality) so STG is the only
             # thing that changes. At stg_scale<=0 we pass nothing → the pipeline
             # builds its own [] params → byte-identical to the pre-slider path.
+            #
+            # `modality_scale` is the one field that is NOT a constant: it is
+            # generation-keyed, and `_hq_modality_scale` asks the library for
+            # the same answer the pipeline's own default would compute. 2.3
+            # still gets 3.0; 2.5 gets 1.0, so the slider changes STG and
+            # nothing else. Hardcoding 3.0 here made the slider silently
+            # re-enable the isolated-modality pass on 2.5 — the one the v4.0
+            # pin removed by default.
             _stg = float(kwargs.get("stg_scale", 0.0))
             if _stg > 0.0:
                 try:
                     from ltx_core_mlx.components.guiders import MultiModalGuiderParams
+                    _modality = _hq_modality_scale(model_dir)
                     kwargs["video_guider_params"] = MultiModalGuiderParams(
                         cfg_scale=float(kwargs.get("cfg_scale", 3.0)),
                         stg_scale=_stg,
                         rescale_scale=0.45,
-                        modality_scale=3.0,
+                        modality_scale=_modality,
                         stg_blocks=[28],
                     )
                     kwargs["audio_guider_params"] = MultiModalGuiderParams(
                         cfg_scale=7.0,
                         stg_scale=_stg,
                         rescale_scale=1.0,
-                        modality_scale=3.0,
+                        modality_scale=_modality,
                         stg_blocks=[28],
                     )
-                    emit({"event": "log", "line": f"STG detail guidance ON — stg_scale={_stg:g}, stg_blocks=[28]"})
+                    emit({"event": "log", "line": f"STG detail guidance ON — stg_scale={_stg:g}, stg_blocks=[28], modality_scale={_modality:g}"})
                 except Exception as _stg_exc:
                     # Never let STG wiring block a render — fall back to the
                     # plain (STG-off) HQ path if the import/shape ever drifts.
@@ -2862,8 +3133,10 @@ for line in sys.__stdin__:
                 num_frames=num_frames,
                 frame_rate=float(p.get("frame_rate", 24.0)),
                 seed=seed,
-                stage1_steps=int(p.get("stage1_steps", 10)),
-                stage2_steps=int(p.get("stage2_steps", 3)),
+                stage1_steps=_thin_cap(model_dir, "stage1_steps",
+                                       int(p.get("stage1_steps", 8))),
+                stage2_steps=_thin_cap(model_dir, "stage2_steps",
+                                       int(p.get("stage2_steps", 3))),
             )
             kwargs = _filter_unsupported_kwargs(pipe.generate_and_save, kwargs)
             out_path = pipe.generate_and_save(**kwargs)
@@ -2980,8 +3253,13 @@ for line in sys.__stdin__:
                 num_frames=num_frames,
                 frame_rate=float(p.get("frame_rate", 24.0)),
                 seed=seed,
-                stage1_steps=int(p.get("stage1_steps", 8)),
-                stage2_steps=int(p.get("stage2_steps", 3)),
+                # Clamped to this checkpoint's fixed table — ICLoraPipeline THINS
+                # it, so the table's own length is the ceiling and an over-ask is a
+                # pad request the sampler refuses after the model has loaded.
+                stage1_steps=_thin_cap(model_dir, "stage1_steps",
+                                       int(p.get("stage1_steps", 8))),
+                stage2_steps=_thin_cap(model_dir, "stage2_steps",
+                                       int(p.get("stage2_steps", 3))),
             )
             # Ingredients (multi-reference) reuses this same action but runs the
             # public Space's single-stage recipe — skip_stage_2=True, generated

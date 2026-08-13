@@ -1,8 +1,6 @@
 #!/usr/bin/env python3.11
 """Storyboard — plan a run of shots that share a character, then shoot them.
 
-Design doc: ~/AI/projects/phosphene/decisions/director_architecture.md
-
 WHAT THIS IS, IN PHOSPHENE'S OWN TERMS
 --------------------------------------
 Phosphene's thesis is "your trained character, in any scene." A storyboard is simply that at
@@ -221,6 +219,16 @@ _H3_LENGTH_FRAMES = {"3s": 73, "5s": 124, "10s": 243, "15s": 362}
 # How many chained 5 s windows each length renders as. Anything past 5 s is
 # N windows stitched by the runner, and every window is asked for a prompt.
 _H3_LENGTH_WINDOWS = {"3s": 1, "5s": 1, "10s": 2, "15s": 3}
+
+# Does this shot have spoken lines? The planner writes dialogue in explicit
+# <d>…</d> tags, so this is a DERIVATION rather than a guess — which is the only
+# reason the storyboard lane is allowed to decide `no_voice` automatically at
+# all.
+#
+# The lookahead is load-bearing: a bare `<d>\s*\S` matches `<d></d>`, because
+# the `<` of the CLOSING tag is itself non-whitespace. An empty tag is a planner
+# artefact and means silence, so it must not load the voice.
+_HAS_DIALOGUE = re.compile(r"<d>\s*(?!</\s*d\s*>)\S", re.I)
 
 # A pass's quality (the LTX vocabulary the policy speaks) -> H3's canvas axis.
 # quick 640x384 · standard 768x448 · high 1024x576 are the three offered canvases;
@@ -804,6 +812,20 @@ def shot_to_job(shot: dict, policy_pass: dict, *,
 
     if shot.get("character_id"):
         job["character_id"] = shot["character_id"]
+        # THE VOICE LOADS ONLY WHEN THERE ARE LINES TO SAY.
+        #
+        # Stacking a character's audio LoRA on a shot with no speech spends the
+        # audio branch on nothing and, on some prompts, invites gibberish. The
+        # panel already has the manual escape hatch (the "No voice" pill); this
+        # makes the DEFAULT right in the one place it can be known EXACTLY
+        # rather than guessed.
+        #
+        # And it is exact here: the planner's H3 dialect carries dialogue in
+        # explicit <d>…</d> tags, so this is a derivation, not a heuristic. A
+        # shot with a <d> tag that has any content speaks; one without does not.
+        # (The Manual tab cannot know this and does not pretend to — it sets a
+        # default and says it did.)
+        job["no_voice"] = "off" if _HAS_DIALOGUE.search(prompt) else "on"
     if shot.get("seed") is not None:
         job["seed"] = shot["seed"]
 
@@ -840,7 +862,7 @@ def new_storyboard(board_id: str, title: str, *, shots: list[dict] | None = None
         "created_at": int(time.time()),
         "cast": cast or [],
         "policy": policy or {
-            "draft": {"quality": "quick", "width": 640, "height": 480, "frames": 49},
+            "draft": {"quality": "quick", "width": 640, "height": 448, "frames": 49},
             "final": {"quality": "balanced", "width": 1024, "height": 576, "frames": 121},
         },
         "shots": shots or [],
