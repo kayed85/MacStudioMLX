@@ -60,26 +60,11 @@ module.exports = {
       method: "shell.run",
       params: {
         message: [
-          // Split across short lines: Pinokio 8.0.x hangs its shell on very long
-          // single lines (#50). One shell invocation — the if/else spans lines.
-          [
-            "MEM_BYTES=$(sysctl -n hw.memsize 2>/dev/null)",
-            "if echo \"$MEM_BYTES\" | grep -qE '^[0-9]+$' && [ \"$MEM_BYTES\" -lt 46000000000 ]; then",
-            "  MEM_GB=$((MEM_BYTES / 1000000000))",
-            "  echo '=================================================================='",
-            "  echo \"HAILUO H3 NEEDS AT LEAST A 48 GB MAC (this Mac has ${MEM_GB} GB)\"",
-            "  echo 'Even the reduced-RAM Q8 engine peaks around 27 GiB while rendering;'",
-            "  echo 'below 48 GB it swaps and a 3-second clip takes hours.'",
-            "  echo 'Nothing was downloaded. Keep using the built-in LTX-2.3 engine.'",
-            "  echo '=================================================================='",
-            "  exit 1",
-            "elif [ \"$MEM_BYTES\" -lt 60000000000 ]; then",
-            "  echo 'H3 memory preflight OK - 48 GB class: the reduced-RAM Q8 engine'",
-            "  echo 'will be built locally after the weights download (adds ~5 min).'",
-            "else",
-            "  echo 'H3 memory preflight OK'",
-            "fi",
-          ].join("\n"),
+          // 3.8.3: the if/else was a "\n"-joined STRING, so Pinokio wrote all
+          // 845 chars to the pty in one go (#56 / #50). Body — with the
+          // fail-open rationale and the 46e9 floor — now in
+          // scripts/pinokio/h3_preflight.sh. Gate: scripts/check_pinokio_scripts.js.
+          "bash scripts/pinokio/h3_preflight.sh",
           "echo 'free disk space:'",
           "df -h ."
         ]
@@ -241,20 +226,11 @@ module.exports = {
       method: "shell.run",
       params: {
         path: "minimax-h3-mlx",
+        // 3.8.3: body moved to scripts/pinokio/h3_build_q8.sh (595-char
+        // dispatch). {{cwd}} is substituted in the MESSAGE, so the app root
+        // is passed as $1 rather than written into the script.
         message: [
-          [
-            "MEM_BYTES=$(sysctl -n hw.memsize 2>/dev/null)",
-            "PACK='{{cwd}}/mlx_models/hailuo-h3/models/h3-dit-q8'",
-            "SRC='{{cwd}}/mlx_models/hailuo-h3/models/deepbeep-pruned-bf16/MiniMax-H3-FL2VA-pruned_bf16.safetensors'",
-            "if [ -f \"$PACK/quant_config.json\" ]; then",
-            "  echo 'Q8 engine already built - skipping'",
-            "elif echo \"$MEM_BYTES\" | grep -qE '^[0-9]+$' && [ \"$MEM_BYTES\" -lt 60000000000 ]; then",
-            "  echo '=== Building the reduced-RAM Q8 engine (~5 min, one time) ==='",
-            "  .venv/bin/python scripts/quantize_stream.py --src \"$SRC\" --out \"$PACK\"",
-            "else",
-            "  echo '64 GB-class Mac - bf16 engine is the default, Q8 not built'",
-            "fi",
-          ].join("\n")
+          "bash ../scripts/pinokio/h3_build_q8.sh '{{cwd}}'"
         ]
       }
     },
@@ -262,7 +238,17 @@ module.exports = {
     {
       method: "notify",
       params: {
-        html: "<b>Hailuo H3 ready.</b><br>Open the panel — the Video tab now has an <b>Engine</b> row: LTX-2.3 | Hailuo H3. H3 serves Text and Image, and generates dialogue + sound from the same prompt, so write them into it."
+        // 3.8.3: this used to say "the Video tab now has an Engine row". The
+        // engine control has been the switcher in the TOP RIGHT of the header
+        // since the engine table landed — there is no Engine row in the Video
+        // tab any more, and #58 ("[bug] Engine Picker not showing") is a user
+        // who installed H3 successfully and then went looking in the place this
+        // sentence sent him. Say where the control actually is, and name the
+        // one thing that can still hide it: the switcher only appears when
+        // there is more than one engine this Mac can render with, and on a
+        // 48 GB-class Mac that means the reduced-RAM Q8 pack built by the step
+        // above must be on disk.
+        html: "<b>Hailuo H3 ready.</b><br>Open the panel — the engine switcher is in the <b>top right of the header</b>, next to the memory and models pills: <b>LTX-2.3 | Hailuo H3</b>. (Not in the Video tab.) Restart the panel if it was already running. H3 serves Text and Image, and generates dialogue + sound from the same prompt, so write them into it."
       }
     }
   ]
