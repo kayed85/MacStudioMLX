@@ -32,7 +32,7 @@ Key differences from the standard A2V path:
 
 </p>
 
-> **Current release: v3.8.1.** Hotfix: Update and Install could abort at the video-engine pin with `error: Your local changes to the following files would be overwritten by checkout: … video_vae.py`, and retrying never cleared it. Both paths now discard local edits in the app-managed vendored checkout before moving the pin, then re-apply the codec patch. v3.8.0 brought Storyboard — describe a film in a sentence, get a shot list you can edit before anything renders — plus the fix for the install failure that had been breaking every fresh install and every Update since hatchling 1.32.0 shipped. Full notes on the [releases page](https://github.com/mrbizarro/phosphene/releases).
+> **Current release: v3.8.2 — update to it if you are on v3.8.1.** On v3.8.1 the Update run could end several steps early without saying so, and the step it skipped was the one that patches the video encoder. The result had no visible symptom: renders completed normally but were encoded 4:2:0 `yuv420p`, which shows up as blocky compression on faces and skin. v3.8.2 runs that patch immediately after the engine reinstall, removes what was ending the run early, and makes the patch verify its own work and fail loudly instead of quietly. v3.8.1 fixed an Update that could abort at the video-engine pin (`your local changes … would be overwritten by checkout: … video_vae.py`) and could never be retried; v3.8.0 brought Storyboard — describe a film in a sentence, get a shot list you can edit before anything renders — plus the fix for the install failure that had been breaking every fresh install since hatchling 1.32.0 shipped. Full notes on the [releases page](https://github.com/mrbizarro/phosphene/releases).
 
 ## Overview
 
