@@ -2323,152 +2323,37 @@ def _train_install_dev_transformer(push_log) -> dict:
 
 
 def _h3_install_turbo(push_log) -> dict:
-    """Fetch the two files the H3 Turbo mode needs, ~804 MB total.
+    """Refuse an unpinned Turbo repack download rather than install raw weights.
 
-    Same shape and the same single download slot as
-    _train_install_dev_transformer, but TWO steps in sequence, because the
-    files come from two different places:
-
-      1. the adapter, 744 MB, a plain `hf download --include` from the
-         Apache-2.0 LoRA repo;
-      2. `upstream_time_embedder.safetensors`, ~60 MB, which is not a
-         published file at all. It is four tensors read out of a 66 GB
-         MiniMaxAI shard by HTTP range request — safetensors puts every
-         tensor's byte offsets in a JSON header at the front of the file, so
-         the pack's own scripts/fetch_time_embedder.py asks for exactly those
-         ranges. No 66 GB download, and nothing here redistributes weights.
-
-    Step 2 needs the H3 pack's venv (it imports huggingface_hub + safetensors)
-    and a runner new enough to carry the script, both of which are checked
-    before anything starts, so a stale pack fails in one second with a sentence
-    rather than after a 744 MB download.
-
-    Returns {"ok": True, "started": True, ...} or {"ok": False, "error": ...}.
+    LightX2V publishes the Apache-2.0 source adapter, but the H3 runner needs
+    the panel's repacked layout. The v1.0 release asset and its output SHA-256
+    have not been published yet, so there is deliberately no URL to execute.
+    install_h3.js carries the exact source/target publication TODO. Once that
+    asset exists, this endpoint can use the ordinary guarded release fetch.
     """
-    import subprocess
-    if DOWNLOAD["active"]:
-        return {"ok": False,
-                "error": f"another download is already active "
-                         f"({DOWNLOAD.get('repo_id', '?')})."}
-
     paths = h3_paths()
     if paths["missing"]:
         return {"ok": False,
                 "error": "Turbo is an add-on to the Hailuo H3 pack, and H3 "
                          "isn't fully installed yet: "
                          + "; ".join(paths["missing"])}
-    fetcher = H3_ROOT / "scripts" / "fetch_time_embedder.py"
-    if not fetcher.is_file() or not h3_supports_lora():
+    if not h3_supports_lora():
         return {"ok": False,
                 "error": "This Hailuo H3 checkout predates Turbo (no --lora "
                          "support in its runner). Re-run 'Install Hailuo H3' "
                          "from the Phosphene sidebar in Pinokio to update the "
                          "clone — it keeps every weight already on disk."}
-
-    hf_bin = HF_BIN if HF_BIN is not None else _resolve_hf()
-    if hf_bin is None:
-        return {"ok": False, "error": "hf CLI not found on PATH."}
-
     target = _h3_turbo_dir()
-    try:
-        target.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        return {"ok": False, "error": f"can't create {target}: {exc}"}
-
-    env = dict(os.environ)
-    hf_token = _active_hf_token()
-    if hf_token:
-        env["HF_TOKEN"] = hf_token
-        env["HUGGING_FACE_HUB_TOKEN"] = hf_token
-    # Step 2 pulls one small index JSON through the hub cache. Left to itself
-    # that lands in ~/.cache/huggingface on a machine whose every other model
-    # lives under the Pinokio tree, so pin it inside the H3 models dir when the
-    # environment hasn't already said where the cache goes.
-    env.setdefault("HF_HOME", str(H3_MODELS / "hf_home"))
-    env["PYTHONUNBUFFERED"] = "1"
-
-    lora_cmd = [str(hf_bin), "download", H3_TURBO_REPO,
-                "--include", H3_TURBO_LORA_FILE,
-                "--local-dir", str(target)]
-    embed_cmd = [str(paths["python"]), str(fetcher),
-                 "--out", str(target / H3_TURBO_EMBEDDER_FILE)]
-
-    with DOWNLOAD_LOCK:
-        DOWNLOAD["active"] = True
-        DOWNLOAD["key"] = "h3_turbo"
-        DOWNLOAD["repo_id"] = H3_TURBO_REPO
-        DOWNLOAD["started_ts"] = time.time()
-        DOWNLOAD["last_line"] = ""
-
-    def _stream(cmd: list[str], tag: str) -> int:
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1, env=env, start_new_session=True)
-        with DOWNLOAD_LOCK:
-            DOWNLOAD["proc"] = proc
-            try:
-                DOWNLOAD["pgid"] = os.getpgid(proc.pid)
-            except ProcessLookupError:
-                DOWNLOAD["pgid"] = None
-        buf = ""
-        assert proc.stdout is not None
-        while True:
-            ch = proc.stdout.read(1)
-            if not ch:
-                break
-            # `hf` draws its progress bar with \r, so both are line breaks here.
-            if ch in ("\n", "\r"):
-                line, buf = buf.strip(), ""
-                if line:
-                    with DOWNLOAD_LOCK:
-                        DOWNLOAD["last_line"] = line[:200]
-                    push_log(f"[{tag}] {line[:300]}")
-            else:
-                buf += ch
-        return proc.wait()
-
-    def _runner():
-        try:
-            push_log(f"[h3:turbo] downloading the 4-step adapter "
-                     f"({H3_TURBO_REPO} / {H3_TURBO_LORA_FILE}, 744 MB) → "
-                     f"{target}")
-            rc = _stream(lora_cmd, "hf:turbo")
-            if rc != 0:
-                push_log(f"[h3:turbo] adapter download exited with code {rc} — "
-                         f"stopping before the time embedder.")
-                return
-            push_log("[h3:turbo] adapter done. Recovering the upstream time "
-                     "embedder (~60 MB read out of a 66 GB release by HTTP "
-                     "range — not a 66 GB download).")
-            rc = _stream(embed_cmd, "h3:embedder")
-            if rc != 0:
-                push_log(f"[h3:turbo] time-embedder fetch exited with code {rc}. "
-                         f"The adapter is on disk; Turbo stays off until this "
-                         f"step succeeds.")
-                return
-            status = h3_turbo_status()
-            if status["available"]:
-                push_log("[h3:turbo] Turbo is ready — the H3 surface offers it "
-                         "on the next page load.")
-            else:
-                push_log(f"[h3:turbo] finished, but the files still don't check "
-                         f"out: {'; '.join(status['missing']) or status['reason']}")
-        except Exception as exc:
-            push_log(f"[h3:turbo] install crashed: {exc}")
-        finally:
-            with DOWNLOAD_LOCK:
-                DOWNLOAD["active"] = False
-                DOWNLOAD["key"] = None
-                DOWNLOAD["repo_id"] = None
-                DOWNLOAD["started_ts"] = None
-                DOWNLOAD["last_line"] = ""
-                DOWNLOAD["proc"] = None
-                DOWNLOAD["pgid"] = None
-
-    threading.Thread(target=_runner, daemon=True, name="h3-turbo-download").start()
-    return {"ok": True, "started": True, "repo_id": H3_TURBO_REPO,
-            "files": [H3_TURBO_LORA_FILE, H3_TURBO_EMBEDDER_FILE],
-            "dir": str(target), "size_gb": H3_TURBO_DOWNLOAD_GB}
+    message = (
+        "Automatic H3 Turbo install is paused until the runner-layout release "
+        f"asset {H3_TURBO_LORA_FILE} is published with a pinned SHA-256. "
+        f"Upstream source: {H3_TURBO_REPO}/{H3_TURBO_SOURCE_FILE} "
+        f"(SHA-256 {H3_TURBO_SOURCE_SHA256}). Do not substitute "
+        f"{H3_TURBO_RAW_V01_FILE}: raw v0.1 renders coloured noise at scale "
+        f"1.0. Expected the repack under {target}."
+    )
+    push_log(f"[h3:turbo] {message}")
+    return {"ok": False, "error": message, "dir": str(target)}
 
 
 # Compatibility taxonomy for LoRAs across the panel's two render lanes
@@ -5663,6 +5548,11 @@ _CIVITAI_BASE_MODELS_BY_CONTEXT = {
     "image": [bm for bms in _CIVITAI_IMAGE_FAMILIES.values() for bm in bms],
 }
 
+def spicy_mode_enabled() -> bool:
+    """Return the single server-side authorization predicate for NSFW UI/data."""
+    return bool(get_settings().get("spicy_mode", False))
+
+
 def _civitai_search(query: str = "", nsfw: bool = False,
                     cursor: str = "", limit: int = 20,
                     context: str = "video", family: str = "") -> dict:
@@ -5681,7 +5571,7 @@ def _civitai_search(query: str = "", nsfw: bool = False,
     # hasn't enabled Spicy mode in Settings, force nsfw=False regardless
     # of what the client sent. This keeps NSFW results out of casual /
     # kid-accessible installs even if someone fiddles the client param.
-    spicy_on = bool(get_settings().get("spicy_mode", False))
+    spicy_on = spicy_mode_enabled()
     if not spicy_on:
         nsfw = False
     # CivitAI's /models endpoint uses cursor-style pagination
@@ -6461,38 +6351,36 @@ H3_TEXT_CONFIG_REL = ("FL2VA", "text_encoder", "config.json")
 # H3 runs at 24 fps like LTX, on a 17n+5 frame grid (the runner snaps up).
 H3_FPS = 24.0
 
-# ---- Turbo: the 4-step distillation LoRA -------------------------------------
-# larryvrh/MiniMax-H3-Turbo-Lora (Apache-2.0) distils H3's sampler down to 4
-# sigma points = 3 forwards, against the 9 points / 8 forwards every tier bakes.
-# It is a SPEED MODE, not a tier and not a quality preset: same model, same
-# geometry, same prompt — fewer denoise passes.
-#
-# Two files, ~804 MB together, neither of them redistributed by Phosphene:
-#   the adapter          744 MB   from the LoRA repo (Apache-2.0)
-#   upstream_time_embedder.safetensors ~60 MB, recovered by the H3 pack's own
-#     scripts/fetch_time_embedder.py — an HTTP-RANGE read of four tensors out of
-#     a 66 GB MiniMaxAI release, not a 66 GB download. Needed because the pruned
-#     checkpoint dropped the 2688-d timestep MLP that the adapter's 51 adaLN
-#     modules consume; without it those 51 are skipped (the render still works,
-#     it is just missing a ~1e-4 correction to the modulation).
-H3_TURBO_REPO = "larryvrh/MiniMax-H3-Turbo-Lora"
-# The EMA checkpoint-500 file specifically. The non-EMA sibling is sharper but
-# over-etches speculars and runs the audio to -0.3 dB with no headroom; the
-# preview (pre-ckpt500) file is visibly softer. Third-party ComfyUI conversions
-# are bit-exact subsets that DROP the 51 adaLN pairs this runner can apply, so
-# they are strictly less than the original here.
-H3_TURBO_LORA_FILE = "minimax_h3_turbo_4step_ema_ckpt500.safetensors"
-H3_TURBO_EMBEDDER_FILE = "upstream_time_embedder.safetensors"
+# ---- Turbo: the LightX2V 4-step distillation LoRA ----------------------------
+# The runner needs the panel's bare/alpha-folded layout, not either raw
+# LightX2V file. In particular, raw v0.1 carries alpha/rank=8/128 outside the
+# tensor file; handing it to --lora at scale 1.0 applies a 16x oversized delta
+# and renders coloured noise. Keep the allowlist exact so a convenient glob can
+# never silently select that file.
+H3_TURBO_REPO = "lightx2v/Minimax-h3-Turbo"
+H3_TURBO_LORA_FILE = "lightx2v_v1.0_768p_ourlayout.safetensors"
+H3_TURBO_FALLBACK_LORA_FILE = "lightx2v_v0.1_ourlayout_alpha8.safetensors"
+H3_TURBO_RAW_V01_FILE = "minimax_h3_fl2v_turbo_4step_v0.1.safetensors"
+H3_TURBO_LORA_CANDIDATES = (
+    (H3_TURBO_LORA_FILE, "v1.0", False),
+    (H3_TURBO_FALLBACK_LORA_FILE, "v0.1", True),
+)
+# Exact upstream source for the v1.0 repack. Automatic installation remains
+# disabled until the runner-layout repack is published as a Phosphene release
+# asset with its own pinned digest; install_h3.js carries the publication TODO.
+H3_TURBO_SOURCE_FILE = "minimax_h3_fl2v_turbo_4step_v1.0_768p_bf16.safetensors"
+H3_TURBO_SOURCE_SHA256 = (
+    "1bdabc2e9fce20b1db563b96bcf6e46adcad4c1964f423676436bf266cc7416c"
+)
 H3_TURBO_DIRNAME = "turbo-lora"
 # Sigma POINTS, matching --steps. 4 points = 3 forwards = what the adapter was
 # distilled for; it is visibly softer at fewer and gains nothing at more.
 H3_TURBO_STEPS = 4
-H3_TURBO_DOWNLOAD_GB = 0.8
+H3_TURBO_DOWNLOAD_GB = 1.4
 # Size floors for the "is it really there" probe. An interrupted fetch leaves a
 # short file that loads far enough to fail 30 s into a render, which is exactly
 # the failure mode the H3-vanish lesson says to catch at status time instead.
 H3_TURBO_LORA_MIN_BYTES = 600 * 1024 * 1024
-H3_TURBO_EMBEDDER_MIN_BYTES = 40 * 1024 * 1024
 # Forwards Turbo runs, whatever shape the render asks for. Turbo ALWAYS runs 3
 # forwards, so the saving depends entirely on how many forwards the render would
 # otherwise have run — and on the fixed cost (staged loads, prompt + adaLN cache,
@@ -6506,8 +6394,8 @@ H3_TURBO_EMBEDDER_MIN_BYTES = 40 * 1024 * 1024
 # canvas × length combination the two axes can produce.
 H3_TURBO_FORWARDS = H3_TURBO_STEPS - 1
 # One line, no marketing. It is a step-distillation adapter; say so.
-H3_TURBO_NOTE = ("Turbo is a 4-step distillation LoRA — fewer denoise passes, "
-                 "same model. Slightly harder contrast than the 9-step default.")
+H3_TURBO_NOTE = ("Turbo uses the LightX2V v1.0 768p 4-step adapter — fewer "
+                 "denoise passes over the same H3 model.")
 
 # ============================================================================
 # H3 RENDER SHAPE — two independent axes, priced by one measured cost model
@@ -6670,6 +6558,13 @@ LTX_PREVIEW_HELP = (
     "render. It costs a fraction of the render time, and the clip you get is "
     "byte-for-byte the clip you would have got with it switched off."
 )
+
+# Only the shared T2V/I2V helper dispatch installs the live-preview callback.
+# Special pipelines (Extend, Keyframe, A2V, HDR, Restore, Ingredients and
+# Control) return through their own job specs and publish no preview today.
+# Keep that fact server-owned so the stage never invents a warming promise for
+# a lane that cannot fulfil it.
+LTX_LIVE_PREVIEW_MODES = frozenset(("t2v", "i2v", "i2v_clean_audio"))
 
 LTX_Q8_CHARACTER_HELP = (
     "Trained characters need the Q8 weights. The 4-bit base pack rounds most of "
@@ -6886,8 +6781,13 @@ H3_MEASURED_ETA: dict[tuple[str, str, bool], tuple[float, str]] = {
     ("standard", "10s",       False): (17.1, "~17 min"),
     ("standard", "15s",       False): (26.6, "~27 min · batch"),
     ("standard", "10s_dense", False): (36.2, "~36 min · batch"),
-    # TURBO IS NOW MEASURED AT BOTH TOP CANVASES, which is why the derivation
-    # below only ever has to fill in the cheap half of the table:
+    # These Turbo measurements belong to the RETIRED ckpt500-EMA adapter and
+    # remain documented in docs/STATE.md as historical evidence. Do not put
+    # them in this active table: LightX2V v1.0 passed visual review, but has no
+    # end-to-end wall-clock receipt yet, so its displayed time stays derived
+    # from the measured per-forward/fixed-cost model.
+    #
+    # Historical ckpt500-EMA timings:
     #   1024×576 — 3 forwards at 128.0/127.4/123.9 s + 131 s fixed = 8.5 min
     #     (codex/opt_out/wide169/w169.log, ckpt500-EMA adapter, 22,923 packed
     #     rows, 42.71 GiB denoise peak). The model derives 8.5 for the same cell
@@ -6900,9 +6800,7 @@ H3_MEASURED_ETA: dict[tuple[str, str, bool], tuple[float, str]] = {
     #     Note the Turbo forwards are slightly SLOWER per forward than the
     #     9-step ones (331 vs 315 s) — small enough to ignore in the model,
     #     large enough that the measurement is the number we print.
-    ("high",     "5s",        True):  (8.5,  "~8-9 min"),
     ("high",     "5s",        False): (18.8, "~19 min"),
-    ("native",   "5s",        True):  (19.9, "~20 min"),
     ("native",   "5s",        False): (44.85, "~45 min · batch"),
 }
 
@@ -7802,6 +7700,15 @@ def live_preview_enabled() -> bool:
     22 MB decoder is not on disk (an install that predates it, mid-download)."""
     if not TAE_CHECKPOINT.is_file():
         return False
+    return live_preview_setting_on()
+
+
+def live_preview_setting_on() -> bool:
+    """The user's engine-neutral preference, without a decoder assumption.
+
+    ``live_preview_enabled`` also checks LTX's TAE file. H3 has a different
+    decoder and must not be disabled merely because the LTX one is absent.
+    """
     return str(get_settings().get("live_preview", "on")).lower() != "off"
 
 
@@ -7866,7 +7773,8 @@ def _live_preview_params(job: dict, p: dict) -> dict:
     from the start. `every 2` selects exactly the clean ones and halves the
     cost. A client counting estimates would have to know which schedule is
     running, so it never gets the chance."""
-    if not live_preview_enabled():
+    if ((p.get("mode") or "").strip().lower() not in LTX_LIVE_PREVIEW_MODES
+            or not live_preview_enabled()):
         return {}
     cell = LTX_QUALITIES.get(p.get("quality") or "", {})
     return {
@@ -8045,6 +7953,10 @@ def ltx_tiers_payload() -> dict:
         # Why the preview is absent, so the Now card can say it instead of
         # showing nothing and letting the user conclude the feature is broken.
         "preview_state": live_preview_state(),
+        # The stage may show a calm warming state before status.json exists,
+        # but only for job specs that actually install the preview callback.
+        # H3 remains payload-driven because its runner owns a separate schema.
+        "preview_modes": sorted(LTX_LIVE_PREVIEW_MODES),
         # Per-capability readiness, from required_files.json → capabilities.
         # The client reads THIS rather than re-deriving what needs what: the
         # notice above uses `live_preview.engines` to know which jobs it is
@@ -8325,18 +8237,18 @@ def h3_supports_first_frame() -> bool:
 
 
 def h3_supports_lora() -> bool:
-    """Whether the INSTALLED runner accepts `--lora` / `--lora-adaln`.
+    """Whether the INSTALLED runner accepts the shared `--lora PATH:SCALE`.
 
     LoRA support landed on codex/h3-engine after Turbo's weights became
     downloadable, so a pack cloned before that renders every tier fine and has
     no way to take the adapter. Same probe, same reason, as --first-frame and
     --chain-windows: hide what the pack can't do rather than dying on an
     argparse error 30 s into a render."""
-    return _h3_runner_has_flag("--lora-adaln")
+    return _h3_runner_has_flag("--lora")
 
 
 def _h3_turbo_dir() -> Path:
-    """Where Turbo's two files live: alongside the other weight components.
+    """Where Turbo's adapter lives: alongside the other weight components.
 
     Follows whichever of the two supported model layouts actually holds the
     DiT, so Turbo lands next to `deepbeep-pruned-bf16` / `ddalcu-q8` rather
@@ -8363,24 +8275,51 @@ def _h3_real_file(path: Path, min_bytes: int) -> bool:
 
 
 def h3_turbo_paths() -> dict:
-    """Resolve Turbo's two files. Never raises; reports what is missing."""
+    """Prefer the v1.0 repack, then the safe alpha-folded v0.1 fallback.
+
+    Deliberately resolve an exact allowlist rather than globbing. The upstream
+    raw v0.1 filename can coexist in this directory, but must never reach the
+    runner at scale 1.0 because its external alpha/rank factor is not folded.
+    """
     directory = _h3_turbo_dir()
-    lora = directory / H3_TURBO_LORA_FILE
-    embedder = directory / H3_TURBO_EMBEDDER_FILE
-    lora_ok = _h3_real_file(lora, H3_TURBO_LORA_MIN_BYTES)
-    embedder_ok = _h3_real_file(embedder, H3_TURBO_EMBEDDER_MIN_BYTES)
-    missing: list[str] = []
-    if not lora_ok:
-        missing.append(f"adapter ({H3_TURBO_LORA_FILE})")
-    if not embedder_ok:
-        missing.append(f"time embedder ({H3_TURBO_EMBEDDER_FILE})")
+    lora = None
+    version = None
+    fallback = False
+    for filename, candidate_version, candidate_fallback in H3_TURBO_LORA_CANDIDATES:
+        candidate = directory / filename
+        if _h3_real_file(candidate, H3_TURBO_LORA_MIN_BYTES):
+            lora = candidate
+            version = candidate_version
+            fallback = candidate_fallback
+            break
+    missing = [] if lora is not None else [
+        "adapter ("
+        + H3_TURBO_LORA_FILE
+        + "; safe fallback "
+        + H3_TURBO_FALLBACK_LORA_FILE
+        + ")"
+    ]
     return {
         "dir": directory,
-        "lora": lora if lora_ok else None,
-        "embedder": embedder if embedder_ok else None,
+        "lora": lora,
+        "version": version,
+        "fallback": fallback,
         "missing": missing,
-        "files_ok": not missing,
+        "files_ok": lora is not None,
     }
+
+
+def h3_turbo_lora_spec(paths: dict | None = None) -> str:
+    """Return the runner's required PATH:SCALE spelling for Turbo."""
+    resolved = paths or h3_turbo_paths()
+    if not resolved.get("files_ok") or resolved.get("lora") is None:
+        raise RuntimeError("H3 Turbo adapter is not available")
+    return f"{resolved['lora']}:1.0"
+
+
+def h3_turbo_argv(paths: dict | None = None) -> list[str]:
+    """The exact runner argv fragment, kept executable as a contract test."""
+    return ["--lora", h3_turbo_lora_spec(paths)]
 
 
 def h3_turbo_status() -> dict:
@@ -8388,8 +8327,8 @@ def h3_turbo_status() -> dict:
 
     Three separable answers, because the UI needs three different sentences:
       supported   — the installed runner has --lora at all (else: update pack)
-      downloaded  — both weight files are really on disk
-      available   — both, so the control can actually be offered
+      downloaded  — one accepted repack is really on disk
+      available   — runner support plus a repack, so Turbo can be offered
     """
     supported = h3_supports_lora()
     paths = h3_turbo_paths()
@@ -8408,6 +8347,13 @@ def h3_turbo_status() -> dict:
         "steps": H3_TURBO_STEPS,
         "download_gb": H3_TURBO_DOWNLOAD_GB,
         "repo": H3_TURBO_REPO,
+        "adapter": str(paths["lora"]) if paths["lora"] else None,
+        "adapter_version": paths["version"],
+        "fallback": paths["fallback"],
+        # Fail closed until the repack is a real, digest-pinned release asset.
+        "install_available": False,
+        "install_note": (f"{H3_TURBO_LORA_FILE} release asset pending; raw "
+                         f"{H3_TURBO_RAW_V01_FILE} is not compatible."),
         "dir": str(paths["dir"]),
         "missing": paths["missing"],
         "note": H3_TURBO_NOTE,
@@ -8897,7 +8843,7 @@ def h3_loras_status() -> dict:
     """The H3 LoRA lane's own availability block for /status + the bootstrap.
 
     Separate from `turbo` because the two answers differ: Turbo is a specific
-    0.8 GB download with a button, this is a directory the user fills from the
+    release adapter, this is a directory the user fills from the
     CivitAI browser. They share one gate — `supported`, whether the installed
     runner has `--lora` at all — and one hard constraint, the single adapter
     slot, which is why `max_stack` is reported rather than assumed by the UI."""
@@ -8938,7 +8884,7 @@ def h3_supports_chain_prompts() -> bool:
     Landed on codex/h3-engine AFTER chaining itself ("Give every window in a
     chain its own prompt"), so a pack cloned in between renders 10 s / 15 s
     perfectly well and simply cannot be told what each window should do. Same
-    probe, same reason, as --first-frame / --lora-adaln / --chain-windows: hide
+    probe, same reason, as --first-frame / --lora / --chain-windows: hide
     the control rather than dying on an argparse error 30 s into a render, and
     keep the honest warning on the cell for that user."""
     return _h3_runner_has_flag("--chain-prompts")
@@ -8952,6 +8898,17 @@ def h3_supports_tae_draft() -> bool:
     has no fast path, so the control is withheld rather than dying on an
     argparse error 30 s into a render."""
     return _h3_runner_has_flag("--draft-decode")
+
+
+def h3_supports_live_preview() -> bool:
+    """Whether this optional runner publishes ``h3-live-preview/1``.
+
+    The live-preview branch landed after the installed H3 v2 line. Probe both
+    required flags so an older pack keeps rendering byte-for-byte as before
+    instead of receiving argv it cannot parse.
+    """
+    return (_h3_runner_has_flag("--live-preview")
+            and _h3_runner_has_flag("--live-preview-dir"))
 
 
 def h3_tae_checkpoint() -> Path | None:
@@ -8978,6 +8935,12 @@ def h3_supports_stage_a() -> bool:
 def h3_tae_ready() -> bool:
     """Runner flag AND weight both present — the only state where TAE is offered."""
     return h3_supports_tae_draft() and h3_tae_checkpoint() is not None
+
+
+def h3_live_preview_ready() -> bool:
+    """All three facts needed to offer H3's live preview on a render."""
+    return (live_preview_setting_on() and h3_supports_live_preview()
+            and h3_tae_checkpoint() is not None)
 
 
 def h3_normalize_chain_prompts(raw, windows: int) -> list[str]:
@@ -9142,14 +9105,28 @@ def h3_status() -> dict:
         # The `?` copy for that control, so the sentence explaining the
         # mechanic lives next to the mechanic.
         "chain_prompt_help": H3_CHAIN_PROMPT_HELP,
+        # H3 publishes its own versioned file schema rather than LTX's helper
+        # event shape. `on` is the only fact the browser needs to promise a
+        # warming stage before the first status file arrives; older optional
+        # packs remain false and therefore change nothing.
+        "live_preview": {
+            "on": bool(available and h3_live_preview_ready()),
+            "supported": bool(available and h3_supports_live_preview()),
+            "schema": "h3-live-preview/1",
+            "meaningful_at": 1,
+            "help": LTX_PREVIEW_HELP,
+        },
         # Turbo — the 4-step distill LoRA. A separate block rather than a bare
         # flag because "off" has three causes the UI must not conflate: H3
-        # itself isn't there, the runner predates --lora, or the 0.8 GB simply
-        # hasn't been downloaded yet (the only one that is a button).
+        # itself isn't there, the runner predates --lora, or neither accepted
+        # repack is on disk.
         "turbo": (h3_turbo_status() if available else
                   {"available": False, "supported": False, "downloaded": False,
                    "reason": "h3_" + paths["reason"], "steps": H3_TURBO_STEPS,
                    "download_gb": H3_TURBO_DOWNLOAD_GB, "repo": H3_TURBO_REPO,
+                   "adapter": None, "adapter_version": None, "fallback": False,
+                   "install_available": False,
+                   "install_note": f"{H3_TURBO_LORA_FILE} release asset pending",
                    "dir": str(_h3_turbo_dir()), "missing": [],
                    "note": H3_TURBO_NOTE, "label": "Turbo"}),
         # User LoRAs — the CivitAI lane. A separate block from `turbo` for the
@@ -15781,7 +15758,7 @@ def run_h3_job_inner(job: dict) -> None:
         p["h3_lora_layout"] = _layout.get("layout")
 
     # ---- Turbo: the 4-step distillation LoRA -----------------------------
-    # make_job already gated this and pinned `steps`, but re-resolve the files
+    # make_job already gated this and pinned `steps`, but re-resolve the adapter
     # HERE: the queue can sit for an hour and a job must not reach the runner
     # with a --lora path that stopped resolving in the meantime.
     turbo = bool(p.get("h3_turbo"))
@@ -15819,10 +15796,11 @@ def run_h3_job_inner(job: dict) -> None:
         turbo_paths = h3_turbo_paths()
         if not turbo_paths["files_ok"]:
             raise RuntimeError(
-                "Turbo's files aren't on disk: "
+                "Turbo's adapter isn't on disk: "
                 + "; ".join(turbo_paths["missing"])
                 + f". Expected under {turbo_paths['dir']} — turn Turbo off, or "
-                  "click its download button (~0.8 GB).")
+                  f"install {H3_TURBO_LORA_FILE} (or the safe folded v0.1 "
+                  f"fallback) under {turbo_paths['dir']}.")
         steps = H3_TURBO_STEPS
 
     # First-frame conditioning (Image mode). The flag landed on the runner
@@ -15947,11 +15925,24 @@ def run_h3_job_inner(job: dict) -> None:
     # path — which is also the ONLY path a non-Draft tier can take, so no
     # delivery render can silently pick up a draft decoder.
     tae_used = False
+    _tae = None
     if tier.get("draft") and h3_supports_tae_draft():
         _tae = h3_tae_checkpoint()
         if _tae is not None:
             cmd += ["--draft-decode", "tae", "--tae-checkpoint", str(_tae)]
             tae_used = True
+    # Live preview is an optional capability of newer H3 runners. It has its
+    # own `h3-live-preview/1` status schema, but writes into the same per-job
+    # state directory the panel's cooperative Stop endpoint already owns.
+    # Probe, never assume: the public v2 pack predates these flags and must
+    # continue down the exact argv path it used before this feature.
+    h3_preview_on = h3_live_preview_ready()
+    if h3_preview_on:
+        _tae = _tae or h3_tae_checkpoint()
+        cmd += ["--live-preview", "tae",
+                "--live-preview-dir", str(live_preview_dir(job["id"]))]
+        if not tae_used:
+            cmd += ["--tae-checkpoint", str(_tae)]
     # Cache the draft's clean Stage-A latents beside the clip. This is what a
     # LATER hires-refine pass consumes to sharpen THIS take at a higher canvas
     # — the owner's actual expectation of "Finish", which today re-renders a
@@ -15963,11 +15954,10 @@ def run_h3_job_inner(job: dict) -> None:
         stage_a_path = out_path.with_suffix(".stage_a")
         cmd += ["--save-stage-a", str(stage_a_path)]
     if turbo:
-        # `--lora-adaln` carries the recovered time embedder, which lets the
-        # runner apply the adapter's 51 adaLN modules too. They fold into the
-        # precomputed modulation cache, so they cost nothing per forward.
-        cmd += ["--lora", str(turbo_paths["lora"]),
-                "--lora-adaln", str(turbo_paths["embedder"])]
+        # LightX2V's runner-ready repack has its training scale folded in. The
+        # CLI still requires PATH:SCALE; 1.0 means "as repacked". Never pass
+        # the raw v0.1 file here — its missing alpha/rank fold renders noise.
+        cmd += h3_turbo_argv(turbo_paths)
     elif user_lora is not None:
         # The SAME flag Turbo rides — one slot, and this render spent it here.
         # `PATH:SCALE` is the runner's own spelling (lora.parse_spec), and the
@@ -15975,12 +15965,6 @@ def run_h3_job_inner(job: dict) -> None:
         # checkpoint that ships alpha == rank, which is the only namespace this
         # lane accepts (the diffusers/PEFT one, whose alpha is NOT in the file,
         # is refused upstream in _h3_lora_prepare).
-        #
-        # No `--lora-adaln` here on purpose: that flag applies TURBO's adaLN
-        # modules using the recovered upstream time embedder, and it is
-        # meaningful only for an adapter that HAS adaLN pairs trained against
-        # the 2688-d timestep MLP this pruned checkpoint dropped. A community
-        # LoRA's attention/MLP pairs apply without it.
         cmd += ["--lora", f"{user_lora}:{user_lora_strength:g}"]
 
     env = os.environ.copy()
@@ -15996,6 +15980,7 @@ def run_h3_job_inner(job: dict) -> None:
          + (f" · LoRA {user_lora.name} @ {user_lora_strength:g}"
             if (user_lora is not None and not turbo) else "")
          + (" · fast draft decode (TAE)" if tae_used else "")
+         + (" · live preview" if h3_preview_on else "")
          + (f" · {chain_windows} chained windows of {window_frames}f"
             if chain_windows > 1 else "")
          + (" · per-window prompts" if chain_prompts else "")
@@ -16144,6 +16129,11 @@ def run_h3_job_inner(job: dict) -> None:
             STATE["pid"] = None
             STATE["h3_pgid"] = None
         _proc_guard_clear("h3")
+        if rc == 75:
+            # H3's file-sentinel contract uses the same dedicated exit code as
+            # LTX. It is a viewer decision, not a crash; worker_loop maps this
+            # exception to the neutral `stopped` history state.
+            raise JobStopped("H3 render stopped early at the next forward boundary")
         if rc != 0:
             raise RuntimeError(
                 f"H3 render exited with code {rc} — see the log above for the "
@@ -16291,15 +16281,14 @@ def run_h3_job_inner(job: dict) -> None:
             "peak_gib": max([v.get("peak_gib") or 0 for v in phases.values()] or [0]),
             "first_frame": str(first_frame) if first_frame else None,
             "turbo": ({"lora": str(turbo_paths["lora"]),
-                       "adaln": str(turbo_paths["embedder"]),
+                       "adapter_version": turbo_paths["version"],
+                       "fallback": turbo_paths["fallback"],
+                       "scale": 1.0,
                        "steps": steps,
                        "repo": H3_TURBO_REPO,
-                       # The runner's own report: how many of the 259 modules
-                       # actually landed, and how big the adaLN correction was.
+                       # The runner's own report: how many modules landed.
                        "applied": (metrics.get("lora")
-                                   or metrics.get("w1_lora")),
-                       "adaln_applied": (metrics.get("lora_adaln")
-                                         or metrics.get("w1_lora_adaln"))}
+                                   or metrics.get("w1_lora"))}
                       if turbo else None),
             "chain_windows": chain_windows,
             "window_frames": window_frames,
@@ -18841,6 +18830,14 @@ class Handler(BaseHTTPRequestHandler):
                     payload["current"]["progress"] = _compute_progress(
                         payload["current"], payload.get("log") or [],
                     )
+                elif _engine == "h3":
+                    # The H3 runner owns its progress object, so preserve it
+                    # and layer the separate h3-live-preview/1 file contract
+                    # onto the snapshot. This executes in the existing status
+                    # poll; there is no preview-specific request or timer.
+                    _h3_progress = dict(payload["current"].get("progress") or {})
+                    _h3_progress.update(_h3_preview_progress(payload["current"]))
+                    payload["current"]["progress"] = _h3_progress
             payload["helper"] = {
                 "alive": HELPER.is_alive(), "pid": HELPER.pid(),
                 "low_memory": HELPER_LOW_MEMORY == "true",
@@ -22557,10 +22554,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json(result, 202)
             return
 
-        # ====== Hailuo H3 Turbo — fetch the 4-step adapter on demand.
-        # ~804 MB in two steps (see _h3_install_turbo). 202 + poll /status's
-        # `download` block, same contract as /train/install; the Turbo control
-        # stays hidden until h3.turbo.available flips.
+        # ====== Hailuo H3 Turbo — install the runner-layout adapter on demand.
+        # This currently fails closed with the exact publication requirement;
+        # _h3_install_turbo must not fetch a raw LightX2V file as a substitute.
         if path == "/h3/turbo/install":
             result = _h3_install_turbo(push)
             if not result.get("ok"):
@@ -24346,6 +24342,63 @@ def _preview_progress(current: dict | None, remaining: float | None,
     }
 
 
+def _h3_preview_progress(current: dict | None) -> dict:
+    """Adapt H3's versioned file contract into the live-preview poll object.
+
+    H3's first forward is already composition-meaningful (the engine proof
+    measured 0.9899 downsampled-luma correlation with the delivered frame),
+    unlike LTX distilled's first five estimates. That rule stays here beside
+    the schema adapter; the browser only renders the resulting boolean.
+    """
+    if not current or not h3_live_preview_ready():
+        return {}
+    d = live_preview_dir(current.get("id") or "")
+    status_path = d / "status.json"
+    try:
+        st = json.loads(status_path.read_text())
+    except (OSError, ValueError):
+        return {}
+    if st.get("schema") != "h3-live-preview/1":
+        return {}
+
+    try:
+        forward = max(0, int(st.get("forward") or 0))
+        total = max(1, int(st.get("total_forwards") or 0))
+        window = int(st.get("window") or 0)
+        window_total = max(1, int(st.get("total_windows") or 1))
+    except (TypeError, ValueError):
+        # A partial/foreign writer must not turn the entire /status endpoint
+        # into a 500. Atomic JSON protects against torn bytes, not bad types.
+        return {}
+    latest = d / "preview_latest.png"
+    has_frame = latest.is_file() and forward >= 1
+    status = str(st.get("status") or "")
+    phase = str((current.get("progress") or {}).get("phase") or "")
+    try:
+        remaining = max(0.0, float(st.get("eta_seconds") or 0.0))
+    except (TypeError, ValueError):
+        remaining = 0.0
+    raw = {
+        "schema": "h3-live-preview/1",
+        "preview_url": (
+            f"/image?path={quote(str(latest))}&t={status_path.stat().st_mtime_ns}"
+            if has_frame else ""
+        ),
+        "preview_step": forward,
+        "preview_total": total,
+        "meaningful": has_frame,
+        # The runner checks immediately after every forward, including the
+        # last one before VAE decode/mux, so there is still work to save at N/N.
+        "abortable": bool(has_frame and status in ("starting", "running")
+                          and phase == "denoise"),
+        "remaining_sec": remaining,
+        "saves_sec": remaining,
+        "window": window,
+        "window_total": window_total,
+    }
+    return {"live_preview": raw}
+
+
 # ---- HTML --------------------------------------------------------------------
 
 def _resolve_quant_tier() -> str:
@@ -24781,6 +24834,10 @@ HTML = r"""<!doctype html>
       user-select: none; transition: border-color 120ms ease, color 120ms ease, background 120ms ease;
       white-space: nowrap;
     }
+    /* Settings is the only NSFW gate. Keep spicy-only controls fail-closed
+       even before settings have loaded; .toggle-pill's display rule would
+       otherwise override the browser's default [hidden] stylesheet. */
+    [data-spicy-only][hidden] { display: none !important; }
     .toggle-pill:hover { border-color: var(--accent); color: var(--text); }
     .toggle-pill input[type="checkbox"] {
       position: absolute; opacity: 0; pointer-events: none; width: 0; height: 0;
@@ -27695,10 +27752,10 @@ HTML = r"""<!doctype html>
        showed at the same time). */
     __ENGINE_RULES__
     [data-h3-only][hidden] { display: none !important; }
-    /* Turbo offered but its 0.8 GB isn't downloaded. Same visual grammar as
+    /* Turbo offered but its adapter isn't installed. Same visual grammar as
        .eng-seg.needs-install in the header — dashed + dimmed reads "real
        control, not ready yet" — but WITHOUT .pill-btn.disabled, because this
-       one is clickable: the click is what starts the download. */
+       one stays clickable so it can explain the pending release asset. */
     .pill-btn.needs-download { opacity: .62; border-style: dashed; }
     .pill-btn.needs-download:hover { opacity: .9; }
     /* The honest one-liner under the Speed control. Shown only while Turbo is
@@ -28506,6 +28563,61 @@ HTML = r"""<!doctype html>
       object-fit: contain;
       display: block;
     }
+    /* Live render owns the same hero surface as finished media. The image node
+       stays mounted while its cache-busted src advances, so a new estimate
+       replaces pixels without flashing the black player underneath. */
+    .player-wrap.live-stage {
+      padding: 0;
+      background:
+        radial-gradient(circle at 50% 45%, rgba(47,129,247,0.12), transparent 58%),
+        #030611;
+    }
+    .player-wrap .live-stage-image {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%; object-fit: contain;
+      transition: opacity 180ms ease;
+    }
+    .player-wrap.live-stage.is-aborting .live-stage-image { opacity: .58; }
+    .live-stage-warming {
+      position: absolute; inset: 0;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 12px; color: rgba(218,229,255,.78);
+      background:
+        radial-gradient(circle at 50% 47%, rgba(88,166,255,.13), transparent 28%),
+        linear-gradient(155deg, #060b19, #030611 72%);
+    }
+    .live-stage-warming-mark {
+      width: 66px; height: 44px;
+      color: var(--accent-bright);
+      opacity: .62;
+      animation: liveStageBreathe 2.8s ease-in-out infinite;
+      filter: drop-shadow(0 0 18px rgba(88,166,255,.28));
+    }
+    .live-stage-warming strong {
+      font-size: 14px; font-weight: 600; letter-spacing: .01em;
+      color: rgba(238,244,255,.9);
+    }
+    .live-stage-warming span {
+      font-size: 12px; color: rgba(184,198,230,.56);
+    }
+    @keyframes liveStageBreathe {
+      0%,100% { opacity:.38; transform:scale(.98) }
+      50% { opacity:.76; transform:scale(1.025) }
+    }
+    /* Completion handoff: keep the last forming frame underneath until the
+       finished video has decoded a real frame. No empty player between them. */
+    .player-wrap .player-handoff-backdrop,
+    .player-wrap .player-handoff-media {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%; object-fit: contain;
+    }
+    .player-wrap .player-handoff-backdrop { z-index: 0; }
+    .player-wrap .player-handoff-media {
+      z-index: 1; opacity: 0;
+      transition: opacity 220ms ease;
+    }
+    .player-wrap .player-handoff-media.is-ready { opacity: 1; }
     .player-wrap.empty {
       background:
         radial-gradient(circle at 50% 35%, rgba(47,129,247,0.08), transparent 55%),
@@ -28730,9 +28842,93 @@ HTML = r"""<!doctype html>
       .po-act { padding: 6px 7px; }
     }
 
-    /* (Bottom progress overlay CSS removed 2026-05-12 — the in-player
-       chip duplicated the bottom-pane Now card AND covered the playing
-       video. Bottom strip is now the single source for progress.) */
+    /* Live render overlay. It consumes the SAME /status progress object as
+       the Now card; there is no second timer or polling loop. Unlike the old
+       generic progress chip, it is present only while the stage is showing
+       the forming take, and therefore never covers a clip being watched. */
+    .live-stage-overlay {
+      position: absolute; inset: auto 0 0 0;
+      z-index: 4;
+      display: flex; align-items: flex-end; gap: 12px;
+      padding: 42px 16px 15px;
+      background: linear-gradient(180deg, transparent, rgba(1,4,13,.88));
+      color: #fff;
+      pointer-events: none;
+    }
+    .live-stage-overlay[hidden] { display: none; }
+    .live-stage-badge {
+      align-self: center;
+      display: inline-flex; align-items: center; gap: 6px;
+      height: 24px; padding: 0 9px;
+      border-radius: var(--r-pill);
+      border: 1px solid rgba(255,255,255,.24);
+      background: rgba(8,14,35,.62);
+      font-size: 10.5px; font-weight: 750; letter-spacing: .1em;
+      box-shadow: 0 0 18px rgba(248,81,73,.14);
+    }
+    .live-stage-badge::before {
+      content: ""; width: 6px; height: 6px; border-radius: 50%;
+      background: #ff6158; box-shadow: 0 0 0 4px rgba(255,97,88,.13);
+      animation: liveStageDot 1.7s ease-in-out infinite;
+    }
+    @keyframes liveStageDot { 50% { opacity:.45 } }
+    .live-stage-copy { flex: 1; min-width: 0; }
+    .live-stage-title {
+      font-size: 13px; font-weight: 650; letter-spacing: .005em;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .live-stage-eta {
+      margin-top: 3px; font-size: 11.5px;
+      color: rgba(226,235,255,.66);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .live-stage-stop {
+      pointer-events: auto;
+      align-self: center;
+      height: 29px; padding: 0 11px;
+      border-radius: var(--r-pill);
+      border: 1px solid rgba(255,255,255,.2);
+      background: rgba(8,14,35,.68);
+      color: rgba(255,255,255,.9);
+      font: inherit; font-size: 11.5px; font-weight: 600;
+      cursor: pointer;
+      backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+      transition: background var(--t-fast), border-color var(--t-fast);
+    }
+    .live-stage-stop:hover:not(:disabled) {
+      background: rgba(248,81,73,.2);
+      border-color: rgba(255,117,109,.55);
+    }
+    .live-stage-stop:disabled { opacity:.55; cursor:wait; }
+    .live-return-chip {
+      position: absolute; top: 12px; left: 50%; z-index: 5;
+      transform: translateX(-50%);
+      display: inline-flex; align-items: center; gap: 7px;
+      min-height: 29px; padding: 0 11px;
+      border-radius: var(--r-pill);
+      border: 1px solid rgba(88,166,255,.42);
+      background: rgba(5,10,25,.78);
+      color: #dceaff;
+      font: inherit; font-size: 11.5px; font-weight: 650;
+      white-space: nowrap;
+      cursor: pointer;
+      backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+      box-shadow: 0 5px 18px rgba(0,0,0,.35);
+      transition: border-color var(--t-fast), background var(--t-fast);
+    }
+    .live-return-chip[hidden] { display: none; }
+    .live-return-chip::before {
+      content: ""; width: 6px; height: 6px; border-radius: 50%;
+      background: #ff6158; box-shadow: 0 0 0 3px rgba(255,97,88,.13);
+    }
+    .live-return-chip.is-done { border-color: rgba(47,191,113,.48); }
+    .live-return-chip.is-done::before {
+      background: var(--ok, #2fbf71); box-shadow: 0 0 0 3px rgba(47,191,113,.14);
+    }
+    .live-return-chip:hover {
+      border-color: rgba(88,166,255,.78);
+      background: rgba(10,20,46,.9);
+    }
 
     /* Hidden compatibility slot — kept in the DOM for legacy callers but
        never visible. Real meta now lives in the top overlay. */
@@ -32965,10 +33161,10 @@ HTML = r"""<!doctype html>
                  sampler is pinned at 4. Rendered by renderH3Turbo() from
                  BOOT.h3.turbo, so Python stays the single source of truth for
                  availability, size and copy — including the tooltip's
-                 measured-vs-derived distinction — the two top canvases have
-                 been rendered with the adapter end to end at 5 s (High 8.5 min,
-                 Native 19.9 min) and say so; everything else says out loud that
-                 its figure is derived from geometry. The whole control
+                 measured-vs-derived distinction. LightX2V v1.0 has a visual
+                 approval but no end-to-end timing receipt yet, so every Turbo
+                 figure honestly stays derived from the measured cost model.
+                 The whole control
                  hides when the installed pack's runner has no --lora. -->
             <div class="cz-control" id="h3TurboRow" data-h3-only hidden>
               <div class="cz-label">Speed
@@ -34836,10 +35032,23 @@ HTML = r"""<!doctype html>
           </svg>
         </button>
       </div>
-      <!-- (Mr Bizarro 2026-05-12: the in-player progress chip was redundant
-           with the bottom Now strip, AND it covered the playing video.
-           Removed entirely; bottom-pane Now card is the single source of
-           truth for live + failed job state.) -->
+      <!-- This chip appears only when a clip is being watched while another
+           take is forming. It is the explicit way back; the poll never yanks a
+           playing clip out from under the viewer. -->
+      <button type="button" class="live-return-chip" id="liveReturnChip" hidden
+              onclick="returnToLiveRender()">LIVE · return to render</button>
+      <!-- Full-size live state. It reads the same progress object as #nowCard
+           and adds no polling. Hidden whenever the finished-output player is
+           visible, so it cannot repeat the old overlay-over-playback mistake. -->
+      <div class="live-stage-overlay" id="liveStageOverlay" hidden>
+        <span class="live-stage-badge" id="liveStageBadge">LIVE</span>
+        <div class="live-stage-copy">
+          <div class="live-stage-title" id="liveStageTitle">forming take</div>
+          <div class="live-stage-eta" id="liveStageEta"></div>
+        </div>
+        <button type="button" class="live-stage-stop" id="liveStageStop"
+                onclick="stopEarly()" hidden>Stop early</button>
+      </div>
     </div>
     <!-- Expand lightbox: full-viewport overlay shared by image + video.
          Opens via the Expand button on the player overlay actions, or by
@@ -35121,7 +35330,7 @@ HTML = r"""<!doctype html>
       <input type="text" id="civitaiQuery" placeholder="Search by name, style, creator…"
              oninput="if(this._t) clearTimeout(this._t); this._t = setTimeout(civitaiSearch, 350)"
              onkeydown="if(event.key==='Enter'){ event.preventDefault(); civitaiSearch(); }">
-      <label class="toggle-pill" id="civitaiNsfwPill">
+      <label class="toggle-pill" id="civitaiNsfwPill" data-spicy-only hidden>
         <input type="checkbox" id="civitaiNsfw">
         <span class="toggle-dot"></span>
         <span>Show NSFW</span>
@@ -35943,6 +36152,16 @@ let filterMode = 'visible';
 let activePath = null;
 let currentOutputs = [];
 let currentMode = 't2v';
+// A deliberate grace window after the user touches the main player. Native
+// video controls briefly report paused while seeking/buffering; without the
+// timestamp the next 1.5 s poll could mistake that instant for an idle stage
+// and replace the clip the user just asked to watch.
+const LIVE_STAGE_PLAYBACK_HOLD_MS = 12000;
+window._stagePlaybackIntentAt = 0;
+window._liveStageJobId = null;
+window._liveStageOwnsPlayer = false;
+window._liveStageForcedJobId = null;
+window._liveStagePendingOutput = null;
 // REMIX_MODES — the IC-LoRA reference tools grouped under the single "Remix"
 // mode pill. These are REAL backend modes (the #mode field + the dispatch see
 // them); "remix" itself is a UI-only pseudo-mode that resolves to one of these.
@@ -41161,7 +41380,7 @@ document.querySelectorAll('#h3StepsGroup [data-h3-steps]').forEach(b => {
 // Three states, and the UI has to say which one it is in:
 //   runner has no --lora  → the whole row is hidden (an old pack never learns
 //                           Turbo exists, exactly like chained tiers)
-//   supported, not downloaded → dashed pill; clicking starts the 0.8 GB fetch
+//   supported, not installed  → dashed pill; click explains/fetches the asset
 //   available             → a normal pill, and picking it pins steps at 4
 function h3TurboState() {
   return (H3 && H3.turbo) || { available: false, supported: false, downloaded: false };
@@ -41171,9 +41390,9 @@ function h3TurboState() {
 // from that tier's own GEOMETRY — Turbo runs 3 forwards whatever the tier bakes
 // and the fixed per-window cost doesn't shrink, so there is no single ratio
 // that could be right for every tier (it is 0.45 on an 8-forward one and 0.59
-// on a 6-forward one). One tier — Wide 5s — has been rendered with the adapter
-// end to end and carries `turbo_measured`; the tooltip below distinguishes that
-// from the derived ones rather than presenting both as the same kind of number.
+// on a 6-forward one). The retired adapter has end-to-end measurements in the
+// changelog, but LightX2V v1.0 does not yet; its active cells remain derived
+// rather than inheriting a measurement from different weights.
 // The pill's SECOND line, in the same grammar every other .pill-btn in
 // Customize uses (name on top, one spec line under it): the cost of turning it
 // on, or the cost of getting it at all.
@@ -41233,7 +41452,8 @@ function h3SpeedSub(which) {
     return eta || 'this shape as tuned';
   }
   const t = h3TurboState();
-  if (!t.downloaded) return (t.download_gb || 0.8) + ' GB download';
+  if (!t.downloaded && !t.install_available) return 'adapter asset pending';
+  if (!t.downloaded) return (t.download_gb || 1.4) + ' GB download';
   const eta = cell && cell.turbo_eta ? _h3EtaPlain(cell.turbo_eta) : '';
   return eta || '4-step adapter';
 }
@@ -41267,8 +41487,10 @@ function renderH3Turbo() {
       + ', over the same fixed load/decode time. Not measured at this canvas.';
   pill.title = t.downloaded
     ? (t.note || '') + basis
-    : 'Downloads the 4-step adapter + the recovered time embedder (~'
-      + (t.download_gb || 0.8) + ' GB) into the H3 pack. Nothing is bundled with Phosphene.';
+    : (t.install_available
+      ? 'Downloads the LightX2V v1.0 runner-layout adapter (~'
+        + (t.download_gb || 1.4) + ' GB) into the H3 pack.'
+      : (t.install_note || 'The runner-layout adapter release asset is pending.'));
   // The pack could have gone away (or arrived) since boot without a reload.
   if (!t.available && (document.getElementById('h3_turbo') || {}).value === '1') {
     setH3Turbo(false);
@@ -41343,11 +41565,17 @@ async function h3TurboClick() {
     }
     return;
   }
-  const gb = t.download_gb || 0.8;
+  if (!t.install_available) {
+    if (typeof phosToast === 'function') {
+      phosToast(t.install_note || 'The H3 Turbo runner-layout adapter release asset is pending.',
+                { kind: 'danger' });
+    }
+    return;
+  }
+  const gb = t.download_gb || 1.4;
   if (!confirm('Download the H3 Turbo adapter?\n\n'
-             + '~' + gb + ' GB in two files, into the H3 pack’s models folder.\n'
-             + 'The adapter is Apache-2.0; the time embedder is read out of the '
-             + 'upstream release by byte range, not downloaded whole.\n\n'
+             + '~' + gb + ' GB, into the H3 pack’s models folder.\n'
+             + 'The LightX2V source adapter is Apache-2.0.\n\n'
              + 'Progress streams to the log at the bottom of the page.')) return;
   try {
     const r = await fetch('/h3/turbo/install', { method: 'POST' });
@@ -41355,7 +41583,7 @@ async function h3TurboClick() {
     if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
     if (typeof phosToast === 'function') {
       phosToast('Turbo download started — watch the log. The pill turns on by '
-                + 'itself when both files land.', { kind: 'ok' });
+                + 'itself when the adapter lands.', { kind: 'ok' });
     }
   } catch (e) {
     if (typeof phosToast === 'function') {
@@ -42621,9 +42849,8 @@ function updateH3Availability(s) {
                // card even when `available` itself hasn't moved yet.
                || (next.repairable !== H3.repairable)
                || (next.reason !== H3.reason)
-               // Turbo's 0.8 GB is downloaded from inside the panel, so this is
-               // what turns the dashed pill into a live one the moment both
-               // files land — no reload, which is what its toast promises.
+               // Turbo's release adapter may arrive from inside the panel, so
+               // this turns the dashed pill live as soon as it lands.
                || (((next.turbo || {}).available) !== ((H3.turbo || {}).available))
                || (((next.turbo || {}).supported) !== ((H3.turbo || {}).supported))
                || ((next.tiers || []).length !== (H3.tiers || []).length);
@@ -43971,6 +44198,10 @@ async function poll() {
   // block (e.g. mid-deploy where the server is older than the JS).
   const nowCard = document.getElementById('nowCard');
   const fill = document.getElementById('progressFill');
+  // Normalize once per /status response. The compact Now card and the main
+  // stage are two views over this object, not two readers inventing their own
+  // schema/rules (and emphatically not two polling loops).
+  let livePreviewData = null;
   // The Now-card Stop button is gone — both the video form's Stop and
   // the Image Studio's Stop now live in the form-pane and stay
   // visible across mode switches, so a Now-card duplicate is no
@@ -44010,9 +44241,10 @@ async function poll() {
     nowCard.querySelector('.meta').innerHTML = phaseLabel
       ? `${baseMeta}<br><span style="color:var(--muted)">${escapeHtml(phaseLabel)}</span>`
       : baseMeta;
-    renderNowPreview(s, prog);
+    livePreviewData = normalizeLivePreview(s, prog);
+    renderNowPreview(s, prog, livePreviewData);
   } else {
-    renderNowPreview(s, null);
+    renderNowPreview(s, null, null);
     // Idle state. If the LAST history entry was a failure (helper crash,
     // OOM, etc.) surface it loud-and-clear here — otherwise users like
     // cocktailpeanut just see "Idle" and assume "the panel did nothing."
@@ -44266,7 +44498,11 @@ async function poll() {
     // viewer agrees with what the gallery is showing — without this,
     // landing on Photos with no active selection would auto-pick a
     // video and fight the filter.
-    if (!activePath) {
+    // A first-ever render can finish while activePath is still null because
+    // the live stage, not an output, owns the player. Let renderLiveStage()
+    // below perform its preview-backed handoff; auto-selecting here would
+    // destroy the last estimate one line before the seamless swap can use it.
+    if (stageMayAutoSelectOutput()) {
       const visible = filteredMainOutputs();
       if (visible.length) selectOutput(visible[0].path);
     }
@@ -44294,6 +44530,10 @@ async function poll() {
     const controlSel = document.getElementById('controlSrcSelect');
     if (controlSel) controlSel.innerHTML = _videoOpts;
   }
+  // OUTSIDE #queueList's qSig memoisation, and after currentOutputs refreshes:
+  // a completed job can therefore hand off from its last preview frame to the
+  // newly-listed mp4 in this same poll without rebuilding the queue DOM.
+  renderLiveStage(s, livePreviewData);
   // (The old "Hidden (N)" pill that lived here was retired with the
   // Visible/Hidden segmented control — the carousel-head comment above
   // documents the removal. Setting textContent on the missing element
@@ -44880,8 +45120,15 @@ function findOutputByPath(path) {
   }
   return o || null;
 }
-function selectOutput(path) {
+function stageMayAutoSelectOutput() {
+  return !activePath && !window._liveStageOwnsPlayer;
+}
+function selectOutput(path, options) {
+  options = options || {};
   activePath = path;
+  const _uev = (typeof window !== 'undefined') ? window.event : null;
+  const userSelected = !!(_uev && _uev.isTrusted);
+  if (userSelected) window._stagePlaybackIntentAt = Date.now();
   // The credit names the weights that made THIS clip.
   if (typeof updateModelCredit === 'function') { try { updateModelCredit(path); } catch (e) {} }
   // If the Ideogram editor canvas is holding the stage, a USER click on an
@@ -44889,14 +45136,27 @@ function selectOutput(path) {
   // Gate on isTrusted so the boot-time auto-select of the newest output (and
   // any other programmatic selection) can't yank someone out of mid-edit;
   // the Generate flow flips explicitly in imgStudioGenerate.
-  var _uev = (typeof window !== 'undefined') ? window.event : null;
-  if (_uev && _uev.isTrusted &&
+  if (userSelected &&
       typeof ideoInLayout === 'function' && ideoInLayout() &&
       typeof stageSetMode === 'function') {
     stageSetMode('result');
   }
   document.querySelectorAll('.car-card').forEach(el => el.classList.toggle('active', el.dataset.path === path));
   const wrap = document.getElementById('playerWrap');
+  // A user can pick an output while the forming take owns the stage. Preserve
+  // the render in status/Now, but immediately yield the hero to the explicit
+  // click; the next poll offers the small LIVE return chip instead of stealing
+  // the clip back.
+  const liveBackdrop = options.liveHandoff
+    ? ((wrap.querySelector('.live-stage-image') || {}).src || '') : '';
+  window._liveStageOwnsPlayer = false;
+  const liveOverlay = document.getElementById('liveStageOverlay');
+  const liveChip = document.getElementById('liveReturnChip');
+  if (liveOverlay) liveOverlay.hidden = true;
+  if (liveChip) liveChip.hidden = true;
+  wrap.classList.remove('live-stage', 'is-warming', 'is-aborting');
+  delete wrap.dataset.liveJobId;
+  delete wrap.dataset.liveState;
   wrap.classList.remove('empty');
   // Y1.039 — use the server-provided URL (which includes the mtime
   // cache-bust v=N param) instead of reconstructing from path. Otherwise
@@ -44921,9 +45181,31 @@ function selectOutput(path) {
   // Photo viewer is a static <img> — no controls, no autoplay (would
   // be a no-op on an image element anyway). Video viewer keeps the
   // existing controls + autoplay behaviour.
-  wrap.innerHTML = isPhoto
-    ? `<img src="${playerSrc}" alt="${o ? escapeHtml(o.name) : ''}">`
-    : `<video controls autoplay src="${playerSrc}"></video>`;
+  if (isPhoto) {
+    wrap.innerHTML = `<img src="${escapeHtml(playerSrc)}" alt="${o ? escapeHtml(o.name) : ''}">`;
+  } else if (liveBackdrop) {
+    wrap.innerHTML =
+      `<img class="player-handoff-backdrop" src="${escapeHtml(liveBackdrop)}" alt="">` +
+      `<video class="player-handoff-media" controls autoplay src="${escapeHtml(playerSrc)}"></video>`;
+    const handoffVideo = wrap.querySelector('.player-handoff-media');
+    const revealFinished = () => {
+      if (!handoffVideo || !handoffVideo.isConnected) return;
+      handoffVideo.classList.add('is-ready');
+      setTimeout(() => {
+        const back = wrap.querySelector('.player-handoff-backdrop');
+        if (back) back.remove();
+        handoffVideo.classList.remove('player-handoff-media', 'is-ready');
+      }, 240);
+    };
+    if (handoffVideo.readyState >= 2) requestAnimationFrame(revealFinished);
+    else handoffVideo.addEventListener('loadeddata', revealFinished, { once: true });
+    // A valid local mp4 normally fires loadeddata immediately. This ceiling is
+    // the escape hatch for a browser that withholds it while autoplay policy
+    // settles; controls must never stay transparent forever.
+    setTimeout(revealFinished, 4000);
+  } else {
+    wrap.innerHTML = `<video controls autoplay src="${escapeHtml(playerSrc)}"></video>`;
+  }
   // Surface aspect adapts to actual media dimensions so vertical clips
   // render vertically (previous hardcoded 16:9 surface + object-fit:cover
   // cropped head/feet off any 9:16 clip, and also showed horizontal
@@ -47041,17 +47323,21 @@ async function _persistSpicyMode(target) {
     const r = await fetch('/settings', { method: 'POST', body: fd });
     const j = await r.json();
     if (j.error) throw new Error(j.error);
-    if (_settingsCache && _settingsCache.settings) {
-      _settingsCache.settings.spicy_mode = !!target;
-    }
-    renderSpicyState(!!target);
+    // Use the value acknowledged by the server as the shared UI source of
+    // truth. This prevents the Settings panel and render form from briefly
+    // disagreeing if validation/coercion changes server-side.
+    if (!_settingsCache) _settingsCache = {};
+    _settingsCache.settings = (j && j.settings) || Object.assign(
+      {}, _settingsCache.settings || {}, { spicy_mode: !!target }
+    );
+    renderSpicyState(spicyModeEnabled());
     if (status) {
       status.textContent = target ? 'Spicy mode ON · NSFW LoRAs unlocked' : 'Spicy mode OFF · NSFW LoRAs hidden';
       status.className = 'settings-status ok';
     }
     // Refresh the CivitAI panel so the "Show NSFW" toggle appears /
     // disappears immediately without a full page reload.
-    if (typeof refreshCivitaiAccessUI === 'function') refreshCivitaiAccessUI();
+    if (typeof renderSpicyAccess === 'function') renderSpicyAccess();
   } catch (e) {
     if (status) {
       status.textContent = 'Could not change Spicy mode: ' + (e.message || e);
@@ -48513,6 +48799,327 @@ function renderCharacterStrip() {
   });
 }
 
+// ---- One live-preview model, two consumers ----------------------------------
+//
+// LTX publishes `progress.preview.{url,estimate,total,meaningful,...}`. H3's
+// runner-facing progress is intentionally a different schema and can surface
+// the same facts as `progress.live_preview`, `preview_url`, `preview_step`,
+// etc. Normalize at the poll boundary ONCE. Neither consumer counts estimates
+// or owns a timer; `meaningful` remains the engine/server's decision.
+function normalizeLivePreview(s, prog) {
+  const cur = (s || {}).current || {};
+  const params = cur.params || {};
+  const engine = String(params.engine || '').toLowerCase();
+  let raw = null;
+  if (prog && prog.preview && typeof prog.preview === 'object') raw = prog.preview;
+  else if (prog && prog.live_preview && typeof prog.live_preview === 'object') raw = prog.live_preview;
+  else if (cur.preview && typeof cur.preview === 'object') raw = cur.preview;
+  else if (prog && typeof prog.preview === 'string') raw = { url: prog.preview };
+
+  const firstNumber = (...values) => {
+    for (const value of values) {
+      if (value === null || value === undefined || value === '') continue;
+      const n = Number(value);
+      if (Number.isFinite(n)) return n;
+    }
+    return null;
+  };
+  const url = String(
+    (raw && (raw.url || raw.preview_url || raw.image_url || raw.src)) ||
+    (prog && prog.preview_url) || cur.preview_url || ''
+  );
+  const estimate = firstNumber(
+    raw && (raw.estimate ?? raw.step ?? raw.preview_step ?? raw.frame),
+    prog && prog.preview_step
+  );
+  const total = firstNumber(
+    raw && (raw.total ?? raw.steps ?? raw.preview_total ?? raw.frame_total),
+    prog && prog.preview_total
+  );
+  let meaningful = null;
+  if (raw && typeof raw.meaningful === 'boolean') meaningful = raw.meaningful;
+  else if (prog && typeof prog.preview_meaningful === 'boolean') meaningful = prog.preview_meaningful;
+  // A schema that only publishes preview_url after its own quality gate is
+  // already making the meaningful decision server-side. URL presence is the
+  // published fact; the browser still does not infer a threshold.
+  else if (url) meaningful = true;
+
+  // Both engines can promise a warming state before status.json exists, but
+  // only when their bootstrap explicitly declares the installed runner ready.
+  // Engines/lanes with no preview stay untouched.
+  let eligible = !!(raw || url);
+  if (engine === 'ltx') {
+    const pstate = ((BOOT.ltx || {}).preview_state) || {};
+    const previewModes = ((BOOT.ltx || {}).preview_modes) || [];
+    const qualities = ((BOOT.ltx || {}).qualities) || [];
+    const cell = Array.isArray(qualities)
+      ? qualities.find(c => c && c.key === String(params.quality || ''))
+      : qualities[String(params.quality || '')];
+    const laneRuns = cell ? Number(cell.preview_every || 0) > 0 : false;
+    const mode = String(params.mode || '').toLowerCase();
+    const laneDeclared = Array.isArray(previewModes) && previewModes.includes(mode);
+    eligible = eligible || (pstate.on !== false && laneRuns && laneDeclared);
+  } else if (engine === 'h3') {
+    const h3Preview = ((BOOT.h3 || {}).live_preview) || {};
+    const h3Modes = ((BOOT.h3 || {}).modes) || [];
+    const mode = String(params.mode || '').toLowerCase();
+    eligible = eligible || (h3Preview.on === true &&
+      Array.isArray(h3Modes) && h3Modes.includes(mode));
+  }
+
+  const remaining = firstNumber(
+    prog && prog.remaining_sec,
+    raw && raw.remaining_sec,
+    raw && raw.saves_sec
+  );
+  const eta = firstNumber(prog && prog.eta_sec, raw && raw.eta_sec);
+  const elapsed = firstNumber(prog && prog.elapsed_sec, 0) || 0;
+  return {
+    eligible,
+    available: !!(raw || url),
+    engine,
+    help: engine === 'h3'
+      ? ((((BOOT.h3 || {}).live_preview) || {}).help || '')
+      : ((((BOOT.ltx || {}).help) || {}).preview || ''),
+    url,
+    estimate,
+    total,
+    meaningful: meaningful === true,
+    abortable: !!(raw && raw.abortable),
+    saves_sec: firstNumber(raw && raw.saves_sec, remaining),
+    remaining_sec: remaining != null ? remaining
+      : (eta != null ? Math.max(0, eta - elapsed) : null),
+  };
+}
+
+function _liveStageMediaHeld() {
+  const wrap = document.getElementById('playerWrap');
+  const video = wrap ? wrap.querySelector('video') : null;
+  const playing = !!(video && !video.paused && !video.ended);
+  const recent = Date.now() - Number(window._stagePlaybackIntentAt || 0)
+                 < LIVE_STAGE_PLAYBACK_HOLD_MS;
+  return playing || recent;
+}
+
+function _showLiveReturnChip(label, outputPath) {
+  const chip = document.getElementById('liveReturnChip');
+  if (!chip) return;
+  chip.textContent = label;
+  chip.hidden = false;
+  chip.classList.toggle('is-done', !!outputPath);
+  if (outputPath) chip.dataset.outputPath = outputPath;
+  else delete chip.dataset.outputPath;
+}
+
+function _hideLiveStageChrome() {
+  const overlay = document.getElementById('liveStageOverlay');
+  const chip = document.getElementById('liveReturnChip');
+  if (overlay) overlay.hidden = true;
+  if (chip) { chip.hidden = true; chip.classList.remove('is-done'); delete chip.dataset.outputPath; }
+}
+
+function _restoreSelectedOutputAfterLive() {
+  const wrap = document.getElementById('playerWrap');
+  window._liveStageOwnsPlayer = false;
+  _hideLiveStageChrome();
+  if (activePath && findOutputByPath(activePath)) {
+    selectOutput(activePath);
+    return;
+  }
+  if (!wrap) return;
+  wrap.className = 'player-wrap empty';
+  wrap.innerHTML = `<div class="ps-empty">
+    <div class="ps-empty-icon" aria-hidden="true">
+      <svg width="56" height="56" viewBox="0 0 56 56" fill="none">
+        <circle cx="28" cy="28" r="22" stroke="currentColor" stroke-width="1.5" stroke-opacity="0.35"/>
+        <path d="M23 19 L37 28 L23 37 Z" fill="currentColor" fill-opacity="0.45"/>
+      </svg>
+    </div>
+    <div class="ps-empty-title">No outputs yet</div>
+    <div class="ps-empty-sub">Generate something on the left and the result lands here.</div>
+  </div>`;
+  const surface = wrap.closest('.player-surface');
+  if (surface) { surface.removeAttribute('data-orient'); surface.style.removeProperty('--media-aspect'); }
+}
+
+function _handoffLiveStageToOutput(path) {
+  if (!path || !findOutputByPath(path)) return false;
+  window._liveStagePendingOutput = null;
+  window._liveStageJobId = null;
+  window._liveStageForcedJobId = null;
+  // Give the finished take the same grace window as a user-started clip. This
+  // matters when the queue has already advanced: the next job's first poll
+  // must not replace the completion frame before anyone has seen it.
+  window._stagePlaybackIntentAt = Date.now();
+  selectOutput(path, { liveHandoff: !!window._liveStageOwnsPlayer });
+  return true;
+}
+
+function returnToLiveRender() {
+  const chip = document.getElementById('liveReturnChip');
+  const donePath = chip && chip.dataset.outputPath;
+  const video = document.querySelector('#playerWrap video');
+  if (video) video.pause();
+  window._stagePlaybackIntentAt = 0;
+  if (donePath) {
+    _handoffLiveStageToOutput(donePath);
+    return;
+  }
+  const s = window.__phosLastStatus || {};
+  const cur = s.current;
+  if (!cur) return;
+  window._liveStageForcedJobId = cur.id;
+  renderLiveStage(s, normalizeLivePreview(s, cur.progress || null));
+}
+
+function _renderLiveStageFrame(s, preview) {
+  const cur = s.current;
+  const wrap = document.getElementById('playerWrap');
+  const surface = wrap && wrap.closest('.player-surface');
+  const overlay = document.getElementById('liveStageOverlay');
+  const chip = document.getElementById('liveReturnChip');
+  if (!cur || !wrap || !surface || !overlay) return;
+
+  window._liveStageOwnsPlayer = true;
+  window._liveStageJobId = cur.id;
+  if (chip) chip.hidden = true;
+  document.getElementById('playerOverlayTop').style.display = 'none';
+  document.getElementById('playerOverlayActions').style.display = 'none';
+  surface.removeAttribute('data-orient');
+  surface.style.setProperty('--media-aspect', '16 / 9');
+  wrap.classList.remove('empty');
+  wrap.classList.add('live-stage');
+  wrap.dataset.liveJobId = String(cur.id);
+
+  const stopping = window._stopEarlyRequested === cur.id;
+  wrap.classList.toggle('is-aborting', stopping);
+  if (!preview.meaningful || !preview.url) {
+    if (wrap.dataset.liveState !== 'warming') {
+      wrap.innerHTML = `<div class="live-stage-warming">
+        <svg class="live-stage-warming-mark" viewBox="0 0 24 16" fill="none" aria-hidden="true">
+          <rect x="1" y="1" width="22" height="14" rx="2" stroke="currentColor" stroke-width="1"/>
+          <path d="M1 5h22M1 11h22M6 1v14M18 1v14" stroke="currentColor" stroke-width=".8" opacity=".72"/>
+        </svg>
+        <strong>Finding the shot…</strong>
+        <span>The first useful estimate will appear here.</span>
+      </div>`;
+      wrap.dataset.liveState = 'warming';
+    }
+  } else {
+    let img = wrap.querySelector('.live-stage-image');
+    if (!img) {
+      wrap.innerHTML = '<img class="live-stage-image" alt="Live render preview">';
+      img = wrap.querySelector('.live-stage-image');
+    }
+    if (img.getAttribute('src') !== preview.url) img.setAttribute('src', preview.url);
+    wrap.dataset.liveState = 'meaningful';
+  }
+
+  const badge = document.getElementById('liveStageBadge');
+  const title = document.getElementById('liveStageTitle');
+  const eta = document.getElementById('liveStageEta');
+  const stop = document.getElementById('liveStageStop');
+  overlay.hidden = false;
+  if (badge) {
+    badge.textContent = 'LIVE';
+    badge.title = preview.help || 'Live render preview';
+  }
+  const step = preview.estimate != null && preview.total != null
+    ? ` · step ${preview.estimate}/${preview.total}` : '';
+  if (title) title.textContent = preview.meaningful
+    ? `forming take${step}` : 'forming take · warming';
+  if (eta) {
+    eta.textContent = stopping ? 'Finishing the current step, then stopping.'
+      : (preview.remaining_sec != null && preview.remaining_sec > 0
+          ? `~${fmtMin(preview.remaining_sec)} left`
+          : 'ETA settling…');
+  }
+  if (stop) {
+    stop.hidden = !(preview.meaningful && preview.abortable);
+    stop.disabled = stopping;
+    stop.textContent = stopping ? 'Stopping…' : 'Stop early';
+  }
+}
+
+function renderLiveStage(s, preview) {
+  const currentId = (s.running && s.current) ? s.current.id : null;
+  const priorId = window._liveStageJobId;
+
+  // Capture the output before considering the next queued job. If the user is
+  // still watching another clip, hold it as a DONE chip; otherwise hand off
+  // immediately from the last estimate to the real mp4.
+  if (priorId && priorId !== currentId) {
+    const ended = (s.history || []).find(j => j && j.id === priorId);
+    if (ended && ended.status === 'done' && ended.output_path) {
+      window._liveStagePendingOutput = { id: priorId, path: ended.output_path };
+    } else if (ended && window._liveStageOwnsPlayer) {
+      _restoreSelectedOutputAfterLive();
+    }
+    if (ended) window._liveStageJobId = null;
+  }
+
+  const pending = window._liveStagePendingOutput;
+  if (pending) {
+    if (window._liveStageOwnsPlayer || !_liveStageMediaHeld()) {
+      if (_handoffLiveStageToOutput(pending.path)) {
+        // A newly-queued job may already be running. Its preview is handled on
+        // the next poll, after the finished video's real playback state exists.
+        return;
+      }
+      // list_outputs intentionally withholds a freshly-written mp4 for two
+      // seconds. Keep the last forming pixels mounted during that safety gap;
+      // restoring the old selected clip here would create the exact black
+      // flash this handoff exists to remove.
+      if (window._liveStageOwnsPlayer) {
+        const badge = document.getElementById('liveStageBadge');
+        const title = document.getElementById('liveStageTitle');
+        const eta = document.getElementById('liveStageEta');
+        const stop = document.getElementById('liveStageStop');
+        if (badge) badge.textContent = 'DONE';
+        if (title) title.textContent = 'preparing finished take';
+        if (eta) eta.textContent = 'Loading the full clip…';
+        if (stop) stop.hidden = true;
+      }
+      return;
+    } else {
+      _showLiveReturnChip('DONE · view finished take', pending.path);
+      return;
+    }
+  }
+
+  if (!currentId || !preview || !preview.eligible) {
+    if (window._liveStageOwnsPlayer) _restoreSelectedOutputAfterLive();
+    else _hideLiveStageChrome();
+    return;
+  }
+
+  window._liveStageJobId = currentId;
+  const forced = window._liveStageForcedJobId === currentId;
+  if (!window._liveStageOwnsPlayer && !forced && _liveStageMediaHeld()) {
+    const label = preview.meaningful ? 'LIVE · return to render'
+                                     : 'LIVE · render warming';
+    _showLiveReturnChip(label, '');
+    return;
+  }
+  window._liveStageForcedJobId = null;
+  _renderLiveStageFrame(s, preview);
+}
+
+// Native video controls do not call selectOutput() when playback begins. A
+// delegated intent stamp covers play/pause/seeking clicks and keyboard use;
+// the actual `video.paused` state remains the stronger hold while it plays.
+document.addEventListener('pointerdown', (event) => {
+  if (event.target && event.target.matches('#playerWrap video')) {
+    window._stagePlaybackIntentAt = Date.now();
+  }
+}, true);
+document.addEventListener('keydown', (event) => {
+  if (event.target && event.target.matches('#playerWrap video') &&
+      [' ', 'Enter', 'k', 'K', 'ArrowLeft', 'ArrowRight'].includes(event.key)) {
+    window._stagePlaybackIntentAt = Date.now();
+  }
+}, true);
+
 // ---- The live preview, in the Now card --------------------------------------
 //
 // Four states, and the transitions between them are what the copy is for:
@@ -48527,11 +49134,11 @@ function renderCharacterStrip() {
 //
 // `meaningful` is the SERVER's call — see _preview_progress(). The client
 // renders it; it never counts estimates.
-function renderNowPreview(s, prog) {
+function renderNowPreview(s, prog, previewData) {
   const box = document.getElementById('nowThumb');
   const actions = document.getElementById('nowCardActions');
   if (!box) return;
-  const prev = prog && prog.preview;
+  const prev = previewData && previewData.available ? previewData : null;
   // A MISSING DECODER MUST SAY SO. Without this, a render on an install whose
   // 22 MB decoder never arrived looks identical to one where the user switched
   // the preview off: nothing appears, and a feature the release announced simply
@@ -48559,13 +49166,14 @@ function renderNowPreview(s, prog) {
   // _live_preview_params say so here) — when the table is absent we do not
   // guess, we stay quiet.
   const _qs = ((BOOT.ltx || {}).qualities) || [];
+  const _previewModes = ((BOOT.ltx || {}).preview_modes) || [];
   const _cell = Array.isArray(_qs)
     ? _qs.find(c => c && c.key === String(_p.quality || ''))
     : _qs[String(_p.quality || '')];
   const laneRuns = _cell ? Number(_cell.preview_every || 0) > 0 : false;
   const previewServesThisJob =
         jobEngine !== '' && capEngines.indexOf(jobEngine) !== -1
-     && jobMode !== 'train' && jobMode !== 'image'
+     && Array.isArray(_previewModes) && _previewModes.indexOf(jobMode) !== -1
      && laneRuns;
   // A REASON SWITCH, not a decoder special-case. There are two silent absences
   // now, and they need DIFFERENT actions: a missing decoder is a download, a
@@ -48628,7 +49236,7 @@ function renderNowPreview(s, prog) {
   // The copy constraint, on the element it constrains. §4.1: "The UI must never
   // invite a face judgement from it." Rendered once per render rather than per
   // poll so the button does not flicker under the 1.5 s cadence.
-  if (!box.parentNode.querySelector('.now-thumb-help')) {
+  if (prev.help && !box.parentNode.querySelector('.now-thumb-help')) {
     const dot = document.createElement('button');
     dot.type = 'button';
     dot.className = 'help-dot now-thumb-help';
@@ -48642,7 +49250,16 @@ function renderNowPreview(s, prog) {
     note.className = 'h3-winhelp';
     note.id = 'nowThumbHelpNote';
     note.hidden = true;
+    note.textContent = prev.help;
     box.parentNode.appendChild(note);
+  } else if (!prev.help) {
+    const oldDot = box.parentNode.querySelector('.now-thumb-help');
+    const oldNote = document.getElementById('nowThumbHelpNote');
+    if (oldDot) oldDot.remove();
+    if (oldNote) oldNote.remove();
+  } else {
+    const note = document.getElementById('nowThumbHelpNote');
+    if (note && note.textContent !== prev.help) note.textContent = prev.help;
   }
   if (!prev.meaningful) {
     box.className = 'now-thumb is-warming';
@@ -48701,7 +49318,7 @@ async function stopEarly() {
   const s = window.__phosLastStatus || {};
   const cur = s.current;
   if (!cur) return;
-  const prev = ((cur.progress || {}).preview) || {};
+  const prev = normalizeLivePreview(s, cur.progress || null) || {};
   const saves = (prev.saves_sec != null && prev.saves_sec > 0)
     ? `About ${fmtMin(prev.saves_sec)} of work is dropped. ` : '';
   if (!confirm('Stop this render?\n\n' +
@@ -49244,7 +49861,7 @@ function _civitaiContextMeta(ctx, fam) {
   };
 }
 
-function openCivitaiModal(context) {
+async function openCivitaiModal(context) {
   // Pick context from the active workflow if not explicitly passed.
   _civitaiContext = context || _civitaiContextForCurrentWorkflow();
   // Family BEFORE the title: on video the title names the engine's family.
@@ -49252,6 +49869,9 @@ function openCivitaiModal(context) {
   const meta = _civitaiContextMeta(_civitaiContext, _civitaiFamily);
   const titleEl = document.getElementById('civitaiModalTitle');
   if (titleEl) titleEl.textContent = meta.title;
+  // Static markup is hidden, and this synchronous pass keeps it fail-closed
+  // while the authoritative Settings response is in flight.
+  renderSpicyAccess();
   document.getElementById('civitaiModal').style.display = 'flex';
   // Pull /loras to populate the dir text and the auth-banner state. The dir
   // shown is the one this family's downloads will actually land in — the
@@ -49270,9 +49890,10 @@ function openCivitaiModal(context) {
   // shows it for every context that HAS families (image, and video since H3).
   const famRow = document.getElementById('civitaiFamilyRow');
   if (famRow) famRow.style.display = 'none';
-  // Pull current Spicy mode state so the "Show NSFW" toggle hides when off.
-  refreshCivitaiAccessUI();
-  civitaiSearch();
+  // Resolve the gate before searching so a stale checked box can never add
+  // nsfw=true while Settings is still loading.
+  await refreshCivitaiAccessUI();
+  await civitaiSearch();
 }
 
 // Render the family-filter pill row when the response carries
@@ -49341,20 +49962,45 @@ function civitaiSetFamily(family) {
   civitaiSearch();
 }
 
-// Hide / show the "Show NSFW" toggle in the CivitAI browser based on the
-// Spicy mode setting. Called on modal open and after toggleSpicyMode flips
-// the value, so the UI tracks the gate without a page reload.
+// One UI predicate serves both LTX and H3. The active engine only changes the
+// LoRA family; it never changes whether NSFW controls/data are authorized.
+function spicyModeEnabled() {
+  return !!(_settingsCache && _settingsCache.settings &&
+            _settingsCache.settings.spicy_mode === true);
+}
+
+function renderSpicyAccess() {
+  const enabled = spicyModeEnabled();
+  document.querySelectorAll('[data-spicy-only]').forEach(el => {
+    el.hidden = !enabled;
+  });
+  const cb = document.getElementById('civitaiNsfw');
+  if (!enabled && cb) cb.checked = false;
+  return enabled;
+}
+
+function civitaiNsfwRequested() {
+  const cb = document.getElementById('civitaiNsfw');
+  return spicyModeEnabled() && !!(cb && cb.checked);
+}
+
+// Refresh the shared Settings cache, then render from the one predicate.
+// Any fetch/shape failure explicitly records OFF instead of trusting stale
+// state from an earlier session.
 async function refreshCivitaiAccessUI() {
-  let spicy = false;
   try {
     const r = await fetch('/settings');
     const j = await r.json();
-    spicy = !!(j && j.settings && j.settings.spicy_mode);
-  } catch (_) { /* default off */ }
-  const pill = document.getElementById('civitaiNsfwPill');
-  const cb = document.getElementById('civitaiNsfw');
-  if (pill) pill.style.display = spicy ? '' : 'none';
-  if (!spicy && cb) cb.checked = false;  // force off when spicy mode is off
+    if (!r.ok || !j || !j.settings) throw new Error('invalid settings response');
+    if (!_settingsCache) _settingsCache = {};
+    _settingsCache.settings = j.settings;
+  } catch (_) {
+    if (!_settingsCache) _settingsCache = {};
+    _settingsCache.settings = Object.assign(
+      {}, _settingsCache.settings || {}, { spicy_mode: false }
+    );
+  }
+  return renderSpicyAccess();
 }
 
 // Render the inline API-key banner at the top of the CivitAI browser.
@@ -49452,7 +50098,7 @@ async function civitaiSearch() {
     const params = new URLSearchParams();
     const q = document.getElementById('civitaiQuery').value.trim();
     if (q) params.set('query', q);
-    if (document.getElementById('civitaiNsfw').checked) params.set('nsfw', 'true');
+    if (civitaiNsfwRequested()) params.set('nsfw', 'true');
     params.set('limit', '24');
     params.set('context', _civitaiContext);
     if (_civitaiFamily) params.set('family', _civitaiFamily);
@@ -49473,7 +50119,7 @@ async function civitaiSearch() {
     if (data.has_more) loadMore.style.display = '';
     if ((data.items || []).length === 0) {
       const meta = _civitaiContextMeta(_civitaiContext, _civitaiFamily);
-      grid.innerHTML = `<div class="hint">${meta.empty} "${escapeHtml(q || '')}"${document.getElementById('civitaiNsfw').checked ? '' : ' (try Show NSFW for more)'}.</div>`;
+      grid.innerHTML = `<div class="hint">${meta.empty} "${escapeHtml(q || '')}"${civitaiNsfwRequested() ? '' : ' (try Show NSFW for more)'}.</div>`;
     }
   } catch (e) {
     status.textContent = 'Network error: ' + (e.message || e);
@@ -49493,7 +50139,7 @@ async function civitaiLoadMore() {
     const params = new URLSearchParams();
     const q = document.getElementById('civitaiQuery').value.trim();
     if (q) params.set('query', q);
-    if (document.getElementById('civitaiNsfw').checked) params.set('nsfw', 'true');
+    if (civitaiNsfwRequested()) params.set('nsfw', 'true');
     params.set('limit', '24');
     params.set('cursor', _civitaiCursor);
     params.set('context', _civitaiContext);
