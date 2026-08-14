@@ -105,10 +105,52 @@ if (!read("scripts/post_update.sh").includes("scripts/pinokio/ltx_checkout.sh"))
   ok("post_update.sh delegates the checkout")
 }
 
+// ---- 5b. The Q8 launcher speaks the active generation ---------------------
+// The fetch lane was made version-aware first, but its two notifications and
+// failure text kept advertising 2.5/30 GB/High add-on to an LTX23 pin. Drive
+// the launcher's real resolver for both generations; checking only today's
+// default is how the stale 2.3 branch survived the previous gate.
+try {
+  const q8Launcher = require(path.join(root, "download_q8.js"))
+  const q23 = q8Launcher._resolveQ8Offer(root, "ltx23")
+  const q25 = q8Launcher._resolveQ8Offer(root, "ltx25")
+  if (q23.key !== "q8" || q23.size !== "37 GB"
+      || !/LTX.?2\.3/.test(q23.startHtml)
+      || /2\.5|29\.5 GB|one more download/.test(q23.readyHtml)) {
+    fail(`LTX23 Q8 notifications are version-wrong: ${JSON.stringify(q23)}`)
+  } else {
+    ok("LTX23 Q8 notifications name its 37 GB pack and no 2.5 add-on")
+  }
+  if (q25.key !== "q8_25" || q25.size !== "30.02 GB"
+      || !/LTX-2\.5/.test(q25.startHtml)
+      || !/High add-on \(~29\.5 GB\)/.test(q25.readyHtml)) {
+    fail(`LTX25 Q8 notifications are version-wrong: ${JSON.stringify(q25)}`)
+  } else {
+    ok("LTX25 Q8 notifications name its pack and separate High add-on")
+  }
+} catch (e) {
+  fail(`download_q8.js could not resolve both generation offers: ${e.stack || e}`)
+}
+const q8Shell = read("scripts/pinokio/q8_weights.sh")
+if (!/ltx23\).*SIZE_GB=37/.test(q8Shell)
+    || !/q8_25;.*SIZE_GB=30\.02/.test(q8Shell)
+    || !/pack needs about \$SIZE_GB GB/.test(q8Shell)) {
+  fail("q8_weights.sh failure copy does not follow the resolved generation size")
+} else {
+  ok("Q8 download failure copy follows the resolved generation size")
+}
+
 // ---- 6. update.js stays THIN -----------------------------------------------
 // It is read BEFORE the pull, so anything it does itself can only be fixed one
 // click late. See the header of `scripts/post_update.sh`.
-const updateSrc = read("update.js")
+// Optional path makes the behavioural gate mutation-testable:
+//   node scripts/check_ltx_pin.js /tmp/previous-update.js
+// Round 4 proved that a gate which can only inspect the current file can pass
+// beside the same old unsafe implementation forever.
+const updatePath = process.argv[2]
+  ? path.resolve(process.argv[2])
+  : path.join(root, "update.js")
+const updateSrc = fs.readFileSync(updatePath, "utf8")
 const banned = [
   [/uv\s+pip\s+install/, "a uv/pip install"],
   [/\bpip\s+install/, "a pip install"],
@@ -171,7 +213,7 @@ const { execFileSync, spawnSync } = require("child_process")
 const os = require("os")
 
 function updateDispatches() {
-  const mod = require(path.join(root, "update.js"))
+  const mod = require(updatePath)
   return (mod.run || [])
     .filter((st) => st.method === "shell.run" && st.params && st.params.message)
     .map((st) => st.params.message)
@@ -188,15 +230,86 @@ function probe(scenario) {
   git(up, ["init", "-q", "."])
   git(up, ["config", "user.email", "a@b"]); git(up, ["config", "user.name", "t"])
   fs.writeFileSync(path.join(up, "f.txt"), "v1\n")
-  git(up, ["add", "f.txt"]); git(up, ["commit", "-qm", "v1"])
+  // update.js's pre-pull steps dispatch `bash scripts/pinokio/*.sh`, so the
+  // fixture has to be a tree that CARRIES them — they ship in the same commit
+  // as update.js, which is the whole reason a pre-pull step is allowed to call
+  // them. Committed in the base revision so every scenario's clone has them
+  // tracked and identical on both sides (they never appear in the diff).
+  const pinokioSrc = path.join(root, "scripts", "pinokio")
+  fs.mkdirSync(path.join(up, "scripts", "pinokio"), { recursive: true })
+  for (const f of fs.readdirSync(pinokioSrc)) {
+    if (!f.endsWith(".sh")) continue
+    fs.copyFileSync(path.join(pinokioSrc, f),
+                    path.join(up, "scripts", "pinokio", f))
+  }
+  git(up, ["add", "f.txt", "scripts"]); git(up, ["commit", "-qm", "v1"])
   git(work, ["clone", "-q", up, clone])
   git(clone, ["config", "user.email", "a@b"]); git(clone, ["config", "user.name", "t"])
 
+  let protectedPath = "notes.txt"
+  let arrivalPath = null      // an upstream path that MUST land (non-blocking)
   if (scenario === "mixed" || scenario === "obstruction_only") {
     fs.writeFileSync(path.join(up, "notes.txt"), "upstream\n")
     git(up, ["add", "notes.txt"]); git(up, ["commit", "-qm", "add notes"])
     fs.writeFileSync(path.join(clone, "notes.txt"), "MINE\n")
     if (scenario === "mixed") git(clone, ["commit", "-q", "--allow-empty", "-m", "local"])
+  } else if (scenario === "file_blocks_directory" || scenario === "ignored_file_blocks_directory") {
+    fs.mkdirSync(path.join(up, "scratch"))
+    fs.writeFileSync(path.join(up, "scratch", "private.txt"), "upstream\n")
+    git(up, ["add", "scratch/private.txt"]); git(up, ["commit", "-qm", "add directory"])
+    fs.writeFileSync(path.join(clone, "scratch"), "MINE\n")
+    protectedPath = "scratch"
+    if (scenario === "ignored_file_blocks_directory") {
+      fs.appendFileSync(path.join(clone, ".git", "info", "exclude"), "\nscratch\n")
+    }
+    git(clone, ["commit", "-q", "--allow-empty", "-m", "local"])
+  } else if (scenario === "directory_blocks_file" || scenario === "ignored_directory_blocks_file") {
+    fs.writeFileSync(path.join(up, "scratch"), "upstream\n")
+    git(up, ["add", "scratch"]); git(up, ["commit", "-qm", "add file"])
+    fs.mkdirSync(path.join(clone, "scratch"))
+    fs.writeFileSync(path.join(clone, "scratch", "private.txt"), "MINE\n")
+    protectedPath = "scratch/private.txt"
+    if (scenario === "ignored_directory_blocks_file") {
+      fs.appendFileSync(path.join(clone, ".git", "info", "exclude"), "\nscratch/\n")
+    }
+    git(clone, ["commit", "-q", "--allow-empty", "-m", "local"])
+  } else if (scenario === "ignored_exact") {
+    fs.writeFileSync(path.join(up, "ignored.txt"), "upstream\n")
+    git(up, ["add", "ignored.txt"]); git(up, ["commit", "-qm", "add ignored"])
+    fs.appendFileSync(path.join(clone, ".git", "info", "exclude"), "\nignored.txt\n")
+    fs.writeFileSync(path.join(clone, "ignored.txt"), "MINE\n")
+    protectedPath = "ignored.txt"
+    git(clone, ["commit", "-q", "--allow-empty", "-m", "local"])
+  } else if (scenario === "dir_contains_nothing_conflicting"
+             || scenario === "ignored_dir_contains_nothing_conflicting"
+             || scenario === "deep_dir_contains_nothing_conflicting") {
+    // THE FLEET-WIDE FALSE REFUSAL. Upstream adds a tracked file INSIDE a
+    // directory the user already has untracked (or ignored). git writes it
+    // without complaint — measured, `ff-only` returns 0 and both files
+    // coexist — so the guard must not block, must not reset, must keep the
+    // user's file, and the new file must actually arrive.
+    const deep = scenario === "deep_dir_contains_nothing_conflicting"
+    const dir = deep ? "notes/sub" : "notes"
+    fs.mkdirSync(path.join(up, dir), { recursive: true })
+    fs.writeFileSync(path.join(up, dir, "new.md"), "upstream\n")
+    git(up, ["add", `${dir}/new.md`]); git(up, ["commit", "-qm", "add in dir"])
+    fs.mkdirSync(path.join(clone, dir), { recursive: true })
+    fs.writeFileSync(path.join(clone, dir, "mine.md"), "MINE\n")
+    protectedPath = `${dir}/mine.md`
+    arrivalPath = `${dir}/new.md`
+    if (scenario === "ignored_dir_contains_nothing_conflicting") {
+      fs.appendFileSync(path.join(clone, ".git", "info", "exclude"),
+                        "\nnotes/\n")
+    }
+  } else if (scenario === "emptydir_does_not_block_file") {
+    // An EMPTY directory where upstream now tracks a FILE: git removes it and
+    // writes the file (measured). No user data can be lost, so blocking here
+    // is pure refusal with nothing protected.
+    fs.writeFileSync(path.join(up, "scratch"), "upstream\n")
+    git(up, ["add", "scratch"]); git(up, ["commit", "-qm", "add file"])
+    fs.mkdirSync(path.join(clone, "scratch"))
+    protectedPath = "f.txt"
+    arrivalPath = "scratch"
   } else if (scenario === "divergence_only") {
     fs.writeFileSync(path.join(up, "f.txt"), "v2\n")
     git(up, ["commit", "-qam", "v2"])
@@ -221,10 +334,16 @@ function probe(scenario) {
     env: Object.assign({}, G.env, { PATH: bin + ":" + process.env.PATH }),
   })
   const outText = (r.stdout || "") + (r.stderr || "")
-  const notes = fs.existsSync(path.join(clone, "notes.txt"))
-    ? fs.readFileSync(path.join(clone, "notes.txt"), "utf8").trim() : null
+  const protectedValue = fs.existsSync(path.join(clone, protectedPath))
+    && fs.statSync(path.join(clone, protectedPath)).isFile()
+    ? fs.readFileSync(path.join(clone, protectedPath), "utf8").trim() : null
+  const arrived = arrivalPath
+    ? fs.existsSync(path.join(clone, arrivalPath))
+      && fs.statSync(path.join(clone, arrivalPath)).isFile()
+    : null
   fs.rmSync(work, { recursive: true, force: true })
-  return { reset: /RESET_CALLED/.test(outText), code: r.status, notes, out: outText }
+  return { reset: /RESET_CALLED/.test(outText), code: r.status,
+           protectedValue, protectedPath, arrived, arrivalPath, out: outText }
 }
 
 let probesRan = false
@@ -237,17 +356,62 @@ try {
 
 if (probesRan) {
   const mixed = probe("mixed")
-  if (mixed.reset || mixed.notes !== "MINE") {
-    fail(`update.js RESET on a diverged clone whose untracked file is tracked upstream — the file is destroyed. Divergence and obstruction are independent; the destructive step must clear BOTH. (reset=${mixed.reset}, notes=${JSON.stringify(mixed.notes)})`)
+  if (mixed.reset || mixed.protectedValue !== "MINE") {
+    fail(`update.js RESET on a diverged clone whose untracked file is tracked upstream — the file is destroyed. Divergence and obstruction are independent; the destructive step must clear BOTH. (reset=${mixed.reset}, value=${JSON.stringify(mixed.protectedValue)})`)
   } else {
     ok("mixed divergence + untracked obstruction: no reset, file intact")
   }
 
   const obs = probe("obstruction_only")
-  if (obs.reset || obs.notes !== "MINE") {
-    fail(`update.js RESET over an untracked obstruction with no divergence at all (reset=${obs.reset}, notes=${JSON.stringify(obs.notes)})`)
+  if (obs.reset || obs.protectedValue !== "MINE") {
+    fail(`update.js RESET over an untracked obstruction with no divergence at all (reset=${obs.reset}, value=${JSON.stringify(obs.protectedValue)})`)
   } else {
     ok("untracked obstruction alone: no reset, file intact")
+  }
+
+  for (const [scenario, label] of [
+    ["file_blocks_directory", "untracked FILE obstructing an upstream DIRECTORY"],
+    ["directory_blocks_file", "untracked DIRECTORY obstructing an upstream FILE"],
+    ["ignored_exact", "ignored exact-path obstruction"],
+    ["ignored_file_blocks_directory", "ignored FILE obstructing an upstream DIRECTORY"],
+    ["ignored_directory_blocks_file", "ignored child beneath an upstream FILE"],
+  ]) {
+    const result = probe(scenario)
+    if (result.reset || result.protectedValue !== "MINE") {
+      fail(`${label}: reset=${result.reset}, ${result.protectedPath}=${JSON.stringify(result.protectedValue)}`)
+    } else {
+      ok(`${label}: no reset, file intact`)
+    }
+  }
+
+  // ---- the guard must not REFUSE what git accepts ---------------------------
+  // The mirror image of the destruction bug, and the more expensive one: the
+  // guard flagged any ancestor that merely EXISTED, so an untracked directory
+  // — logs/, cache/, __pycache__/, mlx_models/, a folder the user dropped in
+  // the app dir — read as an obstruction the moment a release added a tracked
+  // file inside it. Nobody could update, including to the fix. Each row here
+  // was measured against real `git merge --ff-only` before it was asserted.
+  for (const [scenario, label, keep] of [
+    ["dir_contains_nothing_conflicting",
+     "untracked DIRECTORY holding nothing that conflicts", "MINE"],
+    ["ignored_dir_contains_nothing_conflicting",
+     "IGNORED directory holding nothing that conflicts", "MINE"],
+    ["deep_dir_contains_nothing_conflicting",
+     "nested untracked directories holding nothing that conflicts", "MINE"],
+    ["emptydir_does_not_block_file",
+     "EMPTY directory where upstream now tracks a file", "v1"],
+  ]) {
+    const r = probe(scenario)
+    if (r.code !== 0 || r.reset || r.arrived !== true || r.protectedValue !== keep) {
+      fail(`${label}: git accepts this worktree but update.js did not ` +
+        `(exit=${r.code}, reset=${r.reset}, ${r.arrivalPath} arrived=${r.arrived}` +
+        `, ${r.protectedPath}=${JSON.stringify(r.protectedValue)}). A release ` +
+        `adding a tracked file under a folder users commonly have untracked ` +
+        `or ignored is then a fleet-wide update REFUSAL — including the ` +
+        `release that would fix it.\n      ${r.out.trim().split("\n").slice(0, 3).join(" | ")}`)
+    } else {
+      ok(`${label}: update proceeds, ${r.arrivalPath} lands, nothing lost`)
+    }
   }
 
   const div = probe("divergence_only")

@@ -17,6 +17,7 @@ Auto-exits after LTX_IDLE_TIMEOUT seconds idle.
 """
 from __future__ import annotations
 
+import importlib.util
 import io
 import json
 import math
@@ -72,8 +73,10 @@ if "LTX2_GEMMA_EVAL_EVERY" not in os.environ:
 # ---- end early bootstrap ====================================================
 
 # ---- config ------------------------------------------------------------------
-# All paths come from env vars set by the panel. If LTX_GEMMA isn't set, the
-# pipeline falls back to downloading the HF model id, which works first-run.
+# All paths come from env vars set by the panel. LTX_GEMMA is the active
+# generation's render text encoder; LTX_ENHANCE_GEMMA is deliberately separate
+# because prompt rewriting needs Gemma 3's generative language-model head while
+# LTX-2.5 conditions renders with a non-generative Gemma 4 tower.
 _ROOT = Path(__file__).resolve().parent
 _Q4_LOCAL_PATH = _ROOT / "mlx_models" / "ltx-2.3-mlx-q4"
 MODEL_ID = os.environ.get(
@@ -81,6 +84,9 @@ MODEL_ID = os.environ.get(
     str(_Q4_LOCAL_PATH) if _Q4_LOCAL_PATH.is_dir() else "dgrauet/ltx-2.3-mlx-q4",
 )
 GEMMA_PATH = os.environ.get("LTX_GEMMA", "mlx-community/gemma-3-12b-it-4bit")
+ENHANCE_GEMMA_PATH = os.environ.get(
+    "LTX_ENHANCE_GEMMA", "mlx-community/gemma-3-12b-it-4bit"
+)
 IDLE_TIMEOUT = int(os.environ.get("LTX_IDLE_TIMEOUT", "1800"))
 LOW_MEMORY = os.environ.get("LTX_LOW_MEMORY", "true").lower() in ("true", "1", "yes")
 MODEL_UPSCALE_ENABLED = os.environ.get("LTX_ENABLE_MODEL_UPSCALE", "").lower() in ("1", "true", "yes", "on")
@@ -673,7 +679,12 @@ def _install_a2v_frame_rate_patch() -> None:
 
 
 def _install_lora_fusion_patches() -> None:
-    """Make subclass pipelines actually fuse _pending_loras during load().
+    """Install fail-closed native LoRA guards, or repair an older engine.
+
+    Current engines already own the correct quantization-aware LoRA route; the
+    first branch below preserves it and verifies the live attachment report.
+    The rest of this function is the legacy compatibility path for engines
+    whose subclasses bypassed ``_pending_loras`` entirely.
 
     Upstream `BasePipeline.load()` in `_base.py` checks `_pending_loras` and
     fuses LoRA deltas into transformer weights before quantization. But the
@@ -701,6 +712,82 @@ def _install_lora_fusion_patches() -> None:
     HQ ever gets a user-LoRA path."""
     global _LORA_PATCH_INSTALLED
     if _LORA_PATCH_INSTALLED:
+        return
+
+    # v0.14.19+ltx25.3 routes every modern pipeline through BasePipeline's
+    # native LoRA-aware transformer loader.  The historical wrapper below was
+    # written for older subclasses that bypassed that seam; leaving it active
+    # now bypasses the native `auto -> unfused` path and re-quantizes character
+    # deltas into Q4/Q8 weights.  That can erase identity while still producing
+    # a perfectly plausible video.  Prefer the native loader when it exists,
+    # and guard both its header routing and the modules it actually attached.
+    try:
+        from ltx_pipelines_mlx._base import BasePipeline as _NativeBasePipeline
+    except ImportError:
+        _NativeBasePipeline = None
+    if (
+        _NativeBasePipeline is not None
+        and hasattr(_NativeBasePipeline, "_load_transformer_with_optional_streaming")
+        and hasattr(_NativeBasePipeline, "_attach_pending_loras")
+    ):
+        if not getattr(_NativeBasePipeline, "_phosphene_lora_guard", False):
+            _native_load_transformer = (
+                _NativeBasePipeline._load_transformer_with_optional_streaming
+            )
+
+            def _guarded_native_load_transformer(self, transformer_path):
+                pending = list(getattr(self, "_pending_loras", None) or [])
+                active = [(str(path), float(strength))
+                          for path, strength in pending if float(strength) != 0.0]
+                self._phosphene_lora_preflight = []
+                if active:
+                    from lora_compat import validate_lora_stack
+
+                    reports = validate_lora_stack(active, transformer_path)
+                    self._phosphene_lora_preflight = list(zip(
+                        reports, (strength for _, strength in active)
+                    ))
+                return _native_load_transformer(self, transformer_path)
+
+            def _guarded_native_attach(self, dit, lora_paths):
+                from lora_compat import (
+                    LoraCompatibilityError,
+                    validate_runtime_application,
+                )
+                from ltx_core_mlx.loader.runtime_loras import load_and_attach_loras
+                from ltx_core_mlx.utils.memory import aggressive_cleanup
+                from ltx_pipelines_mlx.utils._orchestration import resolve_lora_path
+
+                active = [(resolve_lora_path(path), float(strength))
+                          for path, strength in lora_paths
+                          if float(strength) != 0.0]
+                if not active:
+                    return
+                expected = list(getattr(self, "_phosphene_lora_preflight", []) or [])
+                if len(expected) != len(active):
+                    names = ", ".join(Path(path).name for path, _ in active)
+                    raise LoraCompatibilityError(
+                        f"LoRA preflight state was lost before live attachment "
+                        f"({names}). Rendering was refused before it could "
+                        "produce a LoRA-free result."
+                    )
+                report = load_and_attach_loras(dit, active, verbose=self.verbose)
+                validate_runtime_application(
+                    expected,
+                    (module.name for module in report.applied),
+                    reporter=lambda line: emit({"event": "log", "line": line}),
+                )
+                # Mirror BasePipeline._attach_pending_loras: force the adapter
+                # parameters out of MLX's lazy graph before cleanup.
+                mx.eval(dit.parameters())
+                aggressive_cleanup()
+
+            _NativeBasePipeline._load_transformer_with_optional_streaming = (
+                _guarded_native_load_transformer
+            )
+            _NativeBasePipeline._attach_pending_loras = _guarded_native_attach
+            _NativeBasePipeline._phosphene_lora_guard = True
+        _LORA_PATCH_INSTALLED = True
         return
 
     classes = []
@@ -883,6 +970,33 @@ def _attach_loras(pipe, loras: list[dict] | None) -> None:
               "line": f"  + LoRA queued: {os.path.basename(path)} "
                       f"(strength {strength:.2f})"})
     pipe._pending_loras = pairs
+
+
+def _preflight_distilled_loras(
+    loras: list[tuple[str, float]], model_dir: str | Path
+) -> None:
+    """Fail closed for IC-LoRA pipelines that own their fusion internally."""
+    from lora_compat import resolve_distilled_transformer, validate_lora_stack
+
+    active = [(path, float(strength)) for path, strength in loras
+              if float(strength) != 0.0]
+    if not active:
+        return
+    transformer = resolve_distilled_transformer(model_dir)
+    if transformer is None:
+        raise RuntimeError(
+            f"Cannot validate LoRAs: no distilled transformer found in {model_dir}."
+        )
+    reports = validate_lora_stack(active, transformer)
+    for index, ((_, strength), report) in enumerate(zip(active, reports), start=1):
+        emit({
+            "event": "log",
+            "line": (
+                f"LoRA[{index}] strength={float(strength):.2f} "
+                f"PREFLIGHT={report.matched_tensors}/{report.declared_tensors} "
+                f"tensors file={report.lora_path.name}"
+            ),
+        })
 
 
 _extend_model_dir: str | None = None
@@ -1423,11 +1537,12 @@ def get_a2v_distilled_pipe(model_dir: str):
 
 
 # ---- prompt enhancement (Gemma language model) ------------------------------
-# Separate from the pipeline's TextEncoder wrapper — same weights file, but
-# the LanguageModel class supports `.enhance_t2v(prompt, seed)` /
-# `.enhance_i2v(prompt, seed)` for prompt rewriting. Loaded lazily on first
-# enhance request. Held warm across calls; freed by `release_pipelines`
-# when a render starts to keep memory below the 64 GB ceiling.
+# Separate from the pipeline's TextEncoder wrapper. The LanguageModel class
+# supports `.enhance_t2v(prompt, seed)` / `.enhance_i2v(prompt, seed)` for
+# prompt rewriting, which requires the generative Gemma 3 root even when the
+# active LTX generation renders with Gemma 4. Loaded lazily on first enhance
+# request. Held warm across calls; freed by `release_pipelines` when a render
+# starts to keep memory below the 64 GB ceiling.
 _gemma_lm = None
 
 
@@ -1442,7 +1557,7 @@ def get_gemma_lm():
             # us past 64 GB on standard tier.
             release_pipelines(keep_kind=None)
             _gemma_lm = GemmaLanguageModel()
-            _gemma_lm.load(GEMMA_PATH)
+            _gemma_lm.load(ENHANCE_GEMMA_PATH)
         emit({"event": "log", "line": "Gemma loaded — subsequent enhances will be fast."})
     return _gemma_lm
 
@@ -2118,7 +2233,7 @@ def configure_acceleration(mode: str) -> str:
 # of letting it surface as an un-triageable TypeError mid-render.
 #
 # 2026-08-12: this is a FORK BUILD, not an upstream tag. The vendored checkout
-# is mrbizarro/ltx-2-mlx at the immutable tag `v0.14.19+ltx25.3` — v0.14.19 plus
+# is mrbizarro/ltx-2-mlx at the immutable tag `v0.14.19+ltx25.4` — v0.14.19 plus
 # the LTX-2.5 port (keyframe pos-emb, Gemma 4 tower, ancestral sampler). The
 # release segment stays 0.14.19 because that is genuinely what it branches from;
 # the `+ltx25.N` local segment is what makes the two distinguishable.
@@ -2128,8 +2243,11 @@ def configure_acceleration(mode: str) -> str:
 # plus the vendor's stage-2 first sigma (0.85, not 2.3's 0.909375). `.3` is the
 # v4.0 pin: isolated-modality guidance off by default on the 2.5 HQ path, the
 # distilled lane refining in 2 steps, and a step count thinning the checkpoint's
-# table instead of truncating it. All three change output on 2.5; none touches
-# 2.3.
+# table instead of truncating it. `.4` is the v4.0.2 pin: the euler-ancestral
+# step re-composites the SAMPLE against the clean latent, not only the x0
+# estimate, so an image-conditioned 2.5 render stops discarding its own anchor
+# after step 1. All of them change output on 2.5; none touches 2.3 — `.4` is
+# proven sha256-identical on t2v, and every Euler lane short-circuits the guard.
 #
 # The TAG is the pin, not the SHA. A branch tip moves and a SHA on a rebased
 # branch stops being fetchable; a tag is the only form of this reference that
@@ -2140,7 +2258,7 @@ def configure_acceleration(mode: str) -> str:
 # — a skew gate blind to the one skew that mattered. Bumping the pin here
 # without bumping the packages (or the reverse) puts it back into permanent
 # SKEW warnings, so the two move together or not at all.
-_LTX_EXPECTED_VERSION = "0.14.19+ltx25.3"
+_LTX_EXPECTED_VERSION = "0.14.19+ltx25.4"
 
 
 def _detect_ltx_version() -> dict:
@@ -2233,6 +2351,20 @@ emit({"event": "log",
                f"chip={_RUNTIME_ENV.get('chip')} | "
                f"macOS={_RUNTIME_ENV.get('macos')} ({_RUNTIME_ENV.get('arch')})")})
 
+def _live_preview_supported() -> bool:
+    """Does the INSTALLED engine carry the live-preview module?
+
+    `find_spec` on a submodule imports the PARENT package, which can raise
+    anything at all on a half-installed or mismatched engine — and this probe
+    runs on the ready path, where an exception would take the whole helper down
+    over a monitor. Any failure means "cannot preview", which is the answer the
+    user needs anyway."""
+    try:
+        return importlib.util.find_spec("ltx_pipelines_mlx.live_preview") is not None
+    except Exception:                                 # noqa: BLE001
+        return False
+
+
 # ---- ready -------------------------------------------------------------------
 emit({
     "event": "ready",
@@ -2243,6 +2375,19 @@ emit({
     "ltx_version": _LTX_VERSION_INFO["version"],
     "ltx_version_expected": _LTX_EXPECTED_VERSION,
     "ltx_version_match": _LTX_VERSION_INFO["match"],
+    # CAN THIS ENGINE PREVIEW AT ALL? Probed as a CAPABILITY (does the module
+    # import?), never inferred from the version string — a re-pin, a fork or a
+    # hand-built venv must be able to answer this truthfully without anyone
+    # updating a version table.
+    #
+    # This exists because the answer was previously discoverable only at render
+    # time, in a log line nobody reads: an install whose vendored engine lagged
+    # behind the panel simply never created `state/live`, while the panel went
+    # on reporting live preview as ON. Zero frames, zero errors, zero
+    # explanation. The panel can only tell the user the truth if the helper
+    # tells the panel.
+    "live_preview_supported": (
+        importlib.util.find_spec("ltx_pipelines_mlx.live_preview") is not None),
     "mlx_version": _RUNTIME_ENV.get("mlx"),
     "mlx_metal_version": _RUNTIME_ENV.get("mlx_metal"),
     "chip": _RUNTIME_ENV.get("chip"),
@@ -3135,6 +3280,7 @@ for line in sys.__stdin__:
                 (_resolve_lora_path(str(l["path"])), float(l.get("strength", 1.0)))
                 for l in loras
             ]
+            _preflight_distilled_loras(resolved, model_dir)
             num_frames = int(p["frames"])
             _apply_vae_streaming_decision(num_frames)
             # Tear down any existing cached pipeline before instantiating
@@ -3254,6 +3400,7 @@ for line in sys.__stdin__:
                 (_resolve_lora_path(str(l["path"])), float(l.get("strength", 1.0)))
                 for l in loras
             ]
+            _preflight_distilled_loras(resolved, model_dir)
             num_frames = int(p["frames"])
             _apply_vae_streaming_decision(num_frames)
             # Tear down any existing cached pipeline before instantiating

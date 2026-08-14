@@ -32,9 +32,16 @@
 //     scripts/post_update.sh.
 //   - Assume the copy on the user's disk is ANY historical version. A change
 //     here gets the scrutiny of a schema migration.
-//   - Every dispatch stays under 500 chars — `node scripts/check_pinokio_scripts.js`.
-//     Step 1 CANNOT be moved into a .sh: it runs before the pull, so it may
-//     only reference files that already exist in the user's current tree.
+//   - Every dispatch stays under 500 chars — `node scripts/check_pinokio_scripts.js`
+//     — and under 350 in this file, which is the width @Morac2 actually
+//     bisected as safe (#50). The ceiling is 500 only because six shipped
+//     dispatches sit above 350; nothing here needs to.
+//   - Everything before the pull may only reference files that ALREADY exist
+//     in the user's current tree. That does not mean "inline it": the
+//     obstruction guard and the converge step are `scripts/pinokio/*.sh`,
+//     which ship in the same commit as this file and are therefore exactly as
+//     current as this file is. Step 1 stays inline because it is what
+//     establishes the upstream ref the other two depend on.
 //
 // Note: fs.link is only declared in install.js, not here. Running it on every
 // Update would migrate existing model folders into the drive without a Reset,
@@ -125,32 +132,56 @@ module.exports = {
     // Divergence and obstruction are independent facts and the destructive
     // step must clear BOTH.
     //
-    // The set is computed exactly: every untracked path that also exists in the
-    // fetched upstream tree (`git cat-file -e $U:<path>`). No process
-    // substitution, so it behaves the same under sh, bash and zsh.
+    // The set is computed from paths the fetched tree will write, then checked
+    // against the worktree itself. That direction is deliberate: `git status`
+    // omits ignored files and reports only leaf paths, so it misses both an
+    // untracked FILE where upstream needs a DIRECTORY and an untracked
+    // DIRECTORY where upstream needs a FILE. Walking each upstream path toward
+    // its first existing worktree ancestor covers exact and parent/child
+    // collisions, including ignored files, without enumerating a multi-GB
+    // ignored cache. A path already present in HEAD is tracked and belongs to
+    // the tracked-dirty/divergence checks below, not this obstruction set.
+    //
+    // v4.0.2 — A DIRECTORY IS NOT AN OBSTRUCTION, and treating it as one was a
+    // fleet-wide REFUSAL TO UPDATE. The walk tested only `[ -e ]`, so it
+    // stopped at the first ancestor that existed and flagged it without asking
+    // what it was. git cannot create a directory where a FILE sits — a real
+    // obstruction — but it writes a new file into an existing untracked
+    // directory without complaint. So a release adding `notes/new.md` to a
+    // clone with an untracked `notes/` aborted with
+    // "OBSTRUCTIONS=[notes -> notes/new.md]" while `git merge --ff-only @{u}`
+    // on that same clone succeeded and both files coexisted. Any release
+    // adding a tracked file under a folder users commonly have untracked or
+    // ignored (logs/, cache/, __pycache__/, mlx_models/, ltx-2-mlx/,
+    // minimax-h3-mlx/, anything they dropped in the app dir) would have
+    // refused to install itself, fleet-wide, including the fix for it.
+    //
+    // BOTH STEPS NOW LIVE IN scripts/pinokio/. They were 455 and 484 chars —
+    // the two largest dispatches in the repo, both above the ~350 @Morac2
+    // bisected as safe (#50) even though both sat under the 500 ceiling
+    // `scripts/check_pinokio_scripts.js` enforces. As one-line `bash` calls
+    // they are ~250, and the guard's rule is finally legible enough to argue
+    // with: it is stated as a table of measured `git merge --ff-only`
+    // outcomes in that file's header.
+    //
+    // These are the ONLY steps here that may not be delegated to
+    // post_update.sh — they run BEFORE the pull. Reading them from
+    // scripts/pinokio/ is therefore exactly as one-click-late as update.js
+    // itself, no worse: the two land in the same commit, so a tree carrying
+    // this update.js carries these scripts. If one is missing the tree is
+    // damaged, and the guard MUST NOT be skipped — the destructive step below
+    // is what it protects — so the step aborts with a repair instruction
+    // instead of proceeding without it.
     {
       method: "shell.run",
       params: {
-        message: [
-          "U=$(git rev-parse --abbrev-ref --symbolic-full-name @{u})",
-          "O=$(git status --porcelain -uall | sed -n 's/^?? //p' | while read -r f; do git cat-file -e \"$U:$f\" 2>/dev/null && echo \"$f\"; done)",
-          "[ -z \"$O\" ] || { echo \"$O\"; echo 'FATAL: the untracked files above are tracked upstream. Move them, then Update. Nothing deleted.'; exit 1; }"
-        ].join("\n")
+        message: "if [ -f scripts/pinokio/update_obstruction_guard.sh ]; then bash scripts/pinokio/update_obstruction_guard.sh; else echo 'FATAL: scripts/pinokio/update_obstruction_guard.sh missing - repair with: git checkout -- scripts/pinokio'; exit 1; fi"
       }
     },
     {
       method: "shell.run",
       params: {
-        message: [
-          "U=$(git rev-parse --abbrev-ref --symbolic-full-name @{u})",
-          "M=$(git merge --ff-only \"$U\" 2>&1) && exec git rev-parse --short HEAD",
-          "A=$(git rev-list --count \"$U\"..HEAD)",
-          "[ \"$A\" -gt 0 ] || { echo \"$M\"; echo 'FATAL: blocked above; history has NOT diverged. Nothing deleted.'; exit 1; }",
-          "git diff --quiet && git diff --cached --quiet || { echo 'FATAL: local edits to tracked files'; exit 1; }",
-          "echo \"diverged: $A commit(s) - resetting\"",
-          "git reset --hard \"$U\" || exit 1",
-          "git rev-parse --short HEAD"
-        ].join("\n")
+        message: "if [ -f scripts/pinokio/update_converge.sh ]; then bash scripts/pinokio/update_converge.sh; else echo 'FATAL: scripts/pinokio/update_converge.sh missing - repair with: git checkout -- scripts/pinokio'; exit 1; fi"
       }
     },
     // ---- 2. Everything else, from the tree we just pulled ------------------

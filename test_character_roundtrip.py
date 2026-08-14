@@ -19,14 +19,17 @@ If a function stops doing that, the test fails. If a function is renamed or
 deleted, extraction raises and the test fails loudly rather than quietly going
 back to grepping.
 """
+import io
 import json
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from urllib.parse import urlencode
 
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
@@ -40,6 +43,16 @@ from extract_panel_js import (  # noqa: E402
 import mlx_ltx_panel as P  # noqa: E402
 
 NODE = shutil.which("node")
+
+
+def _write_synthetic_safetensors(path: Path, keys: list[str]) -> None:
+    """Write a header-only fixture; routing gates never materialise payloads."""
+    header = {
+        key: {"dtype": "F32", "shape": [1, 1], "data_offsets": [0, 0]}
+        for key in keys
+    }
+    raw = json.dumps(header, separators=(",", ":")).encode("utf-8")
+    path.write_bytes(struct.pack("<Q", len(raw)) + raw)
 
 # A DOM shim just large enough for the functions under test: getElementById,
 # element values, textContent, and the querySelectorAll calls they make.
@@ -185,6 +198,53 @@ _mk('width', {value: ''}); _mk('height', {value: ''});
     return _run_node(script)
 
 
+def _run_submit(*, face=1.0, voice=1.0, prompt="bizarrotrn waves"):
+    """Execute the REAL charactersGenerate() and capture its HTTP payload.
+
+    The old submit test duplicated two expressions from the function under
+    test. It therefore kept passing if the function returned early, stopped
+    sending a field, or sent a different value. This shim observes the fetch
+    boundary instead: no fetch means ``request`` is null, and whatever the real
+    function put on URLSearchParams is what the assertions receive.
+    """
+    script = DOM_SHIM + """
+%s
+%s
+%s
+window.CHARACTERS = %s;
+window.CHARACTERS.selected = {id: 'bizarrotrn', name: 'Bizarro', trigger: 'bizarrotrn'};
+window.CHARACTERS.charStrength = %s;
+window.CHARACTERS.voiceStrength = %s;
+window.CHARACTERS.duration = '5s';
+window.CHARACTERS.quality = 'pro';
+_mk('charactersPrompt', {value: %s});
+_mk('charactersStrength', {value: '0.8', min: '0.4', max: '1.2'});
+_mk('charactersStrengthValue', {textContent: '0.80'});
+let _request = null;
+global.fetch = async (url, opts) => {
+  _request = {
+    url: String(url),
+    method: String(opts?.method || ''),
+    headers: opts?.headers || {},
+    fields: Object.fromEntries(new URLSearchParams(String(opts?.body || '')).entries()),
+  };
+  return {ok: true, status: 200, json: async () => ({ok: true, job_id: 'gate-job'})};
+};
+(async () => {
+  charactersSyncStrengthControls();
+  await charactersGenerate();
+  console.log(JSON.stringify({
+    request: _request,
+    displayed: document.getElementById('charactersStrengthValue').textContent,
+  }));
+})().catch(e => { console.error(e); process.exit(3); });
+""" % (_JS.fn("charactersUpdateStrengthDisplay"),
+       _JS.fn("charactersSyncStrengthControls"),
+       _JS.fn("charactersGenerate"), _JS.state(),
+       json.dumps(face), json.dumps(voice), json.dumps(prompt))
+    return _run_node(script)
+
+
 class TestVisibleEqualsSubmitted(unittest.TestCase):
     """The defect the review found: the form displayed 0.80 and submitted 1.0."""
 
@@ -217,34 +277,29 @@ console.log(JSON.stringify({
                          "the printed number does not match the state's value")
 
     def test_untouched_form_displays_what_it_submits(self):
-        """End to end: sync the control, then read what the submit path sends."""
-        script = DOM_SHIM + """
-%s
-%s
-window.CHARACTERS = %s;
-_mk('charactersStrength', {value: '0.8', min: '0.4', max: '1.2'});
-_mk('charactersStrengthValue', {textContent: '0.80'});
-charactersSyncStrengthControls();
-// what charactersGenerate() would put on the form, by its own expressions
-const submittedFace  = String(window.CHARACTERS.charStrength ?? 1.0);
-const submittedVoice = String(window.CHARACTERS.voiceStrength ?? 1.0);
-console.log(JSON.stringify({
-  displayed: document.getElementById('charactersStrengthValue').textContent,
-  submittedFace, submittedVoice,
-}));
-""" % (_JS.fn("charactersUpdateStrengthDisplay"),
-       _JS.fn("charactersSyncStrengthControls"), _JS.state())
-        out = _run_node(script)
-        self.assertEqual(float(out["displayed"]), float(out["submittedFace"]),
-                         "displayed %s but submits %s" % (out["displayed"], out["submittedFace"]))
-        self.assertEqual(float(out["submittedFace"]), 1.0)
-        self.assertEqual(float(out["submittedVoice"]), 1.0)
+        """End to end: sync the control, then execute the submit function."""
+        out = _run_submit()
+        self.assertIsNotNone(out["request"],
+                             "charactersGenerate returned before submitting")
+        fields = out["request"]["fields"]
+        self.assertEqual(float(out["displayed"]), float(fields["character_strength"]),
+                         "displayed %s but submits %s" %
+                         (out["displayed"], fields.get("character_strength")))
+        self.assertEqual(float(fields["character_strength"]), 1.0)
+        self.assertEqual(float(fields["character_voice_strength"]), 1.0)
 
     def test_the_submit_path_sends_both_strengths(self):
-        body = _JS.fn("charactersGenerate")
-        self.assertIn("character_strength", body)
-        self.assertIn("character_voice_strength", body,
-                      "the voice strength is never submitted, so it cannot round-trip")
+        out = _run_submit(face=0.65, voice=1.4, prompt="bizarrotrn speaks")
+        self.assertIsNotNone(out["request"],
+                             "charactersGenerate returned before submitting")
+        self.assertEqual(out["request"]["url"],
+                         "/characters/bizarrotrn/generate")
+        self.assertEqual(out["request"]["method"], "POST")
+        fields = out["request"]["fields"]
+        self.assertEqual(fields["prompt_body"], "bizarrotrn speaks")
+        self.assertEqual(float(fields["character_strength"]), 0.65)
+        self.assertEqual(float(fields["character_voice_strength"]), 1.4,
+                         "the real submit path did not send the voice strength")
 
 
 class TestRestoreRunsInBothLoadPaths(unittest.TestCase):
@@ -385,6 +440,329 @@ class TestServerContract(unittest.TestCase):
             self.assertEqual(float(out["voice"]), first["character_voice_strength"], first)
             self.assertEqual(out["width"], str(first["width"]), first)
             self.assertEqual(out["height"], str(first["height"]), first)
+
+
+class TestQueueCharacterVoiceContract(unittest.TestCase):
+    """The public queue API must never render half a trained character."""
+
+    def _post(self, fields: dict, *, with_audio=True, audio_declared_missing=False):
+        body = urlencode(fields).encode()
+        h = P.Handler.__new__(P.Handler)
+        h.path = "/queue/add"
+        h.headers = {"Content-Type": "application/x-www-form-urlencoded",
+                     "Content-Length": str(len(body))}
+        h.rfile = io.BytesIO(body)
+        h._is_local_request = lambda: True
+        reply: dict = {}
+        h._json = lambda payload, status=200: reply.update(
+            payload=payload, status=status)
+
+        with tempfile.TemporaryDirectory() as td:
+            face = Path(td) / "bizarrotrn_v2.safetensors"
+            audio = Path(td) / "bizarrotrn.audio.safetensors"
+            transformer = Path(td) / "transformer-distilled.safetensors"
+            module = "transformer_blocks.0.attn1.to_q"
+            _write_synthetic_safetensors(
+                transformer, [f"transformer.{module}.weight"]
+            )
+            _write_synthetic_safetensors(
+                face, [f"diffusion_model.{module}.lora_A.weight",
+                       f"diffusion_model.{module}.lora_B.weight"]
+            )
+            if with_audio:
+                _write_synthetic_safetensors(
+                    audio, [f"diffusion_model.{module}.lora_A.weight",
+                            f"diffusion_model.{module}.lora_B.weight"]
+                )
+            # THREE SHAPES, AND THEY ARE NOT THE SAME REQUEST.
+            #   with_audio=True             -> a full character
+            #   with_audio=False            -> a SILENT character: no audio file
+            #                                  exists, so list_characters() reports
+            #                                  audio_lora_path=None. This is how a
+            #                                  face-only character is represented,
+            #                                  the shipped sample character among
+            #                                  them. It must RENDER.
+            #   audio_declared_missing=True -> a CORRUPT bundle: the record names
+            #                                  an audio file that is not on disk.
+            #                                  It must REFUSE.
+            char = {
+                "id": "bizarrotrn", "trigger": "bizarrotrn", "name": "Bizarro",
+                "face_lora_path": str(face),
+                "audio_lora_path": (str(audio) if with_audio
+                                    else (str(Path(td) / "gone.audio.safetensors")
+                                          if audio_declared_missing else None)),
+            }
+            saved = (P.list_characters, P.persist_queue, P.push,
+                     P._active_ltx_transformer_path, P.h3_capable)
+            P.list_characters = lambda: [char]
+            P.persist_queue = lambda: None
+            P.push = lambda line: None
+            P._active_ltx_transformer_path = lambda: transformer
+            # Make the H3 refusal test independent of the CI host's RAM. Modes
+            # H3 does not serve still resolve back to LTX through the registry.
+            P.h3_capable = lambda: True
+            try:
+                h.do_POST()
+                jid = (reply.get("payload") or {}).get("id")
+                with P.QUEUE_COND:
+                    queued = next((j for j in P.STATE["queue"]
+                                   if j.get("id") == jid), None)
+                    if jid:
+                        P.STATE["queue"] = [j for j in P.STATE["queue"]
+                                            if j.get("id") != jid]
+                params = dict((queued or {}).get("params") or {})
+                if queued:
+                    params["loras"] = [dict(x) for x in params.get("loras") or []]
+            finally:
+                (P.list_characters, P.persist_queue, P.push,
+                 P._active_ltx_transformer_path, P.h3_capable) = saved
+        return reply, params
+
+    def test_reported_t2v_api_case_stacks_face_and_trained_voice(self):
+        reply, params = self._post({
+            "mode": "t2v",
+            "character_id": "bizarrotrn",
+            "prompt": 'bizarrotrn stands at a podium and says "Welcome back."',
+            "character_strength": "0.9",
+            "character_voice_strength": "1.25",
+        })
+        self.assertEqual(reply["status"], 200, reply)
+        self.assertTrue(reply["payload"].get("ok"), reply)
+        self.assertEqual(params["mode"], "t2v")
+        self.assertEqual([Path(x["path"]).name for x in params["loras"][:2]],
+                         ["bizarrotrn_v2.safetensors",
+                          "bizarrotrn.audio.safetensors"])
+        self.assertEqual([x["strength"] for x in params["loras"][:2]],
+                         [0.9, 1.25])
+
+    def test_every_ltx_video_mode_uses_the_same_pair(self):
+        modes = ("i2v", "i2v_clean_audio", "extend", "keyframe", "a2v",
+                 "restore", "ingredients", "control")
+        for mode in modes:
+            with self.subTest(mode=mode):
+                reply, params = self._post({
+                    "mode": mode, "engine": "ltx",
+                    "character_id": "bizarrotrn", "prompt": "bizarrotrn moves",
+                })
+                self.assertEqual(reply["status"], 200, reply)
+                self.assertEqual(
+                    [Path(x["path"]).name for x in params["loras"][:2]],
+                    ["bizarrotrn_v2.safetensors",
+                     "bizarrotrn.audio.safetensors"])
+
+    def test_a_declared_voice_that_is_missing_refuses(self):
+        """A bundle that NAMES an audio file which is not on disk is corrupt."""
+        fields = {"mode": "t2v", "character_id": "bizarrotrn",
+                  "prompt": "bizarrotrn waves"}
+        reply, params = self._post(fields, with_audio=False,
+                                   audio_declared_missing=True)
+        self.assertEqual(reply["status"], 400, reply)
+        self.assertIn("missing its trained voice LoRA", reply["payload"]["error"])
+        self.assertFalse(params)
+
+        fields["no_voice"] = "on"
+        reply, params = self._post(fields, with_audio=False,
+                                   audio_declared_missing=True)
+        self.assertEqual(reply["status"], 200, reply)
+        self.assertTrue(params["no_voice"])
+        self.assertEqual([Path(x["path"]).name for x in params["loras"]],
+                         ["bizarrotrn_v2.safetensors"])
+
+    def test_a_silent_character_renders_face_only(self):
+        """A character with NO trained voice is not a broken character.
+
+        THIS IS THE REGRESSION THAT SHIPPED. The voice contract was enforced
+        against `audio_lora_path` being falsy, but list_characters() reports
+        None there for every face-only character — so every silent character
+        became unrenderable on every path, with no way to opt out: the
+        No-voice pill is HIDDEN exactly for these characters, so `no_voice`
+        could never be submitted. The one-click SAMPLE CHARACTER ships as a
+        single face file, which made from-zero onboarding produce a character
+        the panel then refused.
+        """
+        reply, params = self._post(
+            {"mode": "t2v", "character_id": "bizarrotrn",
+             "prompt": "bizarrotrn waves"}, with_audio=False)
+        self.assertEqual(reply["status"], 200, reply)
+        self.assertEqual([Path(x["path"]).name for x in params["loras"]],
+                         ["bizarrotrn_v2.safetensors"])
+        # And it does NOT get stamped as an explicit voice opt-out — the user
+        # never opted out of anything; there was nothing to opt out of.
+        self.assertFalse(params.get("no_voice"))
+
+    def test_the_shipped_sample_character_is_renderable(self):
+        """SAMPLE_CHARACTER is one face file. Whatever the voice contract
+        says, it must not refuse the character the app offers to install."""
+        self.assertNotIn("audio", P.SAMPLE_CHARACTER["filename"])
+        reply, _ = self._post(
+            {"mode": "t2v", "character_id": "bizarrotrn",
+             "prompt": "bizarrotrn waves"}, with_audio=False)
+        self.assertEqual(reply["status"], 200, reply)
+
+    def test_h3_character_pair_is_refused_before_lane_scrub(self):
+        reply, params = self._post({
+            "mode": "t2v", "engine": "h3", "character_id": "bizarrotrn",
+            "prompt": "bizarrotrn speaks",
+        })
+        self.assertEqual(reply["status"], 400, reply)
+        self.assertIn("can't load a trained character", reply["payload"]["error"])
+
+    def test_engine_h3_on_a_mode_h3_cannot_serve_still_renders_on_ltx(self):
+        """`engine=h3` is a REQUEST, and make_job resolves it.
+
+        make_job downgrades h3 to LTX for three legitimate reasons — H3 isn't
+        installed, the Mac lacks the RAM, or the mode is one H3 does not serve.
+        The character refusal used to re-read the RAW form field instead of the
+        resolved engine, so a request that was about to render correctly on LTX
+        with the full character stack got a 400 instead. `extend` is one of the
+        modes H3 never serves, so this can be asserted without depending on
+        whether H3 is installed on the machine running the test.
+        """
+        reply, params = self._post({
+            "mode": "extend", "engine": "h3", "character_id": "bizarrotrn",
+            "prompt": "bizarrotrn keeps speaking",
+        })
+        self.assertEqual(reply["status"], 200, reply)
+        self.assertEqual(params["engine"], "ltx")
+        self.assertEqual([Path(x["path"]).name for x in params["loras"][:2]],
+                         ["bizarrotrn_v2.safetensors",
+                          "bizarrotrn.audio.safetensors"])
+
+
+@unittest.skipUnless(NODE, "node is required to execute the panel JavaScript")
+class TestLoraLibraryGenerationFilter(unittest.TestCase):
+    def test_incompatible_ltx_row_is_never_offered_as_an_other_mode(self):
+        source = panel_source()
+        fn = extract_function("_loraGenerationCompatible", source)
+        script = fn + r"""
+const results = [
+  _loraGenerationCompatible({ltx_compatible:false}, 'video'),
+  _loraGenerationCompatible({ltx_compatible:false}, 'image:flux'),
+  _loraGenerationCompatible({ltx_compatible:true}, 'video'),
+];
+process.stdout.write(JSON.stringify(results));
+"""
+        proc = subprocess.run(
+            [NODE, "-e", script], text=True, capture_output=True, check=True
+        )
+        self.assertEqual(json.loads(proc.stdout), [False, True, True])
+
+
+class TestPipelineQualityPerVersion(unittest.TestCase):
+    """The endpoint SUBMITS the pipeline the generation was graded on.
+
+    f65ea9b added character_render_quality() (ltx23 -> high, ltx25 ->
+    balanced) and fixed the endpoint's `quality` VARIABLE — but the job_form
+    three screens below still hardcoded "quality": ["high"], and THAT is the
+    field make_job reads. Every Characters-tab render on 2.5 took the
+    two-stage HQ path (~246 s, 29.5 GB add-on) instead of the graded
+    q8 + distilled path (~139 s). c366e71 fixed the literal; this class pins
+    the property so the variable and the form can never drift apart again.
+
+    Per this file's own charter, it EXECUTES the real do_POST rather than
+    grepping for the fixed line: a stub transport carries the request, and
+    make_job is captured at the seam the bug lived on — the form the endpoint
+    actually submits. Each case runs per model version, not just whichever
+    generation is active today, because "works on the active version" is
+    exactly the coverage hole the original miss hid in.
+    """
+
+    def _generate(self, fields: dict, version: str):
+        """POST /characters/<id>/generate through the REAL handler.
+
+        Returns (reply, submitted): the JSON the endpoint answered and the
+        form it handed make_job. Module seams (character list, make_job,
+        queue persistence, log) are restored in `finally`; the fake job is
+        removed from the in-memory queue so no other test sees it.
+        """
+        body = urlencode(fields).encode()
+        h = P.Handler.__new__(P.Handler)          # no socket — stub transport
+        h.path = "/characters/gatetrn/generate"
+        h.headers = {"Content-Type": "application/x-www-form-urlencoded",
+                     "Content-Length": str(len(body))}
+        h.rfile = io.BytesIO(body)
+        h._is_local_request = lambda: True
+        reply: dict = {}
+        h._json = lambda payload, status=200: reply.update(
+            payload=payload, status=status)
+
+        submitted: dict = {}
+
+        def _capture(form, **_kw):
+            submitted.update(form)
+            return {"id": "quality-gate-job"}
+
+        char = {"id": "gatetrn", "trigger": "gatetrn", "name": "Gate",
+                "face_lora_path": "f.safetensors"}
+        saved = (P.ACTIVE_MODEL_VERSION, P.list_characters, P.make_job,
+                 P.persist_queue, P.push)
+        P.ACTIVE_MODEL_VERSION = version
+        P.list_characters = lambda: [char]
+        P.make_job = _capture
+        P.persist_queue = lambda: None
+        P.push = lambda line: None
+        try:
+            h.do_POST()
+        finally:
+            (P.ACTIVE_MODEL_VERSION, P.list_characters, P.make_job,
+             P.persist_queue, P.push) = saved
+            with P.QUEUE_COND:
+                P.STATE["queue"] = [j for j in P.STATE["queue"]
+                                    if j.get("id") != "quality-gate-job"]
+        return reply, submitted
+
+    def test_the_registry_rule_itself(self):
+        self.assertEqual(P.character_render_quality("ltx23"), "high")
+        self.assertEqual(P.character_render_quality("ltx25"), "balanced")
+
+    def test_every_registered_version_resolves_to_a_real_pipeline(self):
+        # The endpoint 400s a quality outside _CHARACTER_QUALITY_RESOLUTION —
+        # a registry entry naming a fantasy pipeline would brick its own tab.
+        for v in P.MODEL_VERSIONS:
+            self.assertIn(P.character_render_quality(v["id"]),
+                          P._CHARACTER_QUALITY_RESOLUTION, v["id"])
+
+    def test_the_submitted_form_carries_the_resolved_quality(self):
+        for version, expected in (("ltx25", "balanced"), ("ltx23", "high")):
+            reply, form = self._generate({"prompt": "gatetrn waves"}, version)
+            self.assertTrue(reply["payload"].get("ok"), reply)
+            self.assertEqual(form["quality"], [expected], version)
+
+    def test_an_explicit_caller_quality_still_wins(self):
+        # The thin-wrapper promise: a caller naming a REAL pipeline quality is
+        # obeyed on either generation. (Replay / Load Params depends on this.)
+        _, form = self._generate(
+            {"prompt": "gatetrn waves", "quality": "high"}, "ltx25")
+        self.assertEqual(form["quality"], ["high"])
+        _, form = self._generate(
+            {"prompt": "gatetrn waves", "quality": "balanced"}, "ltx23")
+        self.assertEqual(form["quality"], ["balanced"])
+
+    def test_size_tokens_pick_a_canvas_not_a_pipeline(self):
+        # The tab's two chips say draft/pro. That must choose WIDTH×HEIGHT and
+        # leave the pipeline to the generation's rule — conflating the two is
+        # what kept this tab on the wrong pipeline in the first place.
+        for version, expected in (("ltx25", "balanced"), ("ltx23", "high")):
+            for token, (w, hgt) in (("draft", (704, 384)),
+                                    ("pro", (1024, 576))):
+                _, form = self._generate(
+                    {"prompt": "gatetrn waves", "quality": token}, version)
+                self.assertEqual(form["quality"], [expected], (version, token))
+                self.assertEqual(form["width"], [str(w)], (version, token))
+                self.assertEqual(form["height"], [str(hgt)], (version, token))
+
+    def test_schedule_steps_ride_only_when_the_caller_sent_them(self):
+        # c366e71's second half: hardcoded stage1/stage2 steps are inert on
+        # the HQ lane but a pad-request landmine on a thinning lane. A bare
+        # request must not carry them; an explicit caller must.
+        _, form = self._generate({"prompt": "gatetrn waves"}, "ltx25")
+        self.assertNotIn("stage1_steps", form)
+        self.assertNotIn("stage2_steps", form)
+        _, form = self._generate(
+            {"prompt": "gatetrn waves", "stage1_steps": "8",
+             "stage2_steps": "2"}, "ltx25")
+        self.assertEqual(form["stage1_steps"], ["8"])
+        self.assertEqual(form["stage2_steps"], ["2"])
 
 
 if __name__ == "__main__":

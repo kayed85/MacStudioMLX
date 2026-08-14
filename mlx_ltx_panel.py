@@ -173,6 +173,12 @@ STATS_HTML_FILE = ROOT / "panel_assets" / "stats.html"
 STATS_FETCHER = ROOT / "scripts" / "fetch_repo_stats.py"
 HELPER_IDLE_TIMEOUT = int(os.environ.get("LTX_HELPER_IDLE_TIMEOUT", "1800"))
 HELPER_LOW_MEMORY = os.environ.get("LTX_HELPER_LOW_MEMORY", "true")
+# Enhance is an interactive HTTP request, unlike renders that may legitimately
+# run for tens of minutes. Bound its helper wait below the UI/curl client's
+# 120-second ceiling so a silent helper still produces a JSON error response.
+PROMPT_ENHANCE_TIMEOUT = max(
+    1.0, float(os.environ.get("LTX_PROMPT_ENHANCE_TIMEOUT", "90") or 90)
+)
 FPS = 24
 
 
@@ -709,7 +715,12 @@ STORYBOARD_SHOT_CHOICES = (6, 12, 24, 36)
 # silently became a 12-shot film.
 STORYBOARD_MAX_SHOTS = 48
 STORYBOARD_DRAFT_QUALITIES = ("quick", "balanced", "standard")
-STORYBOARD_FINAL_QUALITIES = ("balanced", "standard", "high")
+# The final pass offers every LTX tier except the draft-only floor. Listed here
+# rather than derived because this constant is read at import time, before the
+# registry builder exists — but it is asserted against the registry by
+# scripts/assert_registry.py, so a new tier cannot be added to one and forgotten
+# in the other. That assertion is the thing that makes the literal safe.
+STORYBOARD_FINAL_QUALITIES = ("balanced", "standard", "high", "high_720p")
 # The film-level engine choice. See storyboard.ENGINE_MODES for what each means
 # and why it is a PLANNING input rather than a post-hoc filter.
 STORYBOARD_ENGINE_MODES = ("auto", "h3", "ltx")
@@ -2612,6 +2623,53 @@ def _read_lora_sidecar(safetensors_path: Path) -> dict:
     return meta
 
 
+def _active_ltx_transformer_path() -> Path | None:
+    """Return the checkpoint the active generation's default LoRA lane uses."""
+    from lora_compat import resolve_distilled_transformer
+
+    model_dir = Path(base_model_dir())
+    if not model_dir.is_dir():
+        return None
+    return resolve_distilled_transformer(model_dir)
+
+
+def _ltx_lora_compatibility(path: str | Path) -> dict:
+    """Library-safe compatibility fields for one local adapter.
+
+    Missing active weights produce an unknown result rather than hiding the
+    entire library during install.  A present checkpoint is authoritative: a
+    malformed or mismatched adapter is marked unavailable and its exact file
+    name travels to both the UI and the enqueue refusal.
+    """
+    from lora_compat import LoraCompatibilityError, inspect_lora_compatibility
+
+    lora_path = Path(path)
+    transformer_path = _active_ltx_transformer_path()
+    if transformer_path is None:
+        return {
+            "ltx_compatible": None,
+            "ltx_compat_reason": "active LTX transformer is not installed",
+            "ltx_fusion_tally": None,
+        }
+    try:
+        report = inspect_lora_compatibility(lora_path, transformer_path)
+        reason = "" if report.compatible else report.failure_message()
+        return {
+            "ltx_compatible": report.compatible,
+            "ltx_compat_reason": reason,
+            "ltx_fusion_tally": report.tally,
+        }
+    except (LoraCompatibilityError, OSError, ValueError) as exc:
+        return {
+            "ltx_compatible": False,
+            "ltx_compat_reason": (
+                f"LoRA '{lora_path.name}' cannot be inspected for the active "
+                f"LTX generation: {exc}"
+            ),
+            "ltx_fusion_tally": None,
+        }
+
+
 def list_user_loras() -> list[dict]:
     """Scan mlx_models/loras/ and return one entry per .safetensors found.
     Filenames are matched case-insensitive on the extension; subdirectories
@@ -2657,6 +2715,7 @@ def list_user_loras() -> list[dict]:
                     trigger_words = [_conv_trigger]
                 if not kind:
                     kind = "train_character"
+        ltx_compat = _ltx_lora_compatibility(path)
         out.append({
             "id": f"user:{path.name}",
             "name": meta["name"],
@@ -2691,6 +2750,7 @@ def list_user_loras() -> list[dict]:
             "civitai_url": civitai_url,
             "downloaded_at": meta.get("downloaded_at"),
             "is_curated": False,
+            **ltx_compat,
         })
     return out
 
@@ -2870,6 +2930,16 @@ def list_characters() -> list[dict]:
                 break
         bundle = _character_bundle(trigger)
         sample = _character_dataset_image(trigger)
+        compat_parts = [_ltx_lora_compatibility(face_path)]
+        if has_audio:
+            compat_parts.append(_ltx_lora_compatibility(audio_path))
+        incompatible = next(
+            (part for part in compat_parts if part["ltx_compatible"] is False),
+            None,
+        )
+        compatibility_known = all(
+            part["ltx_compatible"] is not None for part in compat_parts
+        )
         out.append({
             "id": trigger,
             "trigger": trigger,
@@ -2892,8 +2962,26 @@ def list_characters() -> list[dict]:
             "sample_image_path": str(sample) if sample else None,
             "sample_image_url": (f"/characters/{trigger}/preview"
                                  if sample else None),
+            "ltx_compatible": (
+                False if incompatible else (True if compatibility_known else None)
+            ),
+            "ltx_compat_reason": (
+                incompatible["ltx_compat_reason"] if incompatible else ""
+            ),
+            "ltx_fusion_tallies": [
+                part["ltx_fusion_tally"] for part in compat_parts
+                if part.get("ltx_fusion_tally")
+            ],
         })
     return out
+
+
+def list_library_characters() -> list[dict]:
+    """Characters the active generation can safely offer in the UI."""
+    return [
+        char for char in list_characters()
+        if char.get("ltx_compatible") is not False
+    ]
 
 
 # ---- Shipped sample character ------------------------------------------------
@@ -4884,10 +4972,103 @@ def _model_integrity(force: bool = False) -> dict:
     if placement:
         result["ok"] = False
         result["bad"].extend(placement)
+    # Render-level output-codec audit — see _output_codec_report below. Its
+    # own sub-block rather than a bad[] row on purpose: bad[] drives the
+    # Repair (re-download) flow, and a wrong-codec clip is not fixable by
+    # re-downloading weights. It also does not flip result["ok"] — the boot
+    # warning and the banner's corrupt/misplaced headlines enumerate bad[];
+    # consumers read output_codec.ok directly.
+    try:
+        result["output_codec"] = _output_codec_report()
+    except Exception:  # noqa: BLE001 — integrity must never break /status
+        result["output_codec"] = {"ok": True, "skipped": "audit crashed"}
     with _INTEGRITY_LOCK:
         _INTEGRITY_CACHE["ts"] = now
         _INTEGRITY_CACHE["data"] = result
     return result
+
+
+# ---- render-level output-codec self-report (the v3.8.1 class) ----------------
+# v3.8.1 shipped fleet-wide silent 4:2:0: the codec patch never applied, and
+# every gate that existed was static (node --check, shell-line ceilings, patch
+# exit codes) — nothing ever looked at a PRODUCED file, so renders completed,
+# looked like renders, and carried chroma-subsampled block artifacts on faces
+# for a whole release. This closes the class at the last possible layer:
+# ffprobe the newest panel-rendered LTX clip and compare it against the codec
+# its own sidecar says was requested at render time, plus the patched
+# encoder's +faststart fingerprint (the unpatched upstream line writes
+# neither, so it is detectable even when the requested pix_fmt equals
+# upstream's hardcoded yuv420p). The implementation is
+# scripts/check_output_codec.py — the SAME file the release checklist runs —
+# imported here so the pre-promote gate and every install's self-report
+# cannot drift apart. Cost: one ffprobe per NEW output (cached by
+# path+mtime), riding _model_integrity's 120 s cache.
+_CODEC_GATE_PATH = ROOT / "scripts" / "check_output_codec.py"
+_codec_gate_mod = None
+_OUTPUT_CODEC_CACHE: dict = {"key": None, "report": None, "warned_key": None}
+
+
+def _codec_gate():
+    """Lazy-import the gate script. Returns None if missing/unimportable —
+    the self-report then skips; a broken gate must never break /status."""
+    global _codec_gate_mod
+    if _codec_gate_mod is not None:
+        return _codec_gate_mod
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "phosphene_check_output_codec", _CODEC_GATE_PATH)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _codec_gate_mod = mod
+    except Exception:  # noqa: BLE001 — retried on the next integrity refresh
+        return None
+    return _codec_gate_mod
+
+
+def _output_codec_report() -> dict:
+    """Codec state of this install's newest panel render. Shapes:
+    {ok: True, skipped: str} when there is nothing checkable, else
+    {ok, file, actual, expected, expected_source, faststart, problems}."""
+    gate = _codec_gate()
+    if gate is None:
+        return {"ok": True, "skipped": "gate script unavailable"}
+    if not FFPROBE.exists():
+        return {"ok": True, "skipped": "ffprobe not found"}
+    picked = gate.newest_panel_output(OUTPUT)
+    if picked is None:
+        return {"ok": True, "skipped": "no panel-rendered clip yet"}
+    target, sidecar = picked
+    try:
+        key = (str(target), target.stat().st_mtime)
+    except OSError:
+        return {"ok": True, "skipped": "output vanished mid-check"}
+    if _OUTPUT_CODEC_CACHE["key"] == key:
+        return _OUTPUT_CODEC_CACHE["report"]
+    try:
+        rep = gate.check_file(target, FFPROBE, sidecar=sidecar)
+        report = {
+            "ok": rep["ok"],
+            "file": Path(rep["file"]).name,
+            "actual": rep["actual"],
+            "expected": rep["expected"],
+            "expected_source": rep["expected_source"],
+            "faststart": rep["faststart"],
+            "problems": rep["problems"],
+        }
+    except Exception as e:  # noqa: BLE001 — a half-written mp4 is a skip, not an alarm
+        report = {"ok": True, "skipped": f"probe failed: {e}"}
+    if not report["ok"] and _OUTPUT_CODEC_CACHE.get("warned_key") != key:
+        # Once per offending file — the log is how this stays visible in the
+        # panel UI without a render-blocking modal. ASCII only (emoji in
+        # panel output can break the Pinokio/helper handshake, 2026-06-02).
+        _OUTPUT_CODEC_CACHE["warned_key"] = key
+        push("[codec-audit] OUTPUT CODEC MISMATCH on "
+             f"{report['file']}: {'; '.join(report['problems'])} - the codec "
+             "patch may not be applied (the v3.8.1 class). Click Update in "
+             "Pinokio; if it persists, reinstall.")
+    _OUTPUT_CODEC_CACHE["key"] = key
+    _OUTPUT_CODEC_CACHE["report"] = report
+    return report
 
 
 # ---- deep (checksum) integrity vs upstream -----------------------------------
@@ -7127,16 +7308,54 @@ LTX_LATENT_CELL = 32
 #     (the step-0 confirmation render through the panel, job j-19ffa750b91-001)
 #
 # Fitting A and the exponent to those two and then pricing a cell NEITHER of
-# them is gives 142.8 s for balanced/5s/q8 at 8+2, against the 139.4 s the
+# them is gave 142.8 s for balanced/5s/q8 at 8+2, against the 139.4 s the
 # campaign measured for exactly that cell: 2.4 % out, on a cross-validation the
-# fit never saw. That is the whole claim this model makes — good to a few
-# percent, which is why `_fmt_eta` prints no decimals.
+# fit never saw.
+#
+# THAT CROSS-VALIDATION NO LONGER HOLDS, AND THIS COMMENT USED TO CLAIM IT DID.
+# Both anchors above were reduced by a FIXED cost of 26.2 s and 13.0 s — which
+# is `LTX_LOAD_SEC = 10.9` plus each geometry's decode. `LTX_LOAD_SEC` was
+# later re-measured at 31.0 s through the real panel path and raised, WITHOUT
+# refitting the two coefficients that were derived against 10.9. At 31.0 the
+# same cell prices at 162.9 s, not 142.8 s. The second anchor is now
+# self-refuting outright: a 640×448×49 render TOTALLED 39.31 s, which cannot
+# contain 31.0 s of fixed cost.
+#
+# Refitting was attempted and REFUSED, because the three measured bench rows
+# are not fittable by this functional form: Quick (640×448) and Balanced
+# (1024×576) came in 0.7 s apart (161.8 vs 162.5) despite 2.3× the packed rows.
+# No power law in packed rows reproduces that, and the best least-squares fit
+# lands −19 % on Quick and +13 % on Balanced while making the small-canvas
+# anchor 138 % hot. A fit that bad is worse than an honest fallback, because it
+# would look like a measurement.
+#
+# SO: what this model is actually for has changed. Every tier a user is offered
+# is now priced by a MEASURED row or by the length-anchoring branch in
+# `_build_ltx_tiers` (which scales a quality's measured 5s row by the model's
+# own ratio, cancelling the mis-specified fixed term to first order). The raw
+# model is the fallback for cells with neither — `high` at every length, and
+# all of 2.3 — and it runs hot at small canvases. Those cells report
+# `eta_measured: false`, which is the honest label for a number this shaky.
+# Fixing the model properly needs anchors that separate the fixed cost from the
+# per-forward cost (the same geometry timed warm and cold), which nobody has
+# measured. Do not re-derive the coefficients from these two anchors again
+# without also re-deriving the fixed cost they assume.
 LTX_FWD_COEFF = 4.357242e-03
 LTX_FWD_EXPONENT = 0.9620
-# Load + text-encode, measured as the sum of the four load phases the render log
-# prints (Gemma 3.8 + encode 3.2 + transformer 3.8 + decoders 0.1). Does not
-# scale with the canvas.
-LTX_LOAD_SEC = 10.9
+# Fixed cost per render, re-measured 2026-08-14 through the REAL panel path
+# (three-arm bench on an isolated dev panel, helper restarted before each arm
+# so every render pays the load, GPU locks held):
+#   standard 5s  230.1 s measured − 198.7 s modelled denoise+decode = 31.4 s
+#   balanced 5s  162.5 s measured − 131.9 s                          = 30.6 s
+# The old 10.9 was the sum of the four LOAD PHASES the render log prints
+# (Gemma 3.8 + encode 3.2 + transformer 3.8 + decoders 0.1) — but a real
+# render also pays helper spawn, job plumbing, the encode/mux tail and the
+# sidecar/gallery write, none of which print a phase line. Pricing only the
+# logged phases ran every model-priced chip ~20 s hot, which is the
+# owner-reported "Standard says 3 min but it isn't" half of the ETA bug
+# (the High half was a stale-geometry measured row — see LTX_MEASURED_ETA).
+# Does not scale with the canvas.
+LTX_LOAD_SEC = 31.0
 # VAE decode + audio + mux, 15.3 s at 1024×576×121, linear in pixel-frames.
 LTX_DECODE_SEC_PER_PX_FRAME = 15.3 / float(1024 * 576 * 121)
 
@@ -7198,15 +7417,44 @@ def ltx_estimate_minutes(w: int, h: int, frames: int,
 # mistake this table exists to prevent. It is a good seed for the model, not a
 # measurement.
 LTX_MEASURED_ETA: dict[tuple[str, str, str, str], tuple[float, str]] = {
-    # LTX-2.5, q8, distilled 8+2 — the schedule shipped on codex/ltx25-sched
-    # (dfee6cf). The confirmation render is byte-identical (sha256 b831a821…)
-    # to the arm the owner graded, so this is the clip he passed, timed.
-    ("ltx25", "balanced", "5s", "q8"): (2.32, "~2 min"),   # 139.4 s
-    # LTX-2.5, q8 + HQ add-on, two-stage HQ, modality 1.0 (25b9b8e,
-    # owner-passed). Confirmation render, env_overrides {}.
-    ("ltx25", "high",     "5s", "q8"): (4.14, "~4 min"),   # 248.5 s
-    # LTX-2.3, q8, two-stage HQ, modality 3.0 — the SFT value 2.3 keeps.
-    ("ltx23", "high",     "5s", "q8"): (5.08, "~5 min"),   # 304.5 s
+    # LTX-2.5, q8 + HQ add-on, 1280×704 × 121 @ 10+3 — the owner's own render,
+    # 491.03 s end to end through the panel with a character stack on it
+    # (mlx_outputs/bizarrotrn_bizarro_stands_on_a_windswept.mp4.json). This row
+    # belongs to high_720p and ONLY to high_720p: it was measured at 1280×704,
+    # so keying it to `high` (1024×576) is precisely the geometry lie the
+    # comment above forbids — and doing that is what produced the owner-reported
+    # "says ~4 min, takes ~8". The rule is the same either way: the key that
+    # owns the measurement is the key whose canvas was measured.
+    ("ltx25", "high_720p", "5s", "q8"): (8.18, "~8 min"),  # 491.0 s, panel path
+    # `high` (1024×576) has NO measured row. The 248.5 s number it used to carry
+    # was taken at 8+3 and the lane has always run 10+3, so it was never this
+    # tier's price; the model prices it now and the chip says `eta_measured:
+    # false`, which is the honest state until someone times the real thing.
+    # The three distilled 5s cells, 2026-08-14 three-arm bench through the
+    # REAL panel path: isolated dev panel, /run submissions, helper restarted
+    # before each arm so every render pays the load, GPU locks held, M4 Max
+    # 64 GB. These are what a user actually waits, spawn to gallery. Note
+    # Quick ≈ Balanced at 5 s: per-forward and decode floors dominate at
+    # 640×448 (measured 123 s denoise vs 58 s modelled), which is exactly why
+    # these are measured rather than trusted to the power law.
+    ("ltx25", "quick",    "5s", "q4"): (2.70, "~3 min"),   # 161.8 s bench
+    ("ltx25", "balanced", "5s", "q4"): (2.71, "~3 min"),   # 162.5 s bench
+    ("ltx25", "standard", "5s", "q4"): (3.84, "~4 min"),   # 230.1 s bench
+    # THE PACK IS PART OF THE KEY, SO BOTH PACKS CAN BE MEASURED.
+    #
+    # The row above and the row below are the SAME canvas and the SAME
+    # schedule on DIFFERENT weights, and both were timed. A session read the
+    # q8 row's failure to match the Balanced CHIP (which looks up with its own
+    # pack, "q4") as evidence the row was mis-keyed, and re-keyed it — deleting
+    # the only measurement the CHARACTER lane had. But nothing was mis-keyed:
+    # `ltx_measured_eta` takes a quant precisely because the character lane
+    # submits balanced AT q8, which is what this row prices. Re-keying it moved
+    # the character strip's "~2 min" — a real 139.4 s render — onto the model,
+    # which printed "~3 min" for a render that takes two.
+    #
+    # If a lookup does not match, the question is which caller is asking, not
+    # which row is wrong.
+    ("ltx25", "balanced", "5s", "q8"): (2.32, "~2 min"),   # 139.4 s, character lane
 }
 
 # The four tier notes. Python constants on the same four-hop path
@@ -7220,6 +7468,15 @@ _LTX_TIER_HIGH_NOTE_BASE = (
     "High runs a second, larger pass over the first one — sharper detail and "
     "steadier motion, for roughly twice the wait."
 )
+# The 49.70 GiB peak belongs to the 720p canvas it was measured on, not to
+# High — attaching it here told every High user they needed a 64 GB Mac for a
+# render that has never peaked near that.
+_LTX_TIER_HIGH_720P_NOTE_BASE = (
+    "The same second pass as High, run at 1280×704 — the most detail this "
+    "engine produces, and the canvas that exports to 720p with no scaling at "
+    "all. Measured peak 49.7 GB, so it wants a 64 GB Mac, and it takes about "
+    "twice as long as High."
+)
 
 
 def ltx_tier_high_note(version_id: str | None = None) -> str:
@@ -7229,6 +7486,18 @@ def ltx_tier_high_note(version_id: str | None = None) -> str:
 
 
 LTX_TIER_HIGH_NOTE = ltx_tier_high_note()
+
+
+def ltx_tier_high_720p_note(version_id: str | None = None) -> str:
+    """Same pack sentence as High — the 720p tier loads exactly the same
+    weights, so it must not describe a different install requirement."""
+    if model_version(version_id).get("hq_addon_repo_key"):
+        return (_LTX_TIER_HIGH_720P_NOTE_BASE
+                + " It needs the Q8 weights and the High add-on.")
+    return _LTX_TIER_HIGH_720P_NOTE_BASE + " It needs the Q8 weights."
+
+
+LTX_TIER_HIGH_720P_NOTE = ltx_tier_high_720p_note()
 LTX_TIER_Q4_CHARACTER_NOTE = (
     "Trained characters need the Q8 weights. On the base pack most of the "
     "trained face is lost before the first frame, and a stranger renders."
@@ -7247,7 +7516,13 @@ LTX_TIER_STANDARD_NOTE = (
 # DRAFT-lane verdict and retuning HQ stage 2 is ungraded and out of scope.
 LTX_DISTILLED_STAGE1 = 8
 LTX_DISTILLED_STAGE2 = 2
-LTX_HQ_STAGE1 = 8
+# 10+3, from the 1280×704 High-tier lab (2026-08-14): the 10+2 tail candidate
+# saved 60.18 s of a 408 s render but the owner judged its lip-sync worse than
+# 10+3's, so 10+3 ships. 10 also matches what the HQ dispatch
+# was already setdefault-ing ("Q8 Fast knobs: stage1=10"), so the chip stops
+# describing a schedule the lane never actually ran — the drift behind
+# "High says ~4 min but takes ~8".
+LTX_HQ_STAGE1 = 10
 LTX_HQ_STAGE2 = 3
 
 
@@ -7305,6 +7580,24 @@ def _ltx_qualities() -> dict[str, dict]:
         },
         "high": {
             "key": "high", "label": "High", "order": 3,
+            # 1024×576 — WHAT THIS TIER HAS ALWAYS RENDERED, AND WHAT THE
+            # DESIGN SPEC PINS IT AT. A session moved this cell to 1280×704 on
+            # the theory that the chip "priced a recipe no lane runs". Half
+            # true: the HQ dispatch has always setdefault-ed stage1=10 (fixed
+            # below), but the CANVAS was never in doubt — public v4.0.1 ships
+            # 1024×576 here, and the spec's tier table states the rule out
+            # loud: the keys are "UNCHANGED from the shipped data-quality
+            # values … so every sidecar ever written, every Load Params
+            # round-trip and every issue thread quoting a tier name still
+            # resolves."
+            #
+            # Redefining a shipped key silently doubles the cost of a tier for
+            # every existing user — same chip, same name, ~4 min becomes ~8 —
+            # and re-points every sidecar ever written at a canvas it was not
+            # rendered on. The 720p canvas is worth having, so it is its OWN
+            # key below: additive, opt-in, and priced from its own measurement.
+            # `scripts/assert_registry.py` now pins all five canvases so this
+            # cannot recur.
             "width": 1024, "height": 576,
             # The two-stage HQ path: dev transformer + CFG + the distilled LoRA,
             # res_2s. It needs the Q8 weights AND the High add-on, which is why
@@ -7324,12 +7617,49 @@ def _ltx_qualities() -> dict[str, dict]:
             # `.needs-install` state, and both must be able to be true.
             "offered": "q8" in version_cap_tiers(),
         },
+        # ---- High · 720p — the headline of v4.0.2 -------------------------
+        # ADDITIVE. The four shipped keys keep their canvases and their prices;
+        # this is a fifth the user opts into, so nobody's existing chip changes
+        # meaning under them. Same two-stage HQ lane as High, same packs, same
+        # preview rule — only the canvas moves, which is the whole point: 1280×704
+        # is where the HQ pipeline stops being a bigger 1024×576 and starts
+        # resolving detail that canvas cannot hold.
+        #
+        # PRICED FROM THE RENDER THAT PRODUCED IT, not from the model: the owner's
+        # own 1280×704 × 121-frame clip took 491.03 s end to end
+        # (mlx_outputs/bizarrotrn_bizarro_stands_on_a_windswept.mp4.json, q8 +
+        # character stack). That is the ONLY geometry this tier claims a measured
+        # number for — every other length is modelled and says so.
+        "high_720p": {
+            "key": "high_720p", "label": "High · 720p", "order": 4,
+            "width": 1280, "height": 704,
+            "pack": "q8", "pipeline": "hq",
+            "stage1": LTX_HQ_STAGE1, "stage2": LTX_HQ_STAGE2,
+            "stage2_evals": 2,
+            "preview_every": 2, "preview_meaningful_at": 2,
+            "blurb": "The HQ pass at 720p — the most detail this engine makes.",
+            "note": LTX_TIER_HIGH_720P_NOTE,
+            "offered": "q8" in version_cap_tiers(),
+        },
     }
     for q in out.values():
         q.setdefault("note", "")
         q["aspect"] = _h3_aspect(q["width"], q["height"])
         q["canvas"] = f"{q['width']}×{q['height']}"
     return out
+
+
+def ltx_quality_uses_hq(quality: str | None) -> bool:
+    """Does this quality run the two-stage HQ lane?
+
+    ASK THE REGISTRY, NOT THE NAME. Five call sites decided the HQ lane, the
+    Q8 requirement and the accel lock by comparing the quality string to the
+    literal "high" — so adding ANY second HQ tier silently routed it to the
+    distilled lane with a q4 pack. The cell already declares `pipeline`; that
+    is the answer, and it stays right for a sixth tier nobody has thought of.
+    """
+    cell = LTX_QUALITIES.get(str(quality or ""))
+    return bool(cell and cell.get("pipeline") == "hq")
 
 
 def _ltx_lengths() -> dict[str, dict]:
@@ -7401,6 +7731,26 @@ def _build_ltx_tiers() -> dict[str, dict]:
                 (version_id, q["key"], ln["key"], q["pack"]))
             if hit:
                 eta_min, eta, eta_measured = hit[0], hit[1], True
+            else:
+                # No measurement at this exact geometry — but if this QUALITY
+                # has a measured 5s row, scale that anchor by the model's own
+                # ratio between this length and 5s instead of trusting the
+                # model's absolute price. The model's absolute numbers miss
+                # per-forward and decode floors at small canvases (Quick 5s:
+                # 161.8 s measured vs 96.7 s modelled); those biases are
+                # per-quality and roughly proportional across lengths, so the
+                # ratio cancels them to first order. eta_measured stays False
+                # — this is still an estimate, just an anchored one.
+                anchor = LTX_MEASURED_ETA.get(
+                    (version_id, q["key"], "5s", q["pack"]))
+                if anchor and ln["key"] != "5s":
+                    model_5s = ltx_estimate_minutes(
+                        w, h, int(LTX_LENGTHS["5s"]["frames"]),
+                        int(q["stage1"]), int(q["stage2"]),
+                        int(q.get("stage2_evals") or 1))
+                    if model_5s > 0:
+                        eta_min = anchor[0] * (eta_min / model_5s)
+                        eta = _fmt_eta(eta_min)
             allowed = ln.get("qualities") or ()
             restricted = bool(allowed) and q["key"] not in allowed
             notes = [n for n in (q["note"], ln["note"]) if n]
@@ -7472,6 +7822,30 @@ def live_preview_state() -> dict:
                         "installed — Settings → Models → Live-preview decoder."}
     if str(get_settings().get("live_preview", "on")).lower() == "off":
         return {"on": False, "reason": "off", "note": ""}
+    # THE THIRD ABSENCE: the decoder is installed, the setting is on, and the
+    # INSTALLED ENGINE simply cannot do it.
+    #
+    # This is the one that actually shipped. An install whose vendored engine
+    # lagged behind the panel — the 3.8→4.0 update path re-pinned the engine
+    # from its own stale copy of the updater and skipped post_update entirely —
+    # has no `ltx_pipelines_mlx.live_preview` module at all. The monitor is the
+    # ONLY thing that creates `state/live`, so nothing was ever written there:
+    # not an empty directory, no directory. Meanwhile this function returned
+    # {"on": True} and the panel promised a preview on every render. Zero
+    # frames, zero errors, and a feature the release announced silently absent.
+    #
+    # `is False` and NOT a falsy test: `ready_info` is {} until the helper has
+    # booted once, and "we haven't asked yet" must not render as "your engine is
+    # broken". Unknown stays optimistic; only a definite no speaks up.
+    if HELPER.ready_info.get("live_preview_supported") is False:
+        _have = HELPER.ready_info.get("ltx_version") or "an older build"
+        _want = HELPER.ready_info.get("ltx_version_expected") or "a newer build"
+        return {"on": False, "reason": "stale_engine",
+                "note": f"Live preview needs engine {_want}; this install is "
+                        f"running {_have}. Click Update — and if the first "
+                        f"click only moves the panel, click it once more: an "
+                        f"update started by an old version updates itself "
+                        f"first."}
     return {"on": True, "reason": None, "note": ""}
 
 
@@ -7545,6 +7919,25 @@ def pack_offers(version_id: str | None = None) -> dict:
     }
 
 
+def q8_character_install_copy(version_id: str | None = None) -> str:
+    """The repeated character warning, named/sized for one generation.
+
+    This is HTML because it replaces a complete body fragment in two panel
+    surfaces (Manual Character and Storyboard cast). Values originate in the
+    local registry, but are escaped anyway so a future pack label cannot turn
+    into markup by accident.
+    """
+    offer = pack_offers(version_id).get("q8") or {}
+    name = html.escape(str(offer.get("name") or "Q8 weights"))
+    size = html.escape(str(offer.get("size") or "?"))
+    return (
+        f"<b>Trained characters need {name}.</b> Right now this Mac has the "
+        "base pack, so the trained face comes out approximate. "
+        '<a href="#" onclick="openModelsModal();return false;">'
+        f"Install {name} ({size}) →</a>"
+    )
+
+
 def character_render_quality(version_id: str | None = None) -> str:
     """Which pipeline a TRAINED CHARACTER renders on, per generation.
 
@@ -7583,7 +7976,7 @@ def character_strip_payload() -> dict:
         ltx_estimate_minutes(704, 384, 121,
                              LTX_QUALITIES[q]["stage1"], LTX_QUALITIES[q]["stage2"],
                              LTX_QUALITIES[q].get("stage2_evals") or 1))
-    label = "Q8" if q != "high" else "Q8 HQ"
+    label = "Q8 HQ" if ltx_quality_uses_hq(q) else "Q8"
     return {
         "quality": q,
         "draft": {"width": 704, "height": 384,
@@ -8165,6 +8558,91 @@ def _safetensors_header(path: Path) -> tuple[dict, int]:
     if not isinstance(header, dict):
         raise RuntimeError(f"{path.name} has a safetensors header that isn't an object.")
     return header, 8 + n
+
+
+def _h3_lora_effective_alpha(path: Path, header: dict,
+                             buf_start: int) -> tuple[float | None, str]:
+    """The adapter's effective scale (alpha/rank), or None when it declares none.
+
+    THE H3 LOADER APPLIES `B @ A` AND NOTHING ELSE. PEFT applies
+    `B @ A * (alpha / rank)`, and that scalar is a TRAINING-CONFIG value that
+    most exporters do not put in the file — which is why the diffusers branch
+    below refuses outright. But some repacks DO ship it, as one tiny `.alpha`
+    scalar per module, and those files sail through the checks above: they have
+    real `lora_A` / `lora_B` pairs, so `not a_names` is False and the kohya
+    refusal never fires. The alphas are then silently dropped and the adapter
+    runs at whatever `alpha/rank` happened to be — 16x hot in the case that
+    actually bit us, which renders as coloured noise.
+
+    The values are F32 scalars, so this reads a handful of BYTES, not tensors:
+    the header already gives every offset, and rank is `lora_A`'s first
+    dimension. Returns (effective_scale, evidence) or (None, "") when the file
+    declares no alpha at all — which is the common, already-handled case.
+    """
+    _WIDTH = {"F64": 8, "F32": 4, "F16": 2, "BF16": 2, "I64": 8, "I32": 4}
+    alpha_keys = [k for k in header
+                  if k != "__metadata__" and k.endswith(".alpha")]
+    # An exporter may also state it once, in the metadata blob.
+    meta = header.get("__metadata__") or {}
+    meta_alpha = None
+    if isinstance(meta, dict) and meta.get("alpha") is not None:
+        try:
+            meta_alpha = float(str(meta["alpha"]))
+        except (TypeError, ValueError):
+            meta_alpha = None
+    if not alpha_keys and meta_alpha is None:
+        return None, ""
+
+    def _rank_for(module: str) -> int | None:
+        ent = header.get(module + _H3_LORA_A_SUFFIX) or {}
+        shape = ent.get("shape") or []
+        # lora_A is [rank, in_features]; rank is the first dim.
+        return int(shape[0]) if shape else None
+
+    ratios: list[float] = []
+    with path.open("rb") as fh:
+        for k in sorted(alpha_keys):
+            ent = header.get(k) or {}
+            dt = str(ent.get("dtype") or "")
+            off = ent.get("data_offsets") or []
+            w = _WIDTH.get(dt)
+            if not w or len(off) != 2 or (off[1] - off[0]) != w:
+                continue                      # not a scalar we can read cheaply
+            fh.seek(buf_start + int(off[0]))
+            raw = fh.read(w)
+            if len(raw) != w:
+                continue
+            try:
+                if dt == "F32":
+                    val = struct.unpack("<f", raw)[0]
+                elif dt == "F64":
+                    val = struct.unpack("<d", raw)[0]
+                elif dt == "F16":
+                    val = struct.unpack("<e", raw)[0]
+                elif dt == "BF16":
+                    # bf16 is the top 16 bits of an f32.
+                    val = struct.unpack("<f", b"\x00\x00" + raw)[0]
+                else:
+                    val = float(int.from_bytes(raw, "little", signed=True))
+            except (struct.error, ValueError):
+                continue
+            rank = _rank_for(k[: -len(".alpha")])
+            if rank:
+                ratios.append(float(val) / float(rank))
+    if not ratios and meta_alpha is not None:
+        # One declared alpha and no per-module scalars: pair it with any rank.
+        for k in header:
+            if k.endswith(_H3_LORA_A_SUFFIX):
+                shape = (header[k].get("shape") or [])
+                if shape:
+                    ratios.append(meta_alpha / float(shape[0]))
+                break
+    if not ratios:
+        return None, ""
+    lo, hi = min(ratios), max(ratios)
+    ev = (f"{len(ratios)} module(s), alpha/rank "
+          + (f"{lo:.4g}" if abs(hi - lo) < 1e-6 else f"{lo:.4g}–{hi:.4g}"))
+    return (hi if abs(hi - lo) < 1e-6 else max(ratios, key=lambda r: abs(r - 1.0))), ev
 
 
 def _h3_lora_layout(path: Path) -> dict:
@@ -9983,9 +10461,11 @@ def _apply_generation_profile_to_job(job: dict) -> None:
         return
 
     # Q4 one-stage jobs are the common fast path and support Long Clip Boost.
-    # Q8 High has a different sampler and does not support the 12->24 fps path,
-    # so leave High alone rather than silently changing requested quality.
-    if quality != "high":
+    # The two-stage HQ lane has a different sampler and does not support the
+    # 12->24 fps path, so leave it alone rather than silently changing the
+    # requested quality. Asked of the registry, not of the name: a second HQ
+    # tier is still an HQ tier.
+    if not ltx_quality_uses_hq(quality):
         max_dim = int(profile.get("max_dim") or 0)
         new_w, new_h = _scale_dims_to_max(width, height, max_dim)
         if (new_w, new_h) != (width, height):
@@ -10865,6 +11345,13 @@ class WarmHelper:
             # moved the transformer and silently left the text tower on 2.3's
             # encoder. It renders; it just renders wrong (ltx25 entry, above).
             env["LTX_GEMMA"] = text_encoder_dir()
+            # Prompt enhancement is a language-model generation task, not a
+            # render-conditioning task. LTX-2.5's Gemma 4 tower is the correct
+            # text encoder but deliberately has no lm_head / KV cache, so
+            # reusing LTX_GEMMA here made Enhance spend the whole client
+            # timeout loading Gemma 4 and then close with no response body.
+            # Keep the generative Gemma 3 root on its own explicit seam.
+            env["LTX_ENHANCE_GEMMA"] = str(GEMMA)
             env["LTX_IDLE_TIMEOUT"] = str(HELPER_IDLE_TIMEOUT)
             env["LTX_LOW_MEMORY"] = HELPER_LOW_MEMORY
             env["LTX_ENABLE_MODEL_UPSCALE"] = "1" if MODEL_UPSCALE_ENABLED else "0"
@@ -10939,6 +11426,11 @@ class WarmHelper:
                     "ltx_version", "ltx_version_expected", "ltx_version_match",
                     "model", "gemma", "low_memory",
                     "mlx_version", "mlx_metal_version", "chip", "macos",
+                    # THIS ALLOWLIST IS THE SEAM. A key the helper emits and
+                    # this tuple does not name is dropped here, silently, and
+                    # every downstream reader sees None — which is exactly how
+                    # a capability the helper knew about never reached the UI.
+                    "live_preview_supported",
                 )
             }
             _vtag = ""
@@ -11209,7 +11701,7 @@ class WarmHelper:
                 and self.gemma_max_length is None
                 and not self.is_alive())
 
-    def run(self, job_spec: dict) -> dict:
+    def run(self, job_spec: dict, timeout: float | None = None) -> dict:
         """Run a job, with one automatic retry at a shorter Gemma prompt
         encode if the macOS GPU watchdog killed this machine's encode.
 
@@ -11220,7 +11712,7 @@ class WarmHelper:
         session spawns pre-mitigated instead of crashing again.
         """
         try:
-            return self._run_once(job_spec)
+            return self._run_once(job_spec, timeout=timeout)
         except RuntimeError:
             if not self._gemma_fallback_applies():
                 raise
@@ -11229,9 +11721,9 @@ class WarmHelper:
                  f"encoding on this chip. Retrying this job once with Gemma "
                  f"encoding at {self.gemma_max_length} tokens instead of 1024 "
                  f"— nothing was rendered yet, so no work is lost.")
-        return self._run_once(job_spec)
+        return self._run_once(job_spec, timeout=timeout)
 
-    def _run_once(self, job_spec: dict) -> dict:
+    def _run_once(self, job_spec: dict, timeout: float | None = None) -> dict:
         # Per-run detector state — reset here so a watchdog kill seen on an
         # earlier job can't arm the fallback for an unrelated failure.
         self._metal_timeout_seen = False
@@ -11255,9 +11747,19 @@ class WarmHelper:
                 # kept waiting for an event that was never coming, so a
                 # deliberate Stop early surfaced as whatever timed out first.
                 ["done", "error", "exit", "stopped"],
+                timeout=timeout,
                 log_hook=log_hook,
                 panic_check=panic_check,
             )
+            if ev is None and timeout is not None and self.is_alive():
+                # _read_until's deadline expired while the helper remained
+                # alive and silent. Leave no reader parked on the old pipe:
+                # kill it so the next job starts clean, then let the endpoint
+                # serialize the timeout as a normal JSON error.
+                self.kill()
+                raise RuntimeError(
+                    f"helper timed out after {timeout:g}s waiting for a response"
+                )
             return self._dispatch_run_event(ev)
 
     def _dispatch_run_event(self, ev: dict | None) -> dict:
@@ -12838,8 +13340,48 @@ def _sb_export(board: dict) -> dict:
     return {"ok": True, "dir": str(dest), "files": files}
 
 
+class CharacterRequestError(ValueError):
+    """A character request cannot preserve the face + voice contract."""
+
+
+def _engine_would_be_h3(requested: str, mode: str) -> bool:
+    """Would a job asking for this engine ACTUALLY render on H3?
+
+    make_job resolves `engine` rather than obeying it: an id not in the
+    registry, an `announced` engine, a mode H3 does not serve, a Mac without
+    the RAM — each falls back to LTX. Any caller that needs to know "is this an
+    H3 render" and reads the raw form field instead is asking a different
+    question, and will be wrong in exactly the cases the fallbacks exist for.
+
+    This is the shared answer, so the API seam and the enqueue seam cannot
+    disagree. Deliberately conservative: it checks the conditions that are
+    knowable without building the job, and anything it cannot determine
+    resolves to "not H3", which is the forgiving direction (make_job re-checks
+    and raises for real).
+    """
+    eng = (requested or ENGINE_DEFAULT).strip().lower()
+    if eng not in ENGINE_IDS:
+        return False
+    if eng != "h3":
+        return False
+    if (engine_by_id(eng) or {}).get("state") == "announced":
+        return False
+    if not engine_serves_mode(engine_by_id("h3") or {}, (mode or "t2v")):
+        return False
+    return bool(h3_capable())
+
+
 def _validate_character_quality(form: dict[str, list[str]] | dict[str, str]) -> str | None:
-    """Character mode is available on Q4 — LoRAs fuse into the distilled
+    """Validate the complete trained-character contract before enqueueing.
+
+    A character id means more than visual treatment: it names a face LoRA and,
+    unless ``no_voice`` is explicit, the paired trained voice LoRA. The old
+    branch silently ignored an unknown id or a missing audio file and then
+    rendered a plausible-looking stranger/default voice. It also let H3 accept
+    the id before make_job's lane scrub removed both LTX adapters. Those are
+    successful renders of the wrong request, so reject them at the API seam.
+
+    Character mode remains available on Q4 — LoRAs fuse into the distilled
     base (identity match is mediocre per 2026-05-17 empirical test with
     the chartest Q4-Balanced runs, but the render completes). When Q8 is
     installed and the user picks quality=high, the Q8 HQ pipeline is used
@@ -12854,14 +13396,59 @@ def _validate_character_quality(form: dict[str, list[str]] | dict[str, str]) -> 
         v = form.get(name, default)
         if isinstance(v, list):
             v = v[0] if v else default
-        return (v or "").strip()
+        return str(v or "").strip()
     quality = _f("quality", "balanced").lower()
     cid = _f("character_id", "")
     if cid:
-        # Character mode on Q4 submits with Quick/Balanced/Standard.
-        # The identity match is imperfect but it renders and does not
-        # error. Q8 users who pick quality=high get the full fidelity
-        # path — no enforcement needed.
+        # ONLY REFUSE WHEN H3 WOULD ACTUALLY RENDER IT. `engine=h3` in the form
+        # is a REQUEST, not the outcome: make_job downgrades it to LTX when H3
+        # isn't installed, when the Mac lacks the RAM, or when the mode is one
+        # H3 doesn't serve. Refusing on the raw field 400'd requests that were
+        # about to render correctly on LTX with the full character stack — so
+        # this asks the same question make_job answers, through the same
+        # registry, instead of trusting the field.
+        if _engine_would_be_h3(_f("engine", ENGINE_DEFAULT), _f("mode", "t2v")):
+            return ("Hailuo H3 can't load a trained character's face or voice "
+                    "LoRAs. Choose LTX or clear character_id.")
+        try:
+            char = next((c for c in list_characters() if c.get("id") == cid), None)
+        except Exception as exc:  # noqa: BLE001 - turn discovery failure into API 400
+            return f"could not resolve character {cid!r}: {exc}"
+        if not char:
+            return f"character {cid!r} not found; request was not queued"
+        if char.get("ltx_compatible") is False:
+            return str(char.get("ltx_compat_reason") or
+                       f"character {cid!r} is incompatible with the active "
+                       "LTX generation; request was not queued")
+        face = Path(str(char.get("face_lora_path") or ""))
+        if not face.is_file():
+            return (f"character {cid!r} is missing its face LoRA; request was "
+                    "not queued")
+        no_voice = _f("no_voice", "off").lower() in ("on", "true", "1", "yes")
+        # A CHARACTER THAT NEVER HAD A VOICE IS NOT A BROKEN CHARACTER.
+        #
+        # `list_characters()` sets audio_lora_path to None when no
+        # `.audio.safetensors` sits beside the face file — that is how a
+        # face-only character is REPRESENTED, and the UI has always treated it
+        # as a first-class state (the "silent" badge). Refusing it here made
+        # every silent character unrenderable on every path, with no way to opt
+        # out: the No-voice pill is hidden precisely for these characters, so
+        # `no_voice` could never be sent. The shipped one-click SAMPLE
+        # CHARACTER is exactly this shape — one face file, no audio — so
+        # from-zero onboarding produced a character the panel then refused.
+        #
+        # The contract this check exists to enforce is "a character's declared
+        # voice must actually be there", and it is preserved by asking the
+        # right question: DECLARED but MISSING is a corrupt bundle and still
+        # refuses; NEVER DECLARED is silent by construction and renders.
+        audio_declared = str(char.get("audio_lora_path") or "").strip()
+        if audio_declared and not no_voice and not Path(audio_declared).is_file():
+            return (f"character {cid!r} is missing its trained voice LoRA. "
+                    "Restore/train the voice file, or submit no_voice=on "
+                    "explicitly; request was not queued")
+        # Character mode on Q4 submits with Quick/Balanced/Standard. The
+        # identity match is imperfect but the requested face + voice pair is
+        # present. Q8 users who pick quality=high get the full-fidelity path.
         return None
     # No character_id — but a raw train_character LoRA in `loras` triggers
     # the same quality concern. 2026-06-26: we allow it on Q4 (same
@@ -13189,23 +13776,15 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
     if not prompt:
         prompt = "A cinematic atmospheric scene"
     quality = f("quality", "balanced")
-    if quality == "quick":
-        default_w, default_h = 640, 480
-    elif quality == "standard":
-        default_w, default_h = 1280, 704
-    elif quality == "high":
-        # 2026-05-09 lab finding: Q8 two-stage HQ at 1024×576 produces
-        # "outstanding" quality (user verdict on a 5-prompt sweep
-        # including a freckles-and-eyes close-up stress test) at ~7:48
-        # wall, vs ~11:51 at 1280×704. The smaller resolution still
-        # hits the model's wheelhouse for close subjects, and Q8's
-        # per-token detail capacity is the quality differentiator —
-        # not raw pixel count. Power users can still pick 1280×704
-        # explicitly via the aspect chip; this just sets a saner
-        # default that gets the 7-min experience by default.
-        default_w, default_h = 1024, 576
-    else:
-        default_w, default_h = 1024, 576
+    # THE CANVAS COMES FROM THE CELL. This was a per-quality if/elif of literal
+    # sizes that had to be edited in lockstep with the registry — and once two
+    # tiers shared the HQ pipeline, the `uses_hq` branch handed BOTH of them
+    # 1024×576, so High · 720p resolved its own canvas to High's. The registry
+    # already states every tier's width and height; reading it is what makes a
+    # sixth tier a data change instead of a code change.
+    _qcell = LTX_QUALITIES.get(quality) or {}
+    default_w = int(_qcell.get("width") or 1024)
+    default_h = int(_qcell.get("height") or 576)
     upscale = f("upscale", "fit_720p" if quality == "balanced" else "off")
     requested_upscale_method = (f("upscale_method", "lanczos") or "lanczos").strip().lower()
     if requested_upscale_method == "model":
@@ -13719,6 +14298,21 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
     # LoRA — overriding to 0 effectively disables a character without
     # forcing the user to clear the picker.
     if _character_id:
+        # THE RESOLVED ENGINE, NOT THE RAW FORM FIELD. ~350 lines above, this
+        # function has already downgraded `_engine` from "h3" to "ltx" for
+        # three legitimate reasons: H3 isn't installed, the Mac hasn't got the
+        # RAM, or the mode is one H3 doesn't serve (extend / keyframe / a2v /
+        # restore / ingredients / control). Re-reading `f("engine")` here threw
+        # away that resolution and 400'd requests make_job was about to render
+        # correctly on LTX with the full character stack.
+        #
+        # This is the same lockstep-drift class the character gates were
+        # written to catch — a value corrected in one place while its partner
+        # three screens away still read the original.
+        if _engine == "h3":
+            raise CharacterRequestError(
+                "Hailuo H3 can't load a trained character's face or voice "
+                "LoRAs. Choose LTX or clear character_id.")
         try:
             char_strength = float(f("character_strength", "1.0") or "1.0")
         except (TypeError, ValueError):
@@ -13770,47 +14364,68 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         no_voice = (f("no_voice", "off") or "").strip().lower() in ("on", "true", "1", "yes")
         try:
             chars_by_id = {c["id"]: c for c in list_characters()}
-        except Exception:
-            chars_by_id = {}
+        except Exception as exc:  # noqa: BLE001 - preserve a loud contract failure
+            raise CharacterRequestError(
+                f"could not resolve character {_character_id!r}: {exc}") from exc
         char_rec = chars_by_id.get(_character_id)
-        if char_rec:
-            existing_paths = {
-                str((entry or {}).get("path") or "")
-                for entry in (job["params"].get("loras") or [])
-            }
-            face_p = char_rec.get("face_lora_path")
-            audio_p = char_rec.get("audio_lora_path")
-            additions: list[dict] = []
-            if face_p and face_p not in existing_paths:
-                additions.append({"path": face_p, "strength": char_strength})
-                existing_paths.add(face_p)
-            if audio_p and audio_p not in existing_paths and not no_voice:
-                additions.append({"path": audio_p,
-                                  "strength": char_voice_strength})
-                existing_paths.add(audio_p)
-            elif audio_p and no_voice:
-                job["params"]["no_voice"] = True
-            if additions:
-                # Face/audio LoRAs go FIRST in the stack so they take effect
-                # before any style LoRAs the user stacked on top. Mirrors
-                # the existing /characters/<id>/generate ordering.
-                job["params"]["loras"] = additions + list(
-                    job["params"].get("loras") or []
-                )
-            # Always stamp the character_id on params even when the form
-            # didn't declare source="characters". The Manual-tab picker is
-            # a different entry point — stamping is what lets Load Params
-            # later restore the picker selection.
-            if "character_id" not in job["params"]:
-                job["params"]["character_id"] = _character_id
-            # Persist BOTH strengths so Load Params restores the exact sliders
-            # and the sidecar records what actually rendered. The voice value is
-            # stamped even when it equals the default: the number in a clip's
-            # sidecar is how a future listener knows which rung of the ladder
-            # they are hearing.
-            job["params"].setdefault("character_strength", char_strength)
-            job["params"].setdefault("character_voice_strength",
-                                     char_voice_strength)
+        if not char_rec:
+            raise CharacterRequestError(
+                f"character {_character_id!r} not found; request was not queued")
+        face_p = char_rec.get("face_lora_path")
+        audio_p = char_rec.get("audio_lora_path")
+        if not face_p or not Path(str(face_p)).is_file():
+            raise CharacterRequestError(
+                f"character {_character_id!r} is missing its face LoRA; "
+                "request was not queued")
+        # DECLARED-BUT-MISSING refuses; NEVER-DECLARED renders. `audio_p` is
+        # None for a character with no `.audio.safetensors` beside its face
+        # file — the representation of a face-only character, which the UI
+        # shows with a "silent" badge and whose No-voice pill is HIDDEN (so
+        # `no_voice` can never be submitted for it). Refusing that shape made
+        # every silent character unrenderable with no opt-out, the shipped
+        # one-click sample character among them. See the twin check in
+        # _validate_character_quality.
+        _audio_declared = str(audio_p or "").strip()
+        if _audio_declared and not no_voice and not Path(_audio_declared).is_file():
+            raise CharacterRequestError(
+                f"character {_character_id!r} is missing its trained voice "
+                "LoRA. Restore/train the voice file, or submit no_voice=on "
+                "explicitly; request was not queued")
+        if no_voice:
+            job["params"]["no_voice"] = True
+        existing_paths = {
+            str((entry or {}).get("path") or "")
+            for entry in (job["params"].get("loras") or [])
+        }
+        additions: list[dict] = []
+        if face_p not in existing_paths:
+            additions.append({"path": face_p, "strength": char_strength})
+            existing_paths.add(face_p)
+        if audio_p and audio_p not in existing_paths and not no_voice:
+            additions.append({"path": audio_p,
+                              "strength": char_voice_strength})
+            existing_paths.add(audio_p)
+        if additions:
+            # Face/audio LoRAs go FIRST in the stack so they take effect
+            # before any style LoRAs the user stacked on top. Mirrors
+            # the existing /characters/<id>/generate ordering.
+            job["params"]["loras"] = additions + list(
+                job["params"].get("loras") or []
+            )
+        # Always stamp the character_id on params even when the form
+        # didn't declare source="characters". The Manual-tab picker is
+        # a different entry point — stamping is what lets Load Params
+        # later restore the picker selection.
+        if "character_id" not in job["params"]:
+            job["params"]["character_id"] = _character_id
+        # Persist BOTH strengths so Load Params restores the exact sliders
+        # and the sidecar records what actually rendered. The voice value is
+        # stamped even when it equals the default: the number in a clip's
+        # sidecar is how a future listener knows which rung of the ladder
+        # they are hearing.
+        job["params"].setdefault("character_strength", char_strength)
+        job["params"].setdefault("character_voice_strength",
+                                 char_voice_strength)
 
     # ---- lane scrub: a LoRA never crosses engines --------------------------
     # The picker is ONE control shared by both video engines, and its hidden
@@ -13846,6 +14461,24 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                  f"{'…' if len(_dropped) > 4 else ''}) — LTX and Hailuo H3 "
                  f"adapters are not interchangeable.")
             job["params"]["loras"] = _kept
+
+    # The browser library is a convenience, not an authority boundary: a stale
+    # tab or hand-written API call can still submit a path the active generation
+    # cannot use.  Refuse local LTX adapters here as well, before the queue can
+    # spend minutes producing a plausible stranger.  Remote curated adapters
+    # are resolved and checked by the helper immediately before model load.
+    if job["params"].get("engine") == "ltx":
+        for _entry in (job["params"].get("loras") or []):
+            _path_raw = str((_entry or {}).get("path") or "").strip()
+            try:
+                _strength = float((_entry or {}).get("strength", 1.0))
+            except (TypeError, ValueError):
+                _strength = 1.0
+            if not _path_raw or _strength == 0.0 or not Path(_path_raw).is_file():
+                continue
+            _compat = _ltx_lora_compatibility(_path_raw)
+            if _compat["ltx_compatible"] is False:
+                raise CharacterRequestError(_compat["ltx_compat_reason"])
 
     _apply_generation_profile_to_job(job)
 
@@ -15717,7 +16350,7 @@ def run_job_inner(job: dict) -> None:
     quality = p.get("quality", "standard")
     if p.get("accel") not in ("off", "boost", "turbo"):
         p["accel"] = "off"
-    if quality == "high" or mode in ("extend", "keyframe", "a2v", "restore", "ingredients", "control"):
+    if ltx_quality_uses_hq(quality) or mode in ("extend", "keyframe", "a2v", "restore", "ingredients", "control"):
         p["accel"] = "off"
 
     # Guard: Q4 distilled hardcoded 9-sigma schedule needs the full walk to
@@ -15726,9 +16359,9 @@ def run_job_inner(job: dict) -> None:
     # Block before the user wastes 7+ minutes producing static.
     # Modes that don't use the distilled `steps` field skip this check:
     #   - extend / keyframe use stage1_steps + stage2_steps via two-stage path
-    #   - high quality uses two-stage HQ with its own schedule
+    #   - every HQ-pipeline quality uses two-stage HQ with its own schedule
     #   - a2v uses A2VidPipelineTwoStage's stage1/stage2 walks
-    if mode not in ("extend", "keyframe", "a2v", "restore", "ingredients", "control") and quality != "high" and int(p.get("steps", 8)) < 8:
+    if mode not in ("extend", "keyframe", "a2v", "restore", "ingredients", "control") and not ltx_quality_uses_hq(quality) and int(p.get("steps", 8)) < 8:
         raise RuntimeError(
             f"steps={p.get('steps')} is below the 8-step minimum for the Q4 distilled "
             "schedule. Fewer steps truncates the sigma walk and leaves >70% noise in "
@@ -16739,7 +17372,7 @@ def run_job_inner(job: dict) -> None:
     temporal_mode = (p.get("temporal_mode") or "native").strip().lower()
     if temporal_mode not in ("native", "fps12_interp24"):
         temporal_mode = "native"
-    temporal_supported = mode in ("t2v", "i2v") and quality != "high"
+    temporal_supported = mode in ("t2v", "i2v") and not ltx_quality_uses_hq(quality)
     if temporal_mode != "native" and not temporal_supported:
         push("Long Clip Boost is only available for Q4 Text/Image renders; using native 24fps.")
         temporal_mode = "native"
@@ -16781,7 +17414,7 @@ def run_job_inner(job: dict) -> None:
 
     pad_w, pad_h, pad_filter = compute_pad(width, height)
     suffix = f"{pad_w}x{pad_h}" if mode == "i2v_clean_audio" and pad_filter else f"{width}x{height}"
-    tag = f"{mode}_hq" if quality == "high" else mode
+    tag = f"{mode}_hq" if ltx_quality_uses_hq(quality) else mode
     # Only `i2v_clean_audio` runs a panel-side mux (raw → final). For T2V / I2V /
     # HQ the upstream-patched encode writes the lossless yuv444p crf 0 + AAC
     # file directly, so the "raw" is the final — keeping the `_raw` suffix in
@@ -16895,7 +17528,7 @@ def run_job_inner(job: dict) -> None:
         job["output_path"] = str(raw_out)
         return
 
-    if quality == "high":
+    if ltx_quality_uses_hq(quality):
         if not SYSTEM_CAPS["allows_q8"]:
             raise RuntimeError(
                 f"High quality (Q8 two-stage) isn't supported on the "
@@ -16960,8 +17593,12 @@ def run_job_inner(job: dict) -> None:
                 # Defaults updated 2026-05-12 to match the 5-min sweet
                 # spot recovered from the May-10 clip 11–17 cluster
                 # (stage1=10, stage2=3, teacache=2.0). See make_job.
-                "stage1_steps": int(p.get("stage1_steps", 10)),
-                "stage2_steps": int(p.get("stage2_steps", 3)),
+                # The defaults are the SAME constants the quality table and
+                # the ETA model read — these were independent literals (10
+                # here, 8 in the table), which is how the High chip priced a
+                # schedule this lane never ran ("says ~4 min, takes ~8").
+                "stage1_steps": int(p.get("stage1_steps", LTX_HQ_STAGE1)),
+                "stage2_steps": int(p.get("stage2_steps", LTX_HQ_STAGE2)),
                 "cfg_scale": float(p.get("cfg_scale", 3.0)),
                 # STG (Spatio-Temporal Guidance) scale — driven by the
                 # "detail guidance" slider (make_job clamps to 0.0–4.0;
@@ -17043,7 +17680,7 @@ def run_job_inner(job: dict) -> None:
         # 2.3 (whose characters go to `high` and never reach this branch) is
         # untouched.
         _char_pack = "q4"
-        if p.get("character_id") and character_render_quality() != "high":
+        if p.get("character_id") and not ltx_quality_uses_hq(character_render_quality()):
             _char_pack = "q8"
             push(f"[character] {model_version()['label']} characters render on "
                  f"the Q8 weights with the distilled pipeline — the recipe they "
@@ -17941,6 +18578,30 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _inline_filename(self, path: Path) -> str:
+        """`Content-Disposition: inline; filename="<real basename>"`.
+
+        WHY `inline` AND NOT `attachment`: this same response is what the
+        gallery's `<video>` tag streams and range-requests. `attachment` would
+        force a save dialog and stop playback dead. `inline` changes nothing
+        about how the browser RENDERS the response — it only supplies the name
+        the browser uses when the user then chooses "Save video as…" or
+        right-click → Download.
+
+        Without it the browser has no name to offer and derives one from the
+        URL, which for `/file?path=/…/clip.mp4` is the literal string `file` —
+        so every clip anyone ever saved from the panel landed in Downloads as
+        `file`, `file-1`, `file-2`. The name was always right there in the
+        query string; nothing was reading it back out.
+
+        ASCII-safe for the same reason `/loras/download` is: the header does
+        not survive non-ASCII without RFC 5987 encoding. Quotes are stripped so
+        a crafted name cannot break out of the quoted-string and inject a
+        header value."""
+        safe = "".join(c for c in path.name if 32 <= ord(c) < 127)
+        safe = safe.replace('"', "").replace("\\", "").strip()
+        return safe or path.name.encode("ascii", "ignore").decode() or "download"
+
     def _serve_video_with_range(self, path: Path) -> None:
         """Serve an mp4 with HTTP byte-range support so the browser <video>
         tag can seek without redownloading and the gallery's `preload="metadata"`
@@ -17987,6 +18648,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Accept-Ranges", "bytes")
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
             self.send_header("Content-Length", str(length))
+            self.send_header(
+                "Content-Disposition",
+                f'inline; filename="{self._inline_filename(path)}"')
             # Y1.039 — `no-cache` forces revalidation on every request even
             # when the URL is reused. Combined with the v=<mtime> URL bust
             # in list_outputs, this means a refreshed file gets re-fetched
@@ -18015,6 +18679,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "video/mp4")
         self.send_header("Content-Length", str(size))
         self.send_header("Accept-Ranges", "bytes")
+        self.send_header(
+            "Content-Disposition",
+            f'inline; filename="{self._inline_filename(path)}"')
         self.send_header("Cache-Control", "no-cache")  # Y1.039 — see above
         self.end_headers()
         with path.open("rb") as fh:
@@ -18896,6 +19563,7 @@ class Handler(BaseHTTPRequestHandler):
                     user_loras = [
                         l for l in user_loras
                         if l.get("lane") != "h3"
+                        and l.get("ltx_compatible") is not False
                         and (mode_filter in (l.get("compatible_modes") or [])
                              or "unknown" in (l.get("compatible_modes") or []))
                     ]
@@ -18999,7 +19667,7 @@ class Handler(BaseHTTPRequestHandler):
         # with the locked production recipe applied. See list_characters()
         # for the discovery rules.
         if parsed.path == "/characters":
-            self._json({"characters": list_characters()})
+            self._json({"characters": list_library_characters()})
             return
 
         # ---- Storyboard reads ------------------------------------------
@@ -19392,6 +20060,21 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(served.stat().st_size))
+            # The ORIGINAL's name, the SERVED file's extension.
+            #
+            # Neither half is optional. `served.name` alone would hand the user
+            # a cache key (`clip.png.480.webp`), which is not a name anyone
+            # asked for. But `path.name` alone lies in the other direction: a
+            # `w=480` request re-encodes a PNG as JPEG, so calling those bytes
+            # `alice_start.png` saves a file whose extension contradicts its
+            # contents. Stem from the original, suffix from what actually went
+            # down the socket — recognisable AND true.
+            _dl_name = self._inline_filename(path)
+            if served is not path:
+                _dl_name = Path(_dl_name).stem + served.suffix
+            self.send_header(
+                "Content-Disposition",
+                f'inline; filename="{_dl_name}"')
             self.end_headers()
             with served.open("rb") as fh:
                 self.wfile.write(fh.read())
@@ -21150,7 +21833,18 @@ class Handler(BaseHTTPRequestHandler):
             err = _validate_character_quality(form)
             if err:
                 self._json({"error": err}, 400); return
-            job = make_job(form)
+            # The validator runs FIRST, so make_job's own refusals should be
+            # unreachable here — but "should be" is not a guarantee: the two
+            # seams read the same form through different code, and a character
+            # deleted between the two calls is a plain TOCTOU. do_POST has no
+            # top-level handler, so an escaping CharacterRequestError becomes a
+            # traceback and a dropped connection instead of the 400 the rest of
+            # this endpoint answers with. The refusal is polite everywhere else;
+            # it must be polite here too.
+            try:
+                job = make_job(form)
+            except CharacterRequestError as exc:
+                self._json({"error": str(exc)}, 400); return
             with QUEUE_COND:
                 STATE["queue"].append(job)
                 QUEUE_COND.notify_all()
@@ -21410,7 +22104,14 @@ class Handler(BaseHTTPRequestHandler):
             # prompt_body kept as a back-compat alias to the verbatim prompt
             # so older Load-Params restorers still find something.
             job_form["prompt_body"] = [prompt]
-            job = make_job(job_form)
+            try:
+                job = make_job(job_form)
+            except CharacterRequestError as exc:
+                # A bundle can become incomplete after the grid was drawn
+                # (for example its audio LoRA is moved between click and
+                # submit). Refuse the now-half-character rather than dropping
+                # the connection or rendering only its face.
+                self._json({"error": str(exc)}, 400); return
             with QUEUE_COND:
                 STATE["queue"].append(job)
                 QUEUE_COND.notify_all()
@@ -21904,6 +22605,9 @@ class Handler(BaseHTTPRequestHandler):
                 "character_id": src_params.get("character_id") or "",
                 "quality": src_params.get("quality") or "",
                 "loras": json.dumps(src_params.get("loras") or []),
+                "engine": src_params.get("engine") or ENGINE_DEFAULT,
+                "mode": src_params.get("mode") or "t2v",
+                "no_voice": src_params.get("no_voice") or "off",
             }
             err = _validate_character_quality(_retry_form)
             if err:
@@ -21942,10 +22646,26 @@ class Handler(BaseHTTPRequestHandler):
             chunks = [c for c in chunks if c]
             if not chunks:
                 self._json({"error": "no prompts after split"}, 400); return
+            # The character contract applies here too. /queue/batch accepts any
+            # form the Manual tab can build, character_id included, and it was
+            # the one enqueue path that neither validated up front nor caught
+            # CharacterRequestError — so a batch cast with a voice-less
+            # character raised mid-loop, INSIDE the queue lock, after some jobs
+            # were already appended and before persist_queue() or any response.
+            # Half a batch, no answer, and the refusal the rest of the panel
+            # makes politely arriving as a 500.
+            err = _validate_character_quality(form)
+            if err:
+                self._json({"error": err}, 400); return
             ids = []
+            try:
+                built = [make_job(form, override_prompt=pr) for pr in chunks]
+            except CharacterRequestError as exc:
+                self._json({"error": str(exc)}, 400); return
+            # Built first, appended second: a batch is all-or-nothing, so a
+            # refusal on prompt 7 cannot leave prompts 1-6 queued.
             with QUEUE_COND:
-                for prompt in chunks:
-                    job = make_job(form, override_prompt=prompt)
+                for job in built:
                     job["params"]["open_when_done"] = False
                     STATE["queue"].append(job)
                     ids.append(job["id"])
@@ -23071,11 +23791,19 @@ class Handler(BaseHTTPRequestHandler):
                     "id": f"enh-{int(time.time()*1000)}",
                     "params": {"prompt": user_prompt, "mode": mode, "seed": 10,
                                "preserve_tokens": preserve_tokens},
-                })
+                }, timeout=PROMPT_ENHANCE_TIMEOUT)
             except Exception as exc:
                 push(f"[enhance] failed: {exc}")
                 self._json({"error": str(exc)}, 500); return
-            enhanced = result.get("enhanced", "").strip()
+            # A malformed terminal helper event must still become JSON. Before
+            # this guard, None/non-string values raised after the only try/except
+            # in the lane and BaseHTTPRequestHandler closed the socket empty.
+            if not isinstance(result, dict):
+                self._json({"error": "Gemma returned an invalid helper response"}, 500); return
+            enhanced_raw = result.get("enhanced", "")
+            if not isinstance(enhanced_raw, str):
+                self._json({"error": "Gemma returned an invalid enhanced prompt"}, 500); return
+            enhanced = enhanced_raw.strip()
             if not enhanced:
                 self._json({"error": "Gemma returned empty result"}, 500); return
             push(f"[enhance] → {enhanced[:120]}… ({result.get('elapsed_sec','?')}s)")
@@ -23385,7 +24113,7 @@ def _phase_weights(params: dict) -> dict[str, int]:
     upscale_method = params.get("upscale_method", "lanczos")
     quality = params.get("quality", "standard")
     has_post = (upscale != "off" and upscale_method == "pipersr")
-    if quality == "high":
+    if ltx_quality_uses_hq(quality):
         setup, denoise, decode = 2, 86, 12
     elif quality == "quick":
         setup, denoise, decode = 4, 75, 21
@@ -23752,6 +24480,8 @@ def page() -> str:
     return (HTML
             .replace("__BOOTSTRAP__", bootstrap)
             .replace("__PROFILE_BADGE__", profile_badge)
+            .replace("__Q8_CHARACTER_INSTALL_COPY__",
+                     q8_character_install_copy())
             # The header badge used to be the literal string "3.0", so it kept
             # claiming 3.0 through every release since. It reads the VERSION
             # file now — the same source /version and the update pill use.
@@ -24797,7 +25527,10 @@ HTML = r"""<!doctype html>
     /* The High delivery pill can't exist on a Q4 machine — put the rule
        right beside the one that hides #qualityGroup's, so the two can never
        disagree about what this Mac can render. */
-    body[data-cap-tier="q4"] #sbFinalQuality [data-q="high"] { display: none !important; }
+    /* Every q8-pack tier hides on a q4-only machine, not just the one named
+       "high" — sbRenderFinalQualities stamps data-pack so this stays true for
+       any tier the registry grows. */
+    body[data-cap-tier="q4"] #sbFinalQuality [data-pack="q8"] { display: none !important; }
 
     /* The panel has no layout breakpoint today. Storyboard adds one, scoped
        to itself so nothing else can regress. */
@@ -27437,8 +28170,8 @@ HTML = r"""<!doctype html>
        missing. Reads as a discoverable install CTA rather than a
        dead grey button: full opacity, accent-tinted border, pointer
        cursor, and a small download icon prefixed to the subtitle.
-       Click → opens the Models modal so the user can kick off the
-       37 GB Q8 download from one place. */
+       Click → opens the Models modal so the user can install the active
+       generation's Q8 pack from one place. */
     .quality-strip .q-chip.needs-install {
       opacity: 1;
       cursor: pointer;
@@ -31571,7 +32304,7 @@ HTML = r"""<!doctype html>
                   title="Rescan mlx_models/characters/ for new bundles"
                   onclick="refreshManualCharacters()"><svg class="ph" aria-hidden="true"><use href="#ph-arrow-clockwise-bold"/></svg></button>
         </div>
-        <div class="chars-q4-note"><b>Trained characters need the Q8 weights.</b> Right now this Mac has the base pack, so the trained face comes out approximate. <a href="#" onclick="openModelsModal();return false;">Install Q8 (30 GB) →</a></div>
+        <div class="chars-q4-note">__Q8_CHARACTER_INSTALL_COPY__</div>
         <!-- One-liner that surfaces under the strip when a character is
              active. Shows trigger word + a tiny strength control inline.
              charsSummaryMeta stays as a hidden carrier for legacy JS
@@ -33747,7 +34480,7 @@ HTML = r"""<!doctype html>
           <button type="button" class="ghost-btn js-get-sample-char" style="padding:2px 8px;font-size:12px"
                   onclick="downloadSampleCharacter()">get a sample character (Bizarro)</button>.
         </div>
-        <div class="chars-q4-note"><b>Trained characters need the Q8 weights.</b> Right now this Mac has the base pack, so the trained face comes out approximate. <a href="#" onclick="openModelsModal();return false;">Install Q8 (30 GB) →</a></div>
+        <div class="chars-q4-note">__Q8_CHARACTER_INSTALL_COPY__</div>
       </div>
 
       <details class="customize-section" id="sbMustSection">
@@ -34246,11 +34979,11 @@ HTML = r"""<!doctype html>
             </div>
             <div class="cz-control">
               <div class="cz-label">Delivery pass <span class="cz-label-hint">what you keep</span></div>
-              <div class="pill-group cols-3" id="sbFinalQuality">
-                <button type="button" class="pill-btn" data-q="balanced">Balanced<span class="sub">1024×576</span></button>
-                <button type="button" class="pill-btn active" data-q="standard">Standard<span class="sub">1024×576</span></button>
-                <button type="button" class="pill-btn" data-q="high" id="sbFinalHigh">High<span class="sub">1024×576 · Q8</span></button>
-              </div>
+              <!-- Rendered from the registry by sbRenderFinalQualities(): three
+                   hand-written buttons meant two of them printed 1024×576 for
+                   canvases that are not 1024×576 (Standard is 1280×704), and a
+                   fifth tier could never appear here at all. -->
+              <div class="pill-group cols-3" id="sbFinalQuality"></div>
             </div>
           </div>
         </details>
@@ -39888,7 +40621,7 @@ async function trainDeleteLora(loraPath) {
 
 // Quality presets (Y1.013) — each one bundles the backend quality value
 // (which selects the model + sampler) with the canonical dimensions.
-// Backend still routes only on `quality == 'high'` vs anything else, so
+// Backend routes on the cell's `pipeline`, not the key name, so
   // 'quick', 'balanced', and 'standard' all run Q4 distilled — they differ in
 // pixel count. The richer label is preserved in the sidecar so the
 // info modal can show "Quick" / "Standard" / "High" verbatim.
@@ -39949,8 +40682,20 @@ function setQuality(q) {
     try { renderTierAxes('ltx'); } catch (_) {}
   }
 }
+// Does the selected quality run the two-stage HQ lane? Reads the SAME registry
+// cell the server does (BOOT.ltx.qualities[].pipeline) instead of comparing to
+// the literal 'high' — which is what made these gates blind to a second HQ tier
+// and would have offered accel/interpolation on High · 720p, where the backend
+// refuses them.
+function _qualityUsesHq(q) {
+  const cells = ((BOOT.ltx || {}).qualities) || [];
+  const cell = Array.isArray(cells)
+    ? cells.find(c => c && c.key === String(q || ''))
+    : cells[String(q || '')];
+  return !!(cell && cell.pipeline === 'hq');
+}
 function setAccel(a) {
-  const allowed = document.getElementById('quality').value !== 'high' && currentMode !== 'extend' && currentMode !== 'keyframe';
+  const allowed = !_qualityUsesHq(document.getElementById('quality').value) && currentMode !== 'extend' && currentMode !== 'keyframe';
   const v = allowed ? a : 'off';
   document.getElementById('accel').value = v;
   document.querySelectorAll('#accelGroup .pill-btn').forEach(b => b.classList.toggle('active', b.dataset.accel === v));
@@ -39960,7 +40705,7 @@ function setAccel(a) {
 function temporalModeAllowed() {
   const q = document.getElementById('quality').value;
   const mode = document.getElementById('mode').value;
-  return q !== 'high' && currentMode !== 'extend' && currentMode !== 'keyframe' && (mode === 't2v' || mode === 'i2v');
+  return !_qualityUsesHq(q) && currentMode !== 'extend' && currentMode !== 'keyframe' && (mode === 't2v' || mode === 'i2v');
 }
 function setTemporalMode(t) {
   const allowed = temporalModeAllowed();
@@ -39992,7 +40737,7 @@ function setUpscaleMethod(m) {
   updateDerived();
 }
 function updateAccelAvailability() {
-  const allowed = document.getElementById('quality').value !== 'high' && currentMode !== 'extend' && currentMode !== 'keyframe';
+  const allowed = !_qualityUsesHq(document.getElementById('quality').value) && currentMode !== 'extend' && currentMode !== 'keyframe';
   document.querySelectorAll('#accelGroup .pill-btn').forEach(b => {
     const disabled = !allowed && b.dataset.accel !== 'off';
     b.classList.toggle('disabled', disabled);
@@ -42124,10 +42869,10 @@ function applyAspect(key) {
 // dimensions are now owned by setQuality / applyAspect.
 function applyQuality() {
   const q = document.getElementById('quality').value;
-  if (q === 'high') {
+  if (_qualityUsesHq(q)) {
     document.getElementById('steps').value = 18;
   } else {
-    document.getElementById('steps').value = 8;       // quick + balanced + standard
+    document.getElementById('steps').value = 8;       // every distilled canvas
   }
   updateCustomizeSummary();
   updateDerived();
@@ -42750,6 +43495,15 @@ function mergeIntegrity(integ, deep) {
   if (integ && !integ.ok) add(integ.bad);
   const dv = deep && deep.result;
   if (dv && !dv.ok) add(dv.bad);
+  // Render-level codec audit (the v3.8.1 class) rides model_integrity as its
+  // own sub-block. Flagged `codec:true` so the banner never offers Repair for
+  // it — re-downloading weights cannot fix an unapplied codec patch. See
+  // _output_codec_report() in the backend.
+  const oc = integ && integ.output_codec;
+  if (oc && oc.ok === false) {
+    bad.push({ repo: 'output-codec', file: oc.file || '', codec: true,
+               reason: (oc.problems || []).join('; ') });
+  }
   return { ok: bad.length === 0, bad };
 }
 
@@ -42816,17 +43570,21 @@ function renderIntegrityBanner(integ) {
       + 'align-items:center;gap:12px;flex-wrap:wrap;box-shadow:0 2px 10px rgba(0,0,0,.45)';
     document.body.appendChild(el);
   }
-  const repos = [...new Set(bad.map(b => b.repo))];
+  // Repair (re-download) only makes sense for weight files — codec-audit rows
+  // are excluded from the button list; their cure is Update / reinstall.
+  const repos = [...new Set(bad.filter(b => !b.codec).map(b => b.repo))];
   // Placement errors (right content, wrong path) are a different failure from a
   // corrupt download, and the cure is usually a move rather than a re-fetch — so
   // they get their own headline and their reason printed in full (it names both
   // the found-at and expected-at paths). See _placement_errors() in the backend.
   const misplaced = bad.filter(b => b.placement);
-  const corrupt = bad.filter(b => !b.placement);
+  const codecBad = bad.filter(b => b.codec);
+  const corrupt = bad.filter(b => !b.placement && !b.codec);
   el.innerHTML =
     '<span style="font-weight:700">'
     + (corrupt.length ? 'Model files look incomplete / corrupt'
-                      : 'Model files are in the wrong place') + '</span>'
+       : misplaced.length ? 'Model files are in the wrong place'
+       : 'Renders are not being encoded as requested') + '</span>'
     + (corrupt.length
         ? '<span style="opacity:.92">' + escapeHtml(corrupt.map(b => b.file).join(', '))
           + ' — this produces garbled / "mosaic" output (usually an interrupted '
@@ -42836,6 +43594,13 @@ function renderIntegrityBanner(integ) {
         ? '<span style="opacity:.92;flex-basis:100%">'
           + misplaced.map(b => escapeHtml(b.reason)).join('<br>')
           + '</span>'
+        : '')
+    + (codecBad.length
+        ? '<span style="opacity:.92;flex-basis:100%">'
+          + codecBad.map(b => escapeHtml(b.file + ' — ' + b.reason)).join('<br>')
+          + '. The codec patch may not be applied — click Update in Pinokio '
+          + '(if it persists, reinstall). Clips rendered like this carry '
+          + 'avoidable compression on faces.</span>'
         : '')
     + '<span style="margin-left:auto;display:flex;gap:8px">'
     + repos.map(k => '<button class="btn btn-primary" onclick="repairModel(\'' + escapeHtml(k)
@@ -43635,7 +44400,7 @@ function applyPackIncompleteGate(s) {
   // correct before the table has rendered, and on any surface that sets
   // #quality directly.
   const pack = (cell && cell.pack)
-    || (((document.getElementById('quality') || {}).value === 'high') ? 'q8' : 'q4');
+    || (_qualityUsesHq((document.getElementById('quality') || {}).value) ? 'q8' : 'q4');
   // Only the q8 lane can be half-installed in a way the user can act on: an
   // incomplete BASE pack is already a hard block in the models card above, and
   // duplicating it here would give the same fact two voices.
@@ -45191,17 +45956,59 @@ document.getElementById('genForm').addEventListener('submit', async e => {
         (fd.get('engine') || 'ltx') !== 'h3' &&
         Array.isArray(_knownUserLoras) &&
         Array.isArray(_activeLoras)) {
-      const activePaths = new Set(_activeLoras.map(l => l.path));
+      // COVERED-NESS IS A PROPERTY OF THE TRIGGER, NOT OF A PATH. Two blind
+      // spots made this warn about triggers that were fully attached:
+      //
+      //   1. It only looked at _activeLoras — the user-LoRA picker. A CAST
+      //      CHARACTER's stack is expanded server-side from character_id and
+      //      never appears there, so casting bizarrotrn and writing
+      //      "bizarrotrn" warned that bizarrotrn was not attached while it was
+      //      about to be fused first in the stack.
+      //   2. It matched attached-ness by PATH. A library holding two entries
+      //      for one trigger — the bundle copy and a "bizarrotrn (high)" variant
+      //      — flagged the one the user had NOT toggled even though the trigger
+      //      was already covered by the one they had.
+      //
+      // So: build the set of triggers ANY attached source carries, and only
+      // warn about a trigger that appears in none of them.
+      const coveredTriggers = new Set();
+      const addTrigger = (w) => {
+        const t = String(w || '').toLowerCase().trim();
+        if (t) coveredTriggers.add(t);
+      };
+      for (const l of _activeLoras) {
+        for (const w of (l.trigger_words || [])) addTrigger(w);
+        // A user LoRA row may carry only a path; recover its triggers from the
+        // library entry so an attached-by-path LoRA still covers its words.
+        const known = (_knownUserLoras || []).find(k => k.path === l.path);
+        if (known) for (const w of (known.trigger_words || [])) addTrigger(w);
+      }
+      // The cast character's own trigger(s) — the registry knows them, and the
+      // backend expands them into the stack, so they are attached by definition.
+      const castId = (fd.get('character_id') || '').toString().trim();
+      if (castId) {
+        addTrigger(castId);
+        const chars = (typeof _manualCharacters !== 'undefined' && Array.isArray(_manualCharacters))
+          ? _manualCharacters : [];
+        const cast = chars.find(c => c && c.id === castId);
+        if (cast) {
+          addTrigger(cast.trigger);
+          for (const w of (cast.trigger_words || [])) addTrigger(w);
+        }
+      }
       const orphans = [];   // [{name, trigger}]
+      const seenTrigger = new Set();
       const wordRe = /[a-z0-9]+/g;
       const promptTokens = new Set(promptLower.match(wordRe) || []);
       for (const ul of _knownUserLoras) {
-        if (activePaths.has(ul.path)) continue;
         for (const w of (ul.trigger_words || [])) {
           if (!w) continue;
           const wLower = String(w).toLowerCase().trim();
           if (!wLower || wLower.length < 4) continue;   // skip 1-3 char tokens, too common
+          if (coveredTriggers.has(wLower)) continue;    // attached by SOME source
+          if (seenTrigger.has(wLower)) continue;        // one warning per trigger
           if (promptTokens.has(wLower)) {
+            seenTrigger.add(wLower);
             orphans.push({ name: ul.name || ul.filename || ul.path.split('/').pop(), trigger: w });
             break;   // one match per LoRA is enough
           }
@@ -45323,7 +46130,7 @@ document.getElementById('genForm').addEventListener('submit', async e => {
     {
       const _q = (fd.get('quality') || '').toString();
       const _stgEl = document.getElementById('stgScale');
-      if (_q === 'high' && _stgEl) {
+      if (_qualityUsesHq(_q) && _stgEl) {
         fd.set('stg_scale', _stgEl.value || '0');
       } else {
         fd.delete('stg_scale');
@@ -45444,7 +46251,7 @@ function updateModelsCard(s) {
   // ship it after the Y1.024 download trim, so surface the same CTA here.
   const needsQ8 = (currentMode === 'keyframe')
                 || (currentMode === 'extend')
-                || (document.getElementById('quality').value === 'high');
+                || _qualityUsesHq(document.getElementById('quality').value);
   if (needsQ8 && !q8Ok && tier.allows_q8 !== false) {
     if (dismissed) { card.style.display = 'none'; return; }
     card.style.display = '';
@@ -46827,7 +47634,7 @@ function populateIngredientCharLoras() {
   const empty = document.getElementById('ingredientCharEmpty');
   if (!sel) return;
   const chars = (Array.isArray(_knownUserLoras) ? _knownUserLoras : [])
-    .filter(u => u && u.kind === 'train_character');
+    .filter(u => u && u.kind === 'train_character' && u.ltx_compatible !== false);
   const prev = sel.value;
   sel.innerHTML = '<option value="">None — compose from the reference images only</option>';
   for (const c of chars) {
@@ -46942,6 +47749,10 @@ async function refreshLoras() {
   try { populateIngredientCharLoras(); } catch (_) {}
 }
 
+function _loraGenerationCompatible(row, modeTag) {
+  return !(modeTag === 'video' && row && row.ltx_compatible === false);
+}
+
 function renderLorasList() {
   const wrap = document.getElementById('lorasList');
   const empty = document.getElementById('lorasEmpty');
@@ -46977,6 +47788,8 @@ function renderLorasList() {
       layout: ul.layout || null,
       layout_ok: (ul.layout_ok === undefined) ? true : !!ul.layout_ok,
       layout_reason: ul.layout_reason || '',
+      ltx_compatible: ul.ltx_compatible,
+      ltx_compat_reason: ul.ltx_compat_reason || '',
       active: !!active,
       strength: active ? active.strength : (ul.recommended_strength || 1.0),
       // 'user' = downloaded/installed (CivitAI or manual);
@@ -47000,6 +47813,8 @@ function renderLorasList() {
       layout: null,
       layout_ok: true,
       layout_reason: '',
+      ltx_compatible: null,
+      ltx_compat_reason: '',
       active: true,
       strength: a.strength,
       kind: 'remote',
@@ -47077,6 +47892,13 @@ function renderLorasList() {
       return tags.includes(modeTag) || tags.includes('unknown');
     };
     rows = allRows.filter(r => {
+      // A model-family mismatch may be revealed with "Show other modes";
+      // an adapter proven unable to attach to the active LTX generation may
+      // not. The helper would refuse it too, but the library must not offer a
+      // button that can only lead to an error.
+      if (!_loraGenerationCompatible(r, modeTag)) {
+        return false;
+      }
       const m = _matches(r);
       if (!m && !showOtherModes) hiddenCount++;
       return m || showOtherModes;
@@ -47399,7 +48221,12 @@ async function renameLora(path, currentName) {
 function downloadLora(path) {
   const a = document.createElement('a');
   a.href = '/loras/download?path=' + encodeURIComponent(path);
-  a.download = '';
+  // The BASENAME, not the empty string. `download=''` delegates the name to
+  // the server's Content-Disposition, which this endpoint does send — but the
+  // empty form silently falls back to the URL-derived name ("download") on any
+  // path where the header is missing or stripped by an extension. We know the
+  // name here; saying it costs nothing and removes the failure mode.
+  a.download = String(path || '').split('/').pop() || '';
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -47740,18 +48567,46 @@ function renderNowPreview(s, prog) {
         jobEngine !== '' && capEngines.indexOf(jobEngine) !== -1
      && jobMode !== 'train' && jobMode !== 'image'
      && laneRuns;
-  const missingDecoder = s.running && !prev && previewServesThisJob
-                      && pstate.reason === 'missing_decoder';
+  // A REASON SWITCH, not a decoder special-case. There are two silent absences
+  // now, and they need DIFFERENT actions: a missing decoder is a download, a
+  // stale engine is an Update. Sending someone whose engine predates the
+  // feature to the Models modal would have them install a 22 MB decoder they
+  // already have and watch nothing change.
+  //
+  // `off` is still not in this table on purpose — that absence was the user's
+  // own choice and needs no announcement.
+  // A REASON TABLE, not a decoder special-case. There are two silent absences
+  // now and they need DIFFERENT actions: a missing decoder is a download, a
+  // stale engine is an Update. Sending someone whose engine predates the
+  // feature to the Models modal would have them install a 22 MB decoder they
+  // already have and watch nothing change.
+  //
+  // A reason MAY have no CTA. `stale_engine` deliberately has none: the Update
+  // button lives in the Pinokio sidebar, not in this page, so every link the
+  // panel could offer is a dead end — and a dead-end link reads as "we handled
+  // it" when nothing has been handled. The note carries the instruction.
+  //
+  // `off` is absent on purpose: that absence was the user's own choice.
+  const PREVIEW_ABSENCE_CTA = {
+    missing_decoder: { label: 'Install it', run: 'openModelsModal()' },
+    stale_engine: null,
+  };
+  const speaks = s.running && !prev && previewServesThisJob
+              && Object.prototype.hasOwnProperty.call(PREVIEW_ABSENCE_CTA,
+                                                      pstate.reason);
   let miss = document.getElementById('nowPreviewMissing');
-  if (missingDecoder) {
+  if (speaks) {
     if (!miss) {
       miss = document.createElement('div');
       miss.id = 'nowPreviewMissing';
       miss.className = 'now-preview-missing';
       box.parentNode.insertBefore(miss, box.nextSibling);
     }
-    miss.innerHTML = escapeHtml(pstate.note || '') +
-      ' <a href="#" onclick="event.preventDefault();openModelsModal()">Install it</a>';
+    const cta = PREVIEW_ABSENCE_CTA[pstate.reason];
+    miss.innerHTML = escapeHtml(pstate.note || '') + (cta
+      ? ` <a href="#" onclick="event.preventDefault();${cta.run}">`
+        + escapeHtml(cta.label) + '</a>'
+      : '');
   } else if (miss) {
     miss.remove();
   }
@@ -48295,7 +49150,7 @@ function _applyHqSpeedRowVisibility() {
   const row = document.getElementById('hqSpeedRow');
   if (!row) return;
   const q = document.getElementById('quality')?.value || '';
-  row.hidden = (q !== 'high');
+  row.hidden = !_qualityUsesHq(q);
 }
 
 // Show the STG "detail guidance" slider only when quality=high (Q8 HQ).
@@ -48309,7 +49164,7 @@ function _applyStgRowVisibility() {
   const row = document.getElementById('stgRow');
   if (!row) return;
   const q = document.getElementById('quality')?.value || '';
-  row.hidden = (q !== 'high');
+  row.hidden = !_qualityUsesHq(q);
 }
 
 // Wire the char-quality chip clicks once at boot. Idempotent — the
@@ -49484,7 +50339,33 @@ function sbShotEst(secs) {
 }
 
 // ---- tab lifecycle ---------------------------------------------------------
+// The delivery-pass chips, from the registry. Three static buttons carried
+// hardcoded canvases (two of them wrong — Standard is 1280×704) and could never
+// show a tier the registry grew. Filtered to the server's own final_qualities
+// list, labelled and sized from the cell, and stamped with the pack so the
+// q4-tier CSS gate hides every q8 tier rather than the one called "high".
+function sbRenderFinalQualities() {
+  const box = sbEl('sbFinalQuality');
+  if (!box) return;
+  const cells = ((BOOT.ltx || {}).qualities) || [];
+  const allowed = (SB_BOOT.final_qualities || []).slice();
+  const list = (Array.isArray(cells) ? cells : Object.values(cells))
+    .filter(c => c && allowed.indexOf(c.key) !== -1);
+  if (!list.length) return;
+  // The ACTIVE chip is applied later from the board's own policy
+  // (sbRenderPlan), so this only needs a sane pre-board default.
+  const current = (SB_BOOT.defaults || {}).final_quality || 'standard';
+  box.innerHTML = list.map(c => {
+    const on = c.key === current;
+    const sub = `${c.canvas}${c.pack === 'q8' ? ' · Q8' : ''}`;
+    return `<button type="button" class="pill-btn${on ? ' active' : ''}" `
+         + `data-q="${escapeHtml(c.key)}" data-pack="${escapeHtml(c.pack || '')}">`
+         + `${escapeHtml(c.label)}<span class="sub">${escapeHtml(sub)}</span></button>`;
+  }).join('');
+}
+
 function sbInit() {
+  sbRenderFinalQualities();
   const help = sbEl('sbRamHelpNote');
   if (help && !help.textContent) help.textContent = SB_BOOT.ram_help || '';
   // Draft restore — a restart must not eat what someone typed.
@@ -51313,6 +52194,18 @@ if __name__ == "__main__":
             print("-" * 64, flush=True)
         else:
             print(f"model integrity: OK ({_integ['checked']} weight files verified)", flush=True)
+        # Render-level codec audit (the v3.8.1 class) — the newest render's
+        # actual encoding vs what its sidecar says was requested. Not part of
+        # bad[] (that list is the re-download Repair flow); warned separately.
+        _codec = _integ.get("output_codec") or {}
+        if not _codec.get("ok", True):
+            print("-" * 64, flush=True)
+            print("WARNING output codec: the newest render is not encoded the way it", flush=True)
+            print(f"  was requested - {_codec.get('file')}: "
+                  f"{'; '.join(_codec.get('problems') or [])}", flush=True)
+            print("  The codec patch may not be applied (v3.8.1 shipped exactly this,", flush=True)
+            print("  silently). Click Update in Pinokio; if it persists, reinstall.", flush=True)
+            print("-" * 64, flush=True)
     except Exception as _ie:  # noqa: BLE001 — never block boot on the scan
         print(f"model integrity scan skipped: {_ie}", flush=True)
     try:
