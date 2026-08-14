@@ -3768,13 +3768,138 @@ def base_missing() -> list[str]:
     the panel doesn't false-positive against a working manual install."""
     if not str(MODEL_ID).startswith("/"):
         return []
-    out = []
-    for r in _repos():
-        if r.get("kind") != "base":
+    return capability_missing("render")
+
+
+def _capabilities() -> dict:
+    return _REQUIRED.get("capabilities") or {}
+
+
+def capability_repo_keys(name: str, version_id: str | None = None) -> list[str]:
+    """Which repos a capability needs, for the ACTIVE generation.
+
+    `render` is declared per version because which packs render is exactly what a
+    generation IS: on ltx25 that is q4_25 + gemma4_25, and Gemma 3 is not in the list.
+    """
+    cap = _capabilities().get(name) or {}
+    by_version = cap.get("repos_by_version")
+    if by_version:
+        vid = version_id or ACTIVE_MODEL_VERSION
+        keys = by_version.get(vid)
+        if keys is None:
+            keys = by_version.get(cap.get("default_version") or "") or []
+        return list(keys)
+    return list(cap.get("repos") or [])
+
+
+def capability_missing(name: str, version_id: str | None = None) -> list[str]:
+    """Files this capability is missing, as `<local_dir>/<file>` — [] when it works.
+
+    ONE QUESTION PER CAPABILITY. `kind: "base"` had come to mean both "fetched on a
+    fresh install" and "the panel cannot render without it", and those are different
+    questions with different answers: Gemma 3 is fetched on every install and the active
+    2.5 generation does not render with it, so a half-downloaded planner model was
+    reporting the RENDERER incomplete and hiding Start. The preview decoder had the same
+    bug one commit earlier. Asking per capability is what stops the next one.
+    """
+    by_key = {r.get("key"): r for r in _repos()}
+    out: list[str] = []
+    for key in capability_repo_keys(name, version_id):
+        repo = by_key.get(key)
+        if not repo:
             continue
-        for fname in _repo_missing(r):
-            out.append(f"{r['local_dir']}/{fname}")
+        for fname in _repo_effective_missing(repo):
+            out.append(f"{repo['local_dir']}/{fname}")
+
+    # PATHS, VENVS AND MODEL TREES COUNT TOO. This evaluated `repos` only and
+    # silently returned [] for anything declared with the other three keys — so
+    # the H3 capability reported ok:true on a machine where h3_paths() correctly
+    # said not_installed. A capability that answers "fine" for a component set it
+    # never looked at is worse than no capability, because the whole point of the
+    # declaration was to stop two consumers disagreeing.
+    cap = _capabilities().get(name) or {}
+    for rel in cap.get("paths") or ():
+        if not (ROOT / rel).exists():
+            out.append(rel)
+    venv_any = cap.get("venv_any") or ()
+    if venv_any and not any(_venv_python_resolves(ROOT / rel) for rel in venv_any):
+        out.append(venv_any[0] + " (no resolvable interpreter)")
+    roots, models = cap.get("model_roots") or (), cap.get("models") or ()
+    if models:
+        for root in roots or ("",):
+            base = ROOT / root if root else ROOT
+            missing = [m for m in models if not (base / m).is_file()]
+            if not missing:
+                break
+        else:
+            missing = []
+            for m in models:
+                if not any((ROOT / r / m).is_file() for r in (roots or ("",))):
+                    missing.append(m)
+        out.extend(missing)
     return out
+
+
+def _venv_python_resolves(path: Path) -> bool:
+    """A venv entry counts only when it is an interpreter that still resolves.
+
+    `bin/activate` existing proves nothing: uv creates bin/python as a symlink
+    chain into a shared managed interpreter, and installing another pack can
+    move it — leaving activate in place beside a dangling python. That is the
+    v3.4.0 "installed other packs and Hailuo H3 vanished" report. `.exists()`
+    follows symlinks, so a broken chain is definitively false.
+    """
+    try:
+        return path.exists() and path.name != "activate"
+    except OSError:
+        return False
+
+
+def capability_state(name: str, version_id: str | None = None) -> dict:
+    """{ok, blocking, label, missing[]} — what the UI renders and the gate reads."""
+    cap = _capabilities().get(name) or {}
+    missing = capability_missing(name, version_id)
+    return {
+        "ok": not missing,
+        "blocking": bool(cap.get("blocking")),
+        "label": cap.get("label") or name,
+        "engines": list(cap.get("engines") or []),
+        "missing": missing,
+    }
+
+
+def capabilities_state(version_id: str | None = None) -> dict:
+    return {name: capability_state(name, version_id)
+            for name in _capabilities() if not name.startswith("_")}
+
+
+def _repo_effective_missing(repo: dict) -> list[str]:
+    """THE answer to "what is this repo missing" — the one /models already gives.
+
+    There were two answers and they disagreed on a live install: /models reported all 11
+    repos complete and model_integrity ok/42, while /status reported a base file missing,
+    so the panel showed "Base models needed before you can render (1 files left)" over a
+    perfectly working install and never stopped.
+
+    The gap was not staleness, it was two different questions. repo_status_list() resolves
+    each repo through the REGISTRY when it backs a registered pack (so a pack an env var
+    moved, or one that shares a directory with another, is checked where it actually
+    lives) and falls back to the HF CACHE when the local dir is short (what manual and dev
+    installs use). base_missing() did neither: it walked ROOT/local_dir and believed it.
+
+    Now both call this, so the blocker card and the Models modal cannot contradict each
+    other again — the card is a rendering of the modal's answer, not a second opinion.
+    """
+    quant = _quant_for_repo_key(repo.get("key"))
+    local_missing = pack_missing_files(quant) if quant else _repo_missing(repo)
+    if not local_missing:
+        return []
+    total = len(repo.get("files", []))
+    cache_missing = _repo_missing_in_cache(repo)
+    if cache_missing is not None:
+        if (total - len(cache_missing)) > (total - len(local_missing)):
+            return cache_missing
+    return local_missing
 
 
 def pack_missing_files(quant: str, version_id: str | None = None) -> list[str]:
@@ -4113,6 +4238,9 @@ def repo_status_list() -> list[dict]:
         # model version gets its own answer instead of inheriting 2.3's.
         _quant = _quant_for_repo_key(r.get("key"))
         local_missing = pack_missing_files(_quant) if _quant else _repo_missing(r)
+        # NOTE: _repo_effective_missing() above collapses this same local+cache choice
+        # into one call for /status. This loop keeps the expanded form because it also
+        # needs `where`/`location`/`present` for the row — same rule, more outputs.
         total = len(r.get("files", []))
         local_present = total - len(local_missing)
 
@@ -6333,9 +6461,12 @@ LTX_VOICE_STRENGTH_HELP = (
     "they both land at nearly full strength. The face file was trained on still "
     "images, so the marks it leaves on the audio side carry no voice — but they "
     "are still there, and at equal strength they are louder than the voice "
-    "file's. Running the voice a little hotter than the face is what makes it "
-    "win. 1.4 is the first setting with real headroom; 1.2 is about even. Below "
-    "1.0 the voice is mostly the face file's noise.")
+    "file's. That is why the voice gets its own number instead of sharing the "
+    "face's. 1.0 is where it sits, and it is the setting that won the listening "
+    "test: a hotter voice was graded side by side against it and came out worse. "
+    "Raising it is here if you want it, but go in small steps, and only when a "
+    "particular voice is being drowned rather than as a general improvement. "
+    "Below 1.0 the voice is mostly the face file's noise.")
 # Why a trained character needs the Q8 pack.
 #
 # "Same render time either way" is MEASURED, not assumed: 1024x576x121,
@@ -7324,6 +7455,26 @@ def live_preview_enabled() -> bool:
     return str(get_settings().get("live_preview", "on")).lower() != "off"
 
 
+def live_preview_state() -> dict:
+    """WHY there is no preview, not just that there isn't one.
+
+    Two very different absences were indistinguishable to the client, and both
+    rendered as nothing at all: the user switched it off (fine, they know), or the
+    22 MB decoder is missing (they have no idea, and a feature the release
+    announced is silently not happening). An install that predates v4.0 and updates
+    without the decoder step is exactly the second case.
+
+    `reason` is what the UI is allowed to say out loud.
+    """
+    if not TAE_CHECKPOINT.is_file():
+        return {"on": False, "reason": "missing_decoder",
+                "note": "Live preview is off because its 22 MB decoder isn't "
+                        "installed — Settings → Models → Live-preview decoder."}
+    if str(get_settings().get("live_preview", "on")).lower() == "off":
+        return {"on": False, "reason": "off", "note": ""}
+    return {"on": True, "reason": None, "note": ""}
+
+
 def live_preview_dir(job_id: str) -> Path:
     """Per-job scratch for the preview contract: status.json, the PNGs and the
     ABORT sentinel. Per JOB, not per panel, so a stale sentinel from a previous
@@ -7498,6 +7649,14 @@ def ltx_tiers_payload() -> dict:
             "q8_character": LTX_Q8_CHARACTER_HELP,
             "preview": LTX_PREVIEW_HELP,
         },
+        # Why the preview is absent, so the Now card can say it instead of
+        # showing nothing and letting the user conclude the feature is broken.
+        "preview_state": live_preview_state(),
+        # Per-capability readiness, from required_files.json → capabilities.
+        # The client reads THIS rather than re-deriving what needs what: the
+        # notice above uses `live_preview.engines` to know which jobs it is
+        # even about, and `blocking` is the only thing allowed to hard-block.
+        "capabilities": capabilities_state(),
         # The character strip's two chips, and the PIPELINE they submit —
         # resolved per generation so the markup never owns that rule.
         "character": character_strip_payload(),
@@ -13578,16 +13737,17 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         # never mattered; at q8 ~90 % of both survives, which is why fixing the
         # face is what surfaced the voice.
         #
-        # So running the voice a little hotter than the face is what makes it
-        # win. Parity is 1.2; 1.4 is the first setting with real headroom, and
-        # it is independently where current community guidance for 2.5 puts
-        # "balanced".
+        # That is the MEASUREMENT, and it argued for running the voice hotter:
+        # parity is 1.2, and 1.4 was the first rung with real headroom — also
+        # where community guidance for 2.5 puts "balanced".
         #
-        # THE DEFAULT IS 1.0 ANYWAY, and that is a listening decision, not a
-        # measurement one. 1.0/1.0 is the pair every graded clip was rendered
-        # at and passed on; the hotter rungs are real and reachable — the split
-        # control ships, the help text explains the mechanism — but a default
-        # nobody has listened to is not a default. Raise it when an ear says so.
+        # THE EAR DISAGREED, and the ear is the authority here. 1.0 and 1.4
+        # were rendered as a graded pair and the owner rejected 1.4: "candidate
+        # seems less good". So the default is 1.0 — the pair every graded clip
+        # was rendered at and passed on — and it is not provisional. The split
+        # control still ships and the ladder is still reachable; what changed is
+        # that the panel no longer recommends climbing it. An SNR argument is a
+        # reason to give the voice its own number, not a reason to turn it up.
         #
         # THE ALLOWLIST TRAP: make_job builds params from named reads, and a
         # field nobody reads here is dropped with no error — the render
@@ -16779,6 +16939,14 @@ def run_job_inner(job: dict) -> None:
                 # see hq_weights().
                 "dev_transformer": hq_weights()["dev_transformer"],
                 "distilled_lora": hq_weights()["distilled_lora"],
+                # Live preview, same contract as the t2v branch. This was
+                # missing, so High promised preview_every=2 in the quality table
+                # and shipped no frames — and the missing-decoder notice then
+                # fired on a lane that had never been wired at all. The lane rule
+                # (every 2 on res_2s, whose odd ANCHOR estimates come back
+                # patchy) is decided in _live_preview_params from the quality
+                # cell, so the helper is told the number rather than guessing.
+                **_live_preview_params(job, p),
                 "prompt": p["prompt"],
                 "negative_prompt": p.get("negative_prompt", ""),
                 "output_path": str(raw_out),
@@ -21008,7 +21176,9 @@ class Handler(BaseHTTPRequestHandler):
         # This endpoint now does ONLY:
         #   1. look up the character → resolve face + (optional) audio LoRA
         #   2. map duration string → frames (5s/7s/10s)
-        #   3. map quality string → width/height (draft = 736x416, else 1024x576)
+        #   3. map the SIZE token → width/height (draft = 704x384, pro = 1024x576;
+        #      704x384 because both old sizes were off the 64-grid the two-stage
+        #      lane snaps to, so the chip advertised a canvas it never delivered)
         #   4. take the user's prompt verbatim — no prefix, no suffix, no
         #      negative-prompt injection, no framing word
         #   5. build the same form payload /queue/add accepts and call
@@ -21093,11 +21263,11 @@ class Handler(BaseHTTPRequestHandler):
             # on 2.5 q8 the graded recipe is the face at 1.0.
             #
             # The voice takes its own number for the reason spelled out in
-            # make_job: the face file's audio-branch deltas are noise, they are
-            # louder than the voice file's signal at equal strength, and running
-            # the voice hotter is what makes it win. It still DEFAULTS to 1.0 —
-            # the graded pair — because the hotter rungs have not been listened
-            # to. Same default on both lanes or the two surfaces disagree again.
+            # make_job: the face file's audio-branch deltas are noise and are
+            # louder than the voice file's signal at equal strength. It defaults
+            # to 1.0 — the graded pair, and the arm that won the listening test
+            # against a hotter one. Same default on both lanes or the two
+            # surfaces disagree again.
             try:
                 char_strength = float(
                     (form.get("character_strength", ["1.0"])[0] or "1.0"))
@@ -24101,6 +24271,9 @@ HTML = r"""<!doctype html>
        layout editor uses, so there is one mechanism for "this surface needs
        the stage" rather than two. */
     body[data-workflow="storyboard"].sb-full .stage-pane > .player-surface { display: none; }
+    /* The close control is a storyboard affordance only — see the button's own comment. */
+    #sbCollapsePlayerBtn { display: none; }
+    body[data-workflow="storyboard"] #sbCollapsePlayerBtn { display: inline-flex; }
 
     #sbStage {
       display: none;
@@ -28504,6 +28677,13 @@ HTML = r"""<!doctype html>
       animation: nowThumbPulse 2.4s ease-in-out infinite;
     }
     @keyframes nowThumbPulse { 0%,100% { opacity:.10 } 50% { opacity:.26 } }
+    /* The one-line "your decoder is missing" note. Informational, not alarming:
+       the render is fine, only the preview of it is absent. */
+    .now-preview-missing {
+      font-size: 11.5px; color: var(--muted);
+      padding: 6px 2px 0; line-height: 1.45;
+    }
+    .now-preview-missing a { color: var(--accent-bright); }
     /* ABORTING — frozen on the last frame it managed to show. */
     .now-thumb.is-aborting img { opacity: .55; }
     /* Failure-card action row — Retry + Close on the failed Now card.
@@ -30361,6 +30541,39 @@ HTML = r"""<!doctype html>
       border-color: var(--eng-soft, var(--accent));
       background: var(--eng-dim, var(--accent-dim));
     }
+    /* The repeat-click nudge. Pulses the SEGMENT, in the engine's own accent,
+       because the badge beside it is display:none under 1500px — see the
+       media query below. */
+    @keyframes eng-offer-nudge {
+      0%   { box-shadow: 0 0 0 0 var(--eng-soft, var(--accent)); }
+      45%  { box-shadow: 0 0 0 5px transparent; }
+      100% { box-shadow: 0 0 0 0 transparent; }
+    }
+    body > header .eng-seg.offer-nudge {
+      animation: eng-offer-nudge 600ms ease-out 2;
+      background: var(--eng-dim, var(--accent-dim));
+    }
+    /* An inline action inside a toast — the way back to the full install card
+       after the toast has replaced it. */
+    .phos-toast-action {
+      color: var(--accent-bright); margin-left: 8px;
+      font-weight: 600; white-space: nowrap;
+    }
+    /* The troubleshooting disclosure inside the install card. Closed by
+       default — the paths are for the 1% of installs that half-land. */
+    .h3-diag { margin: 0; }
+    .h3-diag > summary {
+      cursor: pointer; font-size: 12px; color: var(--muted);
+      list-style: none; user-select: none;
+    }
+    .h3-diag > summary::-webkit-details-marker { display: none; }
+    .h3-diag > summary::before { content: '▸ '; }
+    .h3-diag[open] > summary::before { content: '▾ '; }
+    .h3-diag > p {
+      margin: 6px 0 0; font-size: 11.5px; color: var(--muted);
+      font-family: var(--ph-font-mono); word-break: break-all;
+    }
+
     /* Narrow windows: the header is flex-wrap:nowrap + overflow:hidden, and
        the status pills already fill it on a laptop. Drop the segment labels
        before anything gets clipped — the marks and the active tint still
@@ -31385,10 +31598,11 @@ HTML = r"""<!doctype html>
       <input type="hidden" name="character_strength" id="characterStrength" value="1.0">
       <!-- The VOICE half of a character's strength. A character is two trained
            files and the face file's audio-branch deltas are noise that is
-           louder than the voice file's signal at equal strength — so running
-           the voice hotter is what makes it win, and the split control below is
-           how you do it. The DEFAULT is the graded pair, 1.0/1.0; the hotter
-           rungs are an ear's decision, not the shipped starting point.
+           louder than the voice file's signal at equal strength — which is why
+           the voice gets its own number, not why it should be turned up. The
+           default is the graded pair, 1.0/1.0, and it beat a hotter arm on the
+           owner's ear. The split control below is still there if a particular
+           voice is being drowned.
            MUST be in make_job's named reads or it silently no-ops. -->
       <input type="hidden" name="character_voice_strength" id="characterVoiceStrength" value="1.0">
 
@@ -32988,14 +33202,14 @@ HTML = r"""<!doctype html>
             </div>
           </div>
 
-          <!-- Character LoRA strength. Default 0.8 — slightly under 1.0
-               because the workshop/copper-pipe/gas-lamp prompt content
-               triggers mesh/sparkle artifacts in the BASE LTX-2.3 model
-               (confirmed via base-only-no-LoRA test 2026-05-17, see
-               lora-lab/STATE.md). At 0.8 the identity still locks and
-               the artifact-prone prompt regions render cleaner. Slider
-               exposed so users can dial up to 1.0 for max identity, or
-               down to 0.5 when a prompt triggers the base-model basin. -->
+          <!-- Character LoRA strength. THE `value` BELOW IS A PLACEHOLDER: the
+               control is painted from window.CHARACTERS.charStrength by
+               charactersSyncStrengthControls() on init and on every compose
+               open. It used to be a hardcoded 0.8 — a 2.3-era correction for
+               mesh/sparkle artifacts in the BASE model — and when the state
+               default moved to 1.0 to match the server, the markup did not,
+               so an untouched form DISPLAYED 0.80 and SUBMITTED 1.0. Never
+               hardcode a value here again; change the state default. -->
           <div class="characters-strength-row">
             <label for="charactersStrength" class="characters-strength-label">
               Character LoRA strength
@@ -33858,6 +34072,22 @@ HTML = r"""<!doctype html>
           </svg>
           <span class="po-act-label">Animate</span>
         </button>
+        <!-- STORYBOARD ONLY. The shot list is the storyboard tab's primary surface and
+             the player is a guest on it, so the guest carries the way out — reported by
+             cocktailpeanut: "i can't seem to find a way to hide this preview video and
+             it's just blocking everything". The Shot list / Player toggle below the
+             player already did this, but nobody looks under the thing they want gone;
+             the control belongs ON it. CSS keeps this hidden everywhere else, because on
+             the Video and Images tabs the player IS the primary surface and a close there
+             would orphan the tab. -->
+        <button id="sbCollapsePlayerBtn" class="po-act po-act-sbclose" type="button"
+                onclick="sbSetStage('list')" title="Hide the preview and show the shot list (Esc)">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M4 4 L12 12 M12 4 L4 12" stroke="currentColor" stroke-width="1.5"
+                  stroke-linecap="round"/>
+          </svg>
+          <span class="po-act-label">Hide preview</span>
+        </button>
         <button id="expandBtn" class="po-act" type="button"
                 onclick="openExpandLightbox()" title="Expand to fullscreen (Esc to close)">
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -34505,7 +34735,11 @@ HTML = r"""<!doctype html>
      onclick="if(event.target===this) closeH3InstallCard()">
   <div class="models-card">
     <div class="models-head">
-      <h2 id="h3InstallTitle">Hailuo H3 · optional engine</h2>
+      <!-- ENGINES ARE PEERS. This read "Hailuo H3 · optional engine", which
+           told a user that half the panel's video capability was a side dish.
+           A missing engine is an OFFER — the title names the engine and its
+           price, and the body says what it does. -->
+      <h2 id="h3InstallTitle">Hailuo H3 · 75 GB</h2>
       <button class="ghost-btn" onclick="closeH3InstallCard()">Close</button>
     </div>
     <div class="models-hint" id="h3InstallBody"></div>
@@ -37743,7 +37977,11 @@ function trainUpdateAdvancedFields() {
 // enhance=false, video_skip=1+audio_skip=1) are applied server-side per
 // docs/API.md. The UI collects prompt (trigger pre-filled) + duration +
 // quality. Quality maps server-side to resolution + recipe:
-//   draft → 736x416, ~3:30 wall;  high → 1024x576, ~6:00 wall.
+//   draft → 704x384;  pro → 1024x576. Both render on the generation's own
+//   character recipe (2.5: q8 + distilled), resolved server-side — the chips
+//   carry a SIZE, never a pipeline. The wall times that used to sit here were
+//   2.3-era and the canvas was the retired 736x416; measured 2.5 numbers live
+//   in LTX_MEASURED_ETA, which is where the UI reads them from.
 
 window.CHARACTERS = {
   list: [],            // [{id, name, trigger, pronoun, subject_noun, sample_image_url, ...}]
@@ -37751,9 +37989,16 @@ window.CHARACTERS = {
   duration: '7s',      // 5s | 7s | 10s | 15s
   quality: 'pro',      // SIZE token: draft | pro. The PIPELINE is the
                        // generation's answer, resolved server-side (§5.6).
-  // Character LoRA strength (applied to both face_lora and audio_lora).
-  // Default 0.8 reduces over-trained baked artifacts at small identity cost.
-  charStrength: 0.8,
+  // ONE CHARACTER, ONE PAIR OF STRENGTHS, WHICHEVER SURFACE LAUNCHED IT.
+  // These were 0.8 and "applied to both face_lora and audio_lora" — a 2.3-era
+  // correction for over-baked quirks at 5000 steps, and a comment that stopped
+  // being true when the server split the two files. The server has defaulted
+  // face 1.0 / voice 1.0 since; this surface kept sending 0.8 and never sent a
+  // voice value at all, so the same character rendered face 0.8 / voice 1.0
+  // here and face 1.0 / voice 1.0 from the Manual tab. Same numbers on both
+  // lanes or the surfaces disagree again.
+  charStrength: 1.0,
+  voiceStrength: 1.0,
   // Reference audio for i2v_clean_audio mode (character lip-syncs to
   // this clip). Image-to-video deliberately omitted on the Characters
   // surface per Mr Bizarro 2026-05-16.
@@ -37860,6 +38105,7 @@ async function charactersInit() {
   if (!window.CHARACTERS.initialised) {
     window.CHARACTERS.initialised = true;
     charactersRenderChips();
+    charactersSyncStrengthControls();   // the slider shows what we will submit
     charactersBackToGrid();   // ensure grid state visible
   }
   await charactersLoadList();
@@ -37962,6 +38208,9 @@ function charactersOpenCompose(id) {
   const c = (window.CHARACTERS.list || []).find(x => x.id === id);
   if (!c) return;
   window.CHARACTERS.selected = c;
+  // Every entry to the compose view repaints the strength control from state,
+  // so a value restored by Load Params is on screen before the user can submit.
+  charactersSyncStrengthControls();
 
   // Toggle states.
   const grid = document.getElementById('charactersGridState');
@@ -38108,6 +38357,26 @@ function charactersUpdateStrengthDisplay(val) {
   if (out) out.textContent = v.toFixed(2);
 }
 
+// THE CONTROL IS RENDERED FROM THE STATE, NEVER THE OTHER WAY AROUND.
+// The slider's `value` was hardcoded in the markup, so when the state default
+// moved to 1.0 the two silently disagreed: an untouched form DISPLAYED 0.80 and
+// SUBMITTED 1.0. The user reads one number and gets another, and no amount of
+// care in the submit path can fix a control that was never told what it holds.
+// Called on every entry to the compose view and after Load Params.
+function charactersSyncStrengthControls() {
+  const v = Number(window.CHARACTERS.charStrength ?? 1.0);
+  const slider = document.getElementById('charactersStrength');
+  if (slider) {
+    // The markup's min/max must not silently clamp the state either.
+    const lo = parseFloat(slider.min), hi = parseFloat(slider.max);
+    if (isFinite(lo) && v < lo) slider.min = String(v);
+    if (isFinite(hi) && v > hi) slider.max = String(v);
+    slider.value = String(v);
+  }
+  const out = document.getElementById('charactersStrengthValue');
+  if (out) out.textContent = v.toFixed(2);
+}
+
 async function charactersGenerate() {
   const c = window.CHARACTERS.selected;
   if (!c) return;
@@ -38132,7 +38401,11 @@ async function charactersGenerate() {
   fd.set('quality',  window.CHARACTERS.quality);
   // Character LoRA strength — passed through so the backend can apply
   // it to both face_lora and audio_lora at job-build time.
-  fd.set('character_strength', String(window.CHARACTERS.charStrength || 0.8));
+  // BOTH strengths, always. Sending only the face left the voice to the
+  // server's default, which meant this surface could not express the pair it
+  // was showing and a sidecar could never round-trip it.
+  fd.set('character_strength', String(window.CHARACTERS.charStrength ?? 1.0));
+  fd.set('character_voice_strength', String(window.CHARACTERS.voiceStrength ?? 1.0));
   // Reference audio (i2v_clean_audio mode) — optional.
   if (window.CHARACTERS.audioPath) fd.set('audio', window.CHARACTERS.audioPath);
   // Extra LoRAs come from the portaled #lorasDetails picker — read
@@ -38201,6 +38474,36 @@ function charactersEscapeAttr(s) { return charactersEscapeHtml(s); }
 //      sidecar values. Re-render chips to update .active classes.
 //   5. Repopulate the prompt textarea with prompt_body verbatim and
 //      refresh the preview.
+// ONE RESTORER, BOTH LOAD PATHS. Load Params has two: the Manual path, and
+// this Characters branch, which returns early and therefore never reached the
+// Manual path's strength restoration at all — so a character clip reloaded
+// with BOTH strengths silently back at their defaults. The external review
+// found the Manual half fixed and this half untouched, which is exactly what a
+// second copy of a rule buys you. There is one copy now.
+function _restoreCharacterStrengths(p) {
+  const put = (value, inputId) => {
+    if (typeof value === 'undefined' || value === null) return;
+    const num = parseFloat(value);
+    if (Number.isNaN(num)) return;
+    const inp = document.getElementById(inputId);
+    if (inp) inp.value = num;
+  };
+  put(p.character_strength, 'characterStrength');
+  put(p.character_voice_strength, 'characterVoiceStrength');
+  if (typeof _renderCharsAppliedNote === 'function') _renderCharsAppliedNote();
+  // The Characters-tab state and its visible slider follow the same numbers,
+  // so a clip reopened there shows what it will re-submit.
+  if (window.CHARACTERS) {
+    const f = parseFloat(p.character_strength);
+    const v = parseFloat(p.character_voice_strength);
+    if (!Number.isNaN(f)) window.CHARACTERS.charStrength = f;
+    if (!Number.isNaN(v)) window.CHARACTERS.voiceStrength = v;
+    if (typeof charactersSyncStrengthControls === 'function') {
+      charactersSyncStrengthControls();
+    }
+  }
+}
+
 async function charactersLoadParams(p) {
   // 2026-05-17 — Characters is no longer its own workflow tab. Load Params
   // on a Characters-origin sidecar restores EVERYTHING into the Manual
@@ -38250,10 +38553,16 @@ async function charactersLoadParams(p) {
   // quality strip's click handler sets quality=high + the right w/h
   // already; calling _setCharacterQuality bypasses setQuality() so our
   // exact dims survive.
+  // 704×384 IS THE DRAFT CANVAS. This recognised only the retired 736×416, so
+  // every Draft render made since the size moved reopened as Pro — Load Params
+  // silently changing the shot's geometry, which is the one thing it exists not
+  // to do. Both are listed because sidecars written before the move are still
+  // on disk and must still round-trip.
   const sidecarW = parseInt(p.width || '0', 10);
   const sidecarH = parseInt(p.height || '0', 10);
-  const isDraft = (sidecarW === 736 && sidecarH === 416)
-                || (sidecarW === 416 && sidecarH === 736);  // vertical draft
+  const _draftPairs = [[704, 384], [736, 416]];   // current, then legacy
+  const isDraft = _draftPairs.some(([w, h]) =>
+    (sidecarW === w && sidecarH === h) || (sidecarW === h && sidecarH === w));
   const charQualityGroup = document.getElementById('qualityGroupCharacter');
   if (charQualityGroup) {
     const sel = isDraft ? '[data-char-quality="draft"]' : '[data-char-quality="pro"]';
@@ -38282,6 +38591,9 @@ async function charactersLoadParams(p) {
   const hInp = document.getElementById('height');
   if (wInp && sidecarW > 0) wInp.value = sidecarW;
   if (hInp && sidecarH > 0) hInp.value = sidecarH;
+
+  // Both strengths — this branch returns before the Manual path's restoration.
+  _restoreCharacterStrengths(p);
 
   // Restore frames + duration. Frames is the source of truth for the
   // render; the duration field is metadata that drives the UI estimate.
@@ -38343,45 +38655,13 @@ async function charactersLoadParams(p) {
   const formPane = document.querySelector('aside.form-pane');
   if (formPane) formPane.scrollTop = 0;
   // Done — early-exit before the old dead-UI code that followed.
-  return;
-
-  // -------- DEAD CODE BELOW (kept temporarily to avoid bigger diff) --------
-  // The block below targeted the now-unreachable Characters tab UI.
-  // Replaced by the Manual-tab restoration above; left in place so the
-  // diff stays narrow while we validate the new path. Will prune in a
-  // follow-up.
-  // eslint-disable-next-line no-unreachable
-  if (typeof charactersInit === 'function') {
-    await charactersInit();
-  }
-  if (!Array.isArray(window.CHARACTERS.list) || window.CHARACTERS.list.length === 0) {
-    throw new Error('character list empty after init');
-  }
-  charactersOpenCompose(p.character_id);
-  if (typeof p.duration === 'string' && p.duration) {
-    window.CHARACTERS.duration = p.duration;
-  }
-  if (typeof p.quality_choice === 'string' && p.quality_choice) {
-    // Legacy sidecars carry a PIPELINE token where the chips now carry a SIZE
-    // token. Map it to the equivalent canvas rather than replaying it: a clip
-    // recorded as `high` on 2.5 would otherwise re-request the two-stage HQ
-    // path and its 29.5 GB add-on — the exact route this tab was moved off.
-    // Both mean 1024x576, so the canvas the user sees is unchanged.
-    const _legacySize = { high: 'pro', balanced: 'pro', standard: 'pro',
-                          quick: 'draft', draft: 'draft', pro: 'pro' };
-    window.CHARACTERS.quality = _legacySize[p.quality_choice] || 'pro';
-  }
-  charactersRenderChips();
-  // Prompt textarea. The verbatim prompt from the sidecar is the
-  // source of truth; we don't try to re-derive a "body" from it.
-  // Older sidecars used prompt_body; newer sidecars store the full
-  // prompt — fall back to the full prompt if prompt_body is empty.
-  const taOld = document.getElementById('charactersPrompt');
-  if (taOld) {
-    taOld.value = (typeof p.prompt_body === 'string' && p.prompt_body)
-      ? p.prompt_body
-      : (typeof p.prompt === 'string' ? p.prompt : '');
-  }
+  // The Manual tab IS the character surface now, and the restoration above is
+  // the whole of it. What used to follow this point was 37 lines targeting the
+  // retired Characters-tab UI, unreachable behind a `return;` and labelled
+  // "DEAD CODE BELOW (kept temporarily to avoid bigger diff)". It outlived the
+  // follow-up that was meant to prune it and became actively dangerous: it held
+  // NEWER-looking quality-mapping logic than the live path above, so the next
+  // reader had two plausible implementations and only one that runs. Deleted.
 }
 
 
@@ -40455,7 +40735,8 @@ function _engineTooltip(e, st, modeOk) {
   if (!e.builtin && !st.available) {
     return st.repairable
       ? name + ' — needs repair; your weights are still on disk. Click for the one-click fix.'
-      : name + " — isn't installed. Click to see how (" + (e.install_size || '') + ').';
+      : name + ' — available to install (' + (e.install_size || '')
+        + '). Click to see what it does.';
   }
   if (!modeOk) {
     return name + ' — renders ' + (e.serves_label || 'other modes')
@@ -40475,7 +40756,10 @@ function engineSegClick(id) {
   if (st.announced) return;
   if (!e.builtin && st.capable && !st.available) {
     const fn = e.install_card && window[e.install_card];
-    if (typeof fn === 'function') fn();
+    // 'chip' tells the card this click came from the switcher, where a repeat
+    // click means "yes, I know" rather than "explain it again". The explicit
+    // buttons elsewhere pass nothing and always get the full card.
+    if (typeof fn === 'function') fn('chip');
     return;
   }
   if (!e.builtin && !st.capable) return;
@@ -41619,8 +41903,20 @@ function updateH3Availability(s) {
 // Install card — H3 is a Pinokio-script install (clone + venv + ~75 GB of
 // weights), not an in-panel `hf download`, so the panel explains the one
 // sidebar click rather than pretending it can do it itself. Same shape the
-// Sharp/Qwen optional packs use.
-function openH3InstallCard() {
+// Sharp/Qwen packs use.
+//
+// SHOWN ONCE, THEN GET OUT OF THE WAY. Session-scoped: the first click on the
+// H3 segment earns the full explainer; every click after that gets the nudge
+// below instead. A modal that re-pops identically on every click stops being
+// an explanation and becomes a wall — and the one thing a user who just read
+// it wants to do is click the engine again.
+//
+// `source` is 'chip' from the engine switcher and undefined from the explicit
+// "How to install" / "How to repair" buttons in the Models list, which must
+// ALWAYS open the card: the user asked for it by name there.
+let _h3CardSeen = false;
+function openH3InstallCard(source) {
+  if (source === 'chip' && _h3CardSeen) { _h3NudgeEngineOffer(); return; }
   const m = document.getElementById('h3InstallModal');
   const body = document.getElementById('h3InstallBody');
   if (body) {
@@ -41650,10 +41946,12 @@ function openH3InstallCard() {
         no restart.
       </p>` : `
       <p style="margin:0 0 10px">
-        <b>Hailuo H3</b> is a second video engine: one prompt in, video
-        <em>and</em> synced dialogue <em>and</em> sound out. It runs fully
-        locally, alongside LTX — installing it changes nothing about your
-        existing renders.
+        <b>Hailuo H3 is Phosphene's second video engine</b>, a peer of LTX
+        rather than an add-on to it: one prompt in, video <em>and</em> synced
+        dialogue <em>and</em> sound out, in a single pass. It runs fully
+        locally and sits beside LTX in the engine switcher — installing it
+        changes nothing about your existing renders, and either engine can
+        drive any render you start.
       </p>
       <p style="margin:0 0 10px;color:var(--muted)">
         ${escapeHtml(H3.size_note || '')}
@@ -41661,18 +41959,64 @@ function openH3InstallCard() {
       <p style="margin:0 0 10px">
         Install it from Pinokio, not from here: open the <b>Phosphene</b> entry
         in the Pinokio sidebar and click
-        <b>“Install Hailuo H3 (optional, ~75 GB)”</b>. The panel picks it up
-        within a couple of seconds — no restart.
+        <b>“Install Hailuo H3 (second video engine, ~75 GB)”</b>. The panel
+        picks it up within a couple of seconds — no restart.
       </p>`;
+    // THE DIAGNOSTIC DUMP GOES BEHIND A DISCLOSURE. `missing` is a list of raw
+    // absolute paths — indispensable when an install half-lands, and pure
+    // noise the other 99% of the time. Printing it under a two-sentence pitch
+    // made the offer read like an error report. Kept verbatim, folded shut.
     body.innerHTML = intro + `
-      ${missing.length ? `<p style="margin:0;color:var(--muted);font-size:12px">
-        Currently missing: ${escapeHtml(missing.join('; '))}</p>` : ''}`;
+      ${missing.length ? `<details class="h3-diag">
+        <summary>Details for troubleshooting</summary>
+        <p>Currently missing: ${escapeHtml(missing.join('; '))}</p>
+      </details>` : ''}`;
   }
   if (m) m.style.display = 'flex';
+  _h3CardSeen = true;
 }
 function closeH3InstallCard() {
   const m = document.getElementById('h3InstallModal');
   if (m) m.style.display = 'none';
+}
+
+// The lighter affordance, for every click after the first. Two jobs:
+//
+//   1. POINT AT THE OFFER. Pulse the H3 segment itself, not only its badge —
+//      the badge is `display:none` under 1500 px (the header runs out of room
+//      on a laptop long before the desktop does), so a badge-only highlight
+//      would be an invisible answer to a click on exactly the machines most
+//      likely to be running this.
+//   2. LEAVE A DOOR OPEN. The nudge carries its own link back to the full
+//      explainer, so dismissing the modal once never costs the user the
+//      explanation permanently.
+//
+// Rides the panel's own phosToast rather than a second notification surface —
+// the storyboard's engine picker already answers this exact situation with one
+// (sbSetEngineMode), and two toasts that look different for the same event is
+// how a UI starts feeling assembled rather than designed. The reopen link is
+// appended to the element phosToast hands back.
+function _h3NudgeEngineOffer() {
+  const seg = document.querySelector('.eng-seg[data-engine="h3"]');
+  if (seg) {
+    seg.classList.remove('offer-nudge');
+    void seg.offsetWidth;            // restart the animation on a repeat click
+    seg.classList.add('offer-nudge');
+    setTimeout(() => seg.classList.remove('offer-nudge'), 1200);
+  }
+  // ONE LINE, and it has to FIT one: .phos-toast-msg is nowrap + ellipsis
+  // inside a 480px cap, so a sentence that runs long is not a long toast, it
+  // is a truncated one — "…install it from the Phosphene entry i…" was the
+  // first draft, and it clipped exactly where the instruction lived.
+  const el = phosToast('Hailuo H3 · 75 GB — install from the Pinokio sidebar.',
+                       { icon: 'ph-info', duration: 5000 });
+  if (!el) return;
+  const a = document.createElement('a');
+  a.href = '#';
+  a.className = 'phos-toast-action';
+  a.textContent = 'What it is';
+  a.onclick = (ev) => { ev.preventDefault(); el.remove(); openH3InstallCard(); };
+  el.appendChild(a);
 }
 
 // Prompt enhancement via Gemma — wraps the upstream CLI's `enhance`
@@ -44278,21 +44622,14 @@ async function loadParams() {
         }
       } catch (_) {}
     })();
-    // Also restore character_strength if recorded (defaults to 1.0).
-    if (typeof p.character_strength !== 'undefined') {
-      const sval = parseFloat(p.character_strength);
-      if (!Number.isNaN(sval)) {
-        const sInp = document.getElementById('characterStrength');
-        if (sInp) sInp.value = sval;
-        const row = document.getElementById('charsStrengthRow');
-        if (row) {
-          const range = row.querySelector('input[type="range"]');
-          const num = row.querySelector('input[type="number"]');
-          if (range) range.value = sval;
-          if (num) num.value = sval.toFixed(2);
-        }
-      }
-    }
+    // BOTH strengths, because the character has two and the sidecar records
+    // two. Only the face was restored here, so a clip rendered with a
+    // deliberately hotter or colder voice reopened with the voice silently
+    // back at its default — Load Params quietly changing the render it claims
+    // to reload. The hidden inputs are the source the strip re-renders from,
+    // so setting them and re-rendering restores both sliders and the value the
+    // next submit will send.
+    _restoreCharacterStrengths(p);
     // Strip the character's face/audio LoRA paths out of the loras list
     // so the picker doesn't show duplicate state. The backend will
     // re-expand on the next submit. We can't read list_characters() from
@@ -47320,7 +47657,7 @@ function _renderCharsAppliedNote() {
                oninput="setCharStrength('voice', this.value)">
         <output id="charVoiceOut">${voi.toFixed(1)}</output>
         <button type="button" class="help-dot" id="charVoiceHelpBtn" aria-expanded="false"
-                aria-controls="charVoiceHelpNote" title="Why run the voice hotter?"
+                aria-controls="charVoiceHelpNote" title="Why the voice has its own number"
                 onclick="toggleCharVoiceHelp()">?</button>
       </div>
       <div class="h3-winhelp" id="charVoiceHelpNote" hidden></div>
@@ -47368,6 +47705,56 @@ function renderNowPreview(s, prog) {
   const actions = document.getElementById('nowCardActions');
   if (!box) return;
   const prev = prog && prog.preview;
+  // A MISSING DECODER MUST SAY SO. Without this, a render on an install whose
+  // 22 MB decoder never arrived looks identical to one where the user switched
+  // the preview off: nothing appears, and a feature the release announced simply
+  // does not happen. Only the missing-decoder case speaks — "off" was the user's
+  // own choice and needs no announcement.
+  const pstate = ((BOOT.ltx || {}).preview_state) || {};
+  // SCOPED TO THE JOB IT IS ABOUT. renderNowPreview() runs for EVERY active job,
+  // so this condition — "something is running, there is no preview, the decoder
+  // is missing" — announced an LTX live-preview failure over H3 renders, image
+  // jobs and training runs, complete with an Install link for a decoder those
+  // jobs would never have used. The capability declares which engines it serves
+  // (required_files.json → capabilities.live_preview.engines) and the running
+  // job says which engine it is, so the notice only appears where it is true.
+  const capEngines = (((BOOT.ltx || {}).capabilities || {}).live_preview || {}).engines || ['ltx'];
+  const _p = ((s.current || {}).params) || {};
+  // A POSITIVE MATCH, never a default. `engine || 'ltx'` meant every job that
+  // does not carry the field — image jobs never do, it is a video field —
+  // counted as LTX and got an LTX live-preview failure notice with an Install
+  // link for a decoder they would never use. Missing now means "not LTX".
+  const jobEngine = String(_p.engine || '').toLowerCase();
+  const jobMode = String(_p.mode || '').toLowerCase();
+  // And only the modes that actually run the preview lane. Image and training
+  // jobs are not video renders; `preview_every` on the quality cell is the
+  // server's own answer for the LTX paths (HQ tiers that never call
+  // _live_preview_params say so here) — when the table is absent we do not
+  // guess, we stay quiet.
+  const _qs = ((BOOT.ltx || {}).qualities) || [];
+  const _cell = Array.isArray(_qs)
+    ? _qs.find(c => c && c.key === String(_p.quality || ''))
+    : _qs[String(_p.quality || '')];
+  const laneRuns = _cell ? Number(_cell.preview_every || 0) > 0 : false;
+  const previewServesThisJob =
+        jobEngine !== '' && capEngines.indexOf(jobEngine) !== -1
+     && jobMode !== 'train' && jobMode !== 'image'
+     && laneRuns;
+  const missingDecoder = s.running && !prev && previewServesThisJob
+                      && pstate.reason === 'missing_decoder';
+  let miss = document.getElementById('nowPreviewMissing');
+  if (missingDecoder) {
+    if (!miss) {
+      miss = document.createElement('div');
+      miss.id = 'nowPreviewMissing';
+      miss.className = 'now-preview-missing';
+      box.parentNode.insertBefore(miss, box.nextSibling);
+    }
+    miss.innerHTML = escapeHtml(pstate.note || '') +
+      ' <a href="#" onclick="event.preventDefault();openModelsModal()">Install it</a>';
+  } else if (miss) {
+    miss.remove();
+  }
   if (!s.running || !prev) {
     box.hidden = true;
     box.className = 'now-thumb';
@@ -48564,7 +48951,7 @@ async function refreshModelsModal({ silent = false } = {}) {
         : '<svg class="ph" aria-hidden="true"><use href="#ph-x-circle"/></svg>';
       const statusText = ready
         ? `Ready · engine picker unlocked · ${escapeHtml(h3.root || '')}`
-        : 'Not installed · install from the Pinokio sidebar';
+        : 'Available to install · one click in the Pinokio sidebar';
       const btn = ready
         ? `<button class="ghost" disabled>Installed</button>`
         : `<button onclick="openH3InstallCard()">How to install</button>`;
@@ -48572,8 +48959,8 @@ async function refreshModelsModal({ silent = false } = {}) {
         <li class="${cls}">
           <span class="icon">${icon}</span>
           <div class="meta">
-            <span class="ttl">Hailuo H3 (MiniMax-H3 FL2VA) · <span style="color:var(--muted)">optional</span></span>
-            <span class="sub">Second video engine — joint video + dialogue + sound</span>
+            <span class="ttl">Hailuo H3 (MiniMax-H3 FL2VA) · <span style="color:var(--muted)">second video engine</span></span>
+            <span class="sub">A peer of LTX — one prompt in, video + synced dialogue + sound out</span>
             <span class="sub">${statusText} · ${escapeHtml(h3.size_note || '')}</span>
           </div>
           ${btn}
@@ -49039,7 +49426,12 @@ let SB = {
   saveTimer: null,
   saveInFlight: false,
   saveAgain: false,
-  stageMode: 'auto',      // 'auto' | 'list' | 'player'
+  // 'auto' (the list) | 'list' | 'player'. Restored from the session so a reload does
+  // not re-dock a preview the user closed two minutes ago.
+  stageMode: (function () {
+    try { return sessionStorage.getItem('phos.sb.stageMode') || 'auto'; }
+    catch (e) { return 'auto'; }
+  })(),
   primed: false,          // brief defaults are read from BOOT once, not per entry
   boards: [],             // /status.storyboards, refreshed by poll()
   lastUndo: null,
@@ -49256,8 +49648,8 @@ function sbEngineChip(id) {
          || { id: id, label: (id || 'ltx').toUpperCase(), mark: 'eng-mark-ltx',
               accent: '', accent_dim: '', accent_soft: '', tagline: '' };
   const why = id === 'h3'
-    ? 'Renders on Hailuo H3 — video, dialogue and sound together. The optional pack.'
-    : 'Renders on LTX — the built-in engine, and the only one that loads a trained character.';
+    ? 'Renders on Hailuo H3 — video, dialogue and sound together. A 75 GB install.'
+    : 'Renders on LTX — ships with the panel, and the only engine that loads a trained character.';
   return `<span class="sb-chip sb-chip-engine" data-engine="${escapeHtml(e.id)}"
       style="--eng-accent:${escapeHtml(e.accent)};--eng-dim:${escapeHtml(e.accent_dim)};--eng-soft:${escapeHtml(e.accent_soft)}"
       title="${escapeHtml(why)}"><span class="eng-mark"><svg class="ph" aria-hidden="true"><use href="#${escapeHtml(e.mark)}"/></svg></span>${escapeHtml(e.label)}</span>`;
@@ -49650,7 +50042,17 @@ function sbSyncStage() {
   if (!on) full = false;
   else if (SB.stageMode === 'list') full = true;
   else if (SB.stageMode === 'player') full = false;
-  else full = !hasClip;
+  // AUTO NO LONGER MEANS "the moment a clip exists, take half the column".
+  //
+  // It used to read `full = !hasClip`, so the instant the first draft landed the player
+  // docked itself over the work — 414 px of a 812 px column, measured, with twelve shots
+  // left sharing the remainder. Nobody asked for it: the user was reading the shot list
+  // and a render finished. That is the whole of the report.
+  //
+  // Auto now stays on the list, and the player appears when the user ASKS for a clip
+  // (sbOpenShotClip, the per-shot thumbnail). The clip is never hidden — the thumbnail on
+  // each shot card is the affordance, and it was already there.
+  else full = true;
   document.body.classList.toggle('sb-full', !!full);
   const tog = sbEl('sbStageToggle');
   if (tog) {
@@ -49659,7 +50061,28 @@ function sbSyncStage() {
       b.classList.toggle('active', b.dataset.sbStage === (full ? 'list' : 'player')));
   }
 }
-function sbSetStage(mode) { SB.stageMode = mode; sbSyncStage(); }
+function sbSetStage(mode) {
+  SB.stageMode = mode;
+  // Session-scoped, so a reload mid-film does not re-dock a player the user closed.
+  // sessionStorage, not localStorage: this is a working preference for this sitting, not
+  // a setting the user should have to find and undo next week.
+  try { sessionStorage.setItem('phos.sb.stageMode', mode); } catch (e) {}
+  sbSyncStage();
+}
+
+// Esc collapses the docked preview, matching the lightbox's own Esc. Deliberately narrow:
+// only on the storyboard tab, only when the player is actually docked, and only when the
+// lightbox is closed (its Esc wins) and the user is not typing in a shot's textarea.
+document.addEventListener('keydown', function (e) {
+  if (e.key !== 'Escape') return;
+  if (document.body.dataset.workflow !== 'storyboard') return;
+  if (document.body.classList.contains('sb-full')) return;
+  const lb = document.getElementById('expandLightbox');
+  if (lb && getComputedStyle(lb).display !== 'none') return;
+  const t = document.activeElement;
+  if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) return;
+  sbSetStage('list');
+});
 
 // ---- the plan screen -------------------------------------------------------
 function sbRenderPlan(r) {
@@ -50080,8 +50503,10 @@ function sbOpenShotClip(n) {
   const s = (((SB.payload || {}).board) || {}).shots.find(x => x.n === n);
   const clip = s && (s.final_output || s.draft_output);
   if (!clip) return;
-  if (SB.stageMode === 'list') SB.stageMode = 'auto';
-  sbSyncStage();
+  // Opening a clip IS the request for the player, so it says so outright rather than
+  // dropping back to 'auto' and hoping auto agrees. Since auto now means "stay on the
+  // list", the old line would have opened a clip into a hidden player.
+  sbSetStage('player');
   selectOutput(clip);
 }
 

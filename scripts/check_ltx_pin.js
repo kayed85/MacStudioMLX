@@ -128,10 +128,141 @@ for (const [re, what] of banned) {
 }
 if (thin) ok("update.js is thin — no installs, patches, downloads or trims")
 
-if (!/git pull --ff-only \|\|/.test(updateSrc)) {
-  fail("update.js's ff-only pull is not the bare form. `git pull --ff-only $UPSTREAM` passes \"origin/main\" as the REPOSITORY argument and has never once succeeded — every update silently took the reset --hard fallback.")
+// ---- the update is transactional -------------------------------------------
+// This used to assert one string: that the ff-only pull was the BARE form,
+// because `git pull --ff-only $UPSTREAM` passes "origin/main" as the REPOSITORY
+// argument and had never once succeeded — measured against the real update
+// path, not reasoned about.
+// v4.0.1 replaced the pull with an explicit fetch + merge so the fetch result
+// can be checked, which made that assertion obsolete while the property it was
+// protecting got MORE important. So the gate now checks the property.
+const updCode = updateSrc.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n")
+
+// 1. The original bug must never come back in either form.
+if (/git pull --ff-only \s*\$/.test(updCode)) {
+  fail("update.js passes $UPSTREAM to `git pull --ff-only`, which git reads as a REPOSITORY argument. That form has never once succeeded — every update silently took the reset --hard fallback.")
 } else {
-  ok("the ff-only pull uses the bare form")
+  ok("no `git pull --ff-only $UPSTREAM` — the form that never worked")
+}
+
+// 2. A failed fetch must stop the update. The whole class of "Update reported
+//    success while staying on stale code" hangs off this one guard: $UPSTREAM is
+//    the LOCAL tracking ref, so resetting to it after a failed fetch is a no-op
+//    that exits 0 and lets post_update run against the old tree.
+if (!/git fetch[^\n]*\|\|[^\n]*exit 1/.test(updCode)) {
+  fail("update.js does not make a failed `git fetch` fatal. Without it a network or auth failure becomes: failed fetch -> failed pull -> 'successful' reset onto the stale tracking ref -> post_update against old code -> Update reports success.")
+} else {
+  ok("a failed fetch aborts the update")
+}
+
+// 3+4. THE DESTRUCTIVE PATH IS ASSERTED BY BEHAVIOUR, NOT BY STRINGS.
+//
+// The previous two checks tested that `git diff --quiet` and `rev-list --count`
+// APPEARED SOMEWHERE in the file. Both were present and the updater still
+// deleted an untracked file: a clone with genuine divergence AND an untracked
+// path that upstream now tracks passed every string test and reached
+// `reset --hard`. A gate that greps for the fix cannot see the case the fix
+// misses — so this one builds a real repository, drives the REAL dispatches out
+// of update.js, and shims `git reset` so any call is recorded rather than run.
+//
+// Three scenarios, one rule: reset is allowed ONLY when history truly diverged
+// AND nothing untracked is in the way.
+const { execFileSync, spawnSync } = require("child_process")
+const os = require("os")
+
+function updateDispatches() {
+  const mod = require(path.join(root, "update.js"))
+  return (mod.run || [])
+    .filter((st) => st.method === "shell.run" && st.params && st.params.message)
+    .map((st) => st.params.message)
+    .filter((m) => !/post_update/.test(m))
+}
+
+function probe(scenario) {
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "phos-upd-"))
+  const G = { cwd: null, env: Object.assign({}, process.env, {
+    GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" }) }
+  const git = (cwd, args) => execFileSync("git", args, { cwd, env: G.env, stdio: "pipe" })
+  const up = path.join(work, "up"), clone = path.join(work, "clone")
+  fs.mkdirSync(up)
+  git(up, ["init", "-q", "."])
+  git(up, ["config", "user.email", "a@b"]); git(up, ["config", "user.name", "t"])
+  fs.writeFileSync(path.join(up, "f.txt"), "v1\n")
+  git(up, ["add", "f.txt"]); git(up, ["commit", "-qm", "v1"])
+  git(work, ["clone", "-q", up, clone])
+  git(clone, ["config", "user.email", "a@b"]); git(clone, ["config", "user.name", "t"])
+
+  if (scenario === "mixed" || scenario === "obstruction_only") {
+    fs.writeFileSync(path.join(up, "notes.txt"), "upstream\n")
+    git(up, ["add", "notes.txt"]); git(up, ["commit", "-qm", "add notes"])
+    fs.writeFileSync(path.join(clone, "notes.txt"), "MINE\n")
+    if (scenario === "mixed") git(clone, ["commit", "-q", "--allow-empty", "-m", "local"])
+  } else if (scenario === "divergence_only") {
+    fs.writeFileSync(path.join(up, "f.txt"), "v2\n")
+    git(up, ["commit", "-qam", "v2"])
+    git(clone, ["commit", "-q", "--allow-empty", "-m", "local"])
+  } else if (scenario === "clean_ff") {
+    fs.writeFileSync(path.join(up, "f.txt"), "v2\n")
+    git(up, ["commit", "-qam", "v2"])
+  }
+  git(clone, ["fetch", "-q", "origin"])
+
+  const bin = path.join(work, "bin")
+  fs.mkdirSync(bin)
+  fs.writeFileSync(path.join(bin, "git"),
+    '#!/usr/bin/env bash\nif [ "${1:-}" = "reset" ]; then echo "RESET_CALLED $*"; exit 0; fi\nexec ' +
+    execFileSync("which", ["git"]).toString().trim() + ' "$@"\n')
+  fs.chmodSync(path.join(bin, "git"), 0o755)
+
+  const script = updateDispatches()
+    .map((m, i) => `(\n${m}\n)\nrc=$?; [ $rc -eq 0 ] || exit $rc\n`).join("")
+  const r = spawnSync("bash", ["-c", script], {
+    cwd: clone, encoding: "utf8",
+    env: Object.assign({}, G.env, { PATH: bin + ":" + process.env.PATH }),
+  })
+  const outText = (r.stdout || "") + (r.stderr || "")
+  const notes = fs.existsSync(path.join(clone, "notes.txt"))
+    ? fs.readFileSync(path.join(clone, "notes.txt"), "utf8").trim() : null
+  fs.rmSync(work, { recursive: true, force: true })
+  return { reset: /RESET_CALLED/.test(outText), code: r.status, notes, out: outText }
+}
+
+let probesRan = false
+try {
+  execFileSync("git", ["--version"], { stdio: "ignore" })
+  probesRan = true
+} catch (e) {
+  ok("SKIPPED the updater behaviour probes — git is not available here")
+}
+
+if (probesRan) {
+  const mixed = probe("mixed")
+  if (mixed.reset || mixed.notes !== "MINE") {
+    fail(`update.js RESET on a diverged clone whose untracked file is tracked upstream — the file is destroyed. Divergence and obstruction are independent; the destructive step must clear BOTH. (reset=${mixed.reset}, notes=${JSON.stringify(mixed.notes)})`)
+  } else {
+    ok("mixed divergence + untracked obstruction: no reset, file intact")
+  }
+
+  const obs = probe("obstruction_only")
+  if (obs.reset || obs.notes !== "MINE") {
+    fail(`update.js RESET over an untracked obstruction with no divergence at all (reset=${obs.reset}, notes=${JSON.stringify(obs.notes)})`)
+  } else {
+    ok("untracked obstruction alone: no reset, file intact")
+  }
+
+  const div = probe("divergence_only")
+  if (!div.reset) {
+    fail("update.js refused to reset a genuinely diverged, clean clone — the updater must still be able to converge.")
+  } else {
+    ok("genuine divergence with a clean tree: reset is reached")
+  }
+
+  const ff = probe("clean_ff")
+  if (ff.reset || ff.code !== 0) {
+    fail(`a plain fast-forward must not reset and must succeed (reset=${ff.reset}, exit=${ff.code})`)
+  } else {
+    ok("plain fast-forward: converges without reset")
+  }
 }
 
 console.log("")

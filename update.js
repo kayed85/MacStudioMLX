@@ -68,15 +68,87 @@ module.exports = {
     // The bare form uses the configured upstream and fast-forwards correctly;
     // the reset --hard fallback is kept, and now only fires when it is true.
     // Measured against the real update path, not reasoned about.
+    // v4.0.1 FIX — THE UPDATE IS TRANSACTIONAL NOW, AND IT WAS NOT.
+    //
+    // The old block ignored the fetch result and sent EVERY pull failure to
+    // `git reset --hard $UPSTREAM`. `$UPSTREAM` is the LOCAL tracking ref, so
+    // when the fetch was the thing that failed the reset landed on the stale
+    // ref that was already checked out — a no-op that exits 0. The sequence a
+    // user offline (or behind an auth failure) actually got was:
+    //
+    //     failed fetch → failed pull → "successful" reset onto old code →
+    //     successful rev-parse → post_update runs against the old tree →
+    //     Update reports success and nothing has changed.
+    //
+    // The same fallback also could not tell a dirty worktree from genuine
+    // divergent history, so it answered "you have local edits" by destroying
+    // them.
+    //
+    // Split into two steps, both short enough for the dispatch gate, and the
+    // ordering is the guarantee: NOTHING moves the tree until a fetch has
+    // provably succeeded, and reset only ever runs against a ref that fetch
+    // just refreshed.
     {
       method: "shell.run",
       params: {
         message: [
-          "REMOTE=$(git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null | cut -d/ -f1)",
-          "UPSTREAM=$(git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null)",
-          "echo \"updating branch: $(git rev-parse --abbrev-ref HEAD) (upstream: $UPSTREAM)\"",
-          "git fetch $REMOTE",
-          "git pull --ff-only || (echo 'not a fast-forward; resetting to upstream' && git reset --hard $UPSTREAM)",
+          "U=$(git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null)",
+          "[ -n \"$U\" ] || { echo 'FATAL: no upstream configured'; exit 1; }",
+          "echo \"updating $(git rev-parse --abbrev-ref HEAD) from $U\"",
+          "git fetch \"${U%%/*}\" || { echo 'FATAL: fetch failed (offline?) - nothing changed, re-run Update'; exit 1; }"
+        ].join("\n")
+      }
+    },
+    // Converge. A reset is reached ONLY on proven history divergence.
+    //
+    // v4.0.1 second pass — THE UNTRACKED-FILE DELETION PATH. The previous
+    // version classified every merge failure that left tracked files clean as
+    // "divergence" and reset. But `git diff --quiet` IGNORES UNTRACKED FILES,
+    // so the most common non-divergence failure — an untracked path that a
+    // newly tracked upstream path would overwrite — passed both checks, and
+    // `git reset --hard` then deleted the user's file as the "obstruction".
+    // A user who dropped a note or a config beside the app lost it to an
+    // update that had no local commits to reconcile in the first place.
+    //
+    // Divergence is now PROVEN, not inferred from what else failed:
+    // `git rev-list --count $U..HEAD` is the number of commits this clone has
+    // that upstream does not. Zero means the history did not diverge, whatever
+    // made the merge fail — so we stop and print git's own error, which names
+    // the obstructing paths. Nothing is deleted on that path, ever.
+    // THE OBSTRUCTION GUARD, and it runs BEFORE anything can move the tree.
+    //
+    // The rev-list proof added in the previous pass only covered the
+    // zero-local-commit case. A clone that has genuinely diverged (A > 0) AND
+    // holds an untracked file where upstream now tracks one still reached
+    // `reset --hard`, because both `git diff` checks ignore untracked files —
+    // so the reset deleted it while legitimately reconciling real divergence.
+    // Divergence and obstruction are independent facts and the destructive
+    // step must clear BOTH.
+    //
+    // The set is computed exactly: every untracked path that also exists in the
+    // fetched upstream tree (`git cat-file -e $U:<path>`). No process
+    // substitution, so it behaves the same under sh, bash and zsh.
+    {
+      method: "shell.run",
+      params: {
+        message: [
+          "U=$(git rev-parse --abbrev-ref --symbolic-full-name @{u})",
+          "O=$(git status --porcelain -uall | sed -n 's/^?? //p' | while read -r f; do git cat-file -e \"$U:$f\" 2>/dev/null && echo \"$f\"; done)",
+          "[ -z \"$O\" ] || { echo \"$O\"; echo 'FATAL: the untracked files above are tracked upstream. Move them, then Update. Nothing deleted.'; exit 1; }"
+        ].join("\n")
+      }
+    },
+    {
+      method: "shell.run",
+      params: {
+        message: [
+          "U=$(git rev-parse --abbrev-ref --symbolic-full-name @{u})",
+          "M=$(git merge --ff-only \"$U\" 2>&1) && exec git rev-parse --short HEAD",
+          "A=$(git rev-list --count \"$U\"..HEAD)",
+          "[ \"$A\" -gt 0 ] || { echo \"$M\"; echo 'FATAL: blocked above; history has NOT diverged. Nothing deleted.'; exit 1; }",
+          "git diff --quiet && git diff --cached --quiet || { echo 'FATAL: local edits to tracked files'; exit 1; }",
+          "echo \"diverged: $A commit(s) - resetting\"",
+          "git reset --hard \"$U\" || exit 1",
           "git rev-parse --short HEAD"
         ].join("\n")
       }

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3.11
 """Storyboard — plan a run of shots that share a character, then shoot them.
 
+
 WHAT THIS IS, IN PHOSPHENE'S OWN TERMS
 --------------------------------------
 Phosphene's thesis is "your trained character, in any scene." A storyboard is simply that at
@@ -851,6 +852,23 @@ def shot_to_job(shot: dict, policy_pass: dict, *,
     return {k: v for k, v in job.items() if v is not None}
 
 
+# THE ONE POLICY LITERAL. storyboard_planner.default_policy() had its own copy and
+# they had drifted: this said Draft 640x448 (what a Quick render actually delivers,
+# ffprobe-verified) while the planner said 640x480, a canvas the panel's own engine
+# registry lists as never delivered. The main path masked it by keeping the board's
+# existing policy, so only a direct planner consumer would ever have seen the
+# fictional geometry. One literal, imported by the planner.
+DEFAULT_POLICY: dict = {
+    "draft": {"quality": "quick", "width": 640, "height": 448, "frames": 49},
+    "final": {"quality": "balanced", "width": 1024, "height": 576, "frames": 121},
+}
+
+
+def default_policy() -> dict:
+    """A fresh copy of DEFAULT_POLICY — callers mutate it (the planner clamps it)."""
+    return {k: dict(v) for k, v in DEFAULT_POLICY.items()}
+
+
 def new_storyboard(board_id: str, title: str, *, shots: list[dict] | None = None,
              cast: list[dict] | None = None, policy: dict | None = None) -> dict:
     """Build an empty, schema-correct storyboard. Kept here so the planner, the tests and any
@@ -861,9 +879,6 @@ def new_storyboard(board_id: str, title: str, *, shots: list[dict] | None = None
         "title": title,
         "created_at": int(time.time()),
         "cast": cast or [],
-        "policy": policy or {
-            "draft": {"quality": "quick", "width": 640, "height": 448, "frames": 49},
-            "final": {"quality": "balanced", "width": 1024, "height": 576, "frames": 121},
-        },
+        "policy": policy or default_policy(),
         "shots": shots or [],
     }

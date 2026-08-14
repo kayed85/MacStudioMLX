@@ -1,10 +1,12 @@
 # Hailuo H3 — Phosphene's second video engine
 
 MiniMax-H3 (FL2VA) takes one prompt and returns **picture, dialogue and sound
-generated together**. It ships as an **optional pack**, not part of the base
-install: ~75 GB of weights, a 64 GB+ Mac, and a licence with territory
-restrictions. LTX stays the default engine and is completely untouched by
-any of this.
+generated together**. It is a **peer of LTX, not an add-on to it** — but it is
+too big to ship in the base install, so it arrives as **its own one-click
+install**: ~75 GB of weights, a 64 GB+ Mac, and a licence with territory
+restrictions. LTX remains the default engine and is completely untouched by
+any of this; whichever engines you have installed sit side by side in the
+switcher.
 
 ---
 
@@ -64,6 +66,20 @@ duplicating 75 GB.
 | `LTX_H3_FORCE_CAPABLE` | unset | test-only: stop the UI hiding the pill on a small Mac. Does **not** make it render. |
 | `LTX_H3_DENSE_10S` | unset | re-adds the pre-chaining dense 10 s tier (36 min) for A/B work |
 | `LTX_H3_WIDE_DRAFT` | unset | adds an experimental **512×288 16:9 draft** (~2 min). Off because 0.15 MP is below anything this campaign has measured — see Tiers. |
+
+**Set them in `ENVIRONMENT`, not in your shell.** An `export` in a terminal reaches
+only a panel launched from that same terminal, and it is gone the moment Pinokio
+restarts the app — which is exactly how a working H3 install "loses" its engine
+after a restart, with the weights still on disk and the panel reporting the pack
+missing. The `ENVIRONMENT` file at the install root is read on every launch, so
+lines there survive restarts and updates:
+
+```
+LTX_H3_ROOT=/path/to/minimax-h3-mlx
+LTX_H3_MODELS=/path/to/models
+```
+
+The `export` form shown further down is for one-off CLI runs, not for the panel.
 
 ### Model layout — both shapes work
 

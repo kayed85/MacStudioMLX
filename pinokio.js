@@ -83,7 +83,11 @@ function repoComplete(installRoot, repo, minBytes) {
 module.exports = {
   version: "7.0",
   title: "Phosphene",
-  description: "[MAC ONLY] Local generative video panel for Apple Silicon. Joint audio+video via LTX 2.3 (MLX). T2V, I2V, FFLF, Extend. Lossless h264. Hardware-tier feature gating. Free, open source.",
+  // The Pinokio store listing. It still said "via LTX 2.3 (MLX)" three weeks after 2.5
+  // became the generation a fresh install renders with — the first sentence a prospective
+  // user reads, naming the wrong engine, while a confused existing user hunting a "why
+  // does it keep asking for LTX 2.3" answer finds it confirming their suspicion.
+  description: "[MAC ONLY] Local generative video panel for Apple Silicon. Joint audio+video via LTX-2.5 (MLX), with Hailuo H3 as a second engine. T2V, I2V, FFLF, Extend, trained characters. Lossless h264. Hardware-tier feature gating. Free, open source.",
   icon: "icon.png",
   menu: async (kernel, info) => {
     // Resolve the install root. cocktailpeanut diagnosed that `info.path` is
@@ -100,7 +104,39 @@ module.exports = {
 
     // --- per-repo completeness from the unified manifest ---
     const repos = required.repos || []
-    const baseRepos = repos.filter(r => r.kind === "base")
+    // WHAT HIDES START IS "CAN THIS RENDER", NOT "IS EVERY base ROW COMPLETE".
+    // `kind: "base"` had come to mean two different things — fetched on a fresh
+    // install, AND the panel cannot render without it — and Gemma 3 is the first
+    // but not the second: it is LTX-2.3's encoder and the Enhance/planner model,
+    // and the active 2.5 generation renders with Gemma 4 instead. Marked base, a
+    // half-downloaded planner model made Pinokio declare the base renderer
+    // incomplete and hide Start on an install that renders perfectly. The
+    // preview decoder had the identical bug one commit earlier; this closes the
+    // class by asking the capability instead of the label.
+    const caps = required.capabilities || {}
+    const capRender = caps.render || {}
+    // THE ACTIVE GENERATION, where it is knowable. A user pinned back with
+    // LTX_MODEL_VERSION=ltx23 renders on 2.3's packs, and evaluating the
+    // manifest's default here told them their install was incomplete for a
+    // generation they are not using. The panel resolves this from its own
+    // process env; Pinokio's menu runs elsewhere, so it reads the same override
+    // from the ENVIRONMENT file the launcher sources — which is exactly where
+    // docs/H3_ENGINE.md tells users to put persistent overrides. Falls back to
+    // the manifest default when nothing has been pinned, which is the norm.
+    let activeVersion = capRender.default_version
+    try {
+      const envPath = path.join(installRoot, "ENVIRONMENT")
+      if (fs.existsSync(envPath)) {
+        const m = fs.readFileSync(envPath, "utf8")
+          .split("\n").filter(l => !/^\s*#/.test(l))
+          .join("\n").match(/^\s*LTX_MODEL_VERSION\s*=\s*(\S+)\s*$/m)
+        if (m && (capRender.repos_by_version || {})[m[1]]) activeVersion = m[1]
+      }
+    } catch (e) { /* unreadable ENVIRONMENT: keep the manifest default */ }
+    const renderKeys = ((capRender.repos_by_version || {})[activeVersion] || [])
+    const baseRepos = renderKeys.length
+      ? renderKeys.map(k => repos.find(r => r.key === k)).filter(Boolean)
+      : repos.filter(r => r.kind === "base")
     // THE PACK THE BUTTON ACTUALLY INSTALLS. This read `key === "q8"` —
     // LTX-2.3's pack — while the menu entry it gates dispatches
     // download_q8.js -> q8_weights.sh -> `--repo-key q8_25`, i.e. LTX-2.5's.
@@ -108,7 +144,16 @@ module.exports = {
     // successful 30 GB install the menu kept offering the download forever.
     // Resolved by mirror-block presence rather than a hardcoded key so a third
     // generation does not reopen it: the 2.5-era packs are the mirrored ones.
-    const q8Repo    = repos.find(r => r.key === "q8_25") || repos.find(r => r.key === "q8")
+    // THE Q8 PACK OF THE ACTIVE GENERATION. This preferred q8_25 unconditionally,
+    // so a user pinned back with LTX_MODEL_VERSION=ltx23 whose 2.3 Q8 pack was
+    // already complete still saw "Download Q8 weights (~30 GB)" forever — an
+    // offer to fetch 30 GB their generation does not load. `characters` is the
+    // capability that names it, and it is declared per version.
+    const capChars  = caps.characters || {}
+    const q8Keys    = ((capChars.repos_by_version || {})[activeVersion]
+                       || (capChars.repos_by_version || {})[capChars.default_version] || [])
+    const q8Repo    = q8Keys.map(k => repos.find(r => r.key === k)).filter(Boolean)[0]
+                   || repos.find(r => r.key === "q8_25") || repos.find(r => r.key === "q8")
 
     const base_ready = baseRepos.length > 0 && baseRepos.every(r => repoComplete(installRoot, r, minBytes))
     const q8_ready   = q8Repo ? repoComplete(installRoot, q8Repo, minBytes) : false
@@ -123,10 +168,20 @@ module.exports = {
     // `mflux-generate-qwen-edit` binary didn't land (mflux <0.17.5).
     const qwen_ready =
       info.exists("ltx-2-mlx/env/bin/mflux-generate-qwen-edit")
-    // Hailuo H3 readiness — the engine's own venv AND the pruned bf16 DiT (the
-    // one 41 GB file; if that landed, the small siblings did too). Weights live
-    // under mlx_models/ so they survive Reset like every other model. Both
-    // download layouts are accepted, matching _h3_model_roots() in the panel.
+    // Hailuo H3 readiness — the engine's own venv, its runner, and EVERY weight
+    // component the panel requires.
+    //
+    // The old note here said "the one 41 GB file; if that landed, the small
+    // siblings did too". That assumption is what Medium 6 was: a partial install
+    // where the DiT arrived and a compact Q8 component did not looked ready from
+    // this side and refused to run from the panel's, and because the menu thought
+    // it was fine it hid the Install/Repair entry that would have fixed it. The
+    // components are declared once in required_files.json and checked here, so
+    // the assumption is gone rather than reworded.
+    //
+    // Weights live under mlx_models/ so they survive Reset like every other
+    // model, and both download layouts are accepted (capabilities.h3.model_roots
+    // mirrors _h3_model_roots() in the panel).
     //
     // Probed with Node's own fs, NOT info.exists() — deliberately, and this is
     // the whole fix. `uv venv` builds the venv interpreter as a symlink chain
@@ -151,16 +206,29 @@ module.exports = {
     const h3Resolves = (rel) => {
       try { return fs.existsSync(path.join(installRoot, rel)) } catch (e) { return false }
     }
-    const h3_venv =
-      h3Resolves("minimax-h3-mlx/.venv/bin/python3.11") ||
-      h3Resolves("minimax-h3-mlx/.venv/bin/python")
-    const h3_runner = h3Resolves("minimax-h3-mlx/scripts/generate_staged.py")
+    // DECLARED, NOT RE-DERIVED. This used to call H3 ready on venv + runner +
+    // the one big DiT, while the panel additionally required every compact Q8
+    // component and the upstream text config — so a partial install hid the
+    // Install/Repair entry here while the panel refused to run H3, and the user
+    // had no route to the fix. Both sides now read the same component list from
+    // required_files.json → capabilities.h3.
+    const capH3 = ((required.capabilities || {}).h3) || {}
+    const h3_venv = (capH3.venv_any || []).some(h3Resolves)
+    const h3_runner = (capH3.paths || []).every(h3Resolves)
     // The weights are the expensive thing (~75 GB) and they live under
     // mlx_models/, a completely different tree from the clone — so they
-    // routinely survive whatever broke the engine.
-    const h3_weights =
-      h3Resolves("mlx_models/hailuo-h3/models/deepbeep-pruned-bf16/MiniMax-H3-FL2VA-pruned_bf16.safetensors") ||
-      h3Resolves("mlx_models/hailuo-h3/deepbeep-pruned-bf16/MiniMax-H3-FL2VA-pruned_bf16.safetensors")
+    // routinely survive whatever broke the engine. `model_roots` are
+    // ALTERNATIVES (either download layout is valid); every entry in `models`
+    // is required beneath whichever root carried the DiT.
+    // PER FILE, not per root. This required every component beneath ONE root,
+    // while the panel resolves each file against any of them — and the panel is
+    // right: LTX_H3_MODELS and LTX_H3_COMPACT_DIR legitimately split a layout
+    // across roots, which is the documented dev setup. On a split layout the
+    // panel said installed and this said not, so Pinokio offered a 75 GB
+    // install for weights already on disk. Two consumers, one manifest, and now
+    // one resolution rule.
+    const h3_weights = (capH3.models || []).every(rel =>
+      (capH3.model_roots || []).some(root => h3Resolves(root + "/" + rel)))
     const h3_ready = h3_venv && h3_runner && h3_weights
     // Weights on disk but the code/venv gone → a REPAIR, not a 75 GB install.
     // install_h3.js is idempotent and skips every intact weight, so the same
@@ -324,7 +392,11 @@ module.exports = {
       // ~30 GB and what it actually buys on 2.5: trained characters and voices.
       // High additionally needs the separate 29.5 GB add-on, which is offered
       // in Settings -> Models rather than here — one menu entry, one download.
-      baseMenu.push({ icon: "fa-solid fa-download", text: "Download Q8 weights (~30 GB) — trained characters + voices", href: "download_q8.js" })
+      // Size and wording follow the pack that will actually be fetched.
+      const q8Size = q8Repo && q8Repo.size_gb ? `~${Math.round(q8Repo.size_gb)} GB` : "~30 GB"
+      baseMenu.push({ icon: "fa-solid fa-download",
+                      text: `Download Q8 weights (${q8Size}) — trained characters + voices`,
+                      href: "download_q8.js" })
     }
     if (!sharp_ready) {
       baseMenu.push({ icon: "fa-solid fa-wand-magic-sparkles", text: "Install Sharp upscaler (PiperSR, optional)", href: "install_sharp.js" })
@@ -344,7 +416,10 @@ module.exports = {
       // never reads as a missing piece of the base install.
       baseMenu.push(h3_repair
         ? { icon: "fa-solid fa-screwdriver-wrench", text: "Repair Hailuo H3 (weights kept — no re-download)", href: "install_h3.js" }
-        : { icon: "fa-solid fa-comments", text: "Install Hailuo H3 (optional, ~75 GB)", href: "install_h3.js" })
+        // ENGINES ARE PEERS: "optional" told a user that half the panel's
+        // video capability was a side dish. The entry names what it IS.
+        // The panel's install card quotes this string verbatim -- change both.
+        : { icon: "fa-solid fa-comments", text: "Install Hailuo H3 (second video engine, ~75 GB)", href: "install_h3.js" })
     }
     baseMenu.push(
       { icon: "fa-solid fa-rotate", text: "Update", href: "update.js" },

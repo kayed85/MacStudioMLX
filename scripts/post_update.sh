@@ -8,8 +8,8 @@
 # Pinokio loads `update.js` from disk into memory and THEN runs it. Our step 1
 # is what pulls the repo, so the repo moves to the new version MID-RUN and
 # execution continues from the STALE in-memory script. cocktailpeanut hit this
-# on his own machine and confirmed the sequencing with timestamps
-# by timestamp: the fix an app ships to its own
+# on his own machine and confirmed the sequencing by timestamp: the fix an
+# app ships to its own
 # installer always lands ONE CLICK LATE, and the user sees a failure they have
 # already downloaded the fix for.
 #
@@ -99,6 +99,27 @@ require "the vendored engine pin move" -- bash "$ROOT/scripts/pinokio/ltx_checko
 # -9.2 dB on 0.31.1, same weights, same seed). --reinstall --no-deps so ONLY
 # mlx moves and nothing that depends on it is re-resolved.
 require "the mlx 0.31.1 pin" -- uv pip install --python "$VENV_PY" --reinstall --no-deps 'mlx==0.31.1' 'mlx-lm==0.31.1' 'mlx-metal==0.31.1'
+
+# ---- 2b. THE TRANSFORMERS CAP — the one install.js has been promising -------
+# install.js has said, since the 2026-07-10 ship-blocker, that "uv downgrades an
+# already-installed 5.13.0 on the next Update". Nothing in the update path ever
+# constrained transformers, so that sentence was false for a month: mlx-lm
+# 0.31.1 declares `transformers>=5.0.0` with NO upper bound, and step 2 above
+# uses --no-deps precisely so nothing else moves — which also means an existing
+# 5.13.0 survives every Update untouched.
+#
+# The failure it leaves behind is total and silent: mlx_lm.tokenizer_utils
+# breaks, the Gemma text-encoder load no-ops ("done in 0.0s"), and EVERY
+# generation dies on "'str' object has no attribute '__module__'" →
+# "Model not loaded. Call load() first." A user in that state can click Update,
+# watch it succeed, and still not be able to render a single frame.
+#
+# FATAL, not best-effort: an install that finishes this script with 5.13.0
+# cannot generate anything, so "continue and hope" is not a kindness. Resolved
+# on the SAME uv invocation as the mlx trio (exactly as install.js:268 does it)
+# so the solver cannot re-widen the cap while satisfying mlx-lm.
+require "the transformers <5.13.0 cap (5.13.0 breaks every generation)" -- \
+  uv pip install --python "$VENV_PY" 'mlx==0.31.1' 'mlx-lm==0.31.1' 'mlx-metal==0.31.1' 'transformers>=5.0.0,<5.13.0'
 
 # ---- 3. Re-install the three vendored packages ------------------------------
 # This is what actually moves an existing user's RUNTIME: a bare git checkout

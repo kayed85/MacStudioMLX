@@ -197,6 +197,22 @@ class PlannerError(Exception):
 # The validator we must satisfy — imported, never reimplemented
 # --------------------------------------------------------------------------------------
 
+def _storyboard_module():
+    """storyboard.py, or None if it cannot be imported.
+
+    Same import path `_load_validator()` uses, but non-fatal: default_policy()
+    is called from contexts that must not raise just because the schema module
+    is unavailable, and it carries its own fallback literal.
+    """
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    try:
+        import storyboard  # type: ignore
+        return storyboard
+    except Exception:
+        return None
+
+
 def _load_validator():
     """Return (validate_fn, storyboard_module).
 
@@ -274,6 +290,49 @@ L11 THE FACE IS THE WHOLE POINT. A shot is judged on whether the face reads. If 
     with no face in it. End on the face instead.
     A face may be dark, wet, bruised, half in shadow or lit from one side. It may not be
     turned away, blocked, cut off by the frame edge, or reduced to an outline.
+L12 A CAST CHARACTER'S APPEARANCE IS FIXED, AND YOU CANNOT SEE IT. A cast character is a
+    trained model of a real, specific face. What they look like is already decided and is
+    NOT in this brief - so any physical description you write is a guess, and a guess that
+    disagrees with the trained face FIGHTS it and degrades the likeness.
+    For a cast character write ONLY: the trigger and name, their ROLE, their WARDROBE,
+    their ACTION and their EMOTION. Never their species or creature type, never their
+    face, hair, eyes, skin or build, never their age. This includes BODY PARTS that only
+    one kind of creature has - no paw, muzzle, snout, fur, tail, whiskers, claws, hooves,
+    wings or scales. They have hands.
+      WRONG  "bizarrotrn Bizarro, a grizzled badger in a military uniform, leans over ..."
+      WRONG  "bizarrotrn Bizarro, a tall bearded man in his fifties, leans over ..."
+      RIGHT  "bizarrotrn Bizarro, the unit's commander in a muddy field uniform, leans
+              over the map table and traces the river with one finger"
+    THIS LAW APPLIES TO CAST CHARACTERS AND TO NOBODY ELSE, and getting that wrong in the
+    other direction ruins the film just as fast. EVERY OTHER CHARACTER **MUST** be
+    described the way the concept asks - species, age, build, all of it. If the brief says
+    the soldiers are humanoid animals, then the soldiers ARE humanoid animals, on screen,
+    in the words, in as many shots as they appear: badgers, wolves, a boar sergeant. A
+    plan that quietly turns them all into ordinary humans has thrown away the premise and
+    is WRONG, even though every cast character in it is lawful.
+    WHEN THE PREMISE COVERS EVERYONE - "all the characters are animals", "everyone is a
+    robot" - the cast character is the ONE EXCEPTION, and the exception is SILENCE, not
+    conversion. Do not say what they are. Do not turn the rest of the cast human to match
+    them. Do not write a sentence explaining why they look different. Give the cast
+    character a role, a uniform and an action, describe everyone else exactly as the
+    premise demands, and let the trained face answer the only question you left open.
+L13 NEVER WRITE SPEECH THE VIEWER CANNOT HEAR. A shot is either SPOKEN or SILENT, and you
+    must choose one on purpose.
+      SPOKEN  the exact words are in the shot, in the dialogue form: <d>[English] Move out,
+              and keep to the treeline.</d> Short - one or two sentences. The words being
+              present IN THAT TAG is what switches the voice on. Quotation marks are not a
+              substitute: He says, "Move out" leaves the voice switched OFF and the model
+              guessing. The tag, every time.
+      SILENT  no speech happens at all. Then the description must not say that speech
+              happens: no explains, briefs, tells, discusses, talks, orders, argues,
+              murmurs, mutters, whispers, addresses, announces - and no describing a voice
+              ("his voice low and authoritative"). The soundscape must not carry speech
+              either: no murmur, chatter, voices, conversation, talking.
+    "He explains the mission, his voice low and authoritative" with no words written is the
+    worst of both: the model is told a man is speaking and given nothing to say, so it
+    invents mouth noise. If the beat needs him to brief the unit, WRITE THE LINE. If it
+    does not, show him working the map in silence and put footsteps, wind, paper and radio
+    static in the soundscape instead.
 """
 
 _H3_EXAMPLES = """\
@@ -495,12 +554,34 @@ def _build_user_prompt(
                   " \"character_id\" to that id and is written in the LTX register:"]
         for c in cast:
             desc = (c.get("description") or "").strip()
-            lines.append("  - %s%s%s" % (
+            noun = (c.get("subject_noun") or "").strip()
+            pron = (c.get("pronoun") or "").strip()
+            facts = []
+            if noun:
+                facts.append("a %s" % noun)
+            if pron:
+                facts.append("%s/%s" % (pron, "him" if pron == "he" else
+                                        "her" if pron == "she" else "them"))
+            lines.append("  - %s%s%s%s" % (
                 c["id"],
                 (" (%s)" % c["name"]) if c.get("name") and c["name"] != c["id"] else "",
+                (" - %s" % ", ".join(facts)) if facts else "",
                 (": " + desc) if desc else "",
             ))
-        lines.append("  Any shot without a listed character sets \"character_id\": null.")
+        # L12 restated where the cast is actually read, because the laws block is long and
+        # this is the moment the model is deciding what these people look like.
+        lines += [
+            "  THE LINE ABOVE IS EVERYTHING YOU KNOW ABOUT HOW THEY LOOK, and it is all you",
+            "  are allowed to imply. Their face is a trained model you cannot see. Give them",
+            "  a role, wardrobe, action and emotion - never a species, creature type, face,",
+            "  hair, eyes, build or age.",
+            "  EVERYONE ELSE IN THE FILM IS DESCRIBED NORMALLY, and if the concept gives the",
+            "  world a premise - humanoid animals, robots, a period, a species - that premise",
+            "  applies to them in full and must be visible in the shots they appear in. The",
+            "  cast character is the ONE you leave undescribed; they are not a reason to make",
+            "  the rest of the film plain.",
+            "  Any shot without a listed character sets \"character_id\": null.",
+        ]
     else:
         lines += ["", "CAST: none. Every shot sets \"character_id\": null."]
     if must_include:
@@ -836,6 +917,346 @@ _WANTS_HIDDEN_RE = re.compile(
     r"\bwithout showing (?:the |their |his |her )?face", re.IGNORECASE)
 
 
+# --- the appearance law (L12) -----------------------------------------------------------
+# A cast character is a trained LoRA. Its appearance is decided, it is not in the brief, and
+# prose that guesses at it fights the weights at render time. The planner has no way to know
+# this on its own, so it styles the cast like everything else in the film — measured live:
+# "ww2 scene but main characters are humanoid animals, bizarrotrn is the boss of the team"
+# produced "bizarrotrn Bizarro, a grizzled badger with a military uniform", assigning a
+# SPECIES to the one face in the film that already has one.
+#
+# The detector is deliberately narrow, because the false positives are the expensive kind:
+# wardrobe and rank are exactly what we WANT ("in a muddy officer's uniform", "the unit's
+# commander"), and every non-cast character in an animal film is legitimately an animal. So
+# it fires only on an appositive or copular phrase bound to the cast mention, and only when
+# the part of that phrase describing what they ARE — the span before any wardrobe
+# preposition — contains a species noun or a physical adjective.
+
+_SPECIES = (
+    r"badger|wolf|wolves|fox|vixen|bear|rabbit|hare|dog|hound|wolfhound|cat|feline|lion|"
+    r"lioness|tiger|leopard|panther|jaguar|cheetah|stoat|weasel|otter|ferret|mink|marten|"
+    r"mouse|mice|rat|squirrel|hedgehog|mole|shrew|boar|pig|hog|sow|stag|deer|doe|elk|moose|"
+    r"goat|ram|sheep|ewe|bull|ox|cow|horse|stallion|mare|donkey|mule|zebra|"
+    r"hawk|falcon|eagle|owl|raven|crow|rook|magpie|sparrow|finch|heron|stork|crane|gull|"
+    r"duck|drake|goose|swan|rooster|cockerel|hen|chicken|turkey|pigeon|dove|"
+    r"frog|toad|newt|lizard|gecko|snake|serpent|adder|viper|turtle|tortoise|crocodile|"
+    r"fish|shark|whale|dolphin|seal|walrus|penguin|"
+    r"ape|monkey|gorilla|chimp|chimpanzee|baboon|lemur|"
+    r"dragon|griffin|gryphon|centaur|minotaur|satyr|faun|"
+    r"elf|dwarf|orc|goblin|troll|ogre|gnome|hobbit|halfling|"
+    r"vampire|werewolf|zombie|skeleton|ghost|demon|angel|deity|god|goddess|"
+    r"robot|android|droid|cyborg|automaton|alien|extraterrestrial|mutant|"
+    r"anthropomorphic|humanoid|creature|beast|critter|animal"
+)
+_SPECIES_RE = re.compile(r"\b(?:%s)s?\b" % _SPECIES, re.IGNORECASE)
+
+_PHYS_ADJ = (
+    r"old|older|elderly|aged|ancient|young|younger|youthful|teenage|teenaged|adolescent|"
+    r"middle-aged|middleaged|boyish|girlish|weathered|grizzled|wizened|craggy|"
+    r"tall|short|stocky|burly|brawny|hulking|lean|lanky|slim|slender|skinny|thin|scrawny|"
+    r"wiry|muscular|muscled|husky|heavyset|heavy-set|stout|portly|obese|fat|plump|petite|"
+    r"broad-shouldered|barrel-chested|squat|gaunt|"
+    r"bald|balding|shaven|clean-shaven|bearded|moustached|mustachioed|whiskered|"
+    r"long-haired|short-haired|red-haired|grey-haired|gray-haired|white-haired|"
+    r"dark-haired|fair-haired|blonde|blond|brunette|redheaded|red-headed|ponytailed|"
+    r"blue-eyed|green-eyed|brown-eyed|dark-eyed|wide-eyed|hollow-eyed|one-eyed|"
+    r"scarred|freckled|wrinkled|pockmarked|jowly|chiselled|chiseled|square-jawed|"
+    r"hook-nosed|snub-nosed|pale-skinned|dark-skinned|olive-skinned|ruddy|swarthy|"
+    r"handsome|beautiful|pretty|ugly|homely|striking|"
+    r"furred|furry|fur-covered|feathered|scaly|striped|spotted|shaggy|bristled|"
+    r"black-furred|brown-furred|grey-furred|gray-furred|white-furred"
+)
+_PHYS_ADJ_RE = re.compile(r"\b(?:%s)\b" % _PHYS_ADJ, re.IGNORECASE)
+
+# What the character WEARS, CARRIES or DOES. Never a violation, always desirable.
+_WARDROBE_SPLIT_RE = re.compile(
+    r"\b(?:in|wearing|dressed|clad|carrying|holding|armed|with)\b", re.IGNORECASE)
+_WARDROBE_LEAD_RE = re.compile(
+    r"^\s*(?:in|wearing|dressed|clad|carrying|holding|armed)\b", re.IGNORECASE)
+
+
+def _cast_mention_re(trigger: str, name: str) -> Optional[Any]:
+    names = [n for n in (trigger, name) if n]
+    if not names:
+        return None
+    alt = "|".join(re.escape(n) for n in names)
+    return r"\b(?:%s)\b(?:\s+(?:%s)\b)?" % (alt, alt)
+
+
+def _appearance_violations(text: str, trigger: str, name: str = "") -> List[str]:
+    """Appearance claims bound to a cast mention. Empty list = the prose is lawful."""
+    mention = _cast_mention_re(trigger, name)
+    if not mention or not text:
+        return []
+    pat = re.compile(r"%s\s*(?:,\s*|\s+(?:is|as)\s+)((?:a|an|the)\s+[^.;]{0,80})" % mention,
+                     re.IGNORECASE)
+    out: List[str] = []
+    for m in pat.finditer(text):
+        clause = m.group(1)
+        head = re.sub(r"^(?:a|an|the)\s+", "", clause, flags=re.IGNORECASE)
+        if _WARDROBE_LEAD_RE.match(head):
+            continue
+        being = _WARDROBE_SPLIT_RE.split(head, maxsplit=1)[0]
+        if _SPECIES_RE.search(being) or _PHYS_ADJ_RE.search(being):
+            out.append(clause.strip())
+    return out
+
+
+def _neutralise_appearance(text: str, trigger: str, name: str = "",
+                           subject_noun: str = "") -> Tuple[str, List[str]]:
+    """Last resort, after a re-plan has already been spent. Returns (text, cuts).
+
+    TOKEN SCRUB, not excision. Two designs were tried and thrown away first: cutting the
+    appositive ate the sentence's verb ("Bizarro, with a military uniform leans over the
+    map table"), and swapping the whole appositive for the canon noun could not be bounded
+    correctly when the clause held its own comma ("a tall, broad-shouldered man") — it
+    either truncated the clause or swallowed the action after it.
+
+    Replacing the offending WORDS in place cannot do either, because it restructures
+    nothing: the species noun becomes the bundle's canon noun, physical adjectives are
+    deleted, and the verb, the wardrobe and the rest of the sentence are untouchable.
+    """
+    mention = _cast_mention_re(trigger, name)
+    if not mention or not text:
+        return text, []
+    noun = subject_noun or "figure"
+    cuts: List[str] = []
+    win = re.compile(r"(%s\s*(?:,\s*|\s+(?:is|as)\s+)(?:a|an|the)\s+)([^.;]{0,90})" % mention,
+                     re.IGNORECASE)
+
+    def fix(m):
+        lead, body = m.group(1), m.group(2)
+        being = _WARDROBE_SPLIT_RE.split(body, maxsplit=1)[0]
+        tail = body[len(being):]
+        if not (_SPECIES_RE.search(being) or _PHYS_ADJ_RE.search(being)):
+            return m.group(0)
+        cuts.append(being.strip().rstrip(","))
+        fixed = _SPECIES_RE.sub(noun, being)
+        fixed = _PHYS_ADJ_RE.sub("", fixed)
+        # "humanoid fox" carries TWO species tokens and would become "man man".
+        fixed = re.sub(r"\b%s(?:\s+%s\b)+" % (re.escape(noun), re.escape(noun)),
+                       noun, fixed, flags=re.IGNORECASE)
+        fixed = re.sub(r"\s*,\s*(?=,|$)", "", fixed)
+        fixed = re.sub(r"^[\s,]+", "", fixed)
+        fixed = re.sub(r"\s*,\s*", ", ", fixed)
+        fixed = re.sub(r"\s{2,}", " ", fixed).strip() or noun
+        return lead + fixed + ((" " + tail.lstrip()) if tail.strip() else "")
+
+    out = win.sub(fix, text)
+    out = re.sub(r"\ban (?=[bcdfghjklmnpqrstvwxyz])", "a ", out, flags=re.IGNORECASE)
+    out = re.sub(r"\s{2,}", " ", out)
+    out = re.sub(r"\s+([,.])", r"\1", out)
+    return out, cuts
+
+
+# --- the speech law (L13) ---------------------------------------------------------------
+# Measured live on the same film: shot 1 read "He explains the mission, his voice low and
+# authoritative" with no line written anywhere, and the soundscape carried "the quiet murmur
+# of other animals". The <d> gating did its job and kept the voice LoRA OFF — correctly,
+# there were no words — but the prompt still TOLD the model a man was speaking. Given speech
+# to render and no words to render, the audio branch babbles. The owner's verdict on the
+# clip was "talking gibberish".
+#
+# So a shot is SPOKEN (the words are present, which is also what flips the voice on) or it
+# is SILENT (nothing may imply speech). Describing speech without providing it is the one
+# combination that is always wrong.
+
+# `brief` is deliberately NOT `brief(?:s|ing)?`: the first live run flagged "a dimly lit
+# briefing room" three times, because a briefing room is a room. The verb needs an object.
+_SPEECH_VERB_RE = re.compile(
+    r"\b(?:explain(?:s|ing)?|brief(?:s|ed)\b|briefing (?:the|his|her|their|them|us)\b|"
+    r"describ(?:es|ing)|discuss(?:es|ing)|"
+    r"talk(?:s|ing)?|speak(?:s|ing)?|says?|saying|tell(?:s|ing)?|address(?:es|ing)?|"
+    r"order(?:s|ing)?|command(?:s|ing)?|instruct(?:s|ing)?|argu(?:es|ing)|"
+    r"murmur(?:s|ing)?|mutter(?:s|ing)?|whisper(?:s|ing)?|mumbl(?:es|ing)|"
+    r"announc(?:es|ing)|declar(?:es|ing)|recit(?:es|ing)|narrat(?:es|ing)|"
+    r"chat(?:s|ting)?|converse(?:s)?|conversing|reply|replies|replying|"
+    r"answer(?:s|ing)?|ask(?:s|ing)?|shout(?:s|ing)?|call(?:s|ing) out|"
+    r"read(?:s|ing)? (?:it )?(?:aloud|out))\b", re.IGNORECASE)
+
+# Describing a voice is describing speech, even with no verb.
+_VOICE_DESC_RE = re.compile(
+    r"\b(?:his|her|their|the|a|its)\s+voice\b"
+    r"|\bin a (?:low|quiet|soft|hushed|loud|steady|calm|firm|gravelly|hoarse|deep)\s+voice\b"
+    r"|\bvoice (?:low|quiet|soft|steady|calm|firm|even|hard)\b"
+    r"|\bmid-sentence\b|\bmid-speech\b", re.IGNORECASE)
+
+# Speech-shaped AUDIO. The soundscape babbles from these on its own.
+_SPEECH_AUDIO_RE = re.compile(
+    r"\b(?:murmur(?:s|ing)?|chatter(?:ing)?|voices?|conversation(?:s)?|talking|speech|"
+    r"dialogue|whisper(?:s|ing)?|mutter(?:s|ing)?|shouting|shouts|yelling|calls?|"
+    r"chant(?:s|ing)?|singing|song|barked orders?|radio chatter)\b", re.IGNORECASE)
+
+# The soundscape's own way of saying "silent", which the H3 exemplar already uses. Its
+# presence means the model has consciously chosen silence, so the audio cue check is moot.
+_SILENCE_DECLARED_RE = re.compile(
+    r"\bnobody speaks\b|\bno voice is heard\b|\bno one speaks\b|\bno speech\b|"
+    r"\bno dialogue\b|\bnobody says\b", re.IGNORECASE)
+
+# A NEGATED cue is the opposite of a violation — "no voices", "without chatter" and "not a
+# word is spoken" are how a soundscape says silence, and the H3 exemplars use exactly that
+# form. Matching them as speech was the first false positive this law produced: it fired on
+# "Steady rain on stone, a distant gutter running, no voices."
+_NEGATED_CUE_RE = re.compile(
+    r"\b(?:no|not|without|never|nobody|none|silent|silence)\b[\w\s]{0,12}$", re.IGNORECASE)
+
+
+def _unnegated_speech_audio(sound: str) -> Optional[str]:
+    """The first speech cue in `sound` that is NOT negated, or None."""
+    for m in _SPEECH_AUDIO_RE.finditer(sound or ""):
+        if not _NEGATED_CUE_RE.search(sound[:m.start()]):
+            return m.group(0)
+    return None
+
+_SILENCE_SENTENCE = "Nobody speaks and no voice is heard at any point."
+
+# Silent stand-ins, for the mechanical fallback only. Each keeps the beat and removes the
+# claim that a mouth is moving.
+_SILENT_VERB_SWAP = (
+    (re.compile(r"\bexplain(?:s|ing)?\b|\bbrief(?:s|ing)?\b|\bdescrib(?:es|ing)\b"
+                r"|\bdiscuss(?:es|ing)\b|\bgoes over\b", re.IGNORECASE), "studies"),
+    (re.compile(r"\border(?:s|ing)?\b|\bcommand(?:s|ing)?\b|\binstruct(?:s|ing)?\b",
+                re.IGNORECASE), "signals"),
+    (re.compile(r"\bmurmur(?:s|ing)?\b|\bmutter(?:s|ing)?\b|\bwhisper(?:s|ing)?\b"
+                r"|\bmumbl(?:es|ing)\b", re.IGNORECASE), "leans in"),
+    (re.compile(r"\btalk(?:s|ing)?\b|\bspeak(?:s|ing)?\b|\bchat(?:s|ting)?\b"
+                r"|\bargu(?:es|ing)\b|\bconvers(?:es|ing)\b", re.IGNORECASE), "gestures"),
+    (re.compile(r"\bsays?\b|\btell(?:s|ing)?\b|\bannounc(?:es|ing)\b|\bdeclar(?:es|ing)\b"
+                r"|\baddress(?:es|ing)?\b|\brecit(?:es|ing)\b|\bnarrat(?:es|ing)\b"
+                r"|\bask(?:s|ing)?\b|\banswer(?:s|ing)?\b|\brepl(?:y|ies|ying)\b"
+                r"|\bshout(?:s|ing)?\b", re.IGNORECASE), "looks up"),
+)
+
+
+# DIALOGUE IN THE WRONG CLOTHES. The first live run under this law turned up a failure the
+# owner's clip had not shown: four of twelve shots DID carry real spoken lines — "He says,
+# 'Gentlemen, we have a situation'" — written as ordinary prose quotes instead of the <d>
+# form. That is worse than it looks. The words are there, so silencing the shot would throw
+# away the director's line; but no <d> tag means the voice gate never flips, so the trained
+# voice stays off and the audio branch improvises around words it was never handed properly.
+# The fix is a CONVERSION, not a deletion: same words, correct wrapper, gate on.
+_PROSE_DIALOGUE_RE = re.compile(
+    r"(\b(?:says?|said|replies|replied|answers?|answered|asks?|asked|adds?|added|"
+    r"calls?|called|shouts?|shouted|whispers?|whispered|murmurs?|murmured|"
+    r"orders?|ordered|announces?|announced|declares?|declared)\b\s*[,:]?\s*)"
+    r"[\"'“‘]([^\"'”’]{3,220})[\"'”’]")
+
+_JAW_STOP = " His jaw ceases speaking motion and his mouth settles closed."
+
+
+def _has_dialogue(text: str) -> bool:
+    """A <d> tag with actual words in it. An empty tag is not a line."""
+    for m in _D_TAG_RE.finditer(text or ""):
+        if (m.group(1) or "").strip():
+            return True
+    return False
+
+
+def _prose_dialogue(text: str) -> List[str]:
+    """Spoken lines written as prose quotes instead of <d> tags."""
+    if _has_dialogue(text):
+        return []
+    return [m.group(2).strip() for m in _PROSE_DIALOGUE_RE.finditer(text or "")]
+
+
+def _convert_prose_dialogue(text: str) -> Tuple[str, int]:
+    """Rewrap prose-quoted lines as <d>[English] ...</d>. Returns (text, count)."""
+    if _has_dialogue(text):
+        return text, 0
+    n = [0]
+
+    def repl(m):
+        n[0] += 1
+        return "%s<d>[English] %s</d>" % (m.group(1), m.group(2).strip())
+
+    out = _PROSE_DIALOGUE_RE.sub(repl, text or "")
+    if n[0] and "ceases speaking motion" not in out:
+        out = out.rstrip()
+        # A closing </d> already ends the sentence — appending a full stop to it produces
+        # "</d>." and the tag is the punctuation.
+        if not out.endswith((".", "!", "?", ">")):
+            out += "."
+        out += _JAW_STOP
+    return out, n[0]
+
+
+def _speech_violations(desc: str, sound: str) -> List[str]:
+    """Speech implied but never written. Empty list = the shot is honestly silent or spoken."""
+    if _has_dialogue(desc):
+        return []
+    out: List[str] = []
+    quoted = _prose_dialogue(desc or "")
+    if quoted:
+        # The line EXISTS — this is a form error, not a silence error, and it is reported
+        # on its own so the fix is "rewrap it", never "delete it".
+        return ["wrote the spoken line %r as prose quotes instead of <d>[English] ...</d>, "
+                "so the voice never switches on" % quoted[0][:60]]
+    m = _SPEECH_VERB_RE.search(desc or "")
+    if m:
+        out.append("speech verb %r with no spoken line" % m.group(0))
+    m = _VOICE_DESC_RE.search(desc or "")
+    if m:
+        out.append("describes a voice (%r) with no spoken line" % m.group(0))
+    if not _SILENCE_DECLARED_RE.search(sound or ""):
+        cue = _unnegated_speech_audio(sound or "")
+        if cue:
+            out.append("soundscape carries speech (%r) with no spoken line" % cue)
+    return out
+
+
+def _neutralise_speech(desc: str, sound: str) -> Tuple[str, str, List[str]]:
+    """Last resort: stage the shot silent rather than let it babble. (desc, sound, notes)."""
+    notes: List[str] = []
+    out_desc = desc or ""
+    # CONVERT BEFORE SILENCING. A shot whose line is merely in the wrong wrapper keeps its
+    # line — rewrapping flips the voice gate on and the beat survives intact. Silencing it
+    # would delete words the director wrote, which is a worse outcome than the bug.
+    converted, n_conv = _convert_prose_dialogue(out_desc)
+    if n_conv:
+        notes.append("rewrapped %d prose-quoted line(s) as <d>[English] ...</d>, so the "
+                     "voice switches on" % n_conv)
+        return converted, (sound or ""), notes
+    for pat, repl in _SILENT_VERB_SWAP:
+        new = pat.sub(repl, out_desc)
+        if new != out_desc:
+            notes.append("silenced a speech verb")
+            out_desc = new
+    # "his voice low and authoritative" and friends: drop the clause, keep the sentence.
+    new = re.sub(r",\s*(?:his|her|their|its)\s+voice\b[^.;]{0,60}", "", out_desc,
+                 flags=re.IGNORECASE)
+    if new != out_desc:
+        notes.append("dropped a voice description")
+        out_desc = new
+    out_sound = sound or ""
+    if not _SILENCE_DECLARED_RE.search(out_sound):
+        # PER FRAGMENT, not per sentence. A soundscape reads "Boots on wet planks, the quiet
+        # murmur of other animals, rain on canvas." — dropping the whole sentence for one
+        # bad clause throws away the boots and the rain, which were the good half of the
+        # line and exactly what should carry the shot once the voices are gone.
+        dropped = False
+        sentences: List[str] = []
+        for sent in re.split(r"(?<=[.!?])\s+", out_sound):
+            if not sent.strip():
+                continue
+            if not _unnegated_speech_audio(sent):
+                sentences.append(sent.strip())
+                continue
+            frags = [f.strip() for f in sent.split(",")]
+            keep = [f for f in frags if f and not _unnegated_speech_audio(f)]
+            dropped = dropped or len(keep) != len([f for f in frags if f])
+            rebuilt = ", ".join(keep).strip(" .")
+            if rebuilt:
+                sentences.append(rebuilt + ".")
+        if dropped:
+            notes.append("removed speech from the soundscape")
+        out_sound = " ".join(sentences).strip()
+        out_sound = (out_sound + " " + _SILENCE_SENTENCE).strip() if out_sound \
+            else _SILENCE_SENTENCE
+    out_desc = re.sub(r"\s{2,}", " ", out_desc)
+    out_desc = re.sub(r"\s+([,.])", r"\1", out_desc)
+    return out_desc, out_sound, notes
+
+
 def _face_level(raw: Any, desc: str) -> Tuple[str, bool]:
     """Normalise the model's `face` choice. Returns (level, was_overridden).
 
@@ -1073,6 +1494,15 @@ def _normalise_cast(characters: Optional[Iterable[Any]]) -> List[Dict[str, str]]
             "trigger": str(c.get("trigger") or cid).strip(),
             "name": str(c.get("name") or cid).strip(),
             "description": str(c.get("description") or c.get("bio") or "").strip(),
+            # THE ONE APPEARANCE FACT THE BUNDLE ACTUALLY KNOWS. lora-lab writes
+            # `subject_noun` ("man", "woman", "person") and `pronoun` into every
+            # bundle.json, and the planner never saw either — so when a film's premise said
+            # "everyone is an animal" the planner had nothing to contradict it with and
+            # made the trained character a badger. It is deliberately the ONLY appearance
+            # word that crosses: it is canon, it comes from the bundle rather than a guess,
+            # and it is what the mechanical fallback substitutes back in.
+            "subject_noun": str(c.get("subject_noun") or "").strip(),
+            "pronoun": str(c.get("pronoun") or "").strip(),
         })
     return out
 
@@ -1164,10 +1594,25 @@ def default_policy(max_dim: Optional[int] = None) -> Dict[str, Any]:
     validate_storyboard() rejects a policy whose longest edge exceeds `max_dim`, so the
     clamp happens here rather than being discovered at validation time.
     """
-    policy = {
-        "draft": {"quality": "quick", "width": 640, "height": 480, "frames": 49},
-        "final": {"quality": "balanced", "width": 1024, "height": 576, "frames": 121},
-    }
+    # IMPORTED, NOT RESTATED. This held its own copy and the two had drifted:
+    # storyboard.py said Draft 640x448 — what a Quick render actually delivers,
+    # ffprobe-verified — and this said 640x480, a canvas the panel's own engine
+    # registry lists as never delivered. The docstring above claimed both were
+    # "the same shape". The main panel path masked it by keeping the board's
+    # existing policy, so only a direct planner consumer would ever have been
+    # handed the fictional geometry.
+    # NO FALLBACK LITERAL. A second copy of the numbers was kept here "in case
+    # the import fails", and a spare copy of a value that has already drifted
+    # once is not insurance, it is the next drift waiting. storyboard.py is a
+    # hard dependency of this module — coerce_spec() already calls into it for
+    # the schema — so if it cannot be imported the honest outcome is the error,
+    # not a policy nobody will ever notice is stale.
+    _sb = _storyboard_module()
+    if _sb is None or not hasattr(_sb, "default_policy"):
+        raise PlannerError(
+            "cannot import storyboard.default_policy() — the planner takes the "
+            "render policy from storyboard.py and has no copy of its own")
+    policy = _sb.default_policy()
     if max_dim:
         for key in ("draft", "final"):
             p = policy[key]
@@ -1284,6 +1729,19 @@ def coerce_spec(
             if not desc.strip():
                 warnings.append("shot %d was entirely face-hiding and was dropped" % (idx + 1))
                 continue
+        # --- the appearance law (L12) and the speech law (L13) --------------------------
+        # Detected here so a direct caller of coerce_spec() is told, but NOT repaired here:
+        # the plan loop gets to spend one targeted re-plan first, and a model rewrite beats
+        # a regex rewrite every time it works. The mechanical fallback runs only after that
+        # re-plan has been spent — see _enforce_laws().
+        if char:
+            for clause in _appearance_violations(desc, char["trigger"], char.get("name", "")):
+                warnings.append("shot %d described %s's appearance (%r) — a cast character's "
+                                "look belongs to the trained face, not the prompt"
+                                % (idx + 1, char["trigger"], clause[:60]))
+        for problem in _speech_violations(desc, sound):
+            warnings.append("shot %d %s" % (idx + 1, problem))
+
         if _TEXT_KEYWORD_RE.search(desc) and not _DQ_RE.search(desc):
             warnings.append("shot %d names on-screen text but does not put it in double "
                             "quotes — H3 renders described strings as letter-shaped noise"
@@ -1780,9 +2238,74 @@ def _plan_with_session(sess, *, system, user, fb_mode, fb_shot, previous, valida
             meta=dict(meta, warnings=warnings, elapsed_s=round(time.time() - t_start, 2),
                       **_session_meta(sess)))
 
+    # ---- L12 / L13: enforcement, not hope --------------------------------------------
+    # After the plan is VALID, because both laws are about prose quality rather than schema
+    # and a plan that fails the validator has a bigger problem than a species adjective.
+    # Skipped on a per-shot re-roll: the caller is already editing one shot by hand, and
+    # re-planning a re-plan from inside itself is how a 25 s call becomes a 4-minute one.
+    _degraded: List[str] = []
+    if fb_mode != "shot":
+        def _replan_one(current, n, note):
+            resp3 = sess.generate(
+                system, _build_shot_feedback_prompt(current, n, note),
+                max_tokens=min(budget, 1400),
+                temperature=max(0.0, temperature * 0.6),
+                seed=(seed_base + 7 + n) % 100000)
+            meta["attempts"] = int(meta.get("attempts") or 0) + 1
+            obj3 = extract_json_object(resp3.get("text") or "")
+            if obj3 is None:
+                return None
+            fixed, warn3 = _coerce_for_mode(
+                obj3, "shot", n, current, concept=concept, n_shots=n_shots, style=style,
+                cast=cast, board_id=board_id, engine=engine, tier=tier,
+                duration_s=duration_s, seed_base=seed_base, max_dim=max_dim, sb=sb,
+                allow_hidden_faces=allow_hidden_faces)
+            # A re-roll that breaks the SCHEMA is discarded outright — the law fix is not
+            # worth an invalid plan, and the mechanical fallback can still clean the prose.
+            if check(fixed):
+                return None
+            warnings.extend(w for w in warn3 if "law" not in w.lower())
+            return fixed
+        spec = _enforce_laws(spec, cast, warnings, replan=_replan_one, style=style, sb=sb)
+        # The premise check runs LAST and only when the brief named creatures: the
+        # appearance law is what puts it at risk, so it is checked after that law has
+        # finished rewriting shots.
+        _premise = _premise_species(" ".join([concept or "", style or ""]))
+        spec = _enforce_premise(
+            spec, cast, warnings, replan=_replan_one, style=style, sb=sb,
+            premise=_premise)
+        # ---- THE FINAL INVARIANT SCAN ------------------------------------
+        # After the LAST mutation, whichever pass made it. Every pass before
+        # this validated only the condition it owned, so the last repair could
+        # silently undo an earlier guarantee and nothing looked.
+        spec, _degraded = _assert_final_invariants(
+            spec, cast, warnings, style=style, sb=sb, premise=_premise)
+    else:
+        # A RE-ROLL IS A PLAN TOO. The whole enforcement block above is skipped
+        # for fb_mode == "shot" — correctly, because re-planning a re-plan from
+        # inside itself turns a 25 s call into a four-minute one. But skipping
+        # the RE-PLAN also skipped the final SCAN, so a re-rolled shot carrying
+        # an L13 violation came back with ok: true, degraded: false and empty
+        # reasons. The expensive part is the model round trip; scanning what it
+        # returned costs nothing and is exactly the thing that must not be
+        # optional. Mechanical repair still applies, and what cannot be repaired
+        # is reported the same way a full plan reports it.
+        _premise = _premise_species(" ".join([concept or "", style or ""]))
+        spec, _degraded = _assert_final_invariants(
+            spec, cast, warnings, style=style, sb=sb, premise=_premise)
+
+    # A DEGRADED PLAN DOES NOT GET TO SAY ok=True. The final pass reports what it
+    # could not repair — an unlawful shot, or a premise the film never showed —
+    # and stamping success over that is how a known defect reaches a user with a
+    # green tick on it. `ok` here is the PLANNER's metadata, not the top-level
+    # error flag `is_plan_error()` reads, so a degraded plan is still a usable
+    # storyboard the caller can render; it is simply no longer described as
+    # clean, and `degraded_reasons` says why in the words the UI already shows.
     spec["_planner"] = dict(
         meta,
-        ok=True,
+        ok=not _degraded,
+        degraded=bool(_degraded),
+        degraded_reasons=list(_degraded),
         warnings=warnings,
         first_try_errors=first_try,
         first_try_clean=first_try_clean,
@@ -1793,6 +2316,361 @@ def _plan_with_session(sess, *, system, user, fb_mode, fb_shot, previous, valida
         elapsed_s=round(time.time() - t_start, 2),
         **_session_meta(sess)
     )
+    return spec
+
+
+def _scan_laws(spec: Dict[str, Any],
+               cast: Sequence[Dict[str, str]]) -> List[Tuple[int, List[str]]]:
+    """Every shot that breaks L12 or L13, as [(shot_n, [reasons])].
+
+    One entry per SHOT, not per law, because a shot that trips both gets ONE re-plan with
+    both restated — sending the model back twice for the same paragraph wastes 20 s and
+    invites it to fix the second complaint by reintroducing the first.
+    """
+    by_id = {c["id"]: c for c in cast}
+    out: List[Tuple[int, List[str]]] = []
+    for s in spec.get("shots") or ():
+        if not isinstance(s, dict):
+            continue
+        desc = s.get("description") or ""
+        sound = s.get("soundscape") or ""
+        reasons: List[str] = []
+        char = by_id.get(s.get("character_id"))
+        if char:
+            for clause in _appearance_violations(desc, char["trigger"], char.get("name", "")):
+                reasons.append(
+                    "APPEARANCE (L12): you wrote %r. %s is a TRAINED face — you cannot see "
+                    "it and must not describe it. Keep the role, the wardrobe, the action "
+                    "and the emotion; delete the species, the build, the age and the "
+                    "features." % (clause[:70], char["trigger"]))
+        for problem in _speech_violations(desc, sound):
+            reasons.append(
+                "SPEECH (L13): %s. Either write the actual line as <d>[English] ...</d>, or "
+                "stage the shot silent — no speech verbs, no described voice, and no "
+                "murmur/chatter/voices in the soundscape." % problem)
+        if reasons:
+            out.append((int(s.get("n") or 0), reasons))
+    return out
+
+
+def _premise_species(brief: str) -> List[str]:
+    """Species/creature words the BRIEF itself asked for. The film's premise, in the
+    user's own words — never inferred, never the model's."""
+    return sorted({m.group(0).lower() for m in _SPECIES_RE.finditer(brief or "")})
+
+
+# Irregular plurals the species table lists in both forms. A brief that says
+# "wolves" is satisfied by a shot that says "wolf", and vice versa.
+_SPECIES_FORMS = {
+    "wolf": "wolves", "wolves": "wolf", "mouse": "mice", "mice": "mouse",
+    "goose": "geese", "geese": "goose", "ox": "oxen", "oxen": "ox",
+    "sheep": "sheep", "deer": "deer", "fish": "fish",
+}
+
+
+def _premise_term_re(term: str) -> Any:
+    """`fox` -> matches fox/foxes; `wolf` -> matches wolf/wolves."""
+    forms = {term, _SPECIES_FORMS.get(term, "")} - {""}
+    alts = sorted({re.escape(f) for f in forms})
+    return re.compile(r"\b(?:%s)(?:e?s)?\b" % "|".join(alts), re.IGNORECASE)
+
+
+def _premise_terms_present(text: str, premise: Sequence[str]) -> bool:
+    """Does `text` show the premise's OWN creatures?
+
+    It used to be enough for ANY species word to appear anywhere, so a brief
+    asking for a fox was considered preserved by a shot containing a robot —
+    the check passed while the film had quietly become a different film. The
+    premise is the user's words; only the user's words can satisfy it.
+    """
+    return any(_premise_term_re(t).search(text or "") for t in premise)
+
+
+def _premise_missing_terms(spec: Dict[str, Any], cast: Sequence[Dict[str, str]],
+                           premise: Sequence[str]) -> List[str]:
+    """Which of the brief's OWN creatures never made it onto the screen.
+
+    ALL THE TERMS, NOT ANY OF THEM. "the crew are a fox and a badger" was
+    counted as preserved by a film containing only the fox — half the premise
+    silently dropped and the check said fine. Every term the brief names has to
+    appear somewhere the law does not govern.
+
+    THE PRESENCE BUDGET. Requiring all of them unconditionally would be its own
+    lie: a brief naming five species cannot show five in a two-shot film, and
+    the format's own COMPOSITION LIMITS forbid crowding a shot with subjects to
+    make a checker happy. So the requirement is capped by the number of uncast
+    shots — the places a creature can legitimately appear. With room for two,
+    two distinct terms are required; with room for one, one is enough.
+    """
+    if not premise:
+        return []
+    cast_ids = {c["id"] for c in cast}
+    uncast = [s for s in (spec.get("shots") or ())
+              if isinstance(s, dict) and s.get("character_id") not in cast_ids]
+    if not uncast:
+        return []
+    seen, unseen = [], []
+    for term in premise:
+        rx = _premise_term_re(term)
+        (seen if any(rx.search(s.get("description") or "") for s in uncast)
+         else unseen).append(term)
+    budget = min(len(premise), len(uncast))
+    if len(seen) >= budget:
+        return []
+    return unseen
+
+
+def _premise_lost(spec: Dict[str, Any], cast: Sequence[Dict[str, str]],
+                  premise: Sequence[str]) -> bool:
+    """Did the appearance law eat the film's own premise?
+
+    THE OVER-CORRECTION, measured. Told never to give the cast character a species, the
+    planner generalised it to never mentioning species AT ALL: the owner's "main
+    characters are humanoid animals" film came back with zero animal words across twelve
+    shots — every soldier on both sides quietly turned into an ordinary human, which is a
+    different film. Each shot was individually lawful, and the plan was wrong.
+
+    So the check is on the shots the law does NOT govern. If the brief named creatures and
+    not one uncast shot shows them, the premise is gone.
+    """
+    return bool(_premise_missing_terms(spec, cast, premise))
+
+
+def _premise_note(premise: Sequence[str]) -> str:
+    return ("This shot lost the film's premise. The brief asked for %s, and not one shot "
+            "that is free to show them does. Re-write this shot so the characters in it "
+            "are visibly what the concept says they are — the rule about not describing a "
+            "trained cast character applies ONLY to that one character, never to anyone "
+            "else, and it is not a reason to make the rest of the film plain."
+            % ", ".join(premise[:4]))
+
+
+def _law_note(reasons: Sequence[str]) -> str:
+    return ("This shot breaks a hard law of the format. Fix ONLY this, keep everything else "
+            "word for word:\n" + "\n".join("  - %s" % r for r in reasons))
+
+
+def _reassemble_prompt(shot: Dict[str, Any], style: str,
+                       cast: Sequence[Dict[str, str]], sb: Any) -> str:
+    """Rebuild the assembled prompt after a mechanical edit to description/soundscape."""
+    desc = shot.get("description") or ""
+    sound = shot.get("soundscape") or ""
+    music = shot.get("music") or "N/A"
+    camera = shot.get("camera") or "static"
+    settle = shot.get("settle") or ""
+    face = shot.get("face") or "medium"
+    char = None
+    for c in cast:
+        if c["id"] == shot.get("character_id"):
+            char = c
+            break
+    if shot.get("engine") == "h3":
+        if char:
+            return _assemble_h3_prompt(
+                "%s The on-screen subject is %s." % (desc, char["trigger"]),
+                sound, music, camera, settle, face)
+        return _assemble_h3_prompt(desc, sound, music, camera, settle, face)
+    prompt = _assemble_ltx_prompt(desc, sound, style, camera, settle, face)
+    if char:
+        if sb is not None and hasattr(sb, "ensure_trigger"):
+            prompt = sb.ensure_trigger(prompt, char["trigger"])
+        elif not re.search(r"\b%s\b" % re.escape(char["trigger"]), prompt):
+            prompt = "%s %s" % (char["trigger"], prompt)
+    return prompt
+
+
+def _assert_final_invariants(spec, cast, warnings, *, style, sb, premise=()):
+    """The last word: every law, over the whole plan, after the last mutation.
+
+    THE PASSES WERE NOT COMPOSABLE. Each one validated only the condition it
+    owned — the law pass checked laws, the premise pass checked the premise —
+    so the final repair could undo an earlier guarantee and nothing ever looked
+    again. That is a structural hole, not a bug in any one pass: it reopens
+    every time a new pass is added at the end.
+
+    This runs after all of them, mechanically neutralises anything still
+    standing, and — the part that matters — reports honestly when it cannot. A
+    plan that reaches a user with a known violation must say so; the previous
+    behaviour was to ship it under a warning claiming the repair had worked.
+    """
+    remaining = _scan_laws(spec, cast)
+    if not remaining:
+        missing = _premise_missing_terms(spec, cast, premise)
+        if missing:
+            msg = ("PLAN LOST PART OF ITS PREMISE: no shot shows %s. The concept "
+                   "asked for it and the film does not have it."
+                   % ", ".join(missing[:4]))
+            warnings.append(msg)
+            return spec, [msg]
+        return spec, []
+    by_id = {c["id"]: c for c in cast}
+    for n, _reasons in remaining:
+        for s in spec.get("shots") or ():
+            if not isinstance(s, dict) or int(s.get("n") or 0) != n:
+                continue
+            touched = False
+            char = by_id.get(s.get("character_id"))
+            if char:
+                fixed, cuts = _neutralise_appearance(
+                    s.get("description") or "", char["trigger"], char.get("name", ""),
+                    char.get("subject_noun", ""))
+                if cuts:
+                    s["description"] = fixed
+                    touched = True
+            d0, s0 = s.get("description") or "", s.get("soundscape") or ""
+            d2, s2, _ = _neutralise_speech(d0, s0)
+            if (d2, s2) != (d0, s0):
+                s["description"], s["soundscape"] = d2, s2
+                touched = True
+            if touched:
+                s["prompt"] = _reassemble_prompt(s, style, cast, sb)
+                warnings.append("shot %d: final invariant pass had to repair it" % n)
+    still = _scan_laws(spec, cast)
+    degraded: List[str] = []
+    if still:
+        msg = ("PLAN SHIPPED WITH %d UNREPAIRED SHOT(S): %s. This is a defect, not a "
+               "style note - re-roll those shots or re-word the concept."
+               % (len(still), ", ".join(str(n) for n, _ in still)))
+        warnings.append(msg)
+        degraded.append(msg)
+    # THE PREMISE IS AN INVARIANT TOO. This pass checked L12/L13 and stopped,
+    # so a premise repair that failed was still the last word on the plan and
+    # nothing downstream ever re-asked. Now it is asked here, after everything.
+    missing = _premise_missing_terms(spec, cast, premise)
+    if missing:
+        msg = ("PLAN LOST PART OF ITS PREMISE: no shot shows %s. The concept asked "
+               "for it and the film does not have it."
+               % ", ".join(missing[:4]))
+        warnings.append(msg)
+        degraded.append(msg)
+    return spec, degraded
+
+
+def _enforce_premise(spec, cast, warnings, *, replan, premise, style, sb) -> Dict[str, Any]:
+    """One re-plan to put the film's own premise back, if the appearance law ate it.
+
+    Bounded to a SINGLE uncast shot: one example is enough to re-anchor the world, and
+    this runs after every other pass, so it must not turn a 40 s plan into a 4 minute one.
+    """
+    if not _premise_lost(spec, cast, premise):
+        return spec
+    warnings.append("the plan lost the brief's premise (%s) — no uncast shot shows them"
+                    % ", ".join(premise[:4]))
+    cast_ids = {c["id"] for c in cast}
+    target = next((s for s in (spec.get("shots") or ())
+                   if isinstance(s, dict) and s.get("character_id") not in cast_ids), None)
+    if target is None:
+        warnings.append("every shot is cast, so there is nowhere to restate the premise")
+        return spec
+    n = int(target.get("n") or 0)
+    try:
+        candidate = replan(spec, n, _premise_note(premise))
+    except PlannerError as exc:
+        warnings.append("premise re-plan failed (%s)" % exc)
+        return spec
+    if candidate is None:
+        return spec
+    # A REPAIR THAT BREAKS A LAW IS NOT A REPAIR. The replan helper validates
+    # schema only, so a shot that came back with the premise restored could also
+    # come back describing speech it never writes — and it was accepted, under a
+    # warning that said "the premise is back". Measured by the external review:
+    # a returned shot containing "explains the mission" with no dialogue tags.
+    #
+    # The premise is the LESSER law: a film that keeps its animals but babbles is
+    # worse than one that lost its animals, and the animals can be asked for
+    # again in the concept. Neutralise first; if it still violates, REJECT.
+    broke = dict(_scan_laws(candidate, cast))
+    if n in broke:
+        for s_ in candidate.get("shots") or ():
+            if isinstance(s_, dict) and int(s_.get("n") or 0) == n:
+                d0, s0 = s_.get("description") or "", s_.get("soundscape") or ""
+                d2, s2, _ = _neutralise_speech(d0, s0)
+                if (d2, s2) != (d0, s0):
+                    s_["description"], s_["soundscape"] = d2, s2
+                    s_["prompt"] = _reassemble_prompt(s_, style, cast, sb)
+        if n in dict(_scan_laws(candidate, cast)):
+            warnings.append("shot %d: the premise re-plan broke a hard law and was "
+                            "REJECTED - the film keeps its previous shot %d" % (n, n))
+            return spec
+        warnings.append("shot %d: the premise re-plan needed silencing to stay lawful" % n)
+    if _premise_lost(candidate, cast, premise):
+        # Not neutralised mechanically: writing a badger into someone's film is authorship,
+        # not repair, and a wrong guess is worse than the omission. The warning stands and
+        # the user can re-roll the shot themselves.
+        warnings.append("shot %d was re-planned and the premise is still missing — say it "
+                        "again in the concept, or re-roll a shot" % n)
+    else:
+        warnings.append("shot %d: re-planned and the premise is back" % n)
+    return candidate
+
+
+def _enforce_laws(spec, cast, warnings, *, replan, style, sb) -> Dict[str, Any]:
+    """L12/L13: one targeted re-plan per offending shot, then a mechanical fallback.
+
+    `replan(current, n, note) -> spec | None` re-rolls ONE shot through the existing
+    per-shot machinery, which carries every other shot across by reference — so a film
+    whose shot 4 was fixed is byte-identical everywhere else.
+
+    THE CURRENT SPEC IS AN ARGUMENT, and that is not decoration. It was a closure over the
+    caller's `spec` for one draft, which meant every re-plan spliced its fix into the
+    ORIGINAL plan: fix shot 1, then fix shot 2 against the unfixed plan, and shot 1's fix
+    is gone. A live 4-shot film reported "shot 1: re-planned and now obeys", the same for
+    2 and 3, and then failed the final scan on all three — three model calls spent to
+    change nothing. Threading it through is what makes the fixes accumulate.
+
+    The fallback is not optional. A law that is only enforced when the model cooperates is
+    a suggestion, and L12 exists because the model demonstrably does not cooperate.
+    """
+    offenders = _scan_laws(spec, cast)
+    if not offenders:
+        return spec
+    warnings.append("law check: %d shot(s) broke the appearance or speech law on the first "
+                    "pass" % len(offenders))
+    for n, reasons in offenders:
+        try:
+            candidate = replan(spec, n, _law_note(reasons))
+        except PlannerError as exc:
+            candidate = None
+            warnings.append("shot %d: law re-plan failed (%s)" % (n, exc))
+        if candidate is not None:
+            still = dict(_scan_laws(candidate, cast))
+            if n not in still:
+                spec = candidate
+                warnings.append("shot %d: re-planned and now obeys the law" % n)
+                continue
+            # The re-plan came back and broke it again — keep it (it may be better prose)
+            # and let the mechanical pass finish the job.
+            spec = candidate
+        # --- mechanical fallback, second failure only --------------------------------
+        by_id = {c["id"]: c for c in cast}
+        for s in spec.get("shots") or ():
+            if not isinstance(s, dict) or int(s.get("n") or 0) != n:
+                continue
+            char = by_id.get(s.get("character_id"))
+            touched = False
+            if char:
+                fixed, cuts = _neutralise_appearance(
+                    s.get("description") or "", char["trigger"], char.get("name", ""),
+                    char.get("subject_noun", ""))
+                if cuts:
+                    s["description"] = fixed
+                    touched = True
+                    for c in cuts:
+                        warnings.append("shot %d: appearance %r was written for a trained "
+                                        "face and has been neutralised" % (n, c[:60]))
+            d0, s0 = s.get("description") or "", s.get("soundscape") or ""
+            d2, s2, notes = _neutralise_speech(d0, s0)
+            # Keyed on the DIFF, not on `notes`: appending the silence sentence is a real
+            # change that produces no note of its own, and a shot that reached here has
+            # already been flagged — leaving it half-fixed is the worst outcome.
+            if d2 != d0 or s2 != s0:
+                s["description"], s["soundscape"] = d2, s2
+                touched = True
+                for note in (notes or ["staged the shot silent"]):
+                    warnings.append("shot %d: %s (the shot is now honestly silent)"
+                                    % (n, note))
+            if touched:
+                s["prompt"] = _reassemble_prompt(s, style, cast, sb)
     return spec
 
 
