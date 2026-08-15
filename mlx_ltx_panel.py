@@ -8179,6 +8179,18 @@ def ltx_tiers_payload() -> dict:
             LTX_LENGTHS.values(), key=lambda x: x["order"]) if l["offered"]],
         "default_quality": LTX_QUALITY_DEFAULT,
         "default_length": LTX_LENGTH_DEFAULT,
+        # The active generation, SERVER-OWNED, so surfaces that differ by
+        # generation (the i2v Anchor/Inspire pills, the Ingredients gate)
+        # read one authoritative flag instead of parsing a label string.
+        "generation": ACTIVE_MODEL_VERSION,
+        # Inspire (loose-reference i2v) exists only where the engine's
+        # masked-sample re-pin is version-resolved on — 2.5.
+        "inspire_available": ACTIVE_MODEL_VERSION == "ltx25",
+        # Ingredients runs the 2.3-trained IC-LoRA whose in-context transfer
+        # does not graft onto 2.5 layers: refs get ignored at two-stage cost
+        # (owner-reproduced 2026-08-15). Offered only where it works; the
+        # 2.5 adapter swap is one registry row the day Lightricks ships it.
+        "ingredients_available": ltx_generation_serves_ingredients(),
         # The `?` copy the LTX help-dots fill from, on the same four-hop
         # Python-owned path H3's chain-prompt help takes. It rides the LTX
         # bootstrap block rather than a top-level one so everything the LTX
@@ -8219,6 +8231,16 @@ def ltx_tiers_payload() -> dict:
 # to 1080p, no pad filter at all.
 H3_UPSCALE_MODES = ("off", "fit_720p", "fit_1080p")
 H3_UPSCALE_DEFAULT = "fit_720p"
+# ORIENTATION — H3's canvases are all landscape, which left vertical social
+# formats unreachable on this engine (owner-reported 2026-08-15). Portrait is
+# the SAME canvas rotated: 576x1024 is the same 0.59 MP, the same packed-row
+# count and therefore the same wall clock and peak as the shipped 1024x576
+# cell, so every estimate in the tier table stays true by construction. It is
+# a per-render FLIP applied where the cell's geometry is stamped, deliberately
+# NOT a third tier axis: `h3_tier` is the wire format every sidecar carries
+# and a key change would strand replay for every clip ever rendered.
+H3_ORIENTATIONS = ("landscape", "portrait")
+H3_ORIENTATION_DEFAULT = "landscape"
 # Modes H3 can serve. Text = prompt only; Image = FL2VA first-frame
 # conditioning. Everything else (FFLF, Extend, Remix, Character, A2V) is
 # LTX-pipeline-specific and has no H3 equivalent.
@@ -9358,6 +9380,25 @@ def h3_status() -> dict:
             "schema": "h3-live-preview/1",
             "meaningful_at": 1,
             "help": LTX_PREVIEW_HELP,
+            # WHY it is off, so the stage can say it instead of showing
+            # nothing and letting the user conclude the feature is broken —
+            # the same rule the LTX lane's `preview_state` follows. The
+            # panel side is complete (schema, adapter, per-job live dir,
+            # tests); no published H3 runner branch implements
+            # `--live-preview`, so the probe is correctly false and the
+            # honest sentence is "the runner cannot publish frames yet".
+            "reason": (
+                None if (available and h3_live_preview_ready())
+                else "engine_off" if not available
+                else "runner_lacks_flag" if not h3_supports_live_preview()
+                else "setting_off" if not live_preview_setting_on()
+                else "missing_decoder"),
+            "note": (
+                "" if (available and h3_live_preview_ready())
+                else ("This Hailuo H3 runner cannot publish preview frames "
+                      "yet — the panel is ready for them, the runner half "
+                      "is still to come. Renders are unaffected.")
+                if (available and not h3_supports_live_preview()) else ""),
         },
         # Turbo — the 4-step distill LoRA. A separate block rather than a bare
         # flag because "off" has three causes the UI must not conflate: H3
@@ -10247,6 +10288,149 @@ def _analytics_job_secrets(job: dict) -> list:
     return out
 
 
+# ---- Schema v2 render-event vocabulary (spec: analytics_spec_2026-08-11) ---
+#
+# Every addition below obeys the schema's three rules: coarse classes never
+# measurements, closed vocabularies never free text, and no new information
+# about the PERSON — only about the render and the hardware class it ran on.
+# The point (spec F6): version/chip/ram lived on app_boot only, so "failure
+# rate by chip" or "wall time by machine class" needed a per-install join
+# nobody had written and PostHog's UI can't do in a click. Stamping the same
+# four coarse fields on the render events collapses all of it to one-click
+# breakdowns.
+
+# Lower edges of the wall-clock ladder (seconds). Log-spaced at ~1.3-1.5x:
+# sharp enough that a 8:19 -> 12:00 regression moves buckets (the old
+# 5-value duration_bucket could not see it — spec F7), far too coarse to be
+# a timing fingerprint. Numeric so PostHog's percentile aggregation works.
+_ANALYTICS_WALL_LADDER = (15, 30, 45, 60, 90, 120, 180, 240, 300, 420,
+                          600, 900, 1200, 1800, 2400, 3600, 5400)
+
+
+def _analytics_wall_sec_bucket(seconds):
+    """The ladder's lower edge for this wall clock, or None when unknown."""
+    try:
+        s = float(seconds)
+    except (TypeError, ValueError):
+        return None
+    if s <= 0:
+        return None
+    edge = 0
+    for rung in _ANALYTICS_WALL_LADDER:
+        if s >= rung:
+            edge = rung
+        else:
+            break
+    return int(edge)
+
+
+def _analytics_canvas_class(width: int, height: int) -> str:
+    """Coarse canvas grouping by megapixels — the percentile dimension."""
+    try:
+        mp = (int(width) * int(height)) / 1e6
+    except (TypeError, ValueError):
+        return "unknown"
+    if mp <= 0:
+        return "unknown"
+    if mp <= 0.45:
+        return "<=480p"
+    if mp <= 0.66:
+        return "576p"
+    if mp <= 1.1:
+        return "720p"
+    if mp <= 2.3:
+        return "1080p"
+    return "native+"
+
+
+# Closed error taxonomy (spec 2.7). Classification runs on the ORIGINAL
+# error string, locally; only the class leaves the machine. Order is
+# load-bearing: the watchdog marker must win over the generic signal names
+# (issue #44 must never be merged into native_crash), cancel races must win
+# over broad matches, and download failures must win over corrupt-weights
+# so a failed fetch's checksum line doesn't count against installed packs.
+_ANALYTICS_ERROR_CLASSES = (
+    ("metal_watchdog", ("kiogpucommandbuffercallbackerrortimeout",
+                        "caused gpu timeout error")),
+    ("cancelled_race", ("cancel",)),
+    ("oom_jetsam", ("sigkill", "helper died mid-job")),
+    ("native_crash", ("sigsegv", "sigbus", "sigabrt")),
+    ("helper_start_timeout", ("helper failed to start", "handshake")),
+    ("helper_exit", ("pipe closed", "broken pipe", "helper exited",
+                     "exited mid-job")),
+    ("download_failed", ("download", "urlopen", "http error", "gated",
+                         "401", "403", "fetch")),
+    ("model_corrupt", ("corrupt", "checksum", "integrity",
+                       "safetensors header", "hash mismatch")),
+    ("model_missing", ("isn't fully installed", "not downloaded",
+                       "weights are missing", "pack is missing",
+                       "resume install", "hq add-on", "missing (")),
+    ("venv_broken", ("venv", "dangling", "runner missing",
+                     "no module named")),
+    ("disk_full", ("enospc", "no space left")),
+    ("input_missing", ("does not exist", "no longer exists")),
+    ("export_failed", ("ffmpeg", "pipersr")),
+    ("bad_params", ("required", "invalid", "unknown mode",
+                    "unsupported mode", "must be", "out of range")),
+    ("timeout", ("timed out", "timeout")),
+)
+
+
+def _analytics_error_class(raw) -> str:
+    """Map an original error string onto the closed taxonomy."""
+    s = str(raw or "").strip().lower()
+    if not s:
+        return "other"
+    for name, needles in _ANALYTICS_ERROR_CLASSES:
+        if any(n in s for n in needles):
+            return name
+    return "other"
+
+
+def _analytics_error_fingerprint(scrubbed: str) -> str:
+    """12 hex chars of the ALREADY-SCRUBBED first line, sent only when the
+    class is `other`. The server learns "the same unknown error, N times,
+    on these chips" without the text; the readable line stays in the user's
+    own state/usage-log.jsonl for them to paste if they choose."""
+    import hashlib as _hashlib
+    return _hashlib.sha256(str(scrubbed or "").encode("utf-8",
+                                                      "replace")).hexdigest()[:12]
+
+
+def _analytics_lora_kinds(params: dict) -> str:
+    """Closed-vocabulary adapter summary: none|style|character|mixed.
+    COUNT and KIND only — which files is deliberately never sent."""
+    loras = params.get("loras") or []
+    character = bool(params.get("character_id"))
+    if not loras and not character:
+        return "none"
+    if character and loras:
+        return "mixed"
+    return "character" if character else "style"
+
+
+def _analytics_audio_mode(params: dict, engine: str, mode: str) -> str:
+    """Where this render's soundtrack came from, as a closed vocabulary."""
+    if engine == "h3":
+        return "h3_native"
+    if mode == "a2v":
+        return "a2v_dub"
+    if mode == "i2v_clean_audio":
+        return "none"
+    return "joint"
+
+
+def ltx_generation_serves_ingredients(version_id: str | None = None) -> bool:
+    """Can this generation actually run the Ingredients IC-LoRA?
+
+    One predicate, read by the worker's gate, the bootstrap flag the UI
+    keys off, and the tests — so "which generations serve Ingredients"
+    cannot drift between the three the way `q8_available` once did. The
+    day Lightricks publishes a 2.5 adapter this returns True for ltx25 and
+    the registry row is the only other change."""
+    return (version_id or ACTIVE_MODEL_VERSION) != "ltx25"
+
+
 def _analytics_render_tier(params: dict, engine: str) -> str:
     """The user-facing quality/tier selector for this job, per engine.
     LTX calls it `quality` (quick/balanced/standard/high); H3 calls it
@@ -10281,17 +10465,64 @@ def _analytics_render_event(job: dict) -> None:
             frames = int(p.get("frames") or 0)
         except (TypeError, ValueError):
             frames = 0
+        mode = str(p.get("mode") or "unknown")
         props = {
             "engine": engine,
-            "mode": str(p.get("mode") or "unknown"),
+            "mode": mode,
             "tier": _analytics_render_tier(p, engine),
             "duration_bucket": _analytics_duration_bucket(job.get("elapsed_sec")),
             "resolution": f"{width}x{height}" if width and height else "unknown",
             "frames": frames,
+            # ---- Schema v2 context (spec 2.4). The same coarse machine
+            # class app_boot already sends, repeated here so "failure rate
+            # by chip" and "wall time by machine class" are one-click
+            # PostHog breakdowns instead of an unwritten join. No new
+            # information about the person — only the render.
+            "version": _read_local_version() or "unknown",
+            "chip_family": _analytics_chip_family(),
+            "ram_gb": int(round(SYSTEM_RAM_GB)),
+            "os_version": _analytics_os_version(),
+            "canvas_class": _analytics_canvas_class(width, height),
+            # ---- Feature adoption, all closed vocabularies derived from
+            # what actually rendered.
+            "steps": max(0, int(p.get("steps") or 0)),
+            "accel": str(p.get("accel") or "off"),
+            "temporal_mode": str(p.get("temporal_mode") or "native"),
+            "upscale": str(p.get("upscale") or "off"),
+            "upscale_method": str(p.get("upscale_method") or "lanczos"),
+            "schedule_preset": str(p.get("schedule_preset") or "") or "default",
+            "chain_windows": max(1, int(p.get("h3_chain_windows") or 1)),
+            "chain_prompts_used": any(
+                str(x).strip() for x in (p.get("h3_chain_prompts") or [])),
+            "lora_count": len(p.get("loras") or []),
+            "lora_kinds": _analytics_lora_kinds(p),
+            "character_used": bool(p.get("character_id")),
+            "audio_mode": _analytics_audio_mode(p, engine, mode),
         }
+        # wall_sec_bucket only when the wall clock is known — a None would
+        # just pollute the percentile aggregation it exists to feed.
+        wall = _analytics_wall_sec_bucket(job.get("elapsed_sec"))
+        if wall is not None:
+            props["wall_sec_bucket"] = wall
+        if status == "done" and not bool(
+                get_settings().get("analytics_first_render_reported")):
+            # Activation as a one-event funnel (spec D1): the first
+            # successful render this install ever produced, once, same
+            # persisted-flag shape as analytics_install_reported.
+            props["first_render"] = True
+            _settings_set_internal(analytics_first_render_reported=True)
         if status == "failed":
-            props["error_signature"] = _analytics_scrub_text(
+            # The closed class is the leaderboard dimension; the scrubbed
+            # free-text signature ships ONE more transition release (spec
+            # 2.4) and then goes. `other` carries a 12-hex fingerprint of
+            # the scrubbed line so unknown-unknowns can be counted without
+            # transmitting their text.
+            scrubbed = _analytics_scrub_text(
                 job.get("error"), _analytics_job_secrets(job))
+            props["error_class"] = _analytics_error_class(job.get("error"))
+            props["error_signature"] = scrubbed
+            if props["error_class"] == "other":
+                props["error_fingerprint"] = _analytics_error_fingerprint(scrubbed)
         _analytics_capture(
             "render_completed" if status == "done" else "render_failed", props)
     except Exception:
@@ -14207,9 +14438,15 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                  "H3' from the Phosphene sidebar to update the clone; your "
                  "weights stay.")
             _h3_chain_prompts = []
+        # Orientation: flip the resolved cell's canvas for vertical work.
+        _h3_orientation = (f("h3_orientation", H3_ORIENTATION_DEFAULT)
+                           or H3_ORIENTATION_DEFAULT).strip().lower()
+        if _h3_orientation not in H3_ORIENTATIONS:
+            _h3_orientation = H3_ORIENTATION_DEFAULT
         # An LTX schedule preset means nothing on the H3 lane; a leftover
         # value from an engine switch must not ride onto the job.
         _schedule_preset = ""
+        _i2v_ref_mode = "anchor"
     else:
         # A chained shot list means nothing on the LTX lane, and a fallback to
         # LTX above must not leave one on the job.
@@ -14221,6 +14458,8 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         # stack, so there is no slot to allocate and a leftover "user" here
         # would only be a confusing field in the sidecar.
         _h3_lora_slot = H3_LORA_SLOT_DEFAULT
+        # LTX has its own aspect control; H3's orientation must not ride along.
+        _h3_orientation = H3_ORIENTATION_DEFAULT
         # LTX-2.5 distilled schedule preset ("fast" = the graded F6S2 draft
         # schedule, 5+2 forwards, renders a DIFFERENT take). Gated server-side
         # like every H3 rule above: the value rides only when the job will
@@ -14245,6 +14484,27 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                  "only — High tiers run their own two-stage schedule. The "
                  "default runs.")
             _schedule_preset = ""
+        # i2v reference mode: "anchor" (default — the image is animated) or
+        # "inspire" (2.5 only — the image guides subject/style while the
+        # composition re-imagines itself; the engine skips the masked-sample
+        # re-pin ON PURPOSE). Same lane-gating discipline as the preset
+        # above: a value the active lane cannot honor is normalized with a
+        # sentence, never queued into a surprise.
+        _i2v_ref_mode = (f("i2v_reference_mode", "") or "").strip().lower()
+        if _i2v_ref_mode in ("", "anchor"):
+            _i2v_ref_mode = "anchor"
+        elif _i2v_ref_mode != "inspire":
+            push(f"Unknown i2v reference mode {_i2v_ref_mode!r} — anchoring "
+                 "to the image.")
+            _i2v_ref_mode = "anchor"
+        elif ACTIVE_MODEL_VERSION != "ltx25":
+            push("Inspire is an LTX-2.5 mode — this install renders "
+                 f"{model_version()['label']}, so the image is anchored.")
+            _i2v_ref_mode = "anchor"
+        elif f("mode", "t2v") not in ("i2v", "i2v_clean_audio"):
+            # Inert without a reference image; a leftover pill from a mode
+            # switch resets quietly rather than logging noise on every t2v.
+            _i2v_ref_mode = "anchor"
     if _h3_turbo and _h3_steps:
         # The adapter is distilled FOR 4 sigma points. Honouring a Steps pill on
         # top of it would quietly render a configuration nobody validated, so
@@ -14298,6 +14558,9 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             # would look wired, post cleanly, and every render would silently
             # come back on the Turbo branch.
             "h3_lora_slot": _h3_lora_slot,
+            # Portrait flips the resolved cell's canvas (same pixel budget,
+            # same cost). SAME allowlist trap as every key in this dict.
+            "h3_orientation": _h3_orientation,
             # Per-window prompts for a chained length: one entry per 5 s
             # window, in render order, "" = "use the main prompt for this
             # window". Already clamped to the resolved cell's window count
@@ -14313,6 +14576,10 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             # it. SAME allowlist trap as every key in this dict: leave it out
             # and the Speed control looks wired and silently no-ops.
             "schedule_preset": _schedule_preset,
+            # i2v reference mode: "anchor" (animate the image) or "inspire"
+            # (2.5: guide subject/style, re-imagine the composition). Already
+            # lane-gated above. SAME allowlist trap as every key here.
+            "i2v_reference_mode": _i2v_ref_mode,
             "prompt": prompt,
             "negative_prompt": f("negative_prompt", ""),
             "width": max(32, int(f("width", str(default_w)) or default_w)),
@@ -14474,8 +14741,14 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                  "to spend it on your LoRA. Rendering at this shape's own "
                  f"{_h3_steps or H3_TIERS[_h3_tier]['steps']} sigma points.")
         _tier_cfg = H3_TIERS[_h3_tier]
-        job["params"]["width"] = _tier_cfg["width"]
-        job["params"]["height"] = _tier_cfg["height"]
+        # Portrait = the cell's own canvas, rotated. Identical pixel count and
+        # packed-row count, so the tier's measured estimate stays honest.
+        if _h3_orientation == "portrait":
+            job["params"]["width"] = _tier_cfg["height"]
+            job["params"]["height"] = _tier_cfg["width"]
+        else:
+            job["params"]["width"] = _tier_cfg["width"]
+            job["params"]["height"] = _tier_cfg["height"]
         # DELIVERED frames — for a chained tier that is the stitched total, not
         # the per-window count, so the queue card and the duration line read the
         # clip the user actually gets. run_h3_job_inner splits it back out.
@@ -17079,6 +17352,27 @@ def run_job_inner(job: dict) -> None:
         # (skip_stage_2=True), and the two-field prompt. Default off; no other
         # mode changes. Recipe matches the public Space
         # ltx-community/ltx-2.3-ingredients-distilled.
+        #
+        # GENERATION GATE (2026-08-15, owner-reproduced). The adapter is
+        # 2.3-trained and Lightricks has published no 2.5 Ingredients
+        # IC-LoRA — their whole 2.5 IC-LoRA catalogue is a pixel upscaler.
+        # On 2.5 its in-context transfer does not graft onto the layers: the
+        # reference sheet rides at strength 0.0 BY DESIGN (at 1.0 the model
+        # copies the sheet verbatim — measured), so when the adapter
+        # contributes nothing the refs are simply absent and the render
+        # collapses to prompt-only. The owner's report is exactly that: an
+        # unrelated subject, produced at two-stage cost. Refuse at the door
+        # with the reason instead of burning ~11 GPU-minutes on noise.
+        if not ltx_generation_serves_ingredients():
+            raise RuntimeError(
+                "Ingredients needs the LTX-2.3 generation. Its IC-LoRA is "
+                "2.3-trained and Lightricks has not published a 2.5 one, so "
+                "on "
+                f"{model_version()['label']} the reference sheet is ignored "
+                "and you get an unrelated clip at full two-stage cost. For "
+                "reference-guided work on 2.5, use Image mode with Inspire "
+                "— or install the 2.3 pack from the Train tab for "
+                "Ingredients.")
         try:
             image_paths = json.loads(p.get("ingredient_images_json") or "[]")
             if not isinstance(image_paths, list):
@@ -17906,6 +18200,11 @@ def run_job_inner(job: dict) -> None:
                 "seed": p["seed"],
                 "image": p["image"] if mode != "t2v" else None,
                 "loras": hq_loras,
+                # Inspire on the HQ lane — this is the lane where the owner
+                # first hit the loose-reference behavior (High / High·720p),
+                # because res_2s re-noises the anchor unmasked. Anchored
+                # renders (the default) now hold the image here for real.
+                "loose_reference": (p.get("i2v_reference_mode") == "inspire"),
                 # Q8 tuning knobs honor per-job overrides from the form.
                 # Defaults updated 2026-05-12 to match the 5-min sweet
                 # spot recovered from the May-10 clip 11–17 cluster
@@ -18039,6 +18338,11 @@ def run_job_inner(job: dict) -> None:
                 # make_job; the helper forwards it to generate_two_stage,
                 # whose resolver validates it before any GPU is spent.
                 "schedule_preset": p.get("schedule_preset") or "",
+                # Inspire: the engine skips its masked-sample re-pin so the
+                # reference guides subject/style while the composition is
+                # re-imagined. Lane-gated in make_job; the helper only
+                # forwards it when true.
+                "loose_reference": (p.get("i2v_reference_mode") == "inspire"),
                 "memory_policy": memory_plan["effective"],
                 "vae_full_decode_max_frames": memory_plan["full_decode_max_frames"],
                 # Sharp/PiperSR is a panel-side post-render pass. Do not pass it
@@ -32942,6 +33246,33 @@ HTML = r"""<!doctype html>
                 <div class="picker-recent-strip" id="picker_recent_image"></div>
               </div>
             </div>
+            <!-- HOW the reference is used. Anchor = the image IS frame one
+                 and gets animated (what i2v has always promised). Inspire =
+                 the image guides subject, style and palette while the shot
+                 re-composes — the behavior High/High·720p produced BY
+                 ACCIDENT until v4.0.7 anchored them for real, kept as an
+                 explicit choice because the owner graded the accident as
+                 worth having. 2.5 only (server-owned flag); the row hides
+                 itself on 2.3 and on H3. -->
+            <div class="cz-control" id="i2vRefModeRow" data-ltx-only hidden
+                 style="margin-top:10px">
+              <div class="cz-label">Reference use
+                <span class="cz-label-hint">anchor the image, or take it as inspiration</span>
+              </div>
+              <input type="hidden" name="i2v_reference_mode" id="i2v_reference_mode" value="anchor">
+              <div class="pill-group cols-2" id="i2vRefModeGroup">
+                <button type="button" class="pill-btn active" data-i2v-ref="anchor"
+                        title="Your image is frame one and the clip animates it. This is what Image mode has always promised — and on High tiers it is a v4.0.7 fix.">
+                  <span>Anchor</span>
+                  <span class="sub">animate this image</span>
+                </button>
+                <button type="button" class="pill-btn" data-i2v-ref="inspire"
+                        title="The image guides subject, style and palette, but the shot composes itself — you will NOT see your picture as frame one. Good for 'this character, new scene'.">
+                  <span>Inspire</span>
+                  <span class="sub">new shot from it</span>
+                </button>
+              </div>
+            </div>
           </div>
 
           <!-- Keyframe interpolation — FFLF or a dynamic 3–8-anchor shot. -->
@@ -33748,6 +34079,30 @@ HTML = r"""<!doctype html>
                  .cz-control / .cz-label / .pill-group grammar as every LTX
                  control below it, folded away on any other engine by
                  data-h3-only (rule emitted from the ENGINES table). -->
+
+            <!-- H3 orientation. Every H3 canvas ships landscape, which made
+                 vertical social formats unreachable on this engine. Portrait
+                 is the SAME canvas rotated — identical pixel count, identical
+                 packed rows, so the tier chip's measured estimate stays true
+                 and no new cell is invented. Applied where make_job stamps the
+                 cell's geometry; `h3_tier` (the wire format every sidecar
+                 carries) is untouched. -->
+            <div class="cz-control" id="h3OrientationRow" data-h3-only>
+              <div class="cz-label">Orientation
+                <span class="cz-label-hint">portrait rotates the tier's canvas — same cost</span>
+              </div>
+              <input type="hidden" name="h3_orientation" id="h3_orientation" value="landscape">
+              <div class="pill-group cols-2" id="h3OrientationGroup">
+                <button type="button" class="pill-btn active" data-h3-orientation="landscape"
+                        title="The tier's canvas as trained and measured — e.g. 1024×576.">
+                  <span>Landscape</span><span class="sub" id="h3OrientLandSub">16:9-ish</span>
+                </button>
+                <button type="button" class="pill-btn" data-h3-orientation="portrait"
+                        title="The same canvas rotated for vertical/social — e.g. 576×1024. Same pixel budget, same wall clock.">
+                  <span>Portrait</span><span class="sub" id="h3OrientPortSub">vertical / social</span>
+                </button>
+              </div>
+            </div>
 
             <!-- H3 export canvas. Most tiers render 12:7 (768×448), which is
                  neither 720p nor 1080p; this runs the SAME lanczos-fit + pad +
@@ -41426,6 +41781,12 @@ function updateCustomizeSummary() {
   if (typeof schedPresetActive === 'function' && schedPresetActive()) {
     parts.push('fast draft · different take');
   }
+  // Inspire changes what the reference DOES; the folded-away summary owes
+  // that sentence as much as it owes the schedule.
+  if (typeof i2vInspireActive === 'function' && i2vInspireActive()
+      && currentMode === 'i2v') {
+    parts.push('inspire · new shot from the image');
+  }
   if ((document.getElementById('temporal_mode')?.value || 'native') === 'fps12_interp24') {
     parts.push('12→24fps long clip');
   }
@@ -41481,8 +41842,41 @@ document.querySelectorAll('#modeGroup .pill-btn').forEach(b => b.onclick = () =>
 // setMode keeps the parent Remix pill lit + this sub-pill active + the section
 // shown. Wired here alongside the #modeGroup handler so both rows behave alike.
 document.querySelectorAll('#remixSubGroup .pill-btn').forEach(b => b.onclick = () => {
+  // Ingredients needs the 2.3 generation: its IC-LoRA is 2.3-trained and no
+  // 2.5 one exists, so on 2.5 the references are silently ignored and the
+  // clip costs full two-stage time (owner-reproduced 2026-08-15). Say that
+  // instead of letting someone spend 11 GPU-minutes finding out. The server
+  // refuses too — this is the polite half.
+  if (b.dataset.remix === 'ingredients'
+      && (BOOT.ltx || {}).ingredients_available === false) {
+    if (typeof phosToast === 'function') {
+      phosToast('Ingredients needs the LTX-2.3 generation — its reference '
+        + 'adapter has no 2.5 release yet, so on 2.5 your references would '
+        + 'be ignored. For reference-guided work here, use Image mode with '
+        + 'Inspire.', { kind: 'danger' });
+    }
+    return;
+  }
   setMode(b.dataset.remix);
 });
+// Paint the Ingredients chip as unavailable on a generation that cannot
+// serve it, so the state is visible before the click.
+(function _markIngredientsAvailability() {
+  const apply = () => {
+    if ((BOOT.ltx || {}).ingredients_available !== false) return;
+    const chip = document.querySelector('#remixSubGroup [data-remix="ingredients"]');
+    if (!chip) return;
+    chip.classList.add('disabled');
+    chip.title = 'Needs LTX-2.3 — the 2.5 reference adapter is not published '
+               + 'yet. Use Image mode with Inspire for reference-guided work '
+               + 'on 2.5.';
+    const sub = chip.querySelector('.mc-sub');
+    if (sub) sub.textContent = 'needs LTX-2.3';
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', apply);
+  } else { apply(); }
+})();
 document.querySelectorAll('#qualityGroup .pill-btn').forEach(b => b.onclick = () => {
   // Disabled-but-actionable: the High pill becomes a "click to install Q8"
   // CTA when Q8 is missing. Routes to the Models modal so the user lands
@@ -41739,6 +42133,40 @@ function setH3Upscale(mode) {
 document.querySelectorAll('#h3UpscaleGroup [data-h3-upscale]').forEach(b => {
   b.onclick = () => setH3Upscale(b.dataset.h3Upscale);
 });
+
+// H3 orientation — a per-render flip of the resolved cell's canvas, not a new
+// tier. The chips' estimates stay valid because a rotation changes no pixel
+// count. Persisted like the other H3 sub-preferences.
+function setH3Orientation(v) {
+  const val = (v === 'portrait') ? 'portrait' : 'landscape';
+  const inp = document.getElementById('h3_orientation');
+  if (inp) inp.value = val;
+  document.querySelectorAll('#h3OrientationGroup [data-h3-orientation]').forEach(b =>
+    b.classList.toggle('active', b.dataset.h3Orientation === val));
+  try { localStorage.setItem('phos_h3_orientation', val); } catch (e) {}
+  _h3SyncOrientationSubs();
+  if (typeof updateDerived === 'function') { try { updateDerived(); } catch (e) {} }
+}
+// Say the ACTUAL canvases the current cell would produce, both ways round.
+function _h3SyncOrientationSubs() {
+  const cell = (typeof h3CurrentCell === 'function') ? h3CurrentCell() : null;
+  const land = document.getElementById('h3OrientLandSub');
+  const port = document.getElementById('h3OrientPortSub');
+  if (!cell) return;
+  if (land) land.textContent = `${cell.width}×${cell.height}`;
+  if (port) port.textContent = `${cell.height}×${cell.width} · vertical`;
+}
+document.querySelectorAll('#h3OrientationGroup [data-h3-orientation]').forEach(b => {
+  b.onclick = () => setH3Orientation(b.dataset.h3Orientation);
+});
+(function _restoreH3Orientation() {
+  let v = 'landscape';
+  try { v = localStorage.getItem('phos_h3_orientation') || 'landscape'; } catch (e) {}
+  const apply = () => setH3Orientation(v);
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', apply);
+  } else { apply(); }
+})();
 
 // Sampler depth for an H3 render. 'auto' = the tier's tuned count (stamped in
 // H3_TIERS); a number overrides it for every window of the job. Server-side
@@ -43636,6 +44064,11 @@ function updateDerived() {
   const inI2V = mode === 'i2v' || mode === 'i2v_clean_audio';
   const inImageFlow = inI2V || currentMode === 'keyframe';
   document.getElementById('imageSection').classList.toggle('show', inI2V && currentMode !== 'keyframe');
+  // The reference-use row lives inside that section and follows the same
+  // mode question, plus the server's 2.5-only availability flag.
+  if (typeof _applyI2vRefModeVisibility === 'function') {
+    try { _applyI2vRefModeVisibility(); } catch (_) {}
+  }
   document.getElementById('extendSection').classList.toggle('show', currentMode === 'extend');
   // Colorize (restore) shows its own source-video picker. Unlike Extend it
   // KEEPS the sizing + quick-metrics rows below (the source's own dims/length
@@ -46007,6 +46440,11 @@ async function loadParams() {
   if (typeof setSchedPreset === 'function') {
     try { setSchedPreset(p.schedule_preset || ''); } catch (e) {}
   }
+  // Reference use round-trips from day one; always applied, so a clip
+  // rendered on Anchor clears a leftover Inspire.
+  if (typeof setI2vRefMode === 'function') {
+    try { setI2vRefMode(p.i2v_reference_mode || 'anchor'); } catch (e) {}
+  }
   if (p.temporal_mode) setTemporalMode(p.temporal_mode);
   if (p.upscale) setUpscale(p.upscale);
   if (p.upscale_method) setUpscaleMethod(p.upscale_method);
@@ -46251,6 +46689,9 @@ async function loadParams() {
   if (_eng === 'h3') {
     if (typeof setH3Upscale === 'function' && p.h3_upscale) {
       try { setH3Upscale(p.h3_upscale); } catch (e) {}
+    }
+    if (typeof setH3Orientation === 'function') {
+      try { setH3Orientation(p.h3_orientation || 'landscape'); } catch (e) {}
     }
     if (typeof setH3Turbo === 'function') {
       try { setH3Turbo(!!Number(p.h3_turbo || 0)); } catch (e) {}
@@ -46521,6 +46962,9 @@ function renderOutputInfoBody(path, data) {
   if (p.schedule_preset && p.schedule_preset !== 'default') {
     genRows.push(`<dt>Schedule</dt><dd>${escapeHtml(String(p.schedule_preset))} · draft schedule — a different take than Tuned</dd>`);
   }
+  if (p.i2v_reference_mode === 'inspire') {
+    genRows.push(`<dt>Reference use</dt><dd>Inspire — the image guided subject and style; the shot was composed fresh (not animated from it)</dd>`);
+  }
   if (accelMetrics && p.accel && p.accel !== 'off') {
     const cachedCount = accelMetrics.cached_steps_count || 0;
     const totalSteps = accelMetrics.total_steps || p.steps || 0;
@@ -46736,6 +47180,7 @@ document.getElementById('genForm').addEventListener('submit', async e => {
     fd.set('character_id', '');      // character LoRAs are an LTX construct
     fd.set('no_voice', '');          // only ever meant "skip the character's voice LoRA"
     fd.set('schedule_preset', '');   // an LTX-2.5 distilled schedule; H3 has its own axes
+    fd.set('i2v_reference_mode', 'anchor');  // an LTX-2.5 sampler behaviour
     // `loras` IS NOT SCRUBBED, and the line that used to scrub it said "the H3
     // runner stacks nothing" — true when it was written, false since the H3
     // LoRA import shipped in 3.7.0. H3 takes ONE adapter from its own family
@@ -49792,9 +50237,22 @@ function renderNowPreview(s, prog, previewData) {
     missing_decoder: { label: 'Install it', run: 'openModelsModal()' },
     stale_engine: null,
   };
-  const speaks = s.running && !prev && previewServesThisJob
+  // H3 gets the SAME courtesy, from its own bootstrap block. Its absence has
+  // a different cause and therefore a different sentence: the panel side is
+  // complete (schema, adapter, per-job live dir) but no published H3 runner
+  // implements `--live-preview`, so nothing can publish frames yet. Silence
+  // here read as "the theater preview is broken on MiniMax" — it is not
+  // broken, it is not built on that half yet, and saying so is the fix
+  // available today. No CTA: there is nothing for the user to click.
+  const h3state = ((BOOT.h3 || {}).live_preview) || {};
+  const h3Modes = ((BOOT.h3 || {}).modes) || [];
+  const h3Speaks = s.running && !prev && jobEngine === 'h3'
+                && Array.isArray(h3Modes) && h3Modes.indexOf(jobMode) !== -1
+                && h3state.on !== true && !!h3state.note;
+  const speaks = (s.running && !prev && previewServesThisJob
               && Object.prototype.hasOwnProperty.call(PREVIEW_ABSENCE_CTA,
-                                                      pstate.reason);
+                                                      pstate.reason))
+              || h3Speaks;
   let miss = document.getElementById('nowPreviewMissing');
   if (speaks) {
     if (!miss) {
@@ -49803,8 +50261,8 @@ function renderNowPreview(s, prog, previewData) {
       miss.className = 'now-preview-missing';
       box.parentNode.insertBefore(miss, box.nextSibling);
     }
-    const cta = PREVIEW_ABSENCE_CTA[pstate.reason];
-    miss.innerHTML = escapeHtml(pstate.note || '') + (cta
+    const cta = h3Speaks ? null : PREVIEW_ABSENCE_CTA[pstate.reason];
+    miss.innerHTML = escapeHtml((h3Speaks ? h3state.note : pstate.note) || '') + (cta
       ? ` <a href="#" onclick="event.preventDefault();${cta.run}">`
         + escapeHtml(cta.label) + '</a>'
       : '');
@@ -50343,6 +50801,52 @@ function _applySchedPresetRowVisibility() {
     if (tunedSub) tunedSub.textContent = cell.eta || 'default schedule';
   }
 }
+// ---- i2v reference use (Anchor / Inspire) ----------------------------------
+// Server-owned availability: BOOT.ltx.inspire_available is true only where the
+// engine's masked-sample re-pin is version-resolved on (2.5). The UI never
+// parses a generation label.
+function setI2vRefMode(v) {
+  const val = (v === 'inspire') ? 'inspire' : 'anchor';
+  const inp = document.getElementById('i2v_reference_mode');
+  if (inp) inp.value = val;
+  document.querySelectorAll('#i2vRefModeGroup [data-i2v-ref]').forEach(b =>
+    b.classList.toggle('active', (b.dataset.i2vRef || '') === val));
+  if (typeof updateCustomizeSummary === 'function') {
+    try { updateCustomizeSummary(); } catch (e) {}
+  }
+}
+function i2vInspireActive() {
+  return (document.getElementById('i2v_reference_mode') || {}).value === 'inspire';
+}
+function _applyI2vRefModeVisibility() {
+  const row = document.getElementById('i2vRefModeRow');
+  if (!row) return;
+  const isI2v = (currentMode === 'i2v');
+  const offered = !!((BOOT.ltx || {}).inspire_available)
+    && isI2v && document.body.dataset.engine !== 'h3';
+  row.hidden = !offered;
+  // A mode the current lane cannot honor must not ride on the form — the
+  // server drops it anyway (make_job gates it); this keeps UI and wire
+  // agreeing. Direct clear, no setter (avoids a summary repaint loop).
+  if (!offered && i2vInspireActive()) {
+    const inp = document.getElementById('i2v_reference_mode');
+    if (inp) inp.value = 'anchor';
+    document.querySelectorAll('#i2vRefModeGroup [data-i2v-ref]').forEach(b =>
+      b.classList.toggle('active', (b.dataset.i2vRef || '') === 'anchor'));
+  }
+}
+function _wireI2vRefModePills() {
+  const group = document.getElementById('i2vRefModeGroup');
+  if (!group || group.dataset.wired === '1') return;
+  group.dataset.wired = '1';
+  group.querySelectorAll('[data-i2v-ref]').forEach(b => {
+    b.addEventListener('click', (e) => {
+      e.preventDefault();
+      setI2vRefMode(b.dataset.i2vRef || 'anchor');
+    });
+  });
+}
+
 function _wireSchedPresetPills() {
   const group = document.getElementById('schedPresetGroup');
   if (!group || group.dataset.wired === '1') return;
@@ -50905,6 +51409,10 @@ document.addEventListener('DOMContentLoaded', () => {
   // settles on every renderTierAxes('ltx') repaint, including boot's.
   if (typeof _wireSchedPresetPills === 'function') {
     try { _wireSchedPresetPills(); } catch (e) {}
+  }
+  // Bind the reference-use pills; visibility follows mode in updateDerived.
+  if (typeof _wireI2vRefModePills === 'function') {
+    try { _wireI2vRefModePills(); } catch (e) {}
   }
   // Apply correct quality-strip visibility based on whether a character
   // is already selected (e.g. restored from sidecar / Load Params).
