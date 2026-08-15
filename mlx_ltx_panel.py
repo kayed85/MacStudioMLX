@@ -12115,8 +12115,24 @@ class WarmHelper:
     # normal prompt is untouched. This is NOT applied pre-emptively — it
     # costs conditioning headroom on very long prompts, so it only arms
     # itself after this machine has actually proven it needs it.
+    # The watchdog does NOT report one code. It reports whichever one fits how
+    # it decided to kill you, and the choice varies by chip and macOS build:
+    #   Timeout                 — the classic long-command-buffer kill (M1 Max, #44)
+    #   ImpactingInteractivity  — same kill, named for the UI stall it caused,
+    #                             which is what an M2 Max on macOS 26.5.2 emits
+    #                             (#59, root-caused by @ybekocak with the fix
+    #                             confirmed on their machine)
+    # Matching only the first meant the mitigation below existed, was correct,
+    # and never armed on the second — the render just died with SIGABRT and the
+    # error text told the user to open an issue about a retry that could not
+    # happen. Deliberately NOT the whole kIOGPUCommandBufferCallbackError family:
+    # OutOfMemory and InnocentVictim are different failures and a shorter prompt
+    # is not their fix.
     _METAL_TIMEOUT_RX = re.compile(
-        r"kIOGPUCommandBufferCallbackErrorTimeout|Caused GPU Timeout Error",
+        r"kIOGPUCommandBufferCallbackErrorTimeout"
+        r"|kIOGPUCommandBufferCallbackErrorImpactingInteractivity"
+        r"|Caused GPU Timeout Error"
+        r"|Impacting Interactivity",
         re.IGNORECASE)
     # Anything proving the run got PAST prompt encoding. If the watchdog
     # fires later than that (denoise, decode), a shorter prompt encode is
