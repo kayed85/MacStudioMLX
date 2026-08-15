@@ -3382,6 +3382,33 @@ def _fetch_raw_text(url: str, timeout: int = 10) -> str | None:
         return None
 
 
+# The SHA this PROCESS loaded, captured once and never refreshed.
+#
+# v4.0.5 built stale-process detection on `_VERSION_STATE["local_sha"]`,
+# described in its own docstring as "the boot snapshot". It is not one:
+# `_check_remote_once()` calls `_detect_local_install_state()` at the top of
+# every poll — deliberately, so a tree that was dirty at boot and is clean now
+# stops being suppressed without a restart. That re-detect also refreshes
+# local_sha, so within one poll interval local_sha equals disk again and
+# `disk_sha != boot_sha` is false forever.
+#
+# Net effect: the "Restart to finish update" pill could never fire. Every user
+# who pulled an update was told nothing, ran the old code, and concluded the
+# update had done nothing — reported 2026-08-15 by the owner, who pulled 4.3.0
+# and saw a 4.0.9 UI for seven hours.
+#
+# This is deliberately captured at IMPORT, not inside a function that anything
+# else might call again.
+_BOOT_HEAD_SHA: str | None = None
+
+
+def _capture_boot_head() -> None:
+    """Record this process's HEAD exactly once. Idempotent by design."""
+    global _BOOT_HEAD_SHA
+    if _BOOT_HEAD_SHA is None:
+        _BOOT_HEAD_SHA = _git_capture(["rev-parse", "HEAD"])
+
+
 def _detect_local_install_state() -> None:
     """Populate _VERSION_STATE.local_* fields. Called once at startup; result
     doesn't change while the panel is running (no auto-pull on the user's
@@ -3547,6 +3574,7 @@ def version_check_loop() -> None:
     """Daemon thread entry: detect local state once, then poll the remote
     every _VERSION_POLL_INTERVAL_SEC. First poll happens after a 30s
     delay so we don't compete with boot-time work."""
+    _capture_boot_head()          # BEFORE anything can re-detect local state
     _detect_local_install_state()
     time.sleep(_VERSION_STARTUP_DELAY_SEC)
     while True:
@@ -3572,7 +3600,9 @@ def get_version_state() -> dict:
     with _VERSION_LOCK:
         snap = dict(_VERSION_STATE)
     disk_sha = _git_capture(["rev-parse", "HEAD"])
-    boot_sha = snap.get("local_sha")
+    # _BOOT_HEAD_SHA, never snap["local_sha"]: the latter is re-detected on
+    # every remote poll and therefore always agrees with disk.
+    boot_sha = _BOOT_HEAD_SHA
     snap["stale_process"] = bool(disk_sha and boot_sha and disk_sha != boot_sha)
     if snap["stale_process"]:
         snap["disk_short"] = disk_sha[:7]
@@ -25493,6 +25523,8 @@ HTML = r"""<!doctype html>
     .ub-star[hidden] { display: none; }
     .ub-star a { color: #f0b940; font-weight: 600; }
     .ub-sep { opacity: .4; }
+    .star-link { color: var(--ink-500, #98a0b3); }
+    .star-link:hover { color: #f0b940; }
     .pill-update {
       color: var(--warning, #f0b940);
       border-color: rgba(240,185,64,0.55);
@@ -33079,6 +33111,7 @@ HTML = r"""<!doctype html>
 <symbol id="ph-device-mobile" viewBox="0 0 256 256"><rect x="64" y="24" width="128" height="208" rx="16" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="104" y1="56" x2="152" y2="56" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="ph-user-plus" viewBox="0 0 256 256"><circle cx="108" cy="100" r="60" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="200" y1="116" x2="248" y2="116" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="224" y1="92" x2="224" y2="140" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M16,208c20.83-36.04,57.06-60,104-60s83.17,23.96,104,60" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="ph-music-notes" viewBox="0 0 256 256"><circle cx="180" cy="184" r="28" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><circle cx="52" cy="200" r="28" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><polyline points="80 200 80 56 208 24 208 184" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="80" y1="88" x2="208" y2="56" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="ph-star" viewBox="0 0 256 256"><path d="M132.4,190.7l50.4,32.5a8,8,0,0,0,12.1-8.7l-15.1-57.7a8,8,0,0,1,2.7-8.3l45.6-37.5a8,8,0,0,0-4.6-14.2l-59.5-3.8a8,8,0,0,1-7-5.1L134.6,31.5a8,8,0,0,0-14.9,0L97.3,87.9a8,8,0,0,1-7,5.1L30.8,96.8a8,8,0,0,0-4.6,14.2l45.6,37.5a8,8,0,0,1,2.7,8.3L60.5,209a8,8,0,0,0,12.1,8.7l50.4-32.5A8,8,0,0,1,132.4,190.7Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="ph-x-brand" viewBox="0 0 24 24"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" fill="currentColor"/></symbol>
 <!-- ==== ENGINE MARKS ====================================================
      One per row of the ENGINES table (`mark`). Original stroked monograms,
@@ -33220,6 +33253,16 @@ HTML = r"""<!doctype html>
        single right-corner cluster. Subtle pulsing glow uses the
        Phosphene gradient (blue → violet) so it pulls the eye without
        being loud. Tooltip on hover; the link itself opens a new tab. -->
+  <!-- The star has a PERMANENT home, not only the one-time row in the update
+       banner. That row is gated on being behind, so a user who keeps Phosphene
+       current — the people most likely to star it — could never see it, and
+       there was no way to find it on purpose. This is a static link, never a
+       prompt: no badge, no pulse, no counter. -->
+  <a class="icon-btn star-link" id="starLink"
+     href="https://github.com/mrbizarro/phosphene" target="_blank" rel="noopener"
+     title="Star Phosphene on GitHub — it is how people find it">
+    <svg class="ph" aria-hidden="true"><use href="#ph-star"/></svg>
+  </a>
   <a class="phosphene-x-link" href="https://x.com/PhospheneAI" target="_blank" rel="noopener"
      title="Follow @PhospheneAI on X — the official Phosphene account">
     <svg class="ph" aria-hidden="true"><use href="#ph-x-brand"/></svg>
@@ -52077,6 +52120,30 @@ function _ubRender(s) {
   el.hidden = false;
 }
 
+// After a successful pull the banner stops being an offer and becomes the
+// instruction. Returns true when it handled the message, so the caller can skip
+// its alert fallback (a panel with the banner hidden still gets the modal).
+function _ubRestartState(newVersion, requiresFullUpdate) {
+  const el = document.getElementById('updateBanner');
+  if (!el || el.hidden) return false;
+  const star = document.getElementById('ubStar');
+  if (star) star.hidden = true;
+  const title = document.getElementById('ubTitle');
+  const sub = document.getElementById('ubSub');
+  const go = document.getElementById('ubUpdate');
+  const later = document.getElementById('ubLater');
+  if (title) title.textContent = `Updated to ${newVersion} — restart to finish`;
+  if (sub) {
+    sub.textContent = requiresFullUpdate
+      ? 'This update touched Python dependencies, so use Pinokio\u2019s Update button (not just Stop and Start) so they reinstall.'
+      : 'Click Stop, then Start in Pinokio. Your queue and settings are preserved.';
+  }
+  if (go) { go.hidden = true; }
+  if (later) { later.textContent = 'Dismiss'; }
+  el.classList.add('ub-done');
+  return true;
+}
+
 async function _ubSaveSetting(patch) {
   Object.assign(window._ubStarSettings || (window._ubStarSettings = {}), patch);
   try {
@@ -52097,8 +52164,9 @@ function _ubWire() {
   if (go) go.onclick = () => {
     go.disabled = true;
     go.textContent = 'Updating…';
-    // Reuse the pill's existing pull path — one implementation, not two.
-    versionPillClick();
+    // Straight to the pull, with no confirm: this button already said what it
+    // does. Reuses the pill's implementation, not a second copy of it.
+    versionDoPull({skipConfirm: true});
   };
   const later = document.getElementById('ubLater');
   if (later) later.onclick = () => {
@@ -52125,6 +52193,12 @@ function _ubWire() {
 }
 document.addEventListener('DOMContentLoaded', () => {
   _ubWire();
+  // Same anonymous count as the banner's link, so the two places agree.
+  const sl = document.getElementById('starLink');
+  if (sl) sl.addEventListener('click', () => {
+    _ubSaveSetting({star_prompt_done: true});   // retire the banner ask too
+    try { fetch('/star-click', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({via: 'link'})}); } catch (e) {}
+  });
   // The banner needs two settings before it can decide anything, and the
   // Settings modal may never be opened — so read them here rather than
   // relying on _settingsCache, which is only populated when that opens.
@@ -52213,17 +52287,23 @@ async function versionDoRefresh() {
   renderVersionPill();
 }
 
-async function versionDoPull() {
+async function versionDoPull(opts) {
+  opts = opts || {};
   const s = _versionState || {};
   const target = _versionRemoteLabel(s);
   const local = _versionDisplayLabel(s);
-  const ok = confirm(
-    `Pull update from ${local} → ${target}?\n\n` +
-    `This runs git pull on your phosphene install. After it succeeds, ` +
-    `you'll need to click Stop, then Start in Pinokio to load the new code. ` +
-    `Your queue and settings are preserved across restarts.`
-  );
-  if (!ok) return;
+  // A button that says "Update now" does not need to ask whether you meant it.
+  // The confirm stays for the version PILL, which is a small ambiguous target
+  // that also does four other things depending on state.
+  if (!opts.skipConfirm) {
+    const ok = confirm(
+      `Pull update from ${local} → ${target}?\n\n` +
+      `This runs git pull on your phosphene install. After it succeeds, ` +
+      `you'll need to click Stop, then Start in Pinokio to load the new code. ` +
+      `Your queue and settings are preserved across restarts.`
+    );
+    if (!ok) return;
+  }
   const pill = document.getElementById('versionPill');
   pill.classList.add('pill-busy');
   pill.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px;animation:phSpin 1.2s linear infinite"><use href="#ph-arrow-clockwise-bold"/></svg>pulling…';
@@ -52253,7 +52333,15 @@ async function versionDoPull() {
       ? `\n\n⚠ This update touched Python dependencies / patches. Use ` +
         `Pinokio's Update button (not just Stop+Start) so deps reinstall.`
       : '';
-    alert(`Pulled to ${newVersion}.\n\nClick Stop, then Start in Pinokio to apply.${fullUpdateNote}`);
+    // Inline, not a modal: the banner is already on screen and is where the
+    // user is looking. An alert here was the second click in "I had to click
+    // twice" — the first pulled, the second only told you what to do next.
+    if (typeof _ubRestartState === 'function'
+        && _ubRestartState(newVersion, !!(data.state && data.state.pull_requires_full_update))) {
+      // handled inline
+    } else {
+      alert(`Pulled to ${newVersion}.\n\nClick Stop, then Start in Pinokio to apply.${fullUpdateNote}`);
+    }
   } catch (e) {
     pill.classList.remove('pill-busy');
     renderVersionPill();
