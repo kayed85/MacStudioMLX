@@ -13,7 +13,7 @@
 
 </p>
 
-> **Current release: v4.0.4.** **The live preview plays on the main stage.** A render you start takes the big player full-size — a calm `Finding the shot…` while the model warms, then the forming take with a `LIVE` badge, step count, ETA and Stop early. A clip you are already watching keeps the stage, and when the render finishes it cross-fades into the finished video with no empty-player flash. Also: the Spicy option follows the Settings switch on both engines instead of only one, and H3's draft adapter moved to the LightX2V v1.0 768p selection. Carries v4.0.3's picker-LoRA crash fix and all of v4.0.2. Full notes on the [releases page](https://github.com/mrbizarro/phosphene/releases).
+> **Current release: v4.1.1.** **The forming take loops, and a render-killing crash is fixed.** The live preview already decoded a window of frames on every publish and kept only one of them; it keeps them all now and plays an animated loop, so a forming render moves instead of standing still — same decode, same cost. v4.1.1 fixes the `SIGABRT` crash that killed every render on some Apple silicon: the automatic Metal-watchdog retry existed and was correct, but macOS names that kill differently by chip, and we matched only one of the names ([#59](https://github.com/mrbizarro/phosphene/issues/59), root-caused by @ybekocak). Recent releases also brought H3 portrait/vertical renders, the H3 live preview, Anchor/Inspire reference modes on LTX-2.5, and per-machine analytics. Full notes on the [releases page](https://github.com/mrbizarro/phosphene/releases).
 
 ## Overview
 

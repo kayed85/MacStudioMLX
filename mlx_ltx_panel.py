@@ -761,6 +761,16 @@ def _settings_defaults() -> dict:
         # never changes the result, and it is what makes Stop early
         # possible at all.
         "live_preview": "on",
+        # ---- Update banner + the one-time star ask -------------------------
+        # `update_banner_dismissed` holds the VERSION the user dismissed, not a
+        # boolean: dismissing 4.1.1 must not silence the banner for 4.2.0. The
+        # star ask is a LOCAL flag and deliberately not an analytics lookup —
+        # GitHub can only answer "did this authenticated user star it", which
+        # would mean asking someone to log into GitHub inside a local video
+        # panel to suppress a prompt. Clicking through, or saying you already
+        # starred, sets this once and the ask never returns on this install.
+        "update_banner_dismissed": "",
+        "star_prompt_done": False,
         # ---- Anonymous usage analytics -----------------------------------
         # Full contract in the "Anonymous usage analytics" section further
         # down this file, and the event-by-event schema in docs/ANALYTICS.md.
@@ -1022,6 +1032,20 @@ def _validate_settings_patch(patch: dict) -> tuple[dict, str | None]:
             return {}, f"live_preview must be on or off, got: {lp}"
         out["live_preview"] = lp
 
+    if "update_banner_dismissed" in patch:
+        # A version string, or "" to re-arm. Bounded so a malformed client
+        # cannot write an unbounded blob into settings.json.
+        out["update_banner_dismissed"] = str(patch["update_banner_dismissed"]).strip()[:32]
+
+    if "star_prompt_done" in patch:
+        # Form values arrive as strings, and bool("false") is True — the exact
+        # trap that would have made "don't ask again" unclearable.
+        _v = patch["star_prompt_done"]
+        if isinstance(_v, str):
+            out["star_prompt_done"] = _v.strip().lower() in ("1", "true", "yes", "on")
+        else:
+            out["star_prompt_done"] = bool(_v)
+
     # ---- H3 DiT precision --------------------------------------------------
     # auto (RAM decides — the default), q8 (force the low-RAM pack: ~15 GiB
     # back for the OS on any machine), bf16 (force max quality where it fits).
@@ -1139,6 +1163,8 @@ def get_settings_public() -> dict:
         "spicy_mode": bool(s.get("spicy_mode", False)),
         "memory_policy": s.get("memory_policy", DEFAULT_MEMORY_POLICY),
         "live_preview": str(s.get("live_preview", "on")),
+        "update_banner_dismissed": str(s.get("update_banner_dismissed", "") or ""),
+        "star_prompt_done": bool(s.get("star_prompt_done", False)),
         # Analytics. Same has_X-boolean treatment as the other secrets —
         # the keys themselves never come back over the wire. The install id
         # DOES come back: it's a random UUID with no meaning off this
@@ -23322,6 +23348,25 @@ class Handler(BaseHTTPRequestHandler):
             persist_queue()
             self._json({"cleared": count}); return
 
+        if path == "/star-click":
+            # One anonymous count, no identity, no repeat — the client also
+            # writes a local flag so the ask never returns on this install.
+            # `via` separates "opened the link" from "said they already had",
+            # because only the first is a click we caused.
+            # `body` is the raw request string here (the handler form-parses
+            # it into `form`); this route speaks JSON, so read it directly and
+            # fall back to the form field rather than trusting either alone.
+            try:
+                _payload = json.loads(body) if body.strip().startswith("{") else {}
+            except (ValueError, TypeError):
+                _payload = {}
+            _via = str(_payload.get("via")
+                       or (form.get("via", ["link"])[0] if form else "link")).strip().lower()
+            if _via not in ("link", "already"):
+                _via = "link"
+            _analytics_capture("star_prompt", {"via": _via})
+            self._json({"ok": True}); return
+
         if path == "/queue/pause":
             with QUEUE_COND:
                 STATE["paused"] = True
@@ -25408,6 +25453,45 @@ HTML = r"""<!doctype html>
     /* Version pill states. Always rendered so the spot is part of the
        user's mental map — when state changes, the colour shift draws
        the eye. Only `pill-update` glows; the other states are quiet. */
+    /* ---- Update banner ------------------------------------------------ */
+    #updateBanner {
+      background: linear-gradient(180deg, rgba(240,185,64,0.14), rgba(240,185,64,0.07));
+      border-bottom: 1px solid rgba(240,185,64,0.34);
+      padding: 10px 16px; font-size: 13px;
+    }
+    #updateBanner[hidden] { display: none; }
+    .ub-main { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .ub-icon { width: 16px; height: 16px; color: #f0b940; flex: 0 0 auto; }
+    /* flex-basis 240px, not auto: with auto this row's text claimed the whole
+       line and shoved both buttons onto lines of their own. */
+    .ub-text { display: flex; gap: 8px; align-items: baseline;
+               flex-wrap: wrap; min-width: 0; flex: 1 1 240px; }
+    .ub-text strong { color: var(--ink, #e8eaf0); font-weight: 600; }
+    .ub-sub { color: var(--ink-500, #98a0b3); }
+    .ub-go {
+      background: #f0b940; color: #1a1408; border: 0; border-radius: 8px;
+      padding: 6px 14px; font-weight: 650; font-size: 13px; cursor: pointer;
+      flex: 0 0 auto; width: auto; white-space: nowrap;
+    }
+    .ub-go:hover { filter: brightness(1.08); }
+    .ub-go[disabled] { opacity: .6; cursor: default; }
+    .ub-dismiss, .ub-already {
+      background: transparent; color: var(--ink-500, #98a0b3);
+      border: 1px solid var(--line, #262a33); border-radius: 8px;
+      padding: 5px 10px; font-size: 12px; cursor: pointer; flex: 0 0 auto;
+      width: auto; white-space: nowrap;
+    }
+    .ub-dismiss:hover, .ub-already:hover { color: var(--ink, #e8eaf0); }
+    /* The star line is its own row so it can never squeeze the update action,
+       which is the thing the user actually came to this banner for. */
+    .ub-star {
+      margin-top: 8px; padding-top: 8px;
+      border-top: 1px solid rgba(240,185,64,0.18);
+      color: var(--ink-500, #98a0b3); display: flex; align-items: center;
+      gap: 10px; flex-wrap: wrap;
+    }
+    .ub-star[hidden] { display: none; }
+    .ub-star a { color: #f0b940; font-weight: 600; }
     .pill-update {
       color: var(--warning, #f0b940);
       border-color: rgba(240,185,64,0.55);
@@ -32973,6 +33057,27 @@ HTML = r"""<!doctype html>
 <symbol id="ph-speaker-slash" viewBox="0 0 256 256"><line x1="48" y1="40" x2="208" y2="216" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M80,168H32a8,8,0,0,1-8-8V96a8,8,0,0,1,8-8H80l72-56V147" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M152,179v45L94.4,179.2" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 </defs>
 </svg>
+
+<!-- Update banner. Deliberately a BANNER and not a modal: an update is not an
+     emergency and a dialog that blocks a running render is worse than being
+     out of date. Shown only when the version check says we are behind AND the
+     user has not dismissed THIS version — dismissing 4.1.1 must not silence
+     4.2.0, which is why the setting stores a version string, not a boolean. -->
+<div id="updateBanner" hidden>
+  <div class="ub-main">
+    <svg class="ph ub-icon" aria-hidden="true"><use href="#ph-arrow-up"/></svg>
+    <div class="ub-text">
+      <strong id="ubTitle">A new version is available</strong>
+      <span id="ubSub" class="ub-sub"></span>
+    </div>
+    <button type="button" class="ub-go" id="ubUpdate">Update now</button>
+    <button type="button" class="ub-dismiss" id="ubLater" title="Hide until the next version">Later</button>
+  </div>
+  <div class="ub-star" id="ubStar" hidden>
+    Updating takes a minute — <a href="https://github.com/mrbizarro/phosphene" id="ubStarLink" target="_blank" rel="noopener">a star on GitHub</a> while you wait means the world.
+    <button type="button" class="ub-already" id="ubStarDone">Already did</button>
+  </div>
+</div>
 
 <header>
   <a href="/" class="brand"><img src="/assets/phosphene_cycle_word_transparent.png" alt="Phosphene"></a>
@@ -51678,6 +51783,7 @@ async function refreshVersionPill() {
     return;             // network blip; don't blow away last good state
   }
   renderVersionPill();
+  try { _ubRender(_versionState); } catch (e) {}
 }
 
 function _versionDisplayLabel(s) {
@@ -51778,6 +51884,107 @@ function renderVersionPill() {
   pill.textContent = `Checking · ${local}`;
   pill.title = 'Checking for updates…';
 }
+
+// ---- Update banner -------------------------------------------------------
+//
+// The pill has always known we were behind; it just said so quietly, in the
+// header, and required a click to even check. This says it once, loudly, and
+// then gets out of the way permanently for that version.
+//
+// The star ask rides HERE and nowhere else on purpose: it is the one moment
+// the user is already waiting on us, and it appears at most once per install.
+// Clicking through or saying "already did" writes a local flag — there is no
+// way to ask GitHub whether a given person starred the repo without making
+// them log into GitHub inside a local video panel, and that trade is not worth
+// a prompt. The analytics side is a COUNT of clicks and carries no identity,
+// which is the same contract as every other event we send.
+window._ubStarSettings = null;
+
+function _ubRender(s) {
+  const el = document.getElementById('updateBanner');
+  if (!el) return;
+  const behind = (s && !s.error && s.checked_ts && (s.behind_by | 0) > 0);
+  const remote = (s && (s.remote_version || s.remote_short)) || '';
+  // A pull already happened this session — the banner's job is done, the
+  // restart pill takes over from here.
+  if (!behind || _versionRestartPending) { el.hidden = true; return; }
+  const cfg = window._ubStarSettings || {};
+  if (String(cfg.update_banner_dismissed || '') === String(remote) && remote) {
+    el.hidden = true; return;
+  }
+  const local = (s.local_version || s.local_short || 'your build');
+  document.getElementById('ubTitle').textContent =
+    `Phosphene ${remote} is available`;
+  document.getElementById('ubSub').textContent =
+    `You are on ${local}.` + (s.behind_more_than ? ' 30+ commits behind.' : '');
+  const star = document.getElementById('ubStar');
+  if (star) star.hidden = !!cfg.star_prompt_done;
+  el.hidden = false;
+}
+
+async function _ubSaveSetting(patch) {
+  Object.assign(window._ubStarSettings || (window._ubStarSettings = {}), patch);
+  try {
+    // /settings is form-encoded — a JSON body parses to nothing and returns
+    // a cheerful ok:true while saving absolutely nothing.
+    const form = new URLSearchParams();
+    for (const [k, v] of Object.entries(patch)) form.set(k, String(v));
+    await fetch('/settings', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: form.toString(),
+    });
+  } catch (e) { /* a failed write just means we ask again next boot */ }
+}
+
+function _ubWire() {
+  const go = document.getElementById('ubUpdate');
+  if (go) go.onclick = () => {
+    go.disabled = true;
+    go.textContent = 'Updating…';
+    // Reuse the pill's existing pull path — one implementation, not two.
+    versionPillClick();
+  };
+  const later = document.getElementById('ubLater');
+  if (later) later.onclick = () => {
+    const s = _versionState || {};
+    _ubSaveSetting({update_banner_dismissed: String(s.remote_version || s.remote_short || '')});
+    const el = document.getElementById('updateBanner');
+    if (el) el.hidden = true;
+  };
+  const link = document.getElementById('ubStarLink');
+  if (link) link.onclick = () => {
+    _ubSaveSetting({star_prompt_done: true});
+    const el = document.getElementById('ubStar');
+    if (el) el.hidden = true;
+    // Anonymous count, no identity — same contract as every other event.
+    try { fetch('/star-click', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({via: 'link'})}); } catch (e) {}
+  };
+  const done = document.getElementById('ubStarDone');
+  if (done) done.onclick = () => {
+    _ubSaveSetting({star_prompt_done: true});
+    const el = document.getElementById('ubStar');
+    if (el) el.hidden = true;
+    try { fetch('/star-click', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({via: 'already'})}); } catch (e) {}
+  };
+}
+document.addEventListener('DOMContentLoaded', () => {
+  _ubWire();
+  // The banner needs two settings before it can decide anything, and the
+  // Settings modal may never be opened — so read them here rather than
+  // relying on _settingsCache, which is only populated when that opens.
+  fetch('/settings')
+    .then(r => r.json())
+    .then(d => {
+      const st = (d && (d.settings || d)) || {};
+      window._ubStarSettings = {
+        update_banner_dismissed: st.update_banner_dismissed || '',
+        star_prompt_done: !!st.star_prompt_done,
+      };
+      if (_versionState) { try { _ubRender(_versionState); } catch (e) {} }
+    })
+    .catch(() => {});
+});
 
 // One click — does the right thing for the current state. Magic button.
 async function versionPillClick() {
