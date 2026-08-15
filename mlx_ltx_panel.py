@@ -25492,6 +25492,7 @@ HTML = r"""<!doctype html>
     }
     .ub-star[hidden] { display: none; }
     .ub-star a { color: #f0b940; font-weight: 600; }
+    .ub-sep { opacity: .4; }
     .pill-update {
       color: var(--warning, #f0b940);
       border-color: rgba(240,185,64,0.55);
@@ -32078,6 +32079,46 @@ HTML = r"""<!doctype html>
     body > header #bugBtn,
     body > header #settingsBtn,
     body > header .creator-link,
+    /* ---- Engine picker: trigger + portaled menu ------------------------ */
+    .eng-trigger {
+      display: inline-flex; align-items: center; gap: 7px;
+      width: auto; padding: 5px 9px; cursor: pointer;
+      background: var(--eng-dim, rgba(255,255,255,.06));
+      border: 1px solid var(--eng-soft, var(--line, #262a33));
+      border-radius: 9px; color: var(--ink, #e8eaf0);
+      font-size: 12.5px; font-weight: 600; white-space: nowrap;
+    }
+    .eng-trigger:hover { filter: brightness(1.12); }
+    .eng-trigger .eng-mark { color: var(--eng-accent, currentColor); display: inline-flex; }
+    .eng-trigger .eng-mark svg { width: 15px; height: 15px; }
+    .eng-caret { width: 11px; height: 11px; opacity: .65; margin-left: 1px; }
+    /* Portaled to <body>: header is overflow:hidden and would slice this. */
+    #engineMenu {
+      position: fixed; z-index: 9000;
+      background: var(--panel, #14161c);
+      border: 1px solid var(--line, #262a33);
+      border-radius: 12px; padding: 5px;
+      box-shadow: 0 18px 44px rgba(0,0,0,.55);
+      max-height: 70vh; overflow-y: auto;
+    }
+    #engineMenu[hidden] { display: none; }
+    .eng-opt {
+      display: flex; align-items: flex-start; gap: 9px; width: 100%;
+      text-align: left; padding: 8px 10px; border: 0; border-radius: 9px;
+      background: transparent; color: var(--ink, #e8eaf0); cursor: pointer;
+    }
+    .eng-opt:hover { background: rgba(255,255,255,.05); }
+    .eng-opt.active { background: var(--eng-dim, rgba(255,255,255,.07)); }
+    .eng-opt .eng-mark { color: var(--eng-accent, currentColor); display: inline-flex; padding-top: 1px; }
+    .eng-opt .eng-mark svg { width: 16px; height: 16px; }
+    .eng-opt-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto; }
+    .eng-opt-top { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .eng-opt-sub { font-size: 11.5px; color: var(--ink-500, #98a0b3); line-height: 1.35; }
+    .eng-tick { width: 13px; height: 13px; color: var(--eng-accent, currentColor); flex: 0 0 auto; margin-top: 3px; }
+    /* Inert = real but unreachable right now; still listed, visibly muted. */
+    .eng-opt.inert { opacity: .58; }
+    .eng-opt.needs-install .eng-badge.offer { color: var(--eng-accent, currentColor); }
+
     body > header .engine-switch {
       flex-shrink: 0;
     }
@@ -33073,15 +33114,26 @@ HTML = r"""<!doctype html>
     <button type="button" class="ub-go" id="ubUpdate">Update now</button>
     <button type="button" class="ub-dismiss" id="ubLater" title="Hide until the next version">Later</button>
   </div>
+  <!-- ONE row, both asks, once ever. A second dismissible prompt for
+       "contribute" would double the nagging to say a smaller thing, and the
+       moment someone is already looking at our GitHub link is exactly the
+       moment the contributing link is worth showing. -->
   <div class="ub-star" id="ubStar" hidden>
-    Updating takes a minute — <a href="https://github.com/mrbizarro/phosphene" id="ubStarLink" target="_blank" rel="noopener">a star on GitHub</a> while you wait means the world.
+    <span>Updating takes a minute — <a href="https://github.com/mrbizarro/phosphene" id="ubStarLink" target="_blank" rel="noopener">a star on GitHub</a> while you wait means the world.</span>
+    <span class="ub-sep">·</span>
+    <span>Fixed something, or want to add an engine? <a href="https://github.com/mrbizarro/phosphene/blob/main/CONTRIBUTING.md" id="ubContribLink" target="_blank" rel="noopener">PRs are welcome and get credited</a>.</span>
     <button type="button" class="ub-already" id="ubStarDone">Already did</button>
   </div>
 </div>
 
 <header>
   <a href="/" class="brand"><img src="/assets/phosphene_cycle_word_transparent.png" alt="Phosphene"></a>
-  <span class="version-badge" title="Phosphene __PANEL_VERSION__">__PANEL_VERSION__</span>
+  <!-- The standalone version badge is gone: #versionPill already carries the
+       version in EVERY state it can be in — "Up to date · 4.2.0",
+       "Update to 4.3.0", "Checking · 4.2.0", "4.2.0 · dev · <sha>",
+       "4.2.0 · offline". Printing it twice cost a header slot that the
+       health cluster needed, on the machines where the cluster was
+       already truncating. -->
   __PROFILE_BADGE__
   <span class="spacer"></span>
   <!-- ============== ENGINE SWITCHER ==============
@@ -42634,6 +42686,64 @@ function syncModeStripToEngine() {
 
 // function has no idea which engines exist. Re-run on: boot, every setEngine,
 // a workflow-tab change, and any /status tick that moves an install.
+// The picker is a DROPDOWN, not a segmented row. Two reasons, and the second
+// is the one that forced it:
+//   1. Header room. Two full segments plus the health cluster already
+//      overflowed a 14" window; a third engine (Flux Video) could not fit at
+//      any width. A trigger showing only the ACTIVE engine costs one slot no
+//      matter how many engines exist.
+//   2. "Which one is selected" has to survive being glanced at. In a segmented
+//      row that is carried entirely by a highlight; a dropdown states it.
+//
+// The MENU IS PORTALED TO <body> and positioned fixed, because <header> is
+// overflow:hidden — the same clipping that produced the "avatar cut off"
+// report. A menu rendered inside the header would be sliced at its edge.
+window._engineMenuOpen = false;
+
+function _engineMenuEl() {
+  let m = document.getElementById('engineMenu');
+  if (!m) {
+    m = document.createElement('div');
+    m.id = 'engineMenu';
+    m.setAttribute('role', 'listbox');
+    m.hidden = true;
+    document.body.appendChild(m);     // portal: escape header overflow:hidden
+  }
+  return m;
+}
+
+function closeEngineMenu() {
+  window._engineMenuOpen = false;
+  const m = document.getElementById('engineMenu');
+  if (m) m.hidden = true;
+  const t = document.querySelector('#engineSwitch .eng-trigger');
+  if (t) t.setAttribute('aria-expanded', 'false');
+}
+
+function toggleEngineMenu() {
+  const m = _engineMenuEl();
+  if (window._engineMenuOpen) { closeEngineMenu(); return; }
+  const trig = document.querySelector('#engineSwitch .eng-trigger');
+  if (!trig) return;
+  const r = trig.getBoundingClientRect();
+  m.style.top = (r.bottom + 6) + 'px';
+  m.style.left = r.left + 'px';
+  m.style.minWidth = Math.max(r.width, 240) + 'px';
+  m.hidden = false;
+  window._engineMenuOpen = true;
+  trig.setAttribute('aria-expanded', 'true');
+}
+
+document.addEventListener('click', (ev) => {
+  if (!window._engineMenuOpen) return;
+  if (ev.target.closest('#engineMenu') || ev.target.closest('#engineSwitch')) return;
+  closeEngineMenu();
+}, true);
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape' && window._engineMenuOpen) closeEngineMenu();
+});
+window.addEventListener('resize', closeEngineMenu);
+
 function renderEngineSwitch() {
   const box = document.getElementById('engineSwitch');
   const div = document.getElementById('engineSwitchDivider');
@@ -42641,11 +42751,30 @@ function renderEngineSwitch() {
   const show = _engineRowVisible();
   box.hidden = !show;
   if (div) div.hidden = !show;
-  if (!show) { box.innerHTML = ''; return; }
+  if (!show) { box.innerHTML = ''; closeEngineMenu(); return; }
 
   const active = currentEngine();
   const list = ENGINES.filter(engineRenderable);
-  box.innerHTML = list.map(e => {
+
+  // ---- The trigger: the active engine, and nothing else ----
+  const act = list.find(e => e.id === active) || list[0];
+  if (act) {
+    box.innerHTML = `<button type="button" class="eng-trigger" aria-haspopup="listbox"
+        aria-expanded="false"
+        style="--eng-accent:${escapeHtml(act.accent)};--eng-dim:${escapeHtml(act.accent_dim)};--eng-soft:${escapeHtml(act.accent_soft)}"
+        title="${escapeHtml(_engineTooltip(act, engineStatus(act), engineServesMode(act, currentMode)))}">
+      <span class="eng-mark"><svg class="ph" aria-hidden="true"><use href="#${escapeHtml(act.mark)}"/></svg></span>
+      <span class="eng-seg-name">${escapeHtml(act.label)}</span>${
+      act.generation ? `<span class="eng-seg-gen">${escapeHtml(act.generation)}</span>` : ''}
+      <svg class="ph eng-caret" aria-hidden="true"><use href="#ph-caret-down-bold"/></svg>
+    </button>`;
+    const t = box.querySelector('.eng-trigger');
+    if (t) t.onclick = (ev) => { ev.stopPropagation(); toggleEngineMenu(); };
+  }
+
+  // ---- The menu: every engine, each stating its own state ----
+  const menu = _engineMenuEl();
+  menu.innerHTML = list.map(e => {
     const st = engineStatus(e);
     const offer = !e.builtin && !st.announced && st.capable && !st.available;
     const modeOk = engineServesMode(e, currentMode);
@@ -42660,22 +42789,35 @@ function renderEngineSwitch() {
     // Inert = real but unreachable RIGHT NOW. Distinct from needs-install,
     // which IS reachable — that click is the install.
     const inert = st.announced || (st.available && !modeOk);
-    const cls = 'eng-seg'
+    const cls = 'eng-opt'
       + (e.id === active ? ' active' : '')
       + (offer ? ' needs-install' : '')
       + (inert ? ' inert' : '');
+    // The tagline earns its place here in a way it never could in a segment:
+    // the menu is where someone decides BETWEEN engines, so each row says what
+    // it is for rather than only what it is called.
     return `<button type="button" class="${cls}" data-engine="${escapeHtml(e.id)}"
+        role="option" aria-selected="${e.id === active ? 'true' : 'false'}"
         style="--eng-accent:${escapeHtml(e.accent)};--eng-dim:${escapeHtml(e.accent_dim)};--eng-soft:${escapeHtml(e.accent_soft)}"
         title="${escapeHtml(_engineTooltip(e, st, modeOk))}">
       <span class="eng-mark"><svg class="ph" aria-hidden="true"><use href="#${escapeHtml(e.mark)}"/></svg></span>
-      <span class="eng-seg-name">${escapeHtml(e.label)}</span>${
-      e.generation ? `<span class="eng-seg-gen">${escapeHtml(e.generation)}</span>` : ''}${
-      badge ? `<span class="eng-badge${badgeClass}">${escapeHtml(badge)}</span>` : ''}
+      <span class="eng-opt-body">
+        <span class="eng-opt-top">
+          <span class="eng-seg-name">${escapeHtml(e.label)}</span>${
+          e.generation ? `<span class="eng-seg-gen">${escapeHtml(e.generation)}</span>` : ''}${
+          badge ? `<span class="eng-badge${badgeClass}">${escapeHtml(badge)}</span>` : ''}
+        </span>
+        <span class="eng-opt-sub">${escapeHtml(e.tagline || e.sublabel || '')}</span>
+      </span>${
+      e.id === active ? '<svg class="ph eng-tick" aria-hidden="true"><use href="#ph-check-bold"/></svg>' : ''}
     </button>`;
   }).join('');
 
-  box.querySelectorAll('.eng-seg').forEach(b => {
-    b.onclick = () => engineSegClick(b.dataset.engine);
+  menu.querySelectorAll('.eng-opt').forEach(b => {
+    b.onclick = () => {
+      closeEngineMenu();
+      engineSegClick(b.dataset.engine);
+    };
   });
 }
 
@@ -44622,8 +44764,20 @@ function ingredientPickerWire() {
 // surfaces in the Memory Pressure indicator. The swap value is still
 // included in /status payloads for any external tooling that wants it.
 function fmtMem(m) {
-  const p = (m.pressure_pct != null) ? `${m.pressure_pct}% pressure` : `swap ${(m.swap_gb || 0).toFixed(1)}`;
-  return `${m.used_gb.toFixed(1)} / ${m.total_gb.toFixed(0)} GB · ${p}`;
+  // Compact on purpose. "21.0 / 64 GB · 33% pressure" is five pieces of
+  // information for a glance that only ever asks one question — am I near the
+  // ceiling. The decimal on used never changed a decision, and the word
+  // "pressure" is carried by the tooltip and the pill's own colour. The full
+  // sentence still lives in the title attribute for anyone who wants it.
+  const p = (m.pressure_pct != null) ? `${m.pressure_pct}%` : `swap ${(m.swap_gb || 0).toFixed(1)}`;
+  return `${Math.round(m.used_gb)}/${m.total_gb.toFixed(0)} GB · ${p}`;
+}
+function fmtMemTitle(m) {
+  const used = (m.used_gb != null) ? m.used_gb.toFixed(1) : '?';
+  const tot = (m.total_gb != null) ? m.total_gb.toFixed(0) : '?';
+  const pr = (m.pressure_pct != null) ? `${m.pressure_pct}% memory pressure` : null;
+  const sw = (m.swap_gb != null) ? `swap ${m.swap_gb.toFixed(1)} GB` : null;
+  return [`${used} of ${tot} GB in use`, pr, sw].filter(Boolean).join(' · ');
 }
 function fmtMin(s) { if (!s || s < 0) return '—'; const m = Math.floor(s/60); const sec = Math.round(s%60); return m > 0 ? `${m}m ${sec}s` : `${sec}s`; }
 function snippet(s, n = 70) { if (!s) return ''; s = s.replace(/\s+/g,' ').trim(); return s.length > n ? s.slice(0, n-1)+'…' : s; }
@@ -44980,6 +45134,7 @@ async function poll() {
   const m = s.memory;
   const memPill = document.getElementById('memPill');
   memPill.innerHTML = `<span class="dot"></span>${fmtMem(m)}`;
+  memPill.title = fmtMemTitle(m);
   // 2026-05-20: color the badge by real pressure, not by sticky swap.
   // Same reason fmtMem dropped swap from the visible label — swap is
   // a high-water mark that only decreases on reboot, so keying the
