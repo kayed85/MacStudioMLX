@@ -6432,7 +6432,39 @@ def _select_generation_profile(total_ram_gb: float, tier_key: str) -> dict:
     T2V/I2V jobs are shaped so they do not start in the pathological state the
     current live render hit.
     """
-    if 0 < float(total_ram_gb or 0) < 64:
+    # Two escape hatches, because a hardcoded 64 GB threshold was making this
+    # decision alone and was demonstrably too conservative on real hardware.
+    #
+    # Reported 2026-08-16 (Mac Studio M4 Max, 48 GB, v4.0.6): a requested
+    # 1088x1472 was silently clamped to 768x1024 while memory sat at 9.4/48 GB.
+    # The reporter patched the threshold out and ran the same i2v job at the
+    # full size: 12.79 s/it versus 13.4 s/it clamped, 284 s, no swap, no OOM.
+    # They also found the real inconsistency — LTX_TIER_OVERRIDE moved the tier
+    # modal to "Studio" while this function kept reading physical RAM, so the
+    # two disagreed about what the machine could do.
+    #
+    # 1. An EXPLICIT tier override now flows through. If you told us to treat
+    #    this machine as high/pro, the shaping obeys that instead of the RAM
+    #    reading it contradicts.
+    # 2. LTX_GENERATION_PROFILE=full lifts the cap on its own, for anyone who
+    #    wants the cap gone without also restating their tier.
+    #
+    # The threshold stays the DEFAULT because it was put here by a real swap
+    # thrash, and one clean 48 GB result does not retire it — but it is no
+    # longer the only voice.
+    _forced = os.environ.get("LTX_GENERATION_PROFILE", "").strip().lower()
+    if _forced in ("full", "off", "uncapped"):
+        return {
+            "key": "full_generation",
+            "label": "Full generation (cap lifted by LTX_GENERATION_PROFILE)",
+            "ram_gb": round(float(total_ram_gb or 0), 1),
+            "tier": tier_key,
+            "compact": False, "max_dim": 0,
+            "auto_temporal_after_frames": 0, "warn_loras": 0,
+        }
+    _override = os.environ.get("LTX_TIER_OVERRIDE", "").strip().lower()
+    _override_lifts = _override in ("high", "pro")
+    if 0 < float(total_ram_gb or 0) < 64 and not _override_lifts:
         return {
             "key": "m5pro48_generation",
             "label": "48 GB fast generation",
@@ -9015,10 +9047,17 @@ def _h3_lora_strip_prefix(path: Path, prefix: str) -> int:
     new_header: dict = {"__metadata__": new_meta}
     new_header.update(renamed)
     blob = json.dumps(new_header, separators=(",", ":")).encode("utf-8")
-    # The tensor buffer must start 8-byte aligned; the spec pads the JSON with
-    # spaces to get there, which is why trailing whitespace inside the header
-    # is legal and ignored by every reader.
-    blob += b" " * ((-len(blob)) % 8)
+    # The tensor buffer must start 8-byte aligned per the spec; we align to 16
+    # because Metal buffer offsets must be 16-byte aligned, and a misaligned
+    # data section makes every tensor fall back to a COPY instead of a
+    # zero-copy mmap view — silently, with no error, on the whole checkpoint.
+    #
+    # The arithmetic is the part to get right: the file is
+    # [8-byte header length][header blob][tensor data], so the data starts at
+    # 8 + len(blob). Padding the blob to a multiple of 16 therefore lands the
+    # data at 8 mod 16 — misaligned EVERY time, which is worse than the 8-byte
+    # padding it would replace. What we need is len(blob) == 8 (mod 16).
+    blob += b" " * ((-(len(blob) + 8)) % 16)
     tmp = path.with_name(path.name + ".converting")
     try:
         with path.open("rb") as src, tmp.open("wb") as dst:
@@ -25525,6 +25564,51 @@ HTML = r"""<!doctype html>
     .ub-sep { opacity: .4; }
     .star-link { color: var(--ink-500, #98a0b3); }
     .star-link:hover { color: #f0b940; }
+    /* ---- Health: one chip, detail in a portaled popover ----------------- */
+    #healthChip {
+      display: inline-flex; align-items: center; gap: 7px; width: auto;
+      padding: 4px 9px 4px 8px; cursor: pointer; white-space: nowrap;
+      background: rgba(255,255,255,.04);
+      border: 1px solid var(--line, #262a33); border-radius: 99px;
+      color: var(--ink, #e8eaf0); font-size: 11.5px; font-weight: 500;
+      font-variant-numeric: tabular-nums;
+    }
+    #healthChip:hover { background: rgba(255,255,255,.07); }
+    .hc-dot {
+      width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto;
+      background: #5fbf8f; box-shadow: 0 0 0 3px rgba(95,191,143,.15);
+    }
+    #healthChip.is-warn { border-color: rgba(240,185,64,.42); color: #f7d489; }
+    #healthChip.is-warn .hc-dot { background: #f0b940; box-shadow: 0 0 0 3px rgba(240,185,64,.15); }
+    #healthChip.is-danger { border-color: rgba(255,92,92,.46); color: #ffa3a3; }
+    #healthChip.is-danger .hc-dot { background: #ff5c5c; box-shadow: 0 0 0 3px rgba(255,92,92,.17); }
+    .hc-caret { width: 10px; height: 10px; opacity: .5; }
+    #healthPop {
+      position: fixed; z-index: 9000; min-width: 250px;
+      background: var(--panel, #14161c);
+      border: 1px solid var(--line, #262a33);
+      border-radius: 12px; padding: 5px;
+      box-shadow: 0 18px 44px rgba(0,0,0,.55);
+    }
+    #healthPop[hidden] { display: none; }
+    .hc-row {
+      display: flex; align-items: center; gap: 12px;
+      padding: 6px 9px; border-radius: 8px; font-size: 12px;
+    }
+    .hc-row:hover { background: rgba(255,255,255,.04); }
+    .hc-label { color: var(--ink-500, #98a0b3); flex: 0 0 auto; }
+    /* The relocated pill drops its chrome in here: a bordered pill inside a
+       bordered popover row is one box too many. Its dot and colour classes
+       stay, which is the whole point of reusing the element. */
+    .hc-row .pill {
+      margin: 0 0 0 auto; padding: 0; border: 0; background: none;
+      font-size: 12px; font-variant-numeric: tabular-nums;
+    }
+    /* "Helper · helper idle" reads badly, so a self-naming pill takes the row. */
+    .hc-row.is-selfnamed .hc-label { display: none; }
+    .hc-row.is-selfnamed .pill { margin-left: 0; }
+    .hc-row.is-empty { display: none; }
+
     .pill-update {
       color: var(--warning, #f0b940);
       border-color: rgba(240,185,64,0.55);
@@ -32151,6 +32235,51 @@ HTML = r"""<!doctype html>
     .eng-opt.inert { opacity: .58; }
     .eng-opt.needs-install .eng-badge.offer { color: var(--eng-accent, currentColor); }
 
+    /* ---- Health: one chip, detail in a portaled popover ------------------ */
+    #healthChip {
+      display: inline-flex; align-items: center; gap: 7px; width: auto;
+      padding: 4px 9px 4px 8px; cursor: pointer; white-space: nowrap;
+      background: rgba(255,255,255,.04);
+      border: 1px solid var(--line, #262a33); border-radius: 99px;
+      color: var(--ink, #e8eaf0); font-size: 11.5px; font-weight: 500;
+      font-variant-numeric: tabular-nums;
+      transition: background .14s ease, border-color .14s ease;
+    }
+    #healthChip:hover { background: rgba(255,255,255,.075); border-color: #333a46; }
+    #healthChip[aria-expanded="true"] { background: rgba(255,255,255,.085); }
+    .hc-dot {
+      width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto;
+      background: #5fbf8f; box-shadow: 0 0 0 3px rgba(95,191,143,.16);
+      transition: background .2s ease, box-shadow .2s ease;
+    }
+    #healthChip.is-warn  .hc-dot { background: #f0b940; box-shadow: 0 0 0 3px rgba(240,185,64,.16); }
+    #healthChip.is-warn  { border-color: rgba(240,185,64,.42); color: #f7d489; }
+    #healthChip.is-danger .hc-dot { background: #ff5c5c; box-shadow: 0 0 0 3px rgba(255,92,92,.18); }
+    #healthChip.is-danger { border-color: rgba(255,92,92,.46); color: #ffa3a3; }
+    .hc-caret { width: 10px; height: 10px; opacity: .5; }
+    #healthPop {
+      position: fixed; z-index: 9000; min-width: 264px;
+      background: #171a21; border: 1px solid #2a2f3a;
+      border-radius: 13px; padding: 6px;
+      box-shadow: 0 20px 48px rgba(0,0,0,.58), inset 0 1px 0 rgba(255,255,255,.04);
+    }
+    #healthPop[hidden] { display: none; }
+    .hc-row {
+      display: flex; align-items: center; gap: 10px;
+      padding: 6px 8px; border-radius: 8px; font-size: 12px;
+    }
+    /* display:flex above beats the UA's [hidden]{display:none} — without this a
+       hidden row still paints its label with nothing after it. */
+    .hc-row[hidden] { display: none; }
+    .hc-row:hover { background: rgba(255,255,255,.04); }
+    .hc-label { color: var(--ink-500, #98a0b3); flex: 0 0 74px; }
+    /* The relocated pill keeps its own id, classes and colour logic; the row
+       only gives it a place to stand and a word in front of it. */
+    .hc-row .pill {
+      margin: 0 0 0 auto !important; font-size: 11.5px;
+      font-variant-numeric: tabular-nums;
+    }
+
     body > header .engine-switch {
       flex-shrink: 0;
     }
@@ -33190,7 +33319,53 @@ HTML = r"""<!doctype html>
        window compresses the cluster instead of shoving the creator chip
        into the header's overflow:hidden (the "avatar clipped" report).
        Individual pill ids and their JS updaters are untouched. -->
-  <div id="healthCluster" role="group" aria-label="System health">
+  <!-- ONE CHIP (v4.5.0). Six pills across the header truncated on a 14" window
+       and could not have taken a seventh. The pills are UNCHANGED — same ids,
+       same updaters, same colour classes — they simply live inside the popover
+       now, relocated at boot, so nothing downstream had to learn a new shape.
+       The chip SUMMARISES them: worst state wins the colour, and memory stays
+       on the face because it is the one number worth a glance.
+       PORTALED to <body>: <header> is overflow:hidden and would slice it —
+       the same clipping that once cut off the avatar. -->
+  <!-- ONE CHIP (v4.5.0). Six pills across the header truncated on a 14" and
+       could not have taken a seventh. The pills are UNCHANGED — same ids, same
+       updaters, same colour classes — they are simply relocated into the rows
+       below at boot, and #healthChip summarises them: worst state wins the
+       colour, memory stays on the face because it is the one number worth a
+       glance. Both the chip's popover and this cluster escape <header>, which
+       is overflow:hidden and would slice them. -->
+  <button type="button" id="healthChip" aria-haspopup="dialog" aria-expanded="false"
+          aria-controls="healthPop" title="System health — click for detail">
+    <span class="hc-dot"></span>
+    <span class="hc-face">checking…</span>
+    <svg class="ph hc-caret" aria-hidden="true"><use href="#ph-caret-down-bold"/></svg>
+  </button>
+  <div id="healthPop" hidden role="dialog" aria-label="System health detail">
+    <div class="hc-row" data-pill="tierPill"><span class="hc-label">Tier</span></div>
+    <div class="hc-row" data-pill="memPill"><span class="hc-label">Memory</span></div>
+    <div class="hc-row" data-pill="helperPill"><span class="hc-label">Helper</span></div>
+    <div class="hc-row" data-pill="modelsPill"><span class="hc-label">Models</span></div>
+    <div class="hc-row" data-pill="comfyPill"><span class="hc-label">ComfyUI</span></div>
+    <div class="hc-row" data-pill="queuePill"><span class="hc-label">Queue</span></div>
+    <div class="hc-row" data-pill="jobPill"><span class="hc-label">Render</span></div>
+  </div>
+  <div id="healthCluster" role="group" aria-label="System health" hidden>
+    <button type="button" id="healthChip" aria-haspopup="dialog"
+            aria-expanded="false" aria-controls="healthPop"
+            title="System health — click for detail">
+      <span class="hc-dot" id="hcDot"></span>
+      <span class="hc-face" id="hcFace">checking…</span>
+      <svg class="ph hc-caret" aria-hidden="true"><use href="#ph-caret-down-bold"/></svg>
+    </button>
+    <div id="healthPop" hidden role="dialog" aria-label="System health detail">
+      <div class="hc-row" data-pill="tierPill"><span class="hc-label">Tier</span></div>
+      <div class="hc-row" data-pill="memPill"><span class="hc-label">Memory</span></div>
+      <div class="hc-row" data-pill="helperPill"><span class="hc-label">Helper</span></div>
+      <div class="hc-row" data-pill="modelsPill"><span class="hc-label">Models</span></div>
+      <div class="hc-row" data-pill="comfyPill"><span class="hc-label">ComfyUI</span></div>
+      <div class="hc-row" data-pill="queuePill"><span class="hc-label">Queue</span></div>
+      <div class="hc-row" data-pill="jobPill"><span class="hc-label">Render</span></div>
+    </div>
     <span id="tierPill" class="pill" style="cursor:pointer" onclick="openTierModal()" title="Click to see what this Mac can do">click for system info</span>
     <span id="memPill" class="pill">memory…</span>
     <span id="comfyPill" class="pill" style="display:none">comfy…</span>
@@ -45177,6 +45352,9 @@ async function poll() {
   const m = s.memory;
   const memPill = document.getElementById('memPill');
   memPill.innerHTML = `<span class="dot"></span>${fmtMem(m)}`;
+  try { _healthSync(); } catch (e) {}
+  memPill.title = fmtMemTitle(m);
+  if (typeof updateHealthChip === 'function') updateHealthChip();
   memPill.title = fmtMemTitle(m);
   // 2026-05-20: color the badge by real pressure, not by sticky swap.
   // Same reason fmtMem dropped swap from the visible label — swap is
@@ -52083,6 +52261,103 @@ function renderVersionPill() {
   pill.title = 'Checking for updates…';
 }
 
+// ---- Health: one chip, one popover ---------------------------------------
+//
+// The pills are NOT rewritten. Every existing updater still writes to
+// #memPill / #helperPill / #modelsPill / #tierPill / #comfyPill / #queuePill /
+// #jobPill exactly as before; they are relocated once and read back here to
+// summarise. A summary that re-derived state from /status would be a second
+// source of truth, and the two would drift the first time a pill's rule moved.
+window._healthPopOpen = false;
+
+function _healthPortal() {
+  const pop = document.getElementById('healthPop');
+  if (!pop || pop.dataset.portaled === '1') return pop;
+  pop.querySelectorAll('.hc-row[data-pill]').forEach(row => {
+    const pill = document.getElementById(row.dataset.pill);
+    if (pill) row.appendChild(pill);
+    else row.remove();                      // a pill this build does not have
+  });
+  const cluster = document.getElementById('healthCluster');
+  if (cluster) cluster.remove();            // the now-empty holder
+  document.body.appendChild(pop);           // escape header overflow:hidden
+  pop.dataset.portaled = '1';
+  return pop;
+}
+
+function closeHealthPop() {
+  window._healthPopOpen = false;
+  const pop = document.getElementById('healthPop');
+  if (pop) pop.hidden = true;
+  const chip = document.getElementById('healthChip');
+  if (chip) chip.setAttribute('aria-expanded', 'false');
+}
+
+function toggleHealthPop() {
+  const pop = _healthPortal();
+  const chip = document.getElementById('healthChip');
+  if (!pop || !chip) return;
+  if (window._healthPopOpen) { closeHealthPop(); return; }
+  const r = chip.getBoundingClientRect();
+  pop.hidden = false;                       // measure before placing
+  const w = pop.getBoundingClientRect().width;
+  pop.style.top = (r.bottom + 7) + 'px';
+  pop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - w - 10)) + 'px';
+  window._healthPopOpen = true;
+  chip.setAttribute('aria-expanded', 'true');
+}
+
+// Worst state wins: a green chip must never hide a red pill.
+function _healthSync() {
+  const chip = document.getElementById('healthChip');
+  if (!chip) return;
+  const ids = ['tierPill', 'memPill', 'comfyPill', 'helperPill', 'modelsPill'];
+  const pills = ids.map(id => document.getElementById(id))
+                   .filter(el => el && el.style.display !== 'none');
+  let worst = 'good';
+  pills.forEach(el => {
+    if (el.classList.contains('pill-danger') || el.classList.contains('pill-bad')) worst = 'bad';
+    else if (el.classList.contains('pill-warn') && worst !== 'bad') worst = 'warn';
+  });
+  chip.classList.toggle('is-warn', worst === 'warn');
+  chip.classList.toggle('is-danger', worst === 'bad');
+
+  // Comfy hides ITSELF when not running; its row has to follow or the popover
+  // shows a label with nothing after it.
+  const pop = document.getElementById('healthPop');
+  if (pop) pop.querySelectorAll('.hc-row[data-pill]').forEach(row => {
+    const pill = document.getElementById(row.dataset.pill);
+    row.hidden = !!(pill && pill.style.display === 'none');
+  });
+
+  // Memory keeps its place on the face: it is the number that moves while you
+  // watch, and the one that decides whether the next render fits.
+  const mem = document.getElementById('memPill');
+  const memText = mem ? mem.textContent.trim() : '';
+  const label = worst === 'bad' ? 'Needs attention'
+              : worst === 'warn' ? 'Under pressure' : 'All good';
+  const face = chip.querySelector('.hc-face');
+  if (face) face.textContent = memText ? `${label} · ${memText}` : label;
+  chip.title = pills.map(el => el.textContent.trim()).filter(Boolean).join(' · ')
+             || 'System health';
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  _healthPortal();
+  const chip = document.getElementById('healthChip');
+  if (chip) chip.onclick = (ev) => { ev.stopPropagation(); toggleHealthPop(); };
+  _healthSync();
+});
+document.addEventListener('click', (ev) => {
+  if (!window._healthPopOpen) return;
+  if (ev.target.closest('#healthPop') || ev.target.closest('#healthChip')) return;
+  closeHealthPop();
+}, true);
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape' && window._healthPopOpen) closeHealthPop();
+});
+window.addEventListener('resize', closeHealthPop);
+
 // ---- Update banner -------------------------------------------------------
 //
 // The pill has always known we were behind; it just said so quietly, in the
@@ -52214,6 +52489,100 @@ document.addEventListener('DOMContentLoaded', () => {
     })
     .catch(() => {});
 });
+
+// ---- Health chip -----------------------------------------------------------
+// The pills still exist and are still written by the same updaters; at boot
+// each is MOVED into its row. The chip is DERIVED from them, so whatever turns
+// memPill red turns the chip red by construction, rather than by a second
+// opinion that could disagree with the first.
+window._hcOpen = false;
+
+function _hcSeverity(el) {
+  if (!el) return 0;
+  if (el.classList.contains('pill-danger')) return 2;
+  if (el.classList.contains('pill-warn')) return 1;
+  return 0;
+}
+
+function _hcRelocate() {
+  const pop = document.getElementById('healthPop');
+  if (!pop) return;
+  pop.querySelectorAll('.hc-row').forEach(row => {
+    const pill = row.dataset.pill && document.getElementById(row.dataset.pill);
+    if (pill && pill.parentElement !== row) row.appendChild(pill);
+  });
+  if (pop.parentElement !== document.body) document.body.appendChild(pop);
+}
+
+function closeHealthPop() {
+  const pop = document.getElementById('healthPop');
+  if (pop) pop.hidden = true;
+  const chip = document.getElementById('healthChip');
+  if (chip) chip.setAttribute('aria-expanded', 'false');
+  window._hcOpen = false;
+}
+
+function toggleHealthPop() {
+  const pop = document.getElementById('healthPop');
+  const chip = document.getElementById('healthChip');
+  if (!pop || !chip) return;
+  if (window._hcOpen) { closeHealthPop(); return; }
+  updateHealthChip();
+  const r = chip.getBoundingClientRect();
+  pop.hidden = false;                     // measure before placing
+  const w = pop.getBoundingClientRect().width;
+  pop.style.top = (r.bottom + 6) + 'px';
+  pop.style.left = Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8)) + 'px';
+  chip.setAttribute('aria-expanded', 'true');
+  window._hcOpen = true;
+}
+
+function updateHealthChip() {
+  const chip = document.getElementById('healthChip');
+  const face = document.getElementById('hcFace');
+  if (!chip || !face) return;
+  const mem = document.getElementById('memPill');
+  const models = document.getElementById('modelsPill');
+  const helper = document.getElementById('helperPill');
+  const worst = [mem, models, helper].reduce((a, el) => Math.max(a, _hcSeverity(el)), 0);
+  chip.classList.toggle('is-warn', worst === 1);
+  chip.classList.toggle('is-danger', worst === 2);
+  const clean = el => (el ? el.textContent : '').replace(/\s+/g, ' ').trim();
+  if (worst > 0) {
+    // Name the thing that is wrong. "Attention" tells the user to go looking.
+    const bad = [models, helper, mem].find(el => _hcSeverity(el) === worst);
+    face.textContent = clean(bad) || 'needs attention';
+  } else {
+    face.textContent = clean(mem) || 'all good';
+  }
+  document.querySelectorAll('#healthPop .hc-row').forEach(row => {
+    const pill = row.querySelector('.pill');
+    const gone = !pill || pill.style.display === 'none';
+    row.classList.toggle('is-empty', gone);
+    if (gone) return;
+    const label = row.querySelector('.hc-label');
+    if (!label) return;
+    if (!label.dataset.word) label.dataset.word = label.textContent.trim();
+    const first = (pill.textContent || '').trim().toLowerCase().split(/[\s·]+/)[0] || '';
+    row.classList.toggle('is-selfnamed', first === label.dataset.word.toLowerCase());
+  });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  _hcRelocate();
+  const chip = document.getElementById('healthChip');
+  if (chip) chip.onclick = (ev) => { ev.stopPropagation(); toggleHealthPop(); };
+  updateHealthChip();
+});
+document.addEventListener('click', (ev) => {
+  if (!window._hcOpen) return;
+  if (ev.target.closest('#healthPop') || ev.target.closest('#healthChip')) return;
+  closeHealthPop();
+}, true);
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape' && window._hcOpen) closeHealthPop();
+});
+window.addEventListener('resize', closeHealthPop);
 
 // One click — does the right thing for the current state. Magic button.
 async function versionPillClick() {
