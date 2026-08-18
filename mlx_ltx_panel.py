@@ -5911,6 +5911,7 @@ def _civitai_request(path: str, params: dict | None = None,
 # Flux engine exposed today, so surfacing Flux LoRAs in the browser
 # would just create install candidates that no engine can run.
 _CIVITAI_IMAGE_FAMILIES: dict[str, list[str]] = {
+    "flux":    ["Flux.1 D", "Flux.1 S", "Flux.1 Dev", "Flux.1 Schnell", "Flux.1 Krea", "Flux.1", "Flux.2"],
     "qwen":    ["Qwen 2", "Qwen"],   # Qwen-Image-Edit-2511 + Qwen-Image (2509)
     "hidream": ["HiDream-O1"],       # HiDream-O1-Image-Dev
 }
@@ -6463,24 +6464,21 @@ def open_pinokio() -> None:
 CAPABILITIES: dict[str, dict] = {
     "base": {
         # < 48 GB. M2 8/16/24 GB, M-Pro 18/36 GB, base M-Max 36 GB.
-        # Q8 won't fit; even Q4 at 720p is borderline.
         "label": "Compact",
         "ram_label": "Under 48 GB",
-        "tagline": "Q4 base model · small renders",
+        "tagline": "All modes supported · Q4 HQ components for advanced features",
         "t2v_max_dim": 768,
         "i2v_max_dim": 768,
-        "keyframe_max_dim": 0,    # disabled
-        "extend_max_dim": 0,      # disabled
-        "allows_q8": False,
-        "allows_keyframe": False,
-        "allows_extend": False,
+        "keyframe_max_dim": 768,
+        "extend_max_dim": 768,
+        "allows_q8": True,
+        "allows_keyframe": True,
+        "allows_extend": True,
         "blurb": (
-            "This Mac has under 48 GB of unified memory. The basic "
-            "modes work — text-to-video and image-to-video — but only "
-            "at smaller sizes (up to 768 pixels on the longer side). "
-            "The bigger modes (High quality, first-last-frame, extend "
-            "an existing clip) need more memory than this Mac has, so "
-            "they're turned off."
+            "This Mac has under 48 GB of unified memory. Every video mode works. "
+            "Text-to-video and image-to-video run at the standard sizes. "
+            "The two biggest modes (first-last-frame interpolation and extending an existing clip) "
+            "and the High quality tier are supported using 4-bit HQ components to prevent running out of memory."
         ),
         # Per-mode time estimates for a typical 5 s render (121 frames @ 24 fps),
         # measured at Exact (no Boost/Turbo). The Comfortable tier is the
@@ -21698,11 +21696,9 @@ def _load_agent_image_config() -> agent_image_engine.ImageEngineConfig:
             reason = "mock"
         elif (cfg.kind == "mflux"
               and (cfg.mflux_family == "qwen_edit"
-                   or agent_image_engine._infer_mflux_family(cfg.mflux_model) == "qwen_edit")
-              and cfg.mflux_steps in (0, 8)
-              and not cfg.mflux_lora_paths):
+                   or agent_image_engine._infer_mflux_family(cfg.mflux_model) == "qwen_edit")):
             needs_promote = True
-            reason = "qwen_edit_no_lightning"
+            reason = "switch_to_flux2_edit"
 
         # Env escape hatch — lets a power user pin the old behaviour
         # (e.g. for A/B benchmarking or to keep a slow but exact path).
@@ -21756,8 +21752,8 @@ def _auto_promote_image_engine_kind(
     # OLDER 54 GB model with weaker character consistency. (Code-review
     # P2-3, 2026-05-09.)
     candidates = [
-        ("qwen_edit",     "Qwen/Qwen-Image-Edit-2511"),
-        ("flux2",         "Runpod/FLUX.2-klein-4B-mflux-4bit"),
+        ("flux2_edit",    "flux2-klein-4b"),
+        ("flux2",         "flux2-klein-4b"),
         ("z_image_turbo", "filipstrand/Z-Image-Turbo-mflux-4bit"),
         ("flux1",         "krea-dev"),
     ]
@@ -21864,6 +21860,22 @@ def _build_image_engine_config(
     # Q6 (vs prior Q4) is the Apple-Silicon community sweet spot — ~4-6%
     # quality loss vs full precision instead of 8-12% for Q4, with
     # negligible speed impact on M4 Max 64 GB.
+    if engine_override == "flux2_edit_inline":
+        return agent_image_engine.ImageEngineConfig(
+            kind="mflux",
+            mflux_model="flux2-klein-4b",
+            mflux_family="flux2_edit",
+            mflux_quantize=4,
+            mflux_steps=4,
+        )
+    if engine_override == "flux2_inline":
+        return agent_image_engine.ImageEngineConfig(
+            kind="mflux",
+            mflux_model="flux2-klein-4b",
+            mflux_family="flux2",
+            mflux_quantize=4,
+            mflux_steps=4,
+        )
     if engine_override == "qwen_edit_lightning_inline":
         # Qwen FAST — 4-step Lightning distillation LoRA, Q6. The
         # `repo:filename` collection-format syntax pins the bf16 4-step
@@ -28657,7 +28669,52 @@ class Handler(BaseHTTPRequestHandler):
                         preserve_set.add(trig)
             except Exception:
                 pass
+
+            import re
+            ref_token_patterns = [
+                r"(?i)from\s+image\s+[1-3]",
+                r"(?i)image\s+[1-3]",
+                r"(?i)من\s+الصورة\s+(الأولى|الاولى|الثانية|الثانيه|الثالثة|الثالثه|1|2|3)",
+                r"(?i)الصورة\s+(الأولى|الاولى|الثانية|الثانيه|الثالثة|الثالثه|1|2|3)",
+            ]
+            for pat in ref_token_patterns:
+                for match in re.finditer(pat, user_prompt):
+                    preserve_set.add(match.group(0))
+
             preserve_tokens = sorted(preserve_set)
+            
+            ref_images_raw = (form.get("ref_images", [""])[0] or "").strip()
+            vision_caption = ""
+            if ref_images_raw:
+                try:
+                    ref_paths = json.loads(ref_images_raw)
+                    if isinstance(ref_paths, list) and ref_paths:
+                        valid_paths = [p for p in ref_paths if isinstance(p, str) and os.path.isfile(p)]
+                        if valid_paths:
+                            cap_py = sys.executable
+                            cap_helper = pathlib.Path(__file__).resolve().parent / "caption_reference_vision.py"
+                            if cap_helper.is_file():
+                                cap_cmd = [str(cap_py), str(cap_helper)]
+                                for vp in valid_paths[:3]:
+                                    cap_cmd += ["--image", str(vp)]
+                                push(f"[enhance] Running Gemma 3 Vision on {len(valid_paths)} reference image(s)…")
+                                cap_res = subprocess.run(cap_cmd, capture_output=True, text=True, timeout=60)
+                                if cap_res.returncode == 0:
+                                    for ln in cap_res.stdout.splitlines():
+                                        if ln.startswith("CAPTION_JSON:"):
+                                            try:
+                                                vision_caption = json.loads(ln.split("CAPTION_JSON:", 1)[1].strip()).get("caption", "")
+                                            except Exception:
+                                                pass
+                                    if not vision_caption:
+                                        tail = [ln for ln in cap_res.stdout.splitlines() if ln.strip()]
+                                        vision_caption = tail[-1].strip() if tail else ""
+                except Exception as exc:
+                    push(f"[enhance] vision caption note: {exc}")
+
+            if vision_caption:
+                user_prompt = f"Reference image details: {vision_caption}. Instructions: {user_prompt}"
+
             push(f"[enhance] {mode}: {user_prompt[:80]}…"
                  + (f"  preserve={preserve_tokens}" if preserve_tokens else ""))
             try:
@@ -28670,9 +28727,6 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 push(f"[enhance] failed: {exc}")
                 self._json({"error": str(exc)}, 500); return
-            # A malformed terminal helper event must still become JSON. Before
-            # this guard, None/non-string values raised after the only try/except
-            # in the lane and BaseHTTPRequestHandler closed the socket empty.
             if not isinstance(result, dict):
                 self._json({"error": "Gemma returned an invalid helper response"}, 500); return
             enhanced_raw = result.get("enhanced", "")
@@ -28681,6 +28735,12 @@ class Handler(BaseHTTPRequestHandler):
             enhanced = enhanced_raw.strip()
             if not enhanced:
                 self._json({"error": "Gemma returned empty result"}, 500); return
+
+            # Ensure any reference tokens from user_prompt survive in enhanced
+            for token in preserve_set:
+                if ("image" in token.lower() or "الصورة" in token) and token not in enhanced:
+                    enhanced = f"{enhanced} ({token})"
+
             push(f"[enhance] → {enhanced[:120]}… ({result.get('elapsed_sec','?')}s)")
             self._json({
                 "ok": True,
@@ -40852,10 +40912,13 @@ HTML = r"""<!doctype html>
           </div>
         </div>
 
-        <!-- Prompt textarea label — hidden for every engine except Ideogram
-             4, where the Simple/Layout toggle relabels it (in Layout the
-             textarea becomes the scene & background field, not the prompt). -->
-        <label id="imgStudioPromptLabel" class="ideo-prompt-label" for="imgStudioPrompt" hidden></label>
+        <!-- Prompt textarea label + Enhance button -->
+        <div class="composer-prompt-head" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+          <label id="imgStudioPromptLabel" class="ideo-prompt-label" for="imgStudioPrompt" style="margin:0">Prompt</label>
+          <button type="button" class="ghost-btn" id="imgStudioEnhanceBtn" onclick="enhancePrompt('imgStudioPrompt')" title="Use Gemma to rewrite your image prompt">
+            <svg class="ph" aria-hidden="true" style="margin-right:6px"><use href="#ph-sparkle-fill"/></svg>Enhance
+          </button>
+        </div>
         <textarea id="imgStudioPrompt" class="composer-prompt" rows="4"
                   placeholder="A cinematic medium close-up of a woman in a sunlit kitchen, soft morning light through blinds, shallow depth of field, photorealistic"></textarea>
       </div>
@@ -41092,9 +41155,11 @@ HTML = r"""<!doctype html>
           <div class="studio-engine-row">
             <select id="imgStudioEngine" onchange="if(typeof ideoSyncVisibility==='function')ideoSyncVisibility();imgStudioUpdateValidity();imgStudioRefreshEngineStatus();imgStudioUpdateEstimate();imgStudioUpdateRefWarning();if(typeof renderLorasList==='function')renderLorasList()">
               <option value="auto">Auto (use Settings)</option>
-              <option value="qwen_edit_lightning_inline" selected>Reference Edit &mdash; Fast (image-to-image, Lightning 4-step, ~1:20, default, multi-ref)</option>
-              <option value="qwen_edit_inline">Reference Edit &mdash; Standard (image-to-image, 8-step Q6, ~2:05, no LoRA)</option>
-              <option value="qwen_edit_high_inline">Reference Edit &mdash; Quality (image-to-image, 40-step Q8 + CFG, ~3:50, final renders)</option>
+              <option value="flux2_edit_inline" selected>FLUX.2 Edit &mdash; Reference Image Edit (image-to-image, multi-ref, ~1:15, default)</option>
+              <option value="flux2_inline">FLUX.2 Klein 4B &mdash; Text to Image (~45s, text-only)</option>
+              <option value="qwen_edit_lightning_inline" hidden>Qwen Edit Fast (Lightning 4-step)</option>
+              <option value="qwen_edit_inline" hidden>Qwen Edit Standard (8-step Q6)</option>
+              <option value="qwen_edit_high_inline" hidden>Qwen Edit Quality (40-step Q8)</option>
               <option value="ideogram4_inline">Ideogram 4 &mdash; typography &amp; layout (text-in-image; optional reference bridge)</option>
               <!-- HiDream-O1 hidden 2026-05-28 (issue #15): the engine expects a
                    standalone lab-repo clone at ~/HIDREAM-O1-MLX-LAB-active/.venv
@@ -41763,6 +41828,12 @@ HTML = r"""<!doctype html>
       </div>
 
       <div class="composer-card sb-brief" id="sbBrief">
+        <div class="composer-prompt-head" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+          <label class="mf-label" for="sbConcept" style="margin:0">Concept / Storyboard Prompt</label>
+          <button type="button" class="ghost-btn" id="sbEnhanceBtn" onclick="enhancePrompt('sbConcept')" title="Use Gemma to rewrite your film concept">
+            <svg class="ph" aria-hidden="true" style="margin-right:6px"><use href="#ph-sparkle-fill"/></svg>Enhance
+          </button>
+        </div>
         <textarea class="composer-prompt sb-concept" id="sbConcept" rows="4"
           oninput="sbConceptInput()"
           placeholder="A retired boxer walks his old neighbourhood at dawn and remembers a fight he lost."></textarea>
@@ -44520,7 +44591,8 @@ const IMG_STUDIO = {
 function imgStudioRequiresRefs(engineOverride) {
   return engineOverride === 'qwen_edit_inline'
       || engineOverride === 'qwen_edit_lightning_inline'
-      || engineOverride === 'qwen_edit_high_inline';
+      || engineOverride === 'qwen_edit_high_inline'
+      || engineOverride === 'flux2_edit_inline';
 }
 
 function imgStudioUpdateValidity() {
@@ -51048,24 +51120,34 @@ function _h3NudgeEngineOffer() {
 // Prompt enhancement via Gemma — wraps the upstream CLI's `enhance`
 // subcommand. Cold start ~12-15s (Gemma load), warm ~5s. Blocks the UI
 // during the request (just the button — rest of the form stays usable).
-async function enhancePrompt() {
-  const ta = document.getElementById('prompt');
+async function enhancePrompt(targetId) {
+  let taId = targetId;
+  if (!taId) {
+    const imgTab = document.getElementById('tabImages');
+    if (imgTab && imgTab.classList.contains('active')) {
+      taId = 'imgStudioPrompt';
+    } else {
+      taId = 'prompt';
+    }
+  }
+  const ta = document.getElementById(taId) || document.getElementById('prompt');
+  if (!ta) return;
   const original = ta.value.trim();
   if (!original) { alert('Type a prompt before enhancing it.'); return; }
-  const mode = (currentMode === 'i2v' || currentMode === 'keyframe' || currentMode === 'extend') ? 'i2v' : 't2v';
-  const btn = document.getElementById('enhanceBtn');
-  // Snapshot the FULL inner markup, not just text — the button carries
-  // an inline ph-sparkle-fill SVG that textContent would strip.
-  const originalLabel = btn.innerHTML;
-  btn.disabled = true;
-  btn.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:6px;vertical-align:-2px"><use href="#ph-sparkle-fill"/></svg>Loading Gemma… (~15s on cold start)';
+  const mode = (taId === 'imgStudioPrompt') ? 't2i' : ((currentMode === 'i2v' || currentMode === 'keyframe' || currentMode === 'extend') ? 'i2v' : 't2v');
+
+  let btn = (taId === 'imgStudioPrompt') ? document.getElementById('imgStudioEnhanceBtn')
+          : (taId === 'sbConcept') ? document.getElementById('sbEnhanceBtn')
+          : (targetId ? (document.getElementById(targetId + 'EnhanceBtn') || document.getElementById(targetId + 'Btn')) : null);
+  if (!btn) btn = document.getElementById('enhanceBtn');
+
+  const originalLabel = btn ? btn.innerHTML : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:6px;vertical-align:-2px"><use href="#ph-sparkle-fill"/></svg>Loading Gemma… (~15s on cold start)';
+  }
   let res;
   try {
-    // Collect trigger tokens to preserve case-exact through enhance.
-    // Source: every active LoRA's trigger_words + the active character
-    // trigger (if Character mode). Server unions these with any
-    // matching character ids found in the raw prompt as a defense in
-    // depth — see /prompt/enhance handler for the merge.
     const preserveTokens = [];
     if (typeof _activeLoras !== 'undefined' && Array.isArray(_activeLoras)) {
       for (const l of _activeLoras) {
@@ -51075,23 +51157,23 @@ async function enhancePrompt() {
         }
       }
     }
-    // The hidden field's element id is "characterIdInput" (its NAME is
-    // "character_id"); getElementById('character_id') always returned null,
-    // so the active character trigger was never preserved through Enhance.
     const charIdEl = document.getElementById('characterIdInput');
     if (charIdEl && charIdEl.value) preserveTokens.push(charIdEl.value);
     const fd = new URLSearchParams({ prompt: original, mode });
     if (preserveTokens.length) fd.set('preserve_tokens', JSON.stringify(preserveTokens));
+    if (typeof IMG_STUDIO !== 'undefined' && Array.isArray(IMG_STUDIO.refs)) {
+      const refPaths = IMG_STUDIO.refs.filter(r => r && r.path).map(r => r.path);
+      if (refPaths.length) fd.set('ref_images', JSON.stringify(refPaths));
+    }
     const r = await fetch('/prompt/enhance', { method: 'POST', body: fd });
     res = await r.json();
   } catch (e) {
     alert('Enhance request failed: ' + (e.message || e));
-    btn.disabled = false; btn.innerHTML = originalLabel;
+    if (btn) { btn.disabled = false; btn.innerHTML = originalLabel; }
     return;
   }
-  btn.disabled = false; btn.innerHTML = originalLabel;
+  if (btn) { btn.disabled = false; btn.innerHTML = originalLabel; }
   if (res.error) { alert('Enhance failed: ' + res.error); return; }
-  // Show diff in a confirm so the user can decide whether to accept.
   const accept = confirm(
     `Original:\n${res.original}\n\nEnhanced:\n${res.enhanced}\n\nReplace your prompt with the enhanced version?`
   );
@@ -54333,9 +54415,11 @@ function renderOutputInfoBody(path, data) {
   // ---- Action row ----
   html += `<div class="oi-actions">
     <button class="ghost-btn" type="button" onclick="closeOutputInfoModal()">Close</button>
+    ${promptText ? `<button class="ghost-btn" type="button" onclick="_copyToClipboard(${promptAttr}, this)">Copy Prompt</button>` : ''}
+    ${seedVal ? `<button class="ghost-btn" type="button" onclick="_copyToClipboard(${seedAttr}, this)">Copy Seed</button>` : ''}
     <button class="oi-primary" type="button"
-            onclick="closeOutputInfoModal(); selectOutput(${pathAttr}); loadParams()">
-      Load params into form
+            onclick="closeOutputInfoModal(); if(typeof selectOutput==='function')selectOutput(${pathAttr}); if(typeof loadParams==='function')loadParams(); if(typeof reuseParams==='function')reuseParams();">
+      ✨ Reuse parameters / إعادة استخدام البيانات
     </button>
   </div>`;
 

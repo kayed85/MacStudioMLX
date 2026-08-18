@@ -488,7 +488,9 @@ def _infer_mflux_family(model: str) -> str:
         return "z_image_turbo"
     if "z-image" in s or "z_image" in s or "tongyi-mai/z-image" in s:
         return "z_image"
-    if "flux2" in s or "flux.2" in s or "flux-2" in s:
+    if ("flux2" in s or "flux.2" in s or "flux-2" in s or "klein" in s) and ("edit" in s):
+        return "flux2_edit"
+    if "flux2" in s or "flux.2" in s or "flux-2" in s or "klein" in s:
         return "flux2"
     if "kontext" in s:
         return "kontext"
@@ -651,6 +653,52 @@ def _generate_mock(prompt: str, n: int, width: int, height: int,
     return results
 
 
+def _normalize_multiref_prompt(p: str, width: int = 0, height: int = 0) -> str:
+    if not p:
+        return p
+    import re
+    res = p
+    replacements = [
+        (r"(?i)من\s+الصورة\s+الأولى|من\s+الصورة\s+الاولى|من\s+صورة\s+1|من\s+الصورة\s+1", "from image 1"),
+        (r"(?i)من\s+الصورة\s+الثانية|من\s+الصورة\s+الثانيه|من\s+صورة\s+2|من\s+الصورة\s+2", "from image 2"),
+        (r"(?i)من\s+الصورة\s+الثالثة|من\s+الصورة\s+الثالثه|من\s+صورة\s+3|من\s+الصورة\s+3", "from image 3"),
+        (r"(?i)الصورة\s+الأولى|الصورة\s+الاولى|صورة\s+1|الصورة\s+1", "image 1"),
+        (r"(?i)الصورة\s+الثانية|الصورة\s+الثانيه|صورة\s+2|الصورة\s+2", "image 2"),
+        (r"(?i)الصورة\s+الثالثة|الصورة\s+الثالثه|صورة\s+3|الصورة\s+3", "image 3"),
+    ]
+    for pat, repl in replacements:
+        res = re.sub(pat, repl, res)
+
+    # Append aspect & orientation preservation directive for reference editing
+    # Prevents Qwen-Edit / Flux2-Edit from distorting or reshaping products to match the canvas orientation
+    if width > 0 and height > 0:
+        if height > width:
+            # Vertical / Reel format (e.g. 9:16)
+            rule = (
+                "Preserve exact natural proportions, shape, and aspect ratio of the product/subject "
+                "from reference image(s). Do not stretch, warp, or deform the product vertically to fill "
+                "the tall 9:16 frame. Render the product with correct original proportions centered vertically."
+            )
+        elif width > height:
+            # Horizontal / YouTube format (e.g. 16:9)
+            rule = (
+                "Preserve exact natural proportions, shape, and aspect ratio of the product/subject "
+                "from reference image(s). Do not stretch, warp, or deform the product horizontally to fill "
+                "the wide 16:9 frame. Render the product with correct original proportions centered horizontally."
+            )
+        else:
+            # Square (1:1)
+            rule = (
+                "Preserve exact natural proportions, shape, and aspect ratio of the product/subject "
+                "from reference image(s). Do not stretch, warp, or deform the product to fit the square frame."
+            )
+
+        if "proportions" not in res.lower() and "aspect ratio" not in res.lower() and "stretch" not in res.lower():
+            res = f"{res}\n\n[Composition Rule: {rule}]"
+
+    return res
+
+
 def _generate_mflux(prompt: str, n: int, width: int, height: int,
                     output_dir: Path, base_seed: int | None,
                     config: ImageEngineConfig,
@@ -721,6 +769,9 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
             "the Engine dropdown to FLUX.2 [klein] / Z-Image-Turbo for "
             "text-only generation."
         )
+
+    if refs and fam in ("qwen_edit", "flux2_edit"):
+        prompt = _normalize_multiref_prompt(prompt, width=width, height=height)
 
     # Effective steps + guidance: prefer user-set values if non-zero,
     # otherwise fall back to the family default.
