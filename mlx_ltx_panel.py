@@ -12165,7 +12165,7 @@ class WarmHelper:
             # `str(GEMMA)` — a constant naming Gemma 3 — so selecting LTX-2.5
             # moved the transformer and silently left the text tower on 2.3's
             # encoder. It renders; it just renders wrong (ltx25 entry, above).
-            env["LTX_GEMMA"] = text_encoder_dir()
+            env["LTX_GEMMA"] = str(GEMMA)
             # Prompt enhancement is a language-model generation task, not a
             # render-conditioning task. LTX-2.5's Gemma 4 tower is the correct
             # text encoder but deliberately has no lm_head / KV cache, so
