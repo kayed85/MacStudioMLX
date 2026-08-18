@@ -66,6 +66,13 @@ import image_engine as agent_image_engine
 # serializer (ideoBuildCaption / ideoSynthDesc / ideoRectToBbox).
 import ideogram_caption
 
+try:
+    import mlx_lm.utils
+    mlx_lm.utils.MODEL_REMAPPING["gemma4_unified"] = "gemma2"
+    mlx_lm.utils.MODEL_REMAPPING["gemma4_unified_text"] = "gemma2"
+except Exception:
+    pass
+
 # Storyboard — the layer ABOVE the video modes: one concept in, a film's worth
 # of shots out. `storyboard` is the spine (schema, validation, scheduling,
 # durable state) and is deliberately pure-stdlib and model-free, so it unit-tests

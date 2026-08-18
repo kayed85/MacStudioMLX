@@ -676,12 +676,12 @@ class TestQueueCharacterVoiceContract(unittest.TestCase):
                           "bizarrotrn.audio.safetensors"])
         self.assertEqual([x["strength"] for x in params["loras"][:2]],
                          [0.9, 1.25])
-        self.assertEqual(params["quality"], "balanced")
+        self.assertEqual(params["quality"], P.character_render_quality(P.ACTIVE_MODEL_VERSION))
         self.assertEqual(params["quality_choice"], "pro")
 
     def test_all_four_tokens_survive_job_sidecar_and_reload(self):
         """Real queue payload -> job params/sidecar shape -> real JS loader."""
-        for row in P.character_strip_payload("ltx25")["tokens"]:
+        for row in P.character_strip_payload(P.ACTIVE_MODEL_VERSION)["tokens"]:
             with self.subTest(token=row["key"]):
                 reply, params = self._post({
                     "mode": "t2v", "character_id": "bizarrotrn",

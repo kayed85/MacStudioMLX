@@ -30,6 +30,13 @@ import traceback
 from contextlib import contextmanager
 from pathlib import Path
 
+try:
+    import mlx_lm.utils
+    mlx_lm.utils.MODEL_REMAPPING["gemma4_unified"] = "gemma2"
+    mlx_lm.utils.MODEL_REMAPPING["gemma4_unified_text"] = "gemma2"
+except Exception:
+    pass
+
 # ---- MLX lazy-eval defaults — MUST RUN BEFORE LTX IMPORTS ===================
 # Upstream ltx_core_mlx reads `LTX2_DIT_EVAL_EVERY` (default 8) and
 # `LTX2_GEMMA_EVAL_EVERY` (default 1) at MODULE IMPORT TIME. The defaults
