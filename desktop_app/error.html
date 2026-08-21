@@ -8,6 +8,8 @@
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
     body { background-color: #0b0f19; color: #e2e8f0; padding: 40px; text-align: center; }
     .container { max-width: 750px; margin: 40px auto; background: #131b2e; padding: 32px; border-radius: 16px; border: 1px solid #1e293b; }
+    .spinner { width: 36px; height: 36px; border: 3px solid #1e293b; border-top-color: #3b82f6; border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 16px auto; }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
     h1 { font-size: 22px; color: #f8fafc; margin-bottom: 12px; }
     p { font-size: 14px; color: #94a3b8; line-height: 1.6; margin-bottom: 24px; }
     .log-box { background: #090d16; color: #a0aec0; font-family: monospace; font-size: 12px; padding: 16px; border-radius: 8px; text-align: left; max-height: 260px; overflow-y: auto; white-space: pre-wrap; margin-bottom: 24px; user-select: text !important; -webkit-user-select: text !important; border: 1px solid #1e293b; }
@@ -19,9 +21,10 @@
 </head>
 <body>
   <div class="container">
-    <h1>Phosphene Python Backend Server</h1>
-    <p>Starting local Python server process. If loading takes longer than expected, review the diagnostic logs below or retry.</p>
-    <div class="log-box" id="errorLogs">Initializing server logs...</div>
+    <div class="spinner"></div>
+    <h1>Starting Phosphene Engine...</h1>
+    <p>Initializing local Python backend server on port 8198. Studio will open automatically as soon as ready.</p>
+    <div class="log-box" id="errorLogs">Starting Python server process...</div>
     <div>
       <button class="btn" onclick="retry()">Retry Launch</button>
       <button class="btn btn-secondary" onclick="openModelHub()">Model Manager</button>
@@ -30,9 +33,11 @@
   <script>
     const { ipcRenderer } = require('electron');
     ipcRenderer.on('server-log', (event, log) => {
-      const box = document.getElementById('errorLogs');
-      box.innerText = log;
-      box.scrollTop = box.scrollHeight;
+      if (log) {
+        const box = document.getElementById('errorLogs');
+        box.innerText = log;
+        box.scrollTop = box.scrollHeight;
+      }
     });
     function retry() {
       document.getElementById('errorLogs').innerText = 'Retrying launch...';
