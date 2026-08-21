@@ -39,9 +39,8 @@ const defaultModelsDir = fs.existsSync(path.join(projectRoot, 'mlx_models'))
 function getPythonBin() {
   const envCandidates = [
     path.join(projectRoot, 'ltx-2-mlx/env/bin/python3.11'),
-    '/Users/mk/Phosphene/ltx-2-mlx/env/bin/python3.11',
     path.join(projectRoot, 'ltx-2-mlx/env/bin/python3'),
-    '/Users/mk/Phosphene/ltx-2-mlx/env/bin/python3'),
+    '/Users/mk/Phosphene/ltx-2-mlx/env/bin/python3',
     path.join(app.getPath('home'), 'Phosphene/ltx-2-mlx/env/bin/python3.11')
   ];
   for (const cand of envCandidates) {
