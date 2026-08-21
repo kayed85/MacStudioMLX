@@ -5757,9 +5757,38 @@ def _download_thread(repo: dict) -> None:
                     buf += ch
             if buf.strip():
                 push(f"[{dl_tag}:{repo['key']}] {buf.strip()[:300]}")
-            rc = proc.wait()
             if rc == 0:
                 push(f"[{dl_tag}] {dl_label} downloaded successfully.")
+                by_key = {r.get("key"): r for r in _repos()}
+                next_repo = None
+                for req_key in capability_repo_keys("render"):
+                    r_cand = by_key.get(req_key)
+                    if r_cand and _repo_effective_missing(r_cand):
+                        next_repo = r_cand
+                        break
+                if next_repo and next_repo.get("key") != repo.get("key"):
+                    push(f"[{dl_tag}] Pack {repo.get('key')} complete! Automatically continuing download for required companion model: {next_repo.get('name')} ({next_repo.get('key')})...")
+                    repo = next_repo
+                    repo_id = repo["repo_id"]
+                    target = ROOT / repo["local_dir"]
+                    target.mkdir(parents=True, exist_ok=True)
+                    mirror = repo.get("mirror") or {}
+                    is_release_mirror = mirror.get("kind") == "github-release"
+                    if is_release_mirror:
+                        dl_tag = "mirror"
+                        cmd = [sys.executable, str(ROOT / "scripts" / "fetch_pack_release.py"),
+                               "--repo-key", str(repo.get("key") or ""), "--root", str(ROOT)]
+                    else:
+                        dl_tag = "hf"
+                        cmd = [str(HF_BIN), "download", repo_id, "--local-dir", str(target)]
+                        include_patterns = repo.get("download_include") or []
+                        for pat in include_patterns:
+                            cmd.extend(["--include", pat])
+                    dl_label = (f"{repo.get('key')} ({mirror.get('tag')})" if is_release_mirror else repo_id)
+                    with DOWNLOAD_LOCK:
+                        DOWNLOAD["key"] = repo.get("key")
+                        DOWNLOAD["repo_id"] = repo["repo_id"]
+                    continue
                 break
             with DOWNLOAD_LOCK:
                 still_active = DOWNLOAD["active"]
