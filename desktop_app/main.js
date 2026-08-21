@@ -96,10 +96,6 @@ function startPythonServerIfNeeded(onReady) {
       return;
     }
 
-    if (mainWindow) {
-      mainWindow.loadFile(path.join(__dirname, 'error.html'));
-    }
-
     const scriptPath = path.join(projectRoot, 'mlx_ltx_panel.py');
     if (!fs.existsSync(scriptPath)) {
       console.error(`Cannot find mlx_ltx_panel.py at ${scriptPath}`);
@@ -111,7 +107,7 @@ function startPythonServerIfNeeded(onReady) {
 
     console.log('Starting Phosphene Python server...');
     startedByUs = true;
-    lastPythonLogs = `Starting Python server process using ${pythonBin} at ${projectRoot}...\n`;
+    lastPythonLogs = `[00:00:00] 🚀 Initializing Phosphene Studio Environment...\n[00:00:01] 🐍 Spawning Python server at ${projectRoot}...\n`;
     if (mainWindow) {
       mainWindow.webContents.send('server-log', lastPythonLogs);
     }
@@ -237,10 +233,11 @@ function createMainWindow() {
   const modelsStatus = downloader.getModelsStatus();
   const hasAnyModel = modelsStatus.some(m => m.isDownloaded);
 
-  // If at least 1 model exists or is downloading, go straight to Phosphene Studio!
   if (!hasAnyModel) {
     mainWindow.loadFile(path.join(__dirname, 'model_hub.html'));
   } else {
+    // ALWAYS load Terminal Console error.html IMMEDIATELY on boot!
+    mainWindow.loadFile(path.join(__dirname, 'error.html'));
     startPythonServerIfNeeded(() => {
       mainWindow.loadURL('http://127.0.0.1:8198');
     });
@@ -269,7 +266,7 @@ ipcMain.on('get-models-status', (event) => {
 });
 
 ipcMain.on('get-server-logs', (event) => {
-  event.reply('server-log', lastPythonLogs || 'Initializing server logs...');
+  event.reply('server-log', lastPythonLogs || '[00:00:00] 🚀 Initializing Phosphene Studio Live Terminal Console...\n[00:00:01] 🐍 Loading Apple Silicon MLX Environment...');
 });
 
 ipcMain.on('start-download', (event, modelId) => {
@@ -300,6 +297,7 @@ ipcMain.on('start-download', (event, modelId) => {
 
 ipcMain.on('start-main-app', () => {
   if (mainWindow) {
+    mainWindow.loadFile(path.join(__dirname, 'error.html'));
     startPythonServerIfNeeded(() => {
       mainWindow.loadURL('http://127.0.0.1:8198');
     });
