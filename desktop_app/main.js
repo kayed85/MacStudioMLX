@@ -39,6 +39,7 @@ const defaultModelsDir = fs.existsSync(path.join(projectRoot, 'mlx_models'))
 function getPythonBin() {
   const envCandidates = [
     path.join(projectRoot, 'ltx-2-mlx/env/bin/python3.11'),
+    '/Users/mk/Phosphene/ltx-2-mlx/env/bin/python3.11',
     path.join(projectRoot, 'ltx-2-mlx/env/bin/python3'),
     '/Users/mk/Phosphene/ltx-2-mlx/env/bin/python3',
     path.join(app.getPath('home'), 'Phosphene/ltx-2-mlx/env/bin/python3.11')
@@ -234,10 +235,10 @@ function createMainWindow() {
   });
 
   const modelsStatus = downloader.getModelsStatus();
-  const requiredMissing = modelsStatus.some(m => m.required && !m.isDownloaded);
+  const hasAnyModel = modelsStatus.some(m => m.isDownloaded);
 
-  if (requiredMissing) {
-    // Show Model Hub UI immediately
+  // If at least 1 model exists or is downloading, go straight to Phosphene Studio!
+  if (!hasAnyModel) {
     mainWindow.loadFile(path.join(__dirname, 'model_hub.html'));
   } else {
     startPythonServerIfNeeded(() => {
