@@ -75,10 +75,7 @@ function startPythonServerIfNeeded(onReady) {
     if (!fs.existsSync(scriptPath)) {
       console.error(`Cannot find mlx_ltx_panel.py at ${scriptPath}`);
       if (mainWindow) {
-        mainWindow.loadFile(path.join(__dirname, 'error.html'));
-        setTimeout(() => {
-          if (mainWindow) mainWindow.webContents.send('server-log', `Error: mlx_ltx_panel.py not found at ${scriptPath}`);
-        }, 500);
+        mainWindow.webContents.send('server-log', `Error: mlx_ltx_panel.py not found at ${scriptPath}`);
       }
       return;
     }
@@ -86,6 +83,9 @@ function startPythonServerIfNeeded(onReady) {
     console.log('Starting Phosphene Python server...');
     startedByUs = true;
     lastPythonLogs = 'Starting Python server process...\n';
+    if (mainWindow) {
+      mainWindow.webContents.send('server-log', lastPythonLogs);
+    }
 
     const env = Object.assign({}, process.env, {
       LTX_TIER_OVERRIDE: 'base',
@@ -100,36 +100,39 @@ function startPythonServerIfNeeded(onReady) {
       PYTHONPATH: path.join(projectRoot, 'ltx-2-mlx/env/lib/python3.11/site-packages')
     });
 
-    pyProcess = spawn(
-      pythonBin,
-      ['mlx_ltx_panel.py'],
-      {
-        cwd: projectRoot,
-        env: env,
-        stdio: ['ignore', 'pipe', 'pipe']
-      }
-    );
+    try {
+      pyProcess = spawn(
+        pythonBin,
+        ['mlx_ltx_panel.py'],
+        {
+          cwd: projectRoot,
+          env: env,
+          stdio: ['ignore', 'pipe', 'pipe']
+        }
+      );
 
-    pyProcess.stdout.on('data', (data) => {
-      const msg = data.toString();
-      console.log(`[Python stdout]: ${msg}`);
-      lastPythonLogs += msg;
+      pyProcess.stdout.on('data', (data) => {
+        const msg = data.toString();
+        console.log(`[Python stdout]: ${msg}`);
+        lastPythonLogs += msg;
+        if (mainWindow) {
+          mainWindow.webContents.send('server-log', lastPythonLogs);
+        }
+      });
+
+      pyProcess.stderr.on('data', (data) => {
+        const msg = data.toString();
+        console.log(`[Python stderr]: ${msg}`);
+        lastPythonLogs += msg;
+        if (mainWindow) {
+          mainWindow.webContents.send('server-log', lastPythonLogs);
+        }
+      });
+    } catch (err) {
+      lastPythonLogs += `\nSpawn Error: ${err.message}`;
       if (mainWindow) {
         mainWindow.webContents.send('server-log', lastPythonLogs);
       }
-    });
-
-    pyProcess.stderr.on('data', (data) => {
-      const msg = data.toString();
-      console.log(`[Python stderr]: ${msg}`);
-      lastPythonLogs += msg;
-      if (mainWindow) {
-        mainWindow.webContents.send('server-log', lastPythonLogs);
-      }
-    });
-
-    if (mainWindow) {
-      mainWindow.loadFile(path.join(__dirname, 'error.html'));
     }
 
     checkServerReady((ready) => {
@@ -166,26 +169,16 @@ function createMainWindow() {
     }
   });
 
-  // Handle load failure gracefully so screen is never black
-  mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription) => {
-    console.log(`[did-fail-load]: ${errorCode} - ${errorDescription}`);
-    if (mainWindow) {
-      mainWindow.loadFile(path.join(__dirname, 'error.html'));
-      setTimeout(() => {
-        if (mainWindow) {
-          mainWindow.webContents.send('server-log', `Connection Error (${errorDescription}). Waiting for Phosphene server...\n${lastPythonLogs}`);
-        }
-      }, 500);
-    }
-  });
-
   const modelsStatus = downloader.getModelsStatus();
   const requiredMissing = modelsStatus.some(m => m.required && !m.isDownloaded);
 
   if (requiredMissing) {
-    // Show Model Hub UI
+    // Show Model Hub UI immediately
     mainWindow.loadFile(path.join(__dirname, 'model_hub.html'));
   } else {
+    // Show status/error page IMMEDIATELY so window is never blank/black
+    mainWindow.loadFile(path.join(__dirname, 'error.html'));
+    
     // Boot server and load app
     startPythonServerIfNeeded(() => {
       mainWindow.loadURL('http://127.0.0.1:8198');
@@ -215,7 +208,7 @@ ipcMain.on('get-models-status', (event) => {
 });
 
 ipcMain.on('get-server-logs', (event) => {
-  event.reply('server-log', lastPythonLogs);
+  event.reply('server-log', lastPythonLogs || 'Initializing server logs...');
 });
 
 ipcMain.on('start-download', (event, modelId) => {
@@ -246,6 +239,7 @@ ipcMain.on('start-download', (event, modelId) => {
 
 ipcMain.on('start-main-app', () => {
   if (mainWindow) {
+    mainWindow.loadFile(path.join(__dirname, 'error.html'));
     startPythonServerIfNeeded(() => {
       mainWindow.loadURL('http://127.0.0.1:8198');
     });
