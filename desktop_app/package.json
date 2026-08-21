@@ -17,6 +17,7 @@
   "build": {
     "appId": "studio.phosphene.app",
     "productName": "Phosphene Studio",
+    "asar": false,
     "mac": {
       "category": "public.app-category.graphics-design",
       "icon": "icon.icns",

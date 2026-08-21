@@ -54,8 +54,15 @@ class ModelDownloader {
     }
 
     const projectRoot = path.resolve(__dirname, '..');
-    const fetchScript = path.join(projectRoot, 'scripts/fetch_pack_release.py');
-    const hfDownloaderScript = path.join(__dirname, 'hf_downloader.py');
+    let fetchScript = path.join(projectRoot, 'scripts/fetch_pack_release.py');
+    let hfDownloaderScript = path.join(__dirname, 'hf_downloader.py');
+
+    if (hfDownloaderScript.includes('app.asar')) {
+      const unpacked = hfDownloaderScript.replace('app.asar', 'app.asar.unpacked');
+      if (fs.existsSync(unpacked)) {
+        hfDownloaderScript = unpacked;
+      }
+    }
 
     let args = [];
     let cwd = projectRoot;
