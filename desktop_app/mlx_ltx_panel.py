@@ -5757,6 +5757,7 @@ def _download_thread(repo: dict) -> None:
                     buf += ch
             if buf.strip():
                 push(f"[{dl_tag}:{repo['key']}] {buf.strip()[:300]}")
+            rc = proc.wait()
             if rc == 0:
                 push(f"[{dl_tag}] {dl_label} downloaded successfully.")
                 by_key = {r.get("key"): r for r in _repos()}
