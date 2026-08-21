@@ -261,7 +261,7 @@
       logOutput.innerText += log + '\n';
       logOutput.scrollTop = logOutput.scrollHeight;
 
-      // Extract percentage if present in log line (e.g. 45%, or shard progress)
+      // Extract percentage if present in log line
       const match = log.match(/(\d{1,3})%/);
       if (match) {
         const pct = parseInt(match[1], 10);
@@ -271,7 +271,6 @@
       } else if (log.includes('DOWNLOAD_COMPLETE') || log.includes('sha256 verified')) {
         updateProgress(100);
       } else if (currentPercent < 90) {
-        // Slowly step progress forward while logs are actively coming in
         updateProgress(Math.min(currentPercent + 5, 90));
       }
     });
@@ -298,13 +297,10 @@
       const grid = document.getElementById('modelsGrid');
       grid.innerHTML = '';
 
-      let hasRequiredDownloaded = true;
+      let anyModelReady = modelsList.some(m => m.isDownloaded);
 
       modelsList.forEach(model => {
         const isDone = model.isDownloaded;
-        if (model.required && !isDone) {
-          hasRequiredDownloaded = false;
-        }
 
         const card = document.createElement('div');
         card.className = 'card';
@@ -337,13 +333,8 @@
       });
 
       const launchBtn = document.getElementById('launchBtn');
-      if (hasRequiredDownloaded) {
-        launchBtn.disabled = false;
-        launchBtn.innerText = 'Start Phosphene Studio';
-      } else {
-        launchBtn.disabled = true;
-        launchBtn.innerText = 'Download Required Models First';
-      }
+      launchBtn.disabled = false; // Always allow starting
+      launchBtn.innerText = anyModelReady ? 'Start Phosphene Studio' : 'Start Phosphene Studio (Download Models First)';
     }
 
     function toggleDownload(modelId) {
@@ -356,6 +347,9 @@
     }
 
     function launchApp() {
+      const launchBtn = document.getElementById('launchBtn');
+      launchBtn.innerText = 'Starting Phosphene Studio...';
+      launchBtn.disabled = true;
       ipcRenderer.send('start-main-app');
     }
 
