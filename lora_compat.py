@@ -378,9 +378,18 @@ def measure_adapter_effect(
                 continue
             if a.shape[0] != b.shape[1]:
                 continue  # rank disagreement: a shape problem, not a size one
-            gram = b.T @ b
-            cov = a @ a.T
-            frob = float(np.sqrt(max(float((gram * cov.T).sum()), 0.0)))
+            # Accelerate's BLAS raises spurious FPE flags on Apple Silicon —
+            # numpy turns them into "divide by zero"/"overflow encountered in
+            # matmul" on inputs that are entirely finite. Measured: identical
+            # results with and without. A diagnostic that shouts three
+            # warnings before its verdict is a diagnostic nobody trusts.
+            with np.errstate(all="ignore"):
+                gram = b.T @ b
+                cov = a @ a.T
+                total = float((gram * cov.T).sum())
+            if not (total == total):  # NaN: a product we cannot stand behind
+                continue
+            frob = float(np.sqrt(max(total, 0.0)))
             entries = float(a.shape[1]) * float(b.shape[0])
             value = frob / (entries**0.5) if entries else 0.0
             rms.append(value)
