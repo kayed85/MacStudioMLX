@@ -41,7 +41,7 @@ function getPythonBin() {
     path.join(projectRoot, 'ltx-2-mlx/env/bin/python3.11'),
     '/Users/mk/Phosphene/ltx-2-mlx/env/bin/python3.11',
     path.join(projectRoot, 'ltx-2-mlx/env/bin/python3'),
-    '/Users/mk/Phosphene/ltx-2-mlx/env/bin/python3',
+    '/Users/mk/Phosphene/ltx-2-mlx/env/bin/python3'),
     path.join(app.getPath('home'), 'Phosphene/ltx-2-mlx/env/bin/python3.11')
   ];
   for (const cand of envCandidates) {
@@ -94,6 +94,10 @@ function startPythonServerIfNeeded(onReady) {
       console.log('Phosphene server is already running on port 8198.');
       onReady();
       return;
+    }
+
+    if (mainWindow) {
+      mainWindow.loadFile(path.join(__dirname, 'error.html'));
     }
 
     const scriptPath = path.join(projectRoot, 'mlx_ltx_panel.py');
@@ -237,8 +241,6 @@ function createMainWindow() {
     // Show Model Hub UI immediately
     mainWindow.loadFile(path.join(__dirname, 'model_hub.html'));
   } else {
-    // Immediately show loading screen
-    mainWindow.loadFile(path.join(__dirname, 'error.html'));
     startPythonServerIfNeeded(() => {
       mainWindow.loadURL('http://127.0.0.1:8198');
     });
@@ -298,7 +300,6 @@ ipcMain.on('start-download', (event, modelId) => {
 
 ipcMain.on('start-main-app', () => {
   if (mainWindow) {
-    mainWindow.loadFile(path.join(__dirname, 'error.html'));
     startPythonServerIfNeeded(() => {
       mainWindow.loadURL('http://127.0.0.1:8198');
     });
