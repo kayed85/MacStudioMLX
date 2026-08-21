@@ -51,7 +51,7 @@ const pythonBin = getPythonBin();
 const manifestPath = path.join(__dirname, 'models_manifest.json');
 const downloader = new ModelDownloader(defaultModelsDir, manifestPath, pythonBin);
 
-function checkServerReady(cb, retries = 60) {
+function checkServerReady(cb, retries = 180) {
   http.get('http://127.0.0.1:8198', (res) => {
     cb(true);
   }).on('error', () => {
@@ -88,6 +88,7 @@ function startPythonServerIfNeeded(onReady) {
     }
 
     const env = Object.assign({}, process.env, {
+      PYTHONUNBUFFERED: '1',
       LTX_TIER_OVERRIDE: 'base',
       LTX_MODEL: path.join(defaultModelsDir, 'ltx-2.3-mlx-q4'),
       LTX_MODEL_HQ: path.join(defaultModelsDir, 'ltx-2.3-mlx-q8'),
@@ -239,7 +240,6 @@ ipcMain.on('start-download', (event, modelId) => {
 
 ipcMain.on('start-main-app', () => {
   if (mainWindow) {
-    mainWindow.loadFile(path.join(__dirname, 'error.html'));
     startPythonServerIfNeeded(() => {
       mainWindow.loadURL('http://127.0.0.1:8198');
     });
