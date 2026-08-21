@@ -179,6 +179,13 @@ class TestIngredientsGeneration(unittest.TestCase):
 class TestH3Orientation(unittest.TestCase):
     """Portrait rotates the resolved cell; it never invents a tier."""
 
+    def setUp(self):
+        self.patcher = unittest.mock.patch.object(P, "h3_capable", return_value=True)
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+
     def h3_job(self, form: dict) -> dict:
         base = {"mode": "t2v", "engine": "h3", "prompt": "a lighthouse"}
         base.update(form)

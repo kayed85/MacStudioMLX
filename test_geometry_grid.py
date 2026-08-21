@@ -33,6 +33,12 @@ def job_for(form: dict) -> dict:
 
 
 class TestLtxGeometryGrid(unittest.TestCase):
+    def setUp(self):
+        self.patcher = unittest.mock.patch.object(P, "h3_capable", return_value=True)
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
     def test_off_grid_canvas_is_floored_to_64(self):
         p = job_for({"width": "1000", "height": "500"})["params"]
         self.assertEqual((p["width"], p["height"]), (960, 448))

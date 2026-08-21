@@ -42,6 +42,11 @@ class ModelDownloader {
   }
 
   downloadModel(modelId, onProgress, onComplete, onError) {
+    if (this.currentProcess) {
+      if (onError) onError(new Error(`Another download is currently active in the background. Please wait for it to complete.`));
+      return;
+    }
+
     const model = this.manifest.models.find(m => m.id === modelId);
     if (!model) {
       if (onError) onError(new Error(`Model ${modelId} not found in manifest.`));
@@ -78,36 +83,48 @@ class ModelDownloader {
       args = [hfDownloaderScript, model.repo_id, targetDir];
     }
 
-    this.currentProcess = spawn(this.pythonBin, args, {
-      cwd: cwd,
-      env: Object.assign({}, process.env, { HF_HUB_ENABLE_HF_TRANSFER: '1' })
-    });
+    try {
+      this.currentProcess = spawn(this.pythonBin, args, {
+        cwd: cwd,
+        env: Object.assign({}, process.env, { HF_HUB_ENABLE_HF_TRANSFER: '1' })
+      });
 
-    this.currentProcess.stdout.on('data', (data) => {
-      const str = data.toString();
-      console.log(`[Downloader stdout]: ${str}`);
-      if (onProgress) onProgress(str);
-    });
+      this.currentProcess.stdout.on('data', (data) => {
+        const str = data.toString();
+        console.log(`[Downloader stdout]: ${str}`);
+        if (onProgress) onProgress(str);
+      });
 
-    this.currentProcess.stderr.on('data', (data) => {
-      const str = data.toString();
-      console.log(`[Downloader stderr]: ${str}`);
-      if (onProgress) onProgress(str);
-    });
+      this.currentProcess.stderr.on('data', (data) => {
+        const str = data.toString();
+        console.log(`[Downloader stderr]: ${str}`);
+        if (onProgress) onProgress(str);
+      });
 
-    this.currentProcess.on('close', (code) => {
+      this.currentProcess.on('error', (err) => {
+        this.currentProcess = null;
+        if (onError) onError(err);
+      });
+
+      this.currentProcess.on('close', (code) => {
+        this.currentProcess = null;
+        if (code === 0) {
+          if (onComplete) onComplete(model);
+        } else {
+          if (onError) onError(new Error(`Download process exited with code ${code}`));
+        }
+      });
+    } catch (err) {
       this.currentProcess = null;
-      if (code === 0) {
-        if (onComplete) onComplete(model);
-      } else {
-        if (onError) onError(new Error(`Download process exited with code ${code}`));
-      }
-    });
+      if (onError) onError(err);
+    }
   }
 
   cancelDownload() {
     if (this.currentProcess) {
-      this.currentProcess.kill('SIGTERM');
+      try {
+        this.currentProcess.kill('SIGTERM');
+      } catch (e) {}
       this.currentProcess = null;
     }
   }
