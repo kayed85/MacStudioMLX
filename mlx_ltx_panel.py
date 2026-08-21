@@ -12165,7 +12165,7 @@ class WarmHelper:
             # `str(GEMMA)` — a constant naming Gemma 3 — so selecting LTX-2.5
             # moved the transformer and silently left the text tower on 2.3's
             # encoder. It renders; it just renders wrong (ltx25 entry, above).
-            env["LTX_GEMMA"] = str(GEMMA)
+            env["LTX_GEMMA"] = text_encoder_dir(ACTIVE_MODEL_VERSION)
             # Prompt enhancement is a language-model generation task, not a
             # render-conditioning task. LTX-2.5's Gemma 4 tower is the correct
             # text encoder but deliberately has no lm_head / KV cache, so
@@ -39478,18 +39478,9 @@ HTML = r"""<!doctype html>
        there was no way to find it on purpose. This is a static link, never a
        prompt: no badge, no pulse, no counter. -->
   <a class="icon-btn star-link" id="starLink"
-     href="https://github.com/mrbizarro/phosphene" target="_blank" rel="noopener"
-     title="Star Phosphene on GitHub — it is how people find it">
+     href="https://github.com/kayed85/Phosphene" target="_blank" rel="noopener"
+     title="Star Phosphene on GitHub">
     <svg class="ph" aria-hidden="true"><use href="#ph-star"/></svg>
-  </a>
-  <a class="phosphene-x-link" href="https://x.com/PhospheneAI" target="_blank" rel="noopener"
-     title="Follow @PhospheneAI on X — the official Phosphene account">
-    <svg class="ph" aria-hidden="true"><use href="#ph-x-brand"/></svg>
-  </a>
-  <a class="creator-link" href="https://x.com/AIBizarrothe" target="_blank" rel="noopener" title="Follow Mr. Bizarro on X (the panel's creator)">
-    <img src="/assets/bizarro-avatar.jpg" class="creator-avatar" alt="">
-    <span>by Bizarro</span>
-    <span class="x-icon"><svg class="ph" aria-hidden="true" style="margin-right:3px;vertical-align:-2px"><use href="#ph-arrow-square-out"/></svg>X</span>
   </a>
 </header>
 
