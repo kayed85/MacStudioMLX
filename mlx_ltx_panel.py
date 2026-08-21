@@ -54810,16 +54810,25 @@ function updateModelsCard(s) {
     // broken 2.5 install: 20 GB spent, still broken.
     const P = ((BOOT.ltx || {}).packs) || {};
     const pBase = P.base, pEnc = P.encoder;
+    const missingList = s.base_missing || [];
+    let targetPack = pBase;
+    if (pBase && pEnc) {
+      const baseName = (pBase.key || 'q4').toLowerCase();
+      const encName = (pEnc.key || 'gemma').toLowerCase();
+      const hasBaseMissing = missingList.some(f => f.toLowerCase().includes(baseName) || f.toLowerCase().includes('ltx'));
+      const hasEncMissing = missingList.some(f => f.toLowerCase().includes(encName) || f.toLowerCase().includes('gemma'));
+      if (!hasBaseMissing && hasEncMissing) {
+        targetPack = pEnc;
+      }
+    }
     sub.innerHTML = `${escapeHtml(pBase ? pBase.name : 'The base model')} (~${escapeHtml(pBase ? pBase.size : '?')})`
       + ` and ${escapeHtml(pEnc ? pEnc.name : 'its text encoder')} (~${escapeHtml(pEnc ? pEnc.size : '?')})`
       + ` are required. Click below — downloads resume if interrupted.${
       missing ? ` <span style="color:var(--muted)">(${missing} files left)</span>` : ''
     }`;
-    // A mirrored pack does not need `hf` at all — the same per-row question the
-    // Models modal already asks, answered from the same registry field.
-    const baseNeedsHf = pBase ? (pBase.needs_hf !== false) : true;
+    const baseNeedsHf = targetPack ? (targetPack.needs_hf !== false) : true;
     actions.innerHTML = ((s.hf_available ?? true) || !baseNeedsHf)
-      ? `<button onclick="startDownload('${escapeHtml(pBase ? pBase.key : 'q4')}')">Download ${escapeHtml(pBase ? pBase.name : 'base')} (${escapeHtml(pBase ? pBase.size : '?')})</button>`
+      ? `<button onclick="startDownload('${escapeHtml(targetPack ? targetPack.key : 'q4')}')">Download ${escapeHtml(targetPack ? targetPack.name : 'missing model')} (${escapeHtml(targetPack ? targetPack.size : '?')})</button>`
       : `<button disabled title="hf binary not found — reinstall via Pinokio">hf missing</button>`;
     return;
   }
