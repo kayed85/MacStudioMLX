@@ -8,8 +8,8 @@ const ModelDownloader = require('./downloader');
 let mainWindow = null;
 let pyProcess = null;
 let startedByUs = false;
+let lastPythonLogs = '';
 
-// Robustly resolve project root and python environment
 function getPhospheneRoot() {
   const candidates = [
     __dirname,
@@ -51,7 +51,7 @@ const pythonBin = getPythonBin();
 const manifestPath = path.join(__dirname, 'models_manifest.json');
 const downloader = new ModelDownloader(defaultModelsDir, manifestPath, pythonBin);
 
-function checkServerReady(cb, retries = 40) {
+function checkServerReady(cb, retries = 60) {
   http.get('http://127.0.0.1:8198', (res) => {
     cb(true);
   }).on('error', () => {
@@ -76,13 +76,16 @@ function startPythonServerIfNeeded(onReady) {
       console.error(`Cannot find mlx_ltx_panel.py at ${scriptPath}`);
       if (mainWindow) {
         mainWindow.loadFile(path.join(__dirname, 'error.html'));
-        mainWindow.webContents.send('server-log', `Error: mlx_ltx_panel.py not found at ${scriptPath}`);
+        setTimeout(() => {
+          if (mainWindow) mainWindow.webContents.send('server-log', `Error: mlx_ltx_panel.py not found at ${scriptPath}`);
+        }, 500);
       }
       return;
     }
 
     console.log('Starting Phosphene Python server...');
     startedByUs = true;
+    lastPythonLogs = 'Starting Python server process...\n';
 
     const env = Object.assign({}, process.env, {
       LTX_TIER_OVERRIDE: 'base',
@@ -103,9 +106,27 @@ function startPythonServerIfNeeded(onReady) {
       {
         cwd: projectRoot,
         env: env,
-        stdio: 'ignore'
+        stdio: ['ignore', 'pipe', 'pipe']
       }
     );
+
+    pyProcess.stdout.on('data', (data) => {
+      const msg = data.toString();
+      console.log(`[Python stdout]: ${msg}`);
+      lastPythonLogs += msg;
+      if (mainWindow) {
+        mainWindow.webContents.send('server-log', lastPythonLogs);
+      }
+    });
+
+    pyProcess.stderr.on('data', (data) => {
+      const msg = data.toString();
+      console.log(`[Python stderr]: ${msg}`);
+      lastPythonLogs += msg;
+      if (mainWindow) {
+        mainWindow.webContents.send('server-log', lastPythonLogs);
+      }
+    });
 
     if (mainWindow) {
       mainWindow.loadFile(path.join(__dirname, 'error.html'));
@@ -117,7 +138,7 @@ function startPythonServerIfNeeded(onReady) {
       } else {
         console.error('Server boot timeout.');
         if (mainWindow) {
-          mainWindow.webContents.send('server-log', 'Server boot timeout. Make sure Python dependencies (mlx, fastapi, gradio) are installed.');
+          mainWindow.webContents.send('server-log', lastPythonLogs + '\n[Error]: Server boot timeout on http://127.0.0.1:8198');
         }
       }
     });
@@ -142,6 +163,19 @@ function createMainWindow() {
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false
+    }
+  });
+
+  // Handle load failure gracefully so screen is never black
+  mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription) => {
+    console.log(`[did-fail-load]: ${errorCode} - ${errorDescription}`);
+    if (mainWindow) {
+      mainWindow.loadFile(path.join(__dirname, 'error.html'));
+      setTimeout(() => {
+        if (mainWindow) {
+          mainWindow.webContents.send('server-log', `Connection Error (${errorDescription}). Waiting for Phosphene server...\n${lastPythonLogs}`);
+        }
+      }, 500);
     }
   });
 
@@ -178,6 +212,10 @@ function stopPythonServer() {
 // IPC Communication
 ipcMain.on('get-models-status', (event) => {
   event.reply('models-status', downloader.getModelsStatus());
+});
+
+ipcMain.on('get-server-logs', (event) => {
+  event.reply('server-log', lastPythonLogs);
 });
 
 ipcMain.on('start-download', (event, modelId) => {
