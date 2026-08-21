@@ -55,6 +55,7 @@ class ModelDownloader {
 
     const projectRoot = path.resolve(__dirname, '..');
     const fetchScript = path.join(projectRoot, 'scripts/fetch_pack_release.py');
+    const hfDownloaderScript = path.join(__dirname, 'hf_downloader.py');
 
     let args = [];
     let cwd = projectRoot;
@@ -63,25 +64,8 @@ class ModelDownloader {
     if (['q4_25', 'q8_25', 'hq_25'].includes(model.key) && fs.existsSync(fetchScript)) {
       args = [fetchScript, '--repo-key', model.key, '--dest', targetDir];
     } else {
-      // Hugging Face repo download via python snapshot_download
-      const script = `
-import sys
-import os
-
-repo_id = sys.argv[1]
-local_dir = sys.argv[2]
-
-print(f"Starting download of {repo_id} to {local_dir}...")
-
-try:
-    from huggingface_hub import snapshot_download
-    snapshot_download(repo_id=repo_id, local_dir=local_dir, resume_download=True)
-    print("DOWNLOAD_COMPLETE")
-except Exception as e:
-    print(f"Hugging Face download failed: {e}", file=sys.stderr)
-    sys.exit(1)
-`;
-      args = ['-c', script, model.repo_id, targetDir];
+      // Use pure stdlib Python HF downloader (no pip / huggingface_hub dependency needed)
+      args = [hfDownloaderScript, model.repo_id, targetDir];
     }
 
     this.currentProcess = spawn(this.pythonBin, args, {

@@ -46,6 +46,7 @@
     "files": [
       "main.js",
       "downloader.js",
+      "hf_downloader.py",
       "models_manifest.json",
       "model_hub.html",
       "icon.png",

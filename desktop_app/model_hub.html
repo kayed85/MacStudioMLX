@@ -16,6 +16,7 @@
       color: #e2e8f0;
       padding: 32px;
       user-select: none;
+      -webkit-user-select: none;
       -webkit-app-region: drag;
     }
     .container {
@@ -199,13 +200,16 @@
       font-family: monospace;
       font-size: 11px;
       color: #a0aec0;
-      max-height: 120px;
+      max-height: 140px;
       overflow-y: auto;
       margin-top: 8px;
       background: #090d16;
       padding: 10px;
       border-radius: 6px;
       white-space: pre-wrap;
+      user-select: text !important;
+      -webkit-user-select: text !important;
+      cursor: text;
     }
   </style>
 </head>
