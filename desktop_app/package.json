@@ -1,0 +1,54 @@
+{
+  "name": "phosphene-studio",
+  "version": "3.5.0",
+  "description": "Phosphene Studio Native Desktop App",
+  "author": "Phosphene Team",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build:dmg": "electron-builder --mac dmg"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "electron": "^43.3.0",
+    "electron-builder": "^24.13.3",
+    "electron-packager": "^17.1.2"
+  },
+  "build": {
+    "appId": "studio.phosphene.app",
+    "productName": "Phosphene Studio",
+    "mac": {
+      "category": "public.app-category.graphics-design",
+      "icon": "icon.icns",
+      "target": [
+        "dmg"
+      ]
+    },
+    "dmg": {
+      "contents": [
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ],
+      "window": {
+        "width": 540,
+        "height": 380
+      }
+    },
+    "files": [
+      "main.js",
+      "downloader.js",
+      "models_manifest.json",
+      "model_hub.html",
+      "icon.png",
+      "icon.icns"
+    ]
+  }
+}

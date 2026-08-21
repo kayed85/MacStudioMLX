@@ -1,0 +1,90 @@
+{
+  "version": "1.0.0",
+  "last_updated": "2026-08-21",
+  "models": [
+    {
+      "id": "q4_25",
+      "key": "q4_25",
+      "name": "LTX-2.5 Base Engine (4-bit)",
+      "version": "2.5",
+      "category": "Render Engine",
+      "size_gb": 20.7,
+      "recommended_ram": "16 GB RAM",
+      "default_selected": true,
+      "required": true,
+      "blurb": "Core renderer for LTX-Video 2.5 clips. Required for standard generation.",
+      "repo_id": "mrbizarro/ltx-2.5-mlx-q4",
+      "local_dir": "mlx_models/ltx-2.5-mlx-q4"
+    },
+    {
+      "id": "gemma4_25",
+      "key": "gemma4_25",
+      "name": "Gemma Text Encoder & Storyboard Planner",
+      "version": "2.5",
+      "category": "LLM & Encoder",
+      "size_gb": 6.0,
+      "recommended_ram": "16 GB RAM",
+      "default_selected": true,
+      "required": true,
+      "blurb": "Powers text prompt encoding, Prompt Enhancer, and Storyboard AI planner.",
+      "repo_id": "mlx-community/gemma-3-12b-it-4bit",
+      "local_dir": "mlx_models/gemma-3-12b-it-4bit"
+    },
+    {
+      "id": "q8_25",
+      "key": "q8_25",
+      "name": "LTX-2.5 High-Quality (8-bit)",
+      "version": "2.5",
+      "category": "High Quality",
+      "size_gb": 30.0,
+      "recommended_ram": "32 GB RAM",
+      "default_selected": false,
+      "required": false,
+      "blurb": "8-bit precision weights for maximum video detail and trained characters.",
+      "repo_id": "dgrauet/ltx-2.5-mlx-q8",
+      "local_dir": "mlx_models/ltx-2.5-mlx-q8"
+    },
+    {
+      "id": "q4",
+      "key": "q4",
+      "name": "LTX-2.3 Legacy Base (4-bit)",
+      "version": "2.3",
+      "category": "Legacy Engine",
+      "size_gb": 20.5,
+      "recommended_ram": "16 GB RAM",
+      "default_selected": false,
+      "required": false,
+      "blurb": "Previous generation engine for training legacy custom character LoRAs.",
+      "repo_id": "dgrauet/ltx-2.3-mlx-q4",
+      "local_dir": "mlx_models/ltx-2.3-mlx-q4"
+    },
+    {
+      "id": "ic_ingredients",
+      "key": "ic_ingredients",
+      "name": "Ingredients IC-LoRA (Multi-reference)",
+      "version": "2.3",
+      "category": "IC-LoRA Add-on",
+      "size_gb": 1.3,
+      "recommended_ram": "16 GB RAM",
+      "default_selected": false,
+      "required": false,
+      "blurb": "Composes 2-8 reference images (face, prop, location) into new videos.",
+      "repo_id": "DeepBeepMeep/LTX-2",
+      "local_dir": "mlx_models/loras/ic"
+    },
+    {
+      "id": "ic_union_control",
+      "key": "ic_union_control",
+      "name": "Control IC-LoRA (Motion / Structure)",
+      "version": "2.3",
+      "category": "IC-LoRA Add-on",
+      "size_gb": 0.65,
+      "recommended_ram": "16 GB RAM",
+      "default_selected": false,
+      "required": false,
+      "blurb": "Drives motion, structure, and composition from an existing control video.",
+      "repo_id": "Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control",
+      "local_dir": "mlx_models/loras/ic"
+    }
+  ]
+}
