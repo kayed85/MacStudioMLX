@@ -12201,8 +12201,14 @@ class WarmHelper:
             # text encoder but deliberately has no lm_head / KV cache, so
             # reusing LTX_GEMMA here made Enhance spend the whole client
             # timeout loading Gemma 4 and then close with no response body.
-            # Keep the generative Gemma 3 root on its own explicit seam.
-            env["LTX_ENHANCE_GEMMA"] = str(GEMMA)
+            enhance_path = str(GEMMA)
+            if not os.path.exists(enhance_path):
+                te_25 = str(MODELS_DIR / "gemma4-12b-ltx25-q4")
+                if os.path.exists(te_25):
+                    enhance_path = te_25
+                else:
+                    enhance_path = "mrbizarro/gemma4-12b-ltx25-q4"
+            env["LTX_ENHANCE_GEMMA"] = enhance_path
             env["LTX_IDLE_TIMEOUT"] = str(HELPER_IDLE_TIMEOUT)
             env["LTX_LOW_MEMORY"] = HELPER_LOW_MEMORY
             env["LTX_ENABLE_MODEL_UPSCALE"] = "1" if MODEL_UPSCALE_ENABLED else "0"
