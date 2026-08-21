@@ -65,3 +65,28 @@ class GenerationProfileClamp(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OneCacheHoweverLaunched(unittest.TestCase):
+    """The panel defaults HF_HOME to its own cache when the launcher didn't.
+
+    Launched from a bare shell, every mflux/hf subprocess re-downloaded weights
+    into ~/.cache/huggingface instead of seeing <install>/cache/HF_HOME — a
+    forked cache that twice nearly filled the system volume in one week (the
+    second time to 177 MB free, mid-render, with a 20 GB duplicate of
+    Qwen-Edit). setdefault, not assignment: an explicit HF_HOME still wins.
+    """
+
+    def test_the_default_is_set_before_any_subprocess_can_spawn(self):
+        import re
+        from pathlib import Path
+        src = Path(__file__).with_name("mlx_ltx_panel.py").read_text()
+        i = src.index('os.environ.setdefault("HF_HOME"')
+        # It must run at import time in the constants block, not inside some
+        # handler that a render path may or may not reach.
+        self.assertLess(i, src.index("QUEUE_FILE = "))
+        # And it must be a setdefault — an assignment would stomp a
+        # self-hoster's explicit cache location.
+        window = src[i - 400:i]
+        self.assertIn("setdefault", src[i:i + 60])
+        self.assertNotIn('os.environ["HF_HOME"] =', src)

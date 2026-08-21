@@ -60,6 +60,10 @@ Qwen-Image-Edit (Lightning 4-step) is the default image engine. It handles instr
 
 End-to-end LoRA training inside the panel. The dataset uploader accepts 15 to 500 images per character. Captions are written by a local Gemma 3 12B (MLX, 4-bit) in roughly 90 seconds for a 37-image dataset, in the `[VISUAL]: <trigger>, <description>` format the LTX trainer expects. The default recipe is rank 32, alpha 32, 100 epochs, lr 1e-4, 512 px resolution, letterbox crop; total step count auto-scales with the dataset (e.g. 50 images → 5000 steps, 100 images → 10000 steps) so adding photos doesn't shift the trained-epochs target. Power users can override any of those in an advanced section. Optional voice LoRA from the same training run.
 
+**Training needs 64 GB, and the panel does not refuse below it — it quietly trains something smaller.** Full 512 px LTX LoRA training materialises backward activations for the dev transformer, and a 48 GB Mac falls into swap thrash and never finishes. So on any Mac with **under 64 GB of unified memory** the panel rewrites all three presets in place: Quick becomes rank 4 / 384 px / 120 steps, Medium rank 8 / 384 px / 300 steps, and **High becomes rank 8 / 448 px / 500 steps** — with the advanced overrides clamped to match, so you cannot ask for the full recipe and get it. The preset names on screen do not change.
+
+Be clear about what that means. **rank 32 is the only recipe anyone has graded for identity.** Below it the training finishes, writes a valid file, loads without a warning, and may simply not move the model. The panel measures that now: every trained LoRA is checked for how much it actually changed, a weak one finishes with a warning instead of a bare "done", and the verdict follows the file into the library so you find out before you spend a render. Quick and Medium say *"identity ungraded"* on their own pills for the same reason. If you are on a sub-64 GB Mac, read a weak verdict as *this hardware, this recipe* — not as a problem with your photos.
+
 <img width="871" height="640" alt="image" src="https://github.com/user-attachments/assets/a25bfc78-671e-4972-bf51-231ae5f5cc04" />
 
 The Train tab also exposes **Style** training (experimental in v3.0) — same end-to-end pipeline, different intent: a curated set of movie frames teaches the model an aesthetic (color grading, lighting, composition) rather than an identity. The trained style LoRA stacks with character LoRAs at render time. Lightly validated as of v3.0; please report rough edges via [GitHub Issues](https://github.com/mrbizarro/phosphene/issues).
@@ -194,7 +198,7 @@ About the version pins: `mlx 0.31.2` attenuates the LTX vocoder by 22 dB. Stay o
 
 ## Interface
 
-Four workflow tabs at the top of the panel: Video, Images, Audio, Train Character. Each is a single page; the helper subprocess and model state persist across tab switches.
+Workflow tabs at the top of the panel: Video, Images, Storyboard, Audio, Train Character. Each is a single page; the helper subprocess and model state persist across tab switches.
 
 <table>
 <tr>
@@ -239,7 +243,7 @@ Behavioral changes worth noting in 3.0:
 
 ## What's in the repo
 
-- `mlx_ltx_panel.py` is the panel HTTP server. One file, around 22k lines, with HTML, CSS, and JS inlined as the page string. Worker thread plus helper subprocess management plus capability tier detection.
+- `mlx_ltx_panel.py` is the panel HTTP server. One file, around 64k lines, with HTML, CSS, and JS inlined as the page string. Worker thread plus helper subprocess management plus capability tier detection.
 - `mlx_warm_helper.py` is the long-running inference subprocess. Holds T2V, I2V, Extend, HQ, and Keyframe pipelines. Reads job specs from stdin, emits events to stdout.
 - `image_engine.py` dispatches the Image tab. Backends `hidream`, `mflux`, `mock`. Each spawns its own subprocess with `start_new_session=True` so `/stop` kills the whole tree.
 - `patch_ltx_codec.py` applies one idempotent runtime patch: lossless H.264 output (yuv444p). As of the v0.14.8 pin the memory-frees, VAE streaming, Metal-watchdog and frame_rate patches are all native upstream; the v0.14.19 pin keeps that shape — one edit, one line.

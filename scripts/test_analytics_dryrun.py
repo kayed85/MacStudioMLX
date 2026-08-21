@@ -762,6 +762,10 @@ class TestReceiverDirectives(AnalyticsTestCase):
             "status": "failed", "error": "OOM during VAE decode",
             "elapsed_sec": 30.0,
             "params": {"mode": "i2v", "engine": "h3", "h3_tier": "hq_5s"}})
+        # star_prompt has no boot or render path to ride in on — it is fired
+        # straight from the /star-click handler, so it is captured directly
+        # here with the same closed vocabulary that handler coerces `via` to.
+        P._analytics_capture("star_prompt", {"via": "link"})
         drain()
         seen = {b["event"]: b["properties"] for b in self.spy.bodies}
         # Coverage, read off the source rather than trusted: if someone adds a

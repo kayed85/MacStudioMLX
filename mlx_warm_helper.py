@@ -741,9 +741,21 @@ def _install_lora_fusion_patches() -> None:
                           for path, strength in pending if float(strength) != 0.0]
                 self._phosphene_lora_preflight = []
                 if active:
-                    from lora_compat import validate_lora_stack
+                    from lora_compat import (
+                        validate_adapter_effects,
+                        validate_lora_stack,
+                    )
 
                     reports = validate_lora_stack(active, transformer_path)
+                    # Names are not effect (#62). A character adapter can match
+                    # every key, attach on every module, report a green tally —
+                    # and still be numerically negligible, which two users spent
+                    # days chasing because nothing in the log ever said how much
+                    # weight the file actually carries. Now every render says it.
+                    validate_adapter_effects(
+                        active,
+                        reporter=lambda line: emit({"event": "log", "line": line}),
+                    )
                     self._phosphene_lora_preflight = list(zip(
                         reports, (strength for _, strength in active)
                     ))
@@ -980,12 +992,19 @@ def _preflight_distilled_loras(
     loras: list[tuple[str, float]], model_dir: str | Path
 ) -> None:
     """Fail closed for IC-LoRA pipelines that own their fusion internally."""
-    from lora_compat import resolve_distilled_transformer, validate_lora_stack
+    from lora_compat import (
+        resolve_distilled_transformer,
+        validate_adapter_effects,
+        validate_lora_stack,
+    )
 
     active = [(path, float(strength)) for path, strength in loras
               if float(strength) != 0.0]
     if not active:
         return
+    validate_adapter_effects(
+        active, reporter=lambda line: emit({"event": "log", "line": line})
+    )
     transformer = resolve_distilled_transformer(model_dir)
     if transformer is None:
         raise RuntimeError(

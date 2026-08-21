@@ -544,6 +544,9 @@ def _build_user_prompt(
     style: str,
     cast: Sequence[Dict[str, str]],
     must_include: Sequence[str],
+    locations: Sequence[Dict[str, str]] = (),
+    screenplay: str = "",
+    floor_plan: str = "",
 ) -> str:
     lines = ["BRIEF", "", "CONCEPT: %s" % concept.strip(), "", "SHOT COUNT: exactly %d shots." % n_shots]
     if style and style.strip():
@@ -584,13 +587,402 @@ def _build_user_prompt(
         ]
     else:
         lines += ["", "CAST: none. Every shot sets \"character_id\": null."]
+    if locations:
+        # The room is injected into the prompt LATER, from the board, for every
+        # shot that names it. The model is told about them anyway so it writes
+        # shots that belong somewhere, and so it does not spend its own prose
+        # re-describing scenery that is about to be appended underneath it.
+        lines += ["", "LOCATIONS - the film happens in these places, and ONLY these:"]
+        has_views = False
+        for loc in locations:
+            lines.append("  - %s: %s" % (loc.get("name") or loc.get("id"),
+                                         (loc.get("description") or "").strip()))
+            views = [v for v in (loc.get("views") or [])
+                     if isinstance(v, dict) and v.get("id") and v.get("description")]
+            if not views:
+                continue
+            has_views = True
+            lines.append("    VIEWS of %s - which way the camera points. Every shot here"
+                         " picks ONE, by id:" % (loc.get("name") or loc.get("id")))
+            for v in views:
+                lines.append("      * %s (%s): %s" % (
+                    str(v.get("id")).strip(), str(v.get("name") or "").strip(),
+                    str(v.get("description") or "").strip()))
+        lines += [
+            "  Every shot sets \"location\" to one of the names above, exactly as written.",
+            "  DO NOT describe the place in the shot description - it is added automatically",
+            "  from the line above, identically on every shot that names it. Describe the",
+            "  PEOPLE, the ACTION and the FRAMING only. A shot that re-describes the room in",
+            "  its own words is how the same room comes back as four different rooms.",
+        ]
+        if has_views:
+            lines += ["", _GEOGRAPHY_LAWS]
     if must_include:
         lines += ["", "MUST APPEAR somewhere in the film:"]
         for m in must_include:
             lines.append("  - %s" % str(m).strip())
+    if floor_plan and floor_plan.strip():
+        # WHERE EVERYTHING IS, written once. The views above are derived from
+        # this paragraph, and a shot that knows what is behind whom stops
+        # inventing a new room every time the camera turns around.
+        lines += ["", "THE FLOOR PLAN. This is the space the scene happens in. It is",
+                  "already decided - do not move anybody, and do not re-describe it in a",
+                  "shot:", "", floor_plan.strip(), ""]
+    if screenplay and screenplay.strip():
+        # The scene, written first and handed down. Without this the model is
+        # asked to invent structure and coverage in the same breath, and what
+        # comes back is a run of equally-weighted moments — the owner's words:
+        # "It is not working properly. It's just a succession of shots."
+        lines += ["", "THE SCENE. This has already been written. Your job is to SHOOT it,",
+                  "not to rewrite it. Cover these beats in order, keep every spoken line",
+                  "word for word, and put each line in the shot where it is spoken:", "",
+                  screenplay.strip(), "",
+                  "A beat with no line is a shot with no line. Do not invent dialogue for",
+                  "it and do not say that someone speaks in it."]
     lines += ["", "Return the JSON object now. %d shots. Nothing before it, nothing after it."
               % n_shots]
     return "\n".join(lines)
+
+
+_SCREENPLAY_SYSTEM = """\
+You are a screenwriter. You write the SCENE, not a shot list. Prose and dialogue only.
+
+Rules:
+1. It is ONE continuous scene in ONE place, unless the brief names more. Everyone in it can
+   see and hear everyone else. Do not cut to somewhere nobody could hear the last line.
+2. Give it a shape: an opening, a turn in the middle, and a button at the end. A run of
+   equally-weighted moments is not a scene.
+3. WRITE THE ACTUAL LINES. Every line of dialogue is words a person says out loud, in double
+   quotes, attributed by name. Never "he explains the situation" — write what he says.
+4. Spread the dialogue across the scene. Do not put every line in the first beat.
+5. Some beats have no dialogue at all. Those are where the scene breathes; say what the
+   person is DOING instead.
+6. Keep it short: 8-14 beats, one or two sentences each. This is a 30-60 second scene.
+
+Output plain text, one beat per line, in this form:
+
+  BEAT - <what happens, present tense>
+  NAME: "the line, exactly as spoken"
+
+No preamble, no headings, no shot numbers, no camera directions. The camera is not your job.
+"""
+
+
+def _screenplay_text(resp: Dict[str, Any]) -> str:
+    """The scene out of a generate() response, or "" if there is nothing usable.
+
+    Small models like to answer a screenwriting brief with a paragraph of
+    preamble ("Sure! Here is the scene:"), and a scene that begins with that
+    would be handed to the shot pass as if it were a beat. Keep only the lines
+    that look like the form that was asked for, and if none do, return nothing
+    and let the plan proceed exactly as it did before this pass existed.
+    """
+    text = (resp or {}).get("text") or ""
+    keep = [ln.rstrip() for ln in text.splitlines()
+            if _SCREENPLAY_LINE_RE.match(ln.strip())]
+    if len(keep) < 3:
+        return ""
+    return "\n".join(keep)[:4000]
+
+
+# A beat line or an attributed line of dialogue. Anything else is chatter.
+_SCREENPLAY_LINE_RE = re.compile(r"^(?:BEAT\b|[A-Z][A-Za-z0-9 _\'-]{0,30}:)")
+
+
+def _build_screenplay_prompt(concept: str, n_shots: int, style: str,
+                             cast: Sequence[Dict[str, str]],
+                             must_include: Sequence[str],
+                             locations: Sequence[Dict[str, str]] = ()) -> str:
+    lines = ["CONCEPT: %s" % (concept or "").strip(), "",
+             "LENGTH: about %d beats." % max(6, min(14, n_shots))]
+    if cast:
+        lines += ["", "WHO IS IN IT:"]
+        for c in cast:
+            who = c.get("name") or c.get("id")
+            noun = (c.get("subject_noun") or "").strip()
+            lines.append("  - %s%s" % (who, (" (%s)" % noun) if noun else ""))
+        lines.append("  Use these names in the dialogue attributions.")
+    if locations:
+        lines += ["", "WHERE:"]
+        for loc in locations:
+            lines.append("  - %s: %s" % (loc.get("name") or loc.get("id"),
+                                         (loc.get("description") or "").strip()))
+        if len(locations) == 1:
+            lines.append("  The whole scene happens HERE. Nobody leaves.")
+    if must_include:
+        lines += ["", "MUST HAPPEN:"]
+        for m in must_include:
+            lines.append("  - %s" % str(m).strip())
+    lines += ["", "Write the scene now."]
+    return "\n".join(lines)
+
+
+# ======================================================================================
+# THE GEOGRAPHY PASS — the screenplay is TIME, this is SPACE
+# ======================================================================================
+# The owner, after a full day of manual continuity work: "Do you notice all the work I
+# had to do to make this scene happen in the same place and have proper angles? ... You
+# need to first make a concept of the whole situation. For instance, a man or woman in a
+# bar — behind him there is this, behind her there is that. When they sit together, this
+# is what you see. So there is continuity between the shots."
+#
+# A scene is a SPACE before it is a shot list. This pass writes the floor plan ONCE —
+# who stands where, what is behind each of them, where the light comes from — and then
+# DERIVES the named views of the location from it, so the reverse angle automatically
+# excludes what has moved behind the camera and the light lands on the correct side.
+# The whole car-wash day was the prototype: carwash/carwash_reverse, the flipped sun,
+# the no-car reverse background, the sign living only on the far side — all of it
+# hand-built, all of it derivable from one paragraph.
+# What the SHOT pass is told once the floor plan exists. Stated in the brief
+# rather than in the system prompt because it is only true for a film whose
+# locations actually carry views — a plan with none must read exactly as it did
+# before this pass existed.
+_GEOGRAPHY_LAWS = """\
+  GEOGRAPHY - the scene happens in a space, and the space does not move.
+  Every shot in a place that has views sets "view" to one of the view ids above, and
+  "eyeline" to "left", "right" or "lens".
+  "eyeline" is where the person LOOKS as the audience sees it: "right" means their eyes go
+  off past the right edge of the frame, "left" past the left edge, "lens" straight down the
+  barrel at the audience. Use "lens" only for a piece to camera.
+  THE 180-DEGREE RULE. Two people talking keep the same sides of the screen for the whole
+  conversation. If he looks frame-RIGHT at her, then in her shot she looks frame-LEFT back
+  at him. Two shots that cut between them may NEVER claim the same eyeline - that is the
+  cut where the audience watches both of them turn and stare at the same wall.
+  A shot on a reverse view must not mention anything that view says is not in it. If the
+  view says "no car in frame", the shot has no car in it, in any words.
+  Never put a character's own body in the view behind them: what the camera sees over his
+  shoulder is HER side of the room, not another copy of him."""
+
+
+_GEOGRAPHY_SYSTEM = """\
+You are a director blocking a scene. Before a single shot exists you decide where
+everything IS, and then you describe the place from each direction the camera will point.
+
+Work in two steps.
+
+STEP 1 - THE FLOOR PLAN. One paragraph, present tense. Say where each person stands or
+sits, where the key objects are, and where the light comes from. Say what is BEHIND each
+person, because that is what the camera sees when it looks at them. Do not describe shots.
+
+STEP 2 - THE VIEWS. Turn the floor plan into 2 to 4 camera directions and describe what
+each one SEES. Rules that are not negotiable:
+
+  * When two people face each other you write AT LEAST an establishing view and its
+    REVERSE - the camera turned 180 degrees to look back the other way.
+  * A view never contains what is behind the camera in that view. If the establishing
+    view holds the car, the reverse view does NOT hold the car - and you SAY SO, in the
+    words "no car in frame", for every prominent thing the other views hold. That
+    sentence is what stops it being put back later.
+  * THE LIGHT FLIPS. A sun raking in from camera LEFT rakes in from camera RIGHT once the
+    camera turns 180 degrees. Every view names its side.
+  * Never put a person's own body in the view behind them. The view behind HIM is what
+    the camera sees over his shoulder, which is HER side of the room, not him.
+  * Each view is self-contained: a reader who has only that one sentence must be able to
+    picture the frame without the floor plan.
+
+Return ONE JSON object and nothing else:
+
+{"floor_plan": "<the paragraph from step 1>",
+ "views": [{"location": "<the location name, exactly as it was given to you>",
+            "id": "<short_lowercase_id>",
+            "name": "<what it is, in a few words>",
+            "light": "camera left" | "camera right",
+            "description": "<what this camera sees, one or two sentences>"}]}
+
+No preamble, no headings, nothing before the object and nothing after it.
+"""
+
+
+def _build_geography_prompt(concept: str, style: str,
+                            cast: Sequence[Dict[str, str]],
+                            locations: Sequence[Dict[str, Any]],
+                            screenplay: str = "") -> str:
+    lines = ["CONCEPT: %s" % (concept or "").strip()]
+    if style and style.strip():
+        lines += ["", "STYLE: %s" % style.strip()]
+    if cast:
+        lines += ["", "WHO IS IN IT:"]
+        for c in cast:
+            who = c.get("name") or c.get("id")
+            noun = (c.get("subject_noun") or "").strip()
+            lines.append("  - %s%s" % (who, (" (%s)" % noun) if noun else ""))
+    lines += ["", "THE PLACES - block every one of them, by name:"]
+    for loc in locations:
+        lines.append("  - %s: %s" % (loc.get("name") or loc.get("id"),
+                                     (loc.get("description") or "").strip()))
+    if screenplay and screenplay.strip():
+        # The scene, so the blocking serves what actually happens in it — who
+        # turns to whom, and therefore which direction has to exist.
+        lines += ["", "THE SCENE THAT HAPPENS HERE:", "", screenplay.strip()[:2000]]
+    lines += ["", "Write the floor plan and the views now."]
+    return "\n".join(lines)
+
+
+# A view id is a location id: lowercase, digits, - and _. Kept local so the
+# planner does not need storyboard.py imported to slugify one.
+_VIEW_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
+_CAMERA_SIDE_RE = re.compile(r"camera[ -](left|right)", re.IGNORECASE)
+MAX_VIEWS_PER_LOCATION = 4
+
+
+def _slug_view_id(*candidates: Any) -> str:
+    for cand in candidates:
+        raw = re.sub(r"[^a-z0-9]+", "_", str(cand or "").strip().lower()).strip("_")[:40]
+        if raw and _VIEW_ID_RE.match(raw):
+            return raw
+    return ""
+
+
+def _fold_light(description: str, light: Any) -> str:
+    """Make sure the view's own sentence says which side the light rakes from.
+
+    The side is the single most load-bearing word in a reverse angle and the
+    model likes to answer it in the `light` field and then forget it in the
+    prose that actually reaches the renderer. Folded in only when the sentence
+    does not already carry a side of its own.
+    """
+    desc = (description or "").strip()
+    m = _CAMERA_SIDE_RE.search(str(light or ""))
+    side = m.group(1).lower() if m else ""
+    if not side:
+        low = str(light or "").lower()
+        side = "left" if "left" in low else "right" if "right" in low else ""
+    if not side or _CAMERA_SIDE_RE.search(desc):
+        return desc
+    return "%s, the light rakes in from camera %s" % (desc.rstrip(" .,;"), side)
+
+
+def _geography_plan(resp: Dict[str, Any],
+                    locations: Sequence[Dict[str, Any]]) -> Tuple[str, Dict[str, List[Dict[str, str]]]]:
+    """(floor plan, {location_id: [views]}) out of a generate() response.
+
+    Empty on anything unusable, exactly like `_screenplay_text` — a model that
+    answers a blocking brief with a paragraph of enthusiasm must leave the plan
+    behaving precisely as it did before this pass existed, not hand chatter
+    down as if it were geography.
+    """
+    obj = next((o for o in _json_dicts((resp or {}).get("text") or "")
+                if isinstance(o.get("views"), list)), None)
+    if obj is None:
+        return "", {}
+    floor = str(obj.get("floor_plan") or obj.get("floorplan") or
+                obj.get("layout") or "").strip()[:1500]
+    raw_views = obj["views"]
+
+    by_name: Dict[str, Dict[str, Any]] = {}
+    for loc in locations:
+        for key in (loc.get("name"), loc.get("id")):
+            if str(key or "").strip():
+                by_name[str(key).strip().lower()] = loc
+
+    out: Dict[str, List[Dict[str, str]]] = {}
+    for v in raw_views:
+        if not isinstance(v, dict):
+            continue
+        desc = _fold_light(str(v.get("description") or v.get("sees") or "").strip(),
+                           v.get("light"))
+        # A view is a DESCRIPTION. An id with nothing under it composes to the
+        # location's own text and pretends coverage exists.
+        if len(desc) < 20:
+            continue
+        want = str(v.get("location") or v.get("place") or "").strip().lower()
+        loc = by_name.get(want)
+        if loc is None and len(locations) == 1:
+            loc = locations[0]
+        if loc is None:
+            continue
+        lid = str(loc.get("id"))
+        rows = out.setdefault(lid, [])
+        if len(rows) >= MAX_VIEWS_PER_LOCATION:
+            continue
+        vid = _slug_view_id(v.get("id"), v.get("name"), "view_%d" % (len(rows) + 1))
+        if not vid or any(r["id"] == vid for r in rows):
+            vid = _slug_view_id("%s_%d" % (vid or "view", len(rows) + 1)) or \
+                "view_%d" % (len(rows) + 1)
+        if any(r["id"] == vid for r in rows):
+            continue
+        rows.append({"id": vid,
+                     "name": str(v.get("name") or v.get("id") or vid).strip()[:80],
+                     "description": desc[:600]})
+
+    out = {k: v for k, v in out.items() if v}
+    if not out:
+        return "", {}
+    return floor, out
+
+
+def _merge_views(locations: Sequence[Dict[str, Any]],
+                 views: Dict[str, List[Dict[str, str]]]) -> List[Dict[str, Any]]:
+    """The board's locations, each carrying the views the floor plan derived.
+
+    Copies rather than mutating: `locations` is the caller's list — on the
+    panel it is the user's own Locations box, parsed — and a pass that edits it
+    in place would leave the user's places rewritten by a model even on the
+    paths where the plan is thrown away.
+    """
+    merged: List[Dict[str, Any]] = []
+    for loc in locations:
+        row = dict(loc)
+        rows = views.get(str(row.get("id")))
+        if rows:
+            row["views"] = [dict(r) for r in rows]
+        merged.append(row)
+    return merged
+
+
+# The eyeline vocabulary, and every way a model says it. Anything that does not
+# land in here is dropped rather than written onto a shot: `eyeline` outside the
+# vocabulary is a hard validator error, and a plan that cannot be rendered is a
+# worse outcome than a shot with no eyeline on it.
+_EYELINE_WORDS = {
+    "left": "left", "frame-left": "left", "frame left": "left",
+    "screen-left": "left", "screen left": "left", "camera-left": "left",
+    "camera left": "left", "off-frame left": "left", "l": "left",
+    "right": "right", "frame-right": "right", "frame right": "right",
+    "screen-right": "right", "screen right": "right", "camera-right": "right",
+    "camera right": "right", "off-frame right": "right", "r": "right",
+    "lens": "lens", "camera": "lens", "to camera": "lens", "at camera": "lens",
+    "into the lens": "lens", "down the lens": "lens", "to the lens": "lens",
+}
+
+
+def _eyeline_key(raw: Any) -> str:
+    key = re.sub(r"\s+", " ", str(raw or "").strip().lower()).strip(".,")
+    return _EYELINE_WORDS.get(key, "")
+
+
+def _apply_geography(shot: Dict[str, Any], raw: Dict[str, Any], loc: Dict[str, Any],
+                     n: int, warnings: List[str]) -> None:
+    """Stamp `view` and `eyeline` onto one shot, matched against the floor plan."""
+    views = [v for v in (loc.get("views") or []) if isinstance(v, dict) and v.get("id")]
+    if views:
+        want = str(raw.get("view") or raw.get("angle") or raw.get("facing") or "").strip().lower()
+        hit = next((v for v in views
+                    if want and want in (str(v.get("id") or "").strip().lower(),
+                                         str(v.get("name") or "").strip().lower())), None)
+        if hit is None and want:
+            hit = next((v for v in views
+                        if _slug_view_id(want) == str(v.get("id")).strip().lower()), None)
+        if hit is None:
+            # UNSPECIFIED COVERAGE IS THE MASTER. A shot that names no view
+            # would compose from the location's own neutral sentence, which is
+            # the pre-views behaviour and the thing this pass exists to end.
+            # The first view is the establishing one by construction.
+            hit = views[0]
+            warnings.append(
+                "shot %d named %sno view of %s — it was put on %r, the establishing view"
+                % (n, ("view %r, which is not on the floor plan, so " % want) if want else "",
+                   loc.get("name") or loc.get("id"), hit.get("id")))
+        shot["view"] = str(hit["id"]).strip().lower()
+
+    raw_eye = raw.get("eyeline") or raw.get("eye_line") or raw.get("looking")
+    if raw_eye:
+        eye = _eyeline_key(raw_eye)
+        if eye:
+            shot["eyeline"] = eye
+        else:
+            warnings.append("shot %d asked for eyeline %r, which is not left, right or "
+                            "lens — the shot carries no eyeline" % (n, str(raw_eye)[:40]))
 
 
 def _build_repair_prompt(bad_json: str, problems: Sequence[str], n_shots: int) -> str:
@@ -654,7 +1046,7 @@ def _build_shot_feedback_prompt(previous: Dict[str, Any], shot_n: int, note: str
 
 def _shot_to_model_view(shot: Dict[str, Any]) -> Dict[str, Any]:
     """The eight creative keys, as the model sees them (drops seeds/modes/engines/etc)."""
-    return {
+    out = {
         "n": shot.get("n"),
         "title": shot.get("title", ""),
         "character_id": shot.get("character_id"),
@@ -666,6 +1058,16 @@ def _shot_to_model_view(shot: Dict[str, Any]) -> Dict[str, Any]:
         "soundscape": shot.get("soundscape", ""),
         "music": shot.get("music", "N/A"),
     }
+    # WHERE, and WHICH WAY. Only when the shot has them, so a board with no
+    # locations shows the model exactly what it always showed. Without these a
+    # film-level re-plan came back with the geography stripped — every shot
+    # re-coerced onto the establishing view because nothing in the plan the
+    # model was shown said which way it had been pointing.
+    for key, src in (("location", "location_id"), ("view", "view"),
+                     ("eyeline", "eyeline")):
+        if shot.get(src):
+            out[key] = shot[src]
+    return out
 
 
 def _spec_to_model_view(spec: Dict[str, Any]) -> Dict[str, Any]:
@@ -777,8 +1179,28 @@ def extract_json_object(text: str) -> Optional[Dict[str, Any]]:
     output truncated mid-object by the token limit. Returns None only when there is no
     recoverable object at all.
     """
+    for obj in _json_dicts(text):
+        if "shots" in obj or "title" in obj:
+            return obj
+        # Model returned a bare list of shots under some other key.
+        for v in obj.values():
+            if isinstance(v, list) and v and isinstance(v[0], dict) and "description" in v[0]:
+                return {"title": "", "shots": v}
+    return None
+
+
+def _json_dicts(text: str) -> Iterable[Dict[str, Any]]:
+    """Every JSON object recoverable from a model reply, longest first.
+
+    The recovery half of `extract_json_object`, split out because it is not
+    plan-specific and a SECOND pass now needs it. The predicate is not shared
+    on purpose: extract_json_object's last resort — "a list of dicts with a
+    description under any key must be the shots" — read the geography pass's
+    `views` array as a shot list and handed a floor plan to the coercer as a
+    film. Two passes, two shapes, one recovery.
+    """
     if not text:
-        return None
+        return
     body = _THINK_RE.sub(" ", text)
 
     candidates: List[str] = []
@@ -806,13 +1228,7 @@ def extract_json_object(text: str) -> Optional[Dict[str, Any]]:
                 if obj is None:
                     continue
             if isinstance(obj, dict):
-                if "shots" in obj or "title" in obj:
-                    return obj
-                # Model returned a bare list of shots under some other key.
-                for v in obj.values():
-                    if isinstance(v, list) and v and isinstance(v[0], dict) and "description" in v[0]:
-                        return {"title": "", "shots": v}
-    return None
+                yield obj
 
 
 # --------------------------------------------------------------------------------------
@@ -1640,6 +2056,7 @@ def coerce_spec(
     created_at: Optional[int] = None,
     allow_hidden_faces: bool = False,
     storyboard_mod: Any = None,
+    locations: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> Tuple[Dict[str, Any], List[str]]:
     """Turn whatever the model returned into a schema-correct storyboard.
 
@@ -1649,6 +2066,7 @@ def coerce_spec(
     """
     warnings: List[str] = []
     cast = list(cast or ())
+    locs = [l for l in (locations or ()) if isinstance(l, dict) and l.get("id")]
     if seed_base is None:
         seed_base = _stable_seed(concept)
 
@@ -1772,6 +2190,26 @@ def coerce_spec(
             "soundscape": sound,
             "music": music,
         }
+        # Which place this shot happens in. Matched on the NAME the model was
+        # given; if it answers with something not on the list, or answers with
+        # nothing, a film with exactly ONE location falls back to that one —
+        # which is the common case and the one the whole feature is for.
+        if locs:
+            want = str(s.get("location") or s.get("place") or "").strip().lower()
+            hit = next((l for l in locs
+                        if want and want in (str(l.get("name") or "").lower(),
+                                             str(l.get("id") or "").lower())), None)
+            if hit is None and len(locs) == 1:
+                hit = locs[0]
+            if hit is not None:
+                shot["location_id"] = hit["id"]
+                # WHICH WAY THE CAMERA FACES, and where the eyes go. Both are
+                # matched against the floor plan rather than trusted: an
+                # unknown view id is a HARD validator error and an eyeline
+                # outside the vocabulary is another, so nothing that did not
+                # resolve is ever written onto a shot.
+                _apply_geography(shot, s, hit, idx + 1, warnings)
+
         if char:
             shot["character_id"] = char["id"]
             shot["trigger"] = char["trigger"]
@@ -1817,6 +2255,17 @@ def coerce_spec(
         "policy": default_policy(max_dim),
         "shots": shots,
     }
+    # THE PLAN CARRIES THE PLACES IT NAMES. Shots have been stamped with
+    # `location_id` since locations existed, and the spec they live in never
+    # carried `locations` — so `validate_storyboard()` saw a shot pointing at a
+    # place the board did not have and returned `unknown_location` for EVERY
+    # shot. Every plan with a location in the brief spent its one repair
+    # round-trip on a fault no model could fix and came back `invalid_plan`.
+    # It survived because the panel keeps its own copy of the locations and
+    # patches them onto the board after adoption, so the only visible symptom
+    # was planning failing whenever the user filled the Locations box in.
+    if locs:
+        spec["locations"] = [dict(l) for l in locs]
     return spec, warnings
 
 
@@ -2045,6 +2494,9 @@ def plan_film(
     duration_s: float = 5.0,
     allow_hidden_faces: Optional[bool] = None,
     board_id: Optional[str] = None,
+    locations: Optional[Iterable[Dict[str, Any]]] = None,
+    screenplay: bool = True,
+    geography: bool = True,
     known_character_ids: Optional[Iterable[str]] = None,
     ref_root: Optional[Any] = None,
     max_dim: Optional[int] = None,
@@ -2078,6 +2530,15 @@ def plan_film(
                                     or {"shot": 4, "note": "..."}
                      Per-shot re-rolls replace ONLY that shot; every other shot object is
                      carried across by reference, so the rest of the plan is byte-stable.
+      locations      the places the film happens in, as board `locations` rows. They ride
+                     into the returned spec so the shots that name them validate, and
+                     they are what the geography pass hangs its views on.
+      geography      write the FLOOR PLAN before the shots (default on): where everybody
+                     stands, what is behind them, which side the light comes from — and
+                     from that, 2-4 named VIEWS per location, so the reverse angle
+                     excludes what is now behind the camera and the light flips sides.
+                     Needs at least one location to be spatial about; with none it is
+                     skipped and the plan behaves as it did before the pass existed.
       engine         "auto" (default) | "h3" | "ltx". Auto = H3 unless the shot is cast.
       tier           per-shot tier, default "draft" — plans are for reviewing, not shipping.
       allow_hidden_faces
@@ -2104,6 +2565,7 @@ def plan_film(
     n_shots = max(1, int(n_shots))
     cast = _normalise_cast(characters)
     must = [str(m).strip() for m in (must_include or ()) if str(m).strip()]
+    locs = [l for l in (locations or ()) if isinstance(l, dict) and l.get("id")]
     fb_mode, fb_shot, fb_note = _parse_feedback(feedback)
     if fb_mode != "none" and previous is None:
         previous = feedback.get("previous") if isinstance(feedback, dict) else None
@@ -2132,12 +2594,75 @@ def plan_film(
     elif fb_mode == "film":
         user = _build_film_feedback_prompt(previous, fb_note, n_shots)
     else:
-        user = _build_user_prompt(concept, n_shots, style, cast, must)
+        user = _build_user_prompt(concept, n_shots, style, cast, must, locs)
 
     owned = session is None
     sess = session or PlannerSession(model_path=model_path, python_exe=python_exe,
                                      timeout_s=timeout_s)
     result: Dict[str, Any] = {}
+    pass_warnings: List[str] = []
+    scene_text = ""
+    floor_plan = ""
+    # Hoisted so the name exists on every path — the shot pass reads it below
+    # to decide whether the prompt has to be rebuilt.
+    _views: Dict[str, List[Dict[str, str]]] = {}
+    if screenplay and fb_mode not in ("shot", "film"):
+        # PASS ONE: write the scene. Only on a fresh plan — a re-roll already
+        # has a scene and rewriting it would move the ground under the shot
+        # being fixed.
+        try:
+            _sp = sess.generate(
+                _SCREENPLAY_SYSTEM,
+                _build_screenplay_prompt(concept, n_shots, style, cast, must, locs),
+                max_tokens=1200, temperature=0.8, seed=seed_base % 100000)
+            scene_text = _screenplay_text(_sp)
+        except PlannerError:
+            # A film with no scene is the behaviour this feature replaced, not a
+            # failure worth aborting a plan over.
+            scene_text = ""
+    if geography and locs and fb_mode not in ("shot", "film"):
+        # PASS TWO: block the space. Between the screenplay and the shots
+        # because it reads the scene (who turns to whom decides which
+        # directions have to exist) and the shots read it (a shot cannot name a
+        # view that has not been derived yet). Skipped on a re-roll for the
+        # same reason the screenplay is: the other shots are standing on this
+        # geography and moving it under them is not a fix.
+        #
+        # It needs a location to be spatial ABOUT. With none, there is nowhere
+        # to hang a view and no board field to carry it, so the pass is not run
+        # and the plan behaves exactly as it did before it existed.
+        try:
+            _gp = sess.generate(
+                _GEOGRAPHY_SYSTEM,
+                _build_geography_prompt(concept, style, cast, locs, scene_text),
+                max_tokens=1400, temperature=0.7, seed=(seed_base + 3) % 100000)
+            floor_plan, _views = _geography_plan(_gp, locs)
+        except PlannerError:
+            floor_plan, _views = "", {}
+        if _views:
+            locs = _merge_views(locs, _views)
+            pass_warnings.append(
+                "geography: %d view(s) derived across %d location(s)"
+                % (sum(len(v) for v in _views.values()), len(_views)))
+        else:
+            pass_warnings.append(
+                "geography: the model returned no usable floor plan — shots will not "
+                "declare views, exactly as before this pass existed")
+    # VIEWS COUNT AS A REASON TO REBUILD THE PROMPT. `_geography_plan` derives
+    # the floor plan from the model's own optional `floor_plan` key, so a reply
+    # that carries views and no plan legitimately returns ("", {...views...}).
+    # With the screenplay also empty — routine: `_screenplay_text` returns ""
+    # whenever fewer than three lines match the form, and a PlannerError there
+    # is deliberately tolerated — `locs` had been REPLACED by the merged list
+    # while `user` was still the pre-geography prompt: no view ids in it, no
+    # geography laws. The model then named no view, `_apply_geography` found
+    # views on the location and no view on any shot, and stamped views[0] on
+    # every shot with one warning each. That is the whole film pinned to the
+    # establishing angle, which is the pre-views behaviour this pass exists to
+    # end — arriving silently, through the pass itself.
+    if scene_text or floor_plan or _views:
+        user = _build_user_prompt(concept, n_shots, style, cast, must, locs,
+                                  screenplay=scene_text, floor_plan=floor_plan)
     try:
         result = _plan_with_session(
             sess, system=system, user=user, fb_mode=fb_mode, fb_shot=fb_shot,
@@ -2146,7 +2671,8 @@ def plan_film(
             duration_s=duration_s, seed_base=seed_base, max_dim=max_dim,
             known_ids=known_ids, ref_root=ref_root, temperature=temperature,
             budget=budget, model_path=model_path, t_start=t_start,
-            allow_hidden_faces=allow_hidden)
+            allow_hidden_faces=allow_hidden, locs=locs,
+            pass_warnings=pass_warnings)
     finally:
         # The model is gone before this function returns, on every path including an
         # exception. Peak RSS is only final once the child has been reaped, so the
@@ -2161,7 +2687,8 @@ def plan_film(
 def _plan_with_session(sess, *, system, user, fb_mode, fb_shot, previous, validate, sb,
                        concept, n_shots, style, cast, board_id, engine, tier, duration_s,
                        seed_base, max_dim, known_ids, ref_root, temperature, budget,
-                       model_path, t_start, allow_hidden_faces) -> Dict[str, Any]:
+                       model_path, t_start, allow_hidden_faces,
+                       locs=(), pass_warnings=()) -> Dict[str, Any]:
     """The generate -> extract -> coerce -> validate -> ONE repair loop.
 
     Split out of plan_film() so the `finally:` that releases the model is three lines with
@@ -2175,11 +2702,41 @@ def _plan_with_session(sess, *, system, user, fb_mode, fb_shot, previous, valida
             obj, fb_mode, fb_shot, previous, concept=concept, n_shots=n_shots, style=style,
             cast=cast, board_id=board_id, engine=engine, tier=tier, duration_s=duration_s,
             seed_base=seed_base, max_dim=max_dim, sb=sb,
-            allow_hidden_faces=allow_hidden_faces)
+            allow_hidden_faces=allow_hidden_faces, locations=locs)
 
     def check(spec):
-        return list(validate(spec, known_character_ids=known_ids,
+        errs = list(validate(spec, known_character_ids=known_ids,
                              ref_root=Path(ref_root) if ref_root else None, max_dim=max_dim))
+        # `speech_without_words` is the board's version of L13 and it is a HARD
+        # error there, correctly — a hand-authored board that would babble must
+        # not reach a render. In here it is premature: this check runs before
+        # `_enforce_laws`, which owns speech and can do better than reject —
+        # it rewraps a prose-quoted line so the voice switches on, or stages the
+        # shot honestly silent. Failing the plan here would spend the one repair
+        # round-trip on a fault the next pass was about to fix for free, and
+        # then return invalid_plan for it.
+        # Dropping it is safe because it is not being waived, only deferred:
+        # the panel validates the finished board again before it renders a
+        # frame, and by then _enforce_laws has run.
+        #
+        # Filtered by CODE via the detail validator, not by matching English in
+        # `errs` — `validate_storyboard()` returns formatted strings, so an
+        # isinstance(dict) filter here silently matched nothing and every one of
+        # these deferrals leaked through as an invalid_plan.
+        detail = getattr(sb, "validate_storyboard_detail", None)
+        if detail is None:
+            return errs
+        try:
+            rows = detail(spec, known_character_ids=known_ids,
+                          ref_root=Path(ref_root) if ref_root else None, max_dim=max_dim)
+        except Exception:                                            # noqa: BLE001
+            return errs
+        # `dialogue_does_not_fit` is deferred for the same reason: the panel's
+        # plan-adoption step FIXES it mechanically (it extends the shot to fit
+        # the line via speech_fit_frames) — failing the plan here would spend
+        # the repair round-trip on a fault that costs zero to fix.
+        _DEFER = {"speech_without_words", "dialogue_does_not_fit"}
+        return [r["message"] for r in rows if r.get("code") not in _DEFER]
 
     # ---- attempt 1 ------------------------------------------------------------------
     try:
@@ -2229,6 +2786,11 @@ def _plan_with_session(sess, *, system, user, fb_mode, fb_shot, previous, valida
         except PlannerError as exc:
             warnings.append("repair round failed: %s" % exc)
 
+    # What the passes BEFORE this one had to say, in front of what the shot
+    # pass had to say. Prepended here rather than earlier because the repair
+    # round replaces `warnings` wholesale with the second draft's list.
+    warnings[:0] = list(pass_warnings)
+
     if errs:
         return _error(
             "invalid_plan",
@@ -2259,7 +2821,7 @@ def _plan_with_session(sess, *, system, user, fb_mode, fb_shot, previous, valida
                 obj3, "shot", n, current, concept=concept, n_shots=n_shots, style=style,
                 cast=cast, board_id=board_id, engine=engine, tier=tier,
                 duration_s=duration_s, seed_base=seed_base, max_dim=max_dim, sb=sb,
-                allow_hidden_faces=allow_hidden_faces)
+                allow_hidden_faces=allow_hidden_faces, locations=locs)
             # A re-roll that breaks the SCHEMA is discarded outright — the law fix is not
             # worth an invalid plan, and the mechanical fallback can still clean the prose.
             if check(fixed):
@@ -2274,6 +2836,12 @@ def _plan_with_session(sess, *, system, user, fb_mode, fb_shot, previous, valida
         spec = _enforce_premise(
             spec, cast, warnings, replan=_replan_one, style=style, sb=sb,
             premise=_premise)
+        # SPACE, after the prose laws have finished rewriting shots. Safe in
+        # any order in fact — it reads `eyeline`/`view`/`description` and
+        # writes only `eyeline`, which no other law reads and which is composed
+        # into the prompt at render time — but it is a scan, not a re-plan, and
+        # scanning what the last mutation produced is the only honest place.
+        spec = _enforce_geography(spec, locs, warnings)
         # ---- THE FINAL INVARIANT SCAN ------------------------------------
         # After the LAST mutation, whichever pass made it. Every pass before
         # this validated only the condition it owned, so the last repair could
@@ -2291,6 +2859,10 @@ def _plan_with_session(sess, *, system, user, fb_mode, fb_shot, previous, valida
         # optional. Mechanical repair still applies, and what cannot be repaired
         # is reported the same way a full plan reports it.
         _premise = _premise_species(" ".join([concept or "", style or ""]))
+        # A RE-ROLLED SHOT CAN BREAK THE LINE with the neighbours it was cut
+        # between — and unlike the prose laws this one costs no model call, so
+        # there is no reason for the cheap path to skip it.
+        spec = _enforce_geography(spec, locs or (spec.get("locations") or ()), warnings)
         spec, _degraded = _assert_final_invariants(
             spec, cast, warnings, style=style, sb=sb, premise=_premise)
 
@@ -2316,6 +2888,131 @@ def _plan_with_session(sess, *, system, user, fb_mode, fb_shot, previous, valida
         elapsed_s=round(time.time() - t_start, 2),
         **_session_meta(sess)
     )
+    return spec
+
+
+# ---- THE GEOGRAPHY LAWS ---------------------------------------------------------------
+# Both are WARNING level and neither can fail a plan. A film whose eyelines are
+# a little loose is still a film; a film that will not render is not. What they
+# do is name the defect in the words the UI already shows, and — where the fix
+# is a single discrete field with exactly one other legal value — apply it.
+
+def _shots_in_cut_order(spec: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The shots as the audience meets them. "Adjacent" means adjacent ON SCREEN."""
+    rows = [s for s in (spec.get("shots") or ()) if isinstance(s, dict)]
+    return sorted(rows, key=lambda s: s.get("n") if isinstance(s.get("n"), int) else 0)
+
+
+def _enforce_eyelines(spec: Dict[str, Any], warnings: List[str]) -> Dict[str, Any]:
+    """THE 180-DEGREE LINE: a cut between two people reverses the eyeline.
+
+    He looks frame-right at her; she looks frame-LEFT back at him. Two adjacent
+    shots of two DIFFERENT characters in the SAME place that both claim the
+    same side are the cut where the audience watches both of them turn and
+    stare at the same wall — the single most recognisable continuity error in
+    the format, and the owner spent a day fixing it by hand.
+
+    Repaired mechanically, which is only defensible because `eyeline` is a
+    discrete field with exactly one complement: flipping it cannot damage
+    anybody's prose, and the clause it produces is composed at render time
+    (`compose_shot_prompt`), so nothing has to be re-assembled. Prose laws get
+    a model round trip precisely because they do not have this property.
+    """
+    shots = _shots_in_cut_order(spec)
+    for prev, cur in zip(shots, shots[1:]):
+        a, b = prev.get("eyeline"), cur.get("eyeline")
+        if a not in ("left", "right") or a != b:
+            continue
+        ca, cb = prev.get("character_id"), cur.get("character_id")
+        if not ca or not cb or ca == cb:
+            continue
+        if (prev.get("location_id") or "") != (cur.get("location_id") or ""):
+            continue
+        flip = "right" if b == "left" else "left"
+        cur["eyeline"] = flip
+        warnings.append(
+            "shots %s and %s cut between two people and both looked %s — the 180-degree "
+            "line. Shot %s now looks %s, back at them."
+            % (prev.get("n"), cur.get("n"), b, cur.get("n"), flip))
+    return spec
+
+
+# What a view says is NOT in it. "no car in frame", "without the sign".
+# The floor plan is asked to write these sentences precisely so this check has
+# something exact to stand on.
+_ABSENCE_RE = re.compile(r"\b(?:no|without|not)\s+((?:[a-z][a-z'-]{2,}\s+){0,2}[a-z][a-z'-]{2,})",
+                         re.IGNORECASE)
+# Words that carry no object of their own — a view saying "no longer" or "not
+# visible" is not naming a thing that must stay off screen.
+_ABSENCE_STOP = {
+    "longer", "visible", "seen", "shown", "there", "here", "part", "more", "less",
+    "camera", "frame", "shot", "view", "side", "screen", "left", "right", "front",
+    "behind", "back", "this", "that", "these", "those", "them", "their", "they",
+    "anything", "anyone", "nothing", "else", "other", "another", "same", "and",
+    "the", "one", "two", "any", "all", "with", "from", "into", "onto", "over",
+    "under", "near", "past", "still", "yet", "just", "only", "even", "very",
+}
+
+
+def _absent_terms(view_desc: str) -> List[str]:
+    """The things a view SAYS are not in it: "no car in frame" -> ["car"].
+
+    Only the view's own negations. An earlier draft also inferred absence by
+    diffing the content words of the other views, and that is wrong in the case
+    the feature exists for: a reverse angle legitimately contains the OTHER
+    person and everything they are holding, so every mention of her, her
+    sponge, her wheel came back as a violation. The floor plan states absence
+    out loud; nothing else is trustworthy enough to warn on.
+    """
+    out: List[str] = []
+    for m in _ABSENCE_RE.finditer(view_desc or ""):
+        for word in m.group(1).split():
+            w = word.strip(".,;:'\"").lower()
+            if len(w) >= 3 and w not in _ABSENCE_STOP and w not in out:
+                out.append(w)
+    return out
+
+
+def _scan_reverse_objects(spec: Dict[str, Any],
+                          locations: Sequence[Dict[str, Any]]) -> List[Tuple[int, str, str]]:
+    """[(shot n, view id, the thing that is behind the camera in it)].
+
+    The car-wash law: the reverse angle exists so the car is not in it, and a
+    shot on that view that writes the car back in has undone the only reason
+    it was derived.
+    """
+    by_id = {str(l.get("id")): l for l in (locations or ()) if isinstance(l, dict)}
+    out: List[Tuple[int, str, str]] = []
+    for s in (spec.get("shots") or ()):
+        if not isinstance(s, dict) or not s.get("view"):
+            continue
+        loc = by_id.get(str(s.get("location_id") or ""))
+        view = next((v for v in ((loc or {}).get("views") or ())
+                     if isinstance(v, dict)
+                     and str(v.get("id")).strip().lower() == str(s["view"]).strip().lower()),
+                    None)
+        if view is None:
+            continue
+        text = " ".join([str(s.get("description") or ""), str(s.get("settle") or "")])
+        for term in _absent_terms(str(view.get("description") or "")):
+            if re.search(r"\b%s(?:e?s)?\b" % re.escape(term), text, re.IGNORECASE):
+                out.append((int(s.get("n") or 0), str(s["view"]), term))
+                break
+    return out
+
+
+def _enforce_geography(spec: Dict[str, Any], locations: Sequence[Dict[str, Any]],
+                       warnings: List[str]) -> Dict[str, Any]:
+    """Both laws, in the order that makes the second one's warning readable."""
+    spec = _enforce_eyelines(spec, warnings)
+    for n, view, term in _scan_reverse_objects(spec, locations):
+        # NOT repaired. Cutting a noun out of a sentence leaves prose nobody
+        # wrote, and a targeted re-plan is a 20-second round trip spent on a
+        # shot the user can re-roll deliberately with this sentence in hand.
+        warnings.append(
+            "shot %d is on view %r, which says the %s is not in it — and the shot puts "
+            "the %s back in frame. Re-roll the shot, or move it to the view that holds "
+            "the %s." % (n, view, term, term, term))
     return spec
 
 
@@ -2702,13 +3399,14 @@ def _engine_mix(spec: Dict[str, Any]) -> Dict[str, int]:
 
 def _coerce_for_mode(obj, fb_mode, fb_shot, previous, *, concept, n_shots, style, cast,
                      board_id, engine, tier, duration_s, seed_base, max_dim, sb,
-                     allow_hidden_faces=False):
+                     allow_hidden_faces=False, locations=None):
     """Coerce a fresh plan, or splice one re-rolled shot into an existing plan."""
     if fb_mode != "shot":
         return coerce_spec(obj, concept=concept, n_shots=n_shots, style=style, cast=cast,
                            board_id=board_id, engine=engine, tier=tier,
                            duration_s=duration_s, seed_base=seed_base, max_dim=max_dim,
-                           allow_hidden_faces=allow_hidden_faces, storyboard_mod=sb)
+                           allow_hidden_faces=allow_hidden_faces, storyboard_mod=sb,
+                           locations=locations)
 
     # Per-shot re-roll: coerce the single returned shot, then splice. Every other shot
     # object is carried across by reference, so the untouched part of the plan is
@@ -2716,7 +3414,8 @@ def _coerce_for_mode(obj, fb_mode, fb_shot, previous, *, concept, n_shots, style
     one, warnings = coerce_spec(obj, concept=concept, n_shots=1, style=style, cast=cast,
                                 board_id=previous.get("id"), engine=engine, tier=tier,
                                 duration_s=duration_s, seed_base=seed_base, max_dim=max_dim,
-                                allow_hidden_faces=allow_hidden_faces, storyboard_mod=sb)
+                                allow_hidden_faces=allow_hidden_faces, storyboard_mod=sb,
+                                locations=locations)
     new_shots = one.get("shots") or []
     spec = copy.copy(previous)
     spec["shots"] = list(previous.get("shots") or [])

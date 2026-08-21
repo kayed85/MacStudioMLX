@@ -181,6 +181,14 @@ def main() -> int:
     system = _SYSTEM_TMPL.format(trigger=args.trigger)
     n = len(images)
     t_start = time.time()
+    # Counted, not assumed. A per-image failure `continue`s below, so the
+    # number of images is NOT the number of captions on disk. Reporting the
+    # former made the panel print "done - 24 captions" over a dataset that
+    # had 20, and the four images with no caption then trained on the
+    # 3-word `<trigger> man` fallback without anyone being told. Same class
+    # as the zip filter that dropped 6 of 18 images in #61: a silent loss
+    # under a green summary.
+    written = 0
     for i, img_path in enumerate(images, 1):
         t_step = time.time()
         messages = [
@@ -212,15 +220,29 @@ def main() -> int:
             _emit("error", message=f"could not write {cap_path}: {e}",
                   i=i, n=n, file=img_path.name)
             continue
+        written += 1
         _emit("progress",
               i=i, n=n,
               file=img_path.name,
               elapsed_sec=round(time.time() - t_step, 2),
               caption=caption)
 
+    # Nothing on disk is not a run that finished, whatever the exit code
+    # said. Emitting `done` here left the panel green while the whole
+    # dataset fell through to the fallback caption at train time.
+    if written == 0:
+        _emit("error",
+              message=f"no captions were written for any of the {n} images "
+                      f"— every image failed to caption. The dataset is "
+                      f"unchanged; see the errors above for the cause.",
+              count=0, failed=n, total=n)
+        return 1
+
     _emit("done",
           elapsed_sec=round(time.time() - t_start, 2),
-          count=n)
+          count=written,
+          failed=n - written,
+          total=n)
     return 0
 
 

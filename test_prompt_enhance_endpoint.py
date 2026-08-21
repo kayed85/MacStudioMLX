@@ -99,7 +99,16 @@ class PromptEnhanceEndpointTest(unittest.TestCase):
     def test_endpoint_uses_gemma3_and_always_returns_json(self) -> None:
         # Refuse to interfere with any process already using the requested test
         # port. Cleanup below only signals the exact Popen PID saved here.
+        #
+        # SO_REUSEADDR matters here and its absence made this suite flaky: the
+        # probe binds PORT, closes it, and the socket sits in TIME_WAIT for
+        # ~30 s. Running the suite twice inside that window failed with
+        # "Address already in use" and named a port that nothing held —
+        # blaming a phantom process for this test's own previous run. The flag
+        # permits exactly that case and still refuses a port a LIVE listener
+        # owns, which is the check we actually want.
         probe = socket.socket()
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             probe.bind(("127.0.0.1", PORT))
         except PermissionError as exc:

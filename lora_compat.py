@@ -10,12 +10,25 @@ starts denoising.
 It deliberately has no MLX or safetensors dependency.  The panel uses it while
 building the library, and the helper uses the same code against the transformer
 file it is about to load.
+
+Names are not effect (#62)
+--------------------------
+Matching every key is necessary and **not sufficient**.  In August 2026 two
+users trained characters that attached ``576/576`` modules on the unfused
+runtime route — a perfectly green tally — and changed nothing anyone could
+see.  The adapters were structurally flawless and numerically negligible: the
+low-rank product they carry is orders of magnitude below the one recipe that
+has ever carried an identity.  ``measure_adapter_effect`` puts a number on
+that half of the question, cheaply (the exact Frobenius norm of ``B @ A``
+without ever forming ``B @ A``), so "it attached" and "it can do something"
+stop being the same claim.
 """
 
 from __future__ import annotations
 
 import json
 import struct
+import sys
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -26,6 +39,28 @@ LORA_A_SUFFIX = ".lora_A.weight"
 LORA_B_SUFFIX = ".lora_B.weight"
 MIN_MATCH_RATIO = 0.90
 MAX_HEADER_BYTES = 64 * 1024 * 1024
+
+#: Per-entry RMS of the low-rank delta, ``‖B @ A‖_F / sqrt(in * out)``, below
+#: which an adapter has never been observed to change a render.  Calibrated on
+#: the adapters this repo actually ships and grades, all measured with
+#: :func:`measure_adapter_effect`:
+#:
+#:   ===========================================  =========  =========
+#:   adapter                                      rank       median
+#:   ===========================================  =========  =========
+#:   ``elontrn_v2`` (validated recipe)            32         1.63e-03
+#:   ``ariatrn_v2`` (validated recipe)            32         1.45e-03
+#:   ``eltrumpo_v2`` (validated recipe)           32         1.41e-03
+#:   ``bizarrotrn_v2`` (sample character)         32         8.84e-04
+#:   ``LTX2.3-Rogue…`` (third-party, works)       16         1.84e-03
+#:   ``Fantasy_Painterly`` (third-party, works)   32         5.36e-04
+#:   ``bizarrotrn.audio`` (voice, works)          16         4.85e-04
+#:   ===========================================  =========  =========
+#:
+#: The floor sits an order of magnitude under the weakest working adapter, so
+#: it accuses nothing that has ever worked, and it is two orders above a
+#: freshly-initialised adapter (1.7e-05 after four steps).
+WEAK_DELTA_RMS = 2.0e-4
 
 
 class LoraCompatibilityError(RuntimeError):
@@ -208,6 +243,194 @@ def inspect_lora_compatibility(
     )
 
 
+@dataclass(frozen=True)
+class AdapterEffect:
+    """How much an adapter can move the weights it attaches to.
+
+    ``deltas`` holds one ``‖B @ A‖_F / sqrt(in * out)`` per complete module —
+    the RMS of the delta the module will actually add, which is comparable
+    across shapes and ranks in a way the raw Frobenius norm is not.
+    """
+
+    lora_path: Path
+    modules: int
+    zero_modules: int
+    median_rms: float
+    max_rms: float
+    floor: float = WEAK_DELTA_RMS
+
+    @property
+    def inert(self) -> bool:
+        """Every module's delta is exactly zero — the adapter cannot do anything."""
+        return self.modules > 0 and self.zero_modules == self.modules
+
+    @property
+    def weak(self) -> bool:
+        return self.modules > 0 and not self.inert and self.median_rms < self.floor
+
+    @property
+    def summary(self) -> str:
+        return (
+            f"delta_rms median={self.median_rms:.2e} max={self.max_rms:.2e} "
+            f"({self.modules - self.zero_modules}/{self.modules} modules carry a delta)"
+        )
+
+    def failure_message(self) -> str:
+        return (
+            f"LoRA '{self.lora_path.name}' carries no weight delta at all: "
+            f"{self.summary}. Every low-rank product is exactly zero, so "
+            "attaching it cannot change a single pixel. The file is a "
+            "freshly-initialised adapter — training never moved it. Rendering "
+            "was refused instead of returning a LoRA-free result."
+        )
+
+    def weak_message(self) -> str:
+        return (
+            f"LoRA '{self.lora_path.name}' is far weaker than any adapter that "
+            f"has carried an identity here: {self.summary}, against "
+            f"{self.floor:.1e} for the weakest working reference and ~1.4e-03 "
+            "for the validated character recipe. Expect little or no visible "
+            "effect."
+        )
+
+    def require_effective(self) -> None:
+        if self.inert:
+            raise LoraCompatibilityError(self.failure_message())
+
+
+def _numpy():
+    """Import numpy on demand, or return ``None``.
+
+    This module promises to be importable anywhere — the panel, the helper and
+    the trainer all use it, and one of them may be a bare interpreter. The
+    strength probe is the only part that needs an array library, so it degrades
+    to "not measured" rather than taking the whole module down with it.
+    """
+    try:
+        import numpy  # noqa: PLC0415 — deliberate optional dependency
+    except ImportError:  # pragma: no cover — every supported env ships numpy
+        return None
+    return numpy
+
+
+_DTYPE_READERS = {"F32": ("<f4", None), "F16": ("<f2", None), "BF16": ("<u2", "bf16")}
+
+
+def measure_adapter_effect(
+    lora_path: str | Path, *, floor: float = WEAK_DELTA_RMS
+) -> AdapterEffect | None:
+    """Measure the size of the delta an adapter would add, per module.
+
+    ``‖B @ A‖_F`` is computed **without forming** ``B @ A``: for
+    ``G = Bᵀ B`` and ``H = A Aᵀ`` (both ``r × r``),
+    ``‖B A‖_F² = trace(G H)``.  At rank 32 on a 4096-wide projection that is
+    two thin matmuls instead of a 16 M-element product, so measuring a whole
+    500 MB character adapter costs about a second and no meaningful memory.
+
+    Returns ``None`` when numpy is unavailable or the file declares no complete
+    ``lora_A``/``lora_B`` pair (that second case is already the province of
+    :func:`inspect_lora_compatibility`, which fails closed on it).
+    """
+    np = _numpy()
+    if np is None:
+        return None
+    path = Path(lora_path)
+    header = read_tensor_header(path)
+    modules = sorted(
+        {
+            key[: -len(LORA_A_SUFFIX)]
+            for key in header
+            if key.endswith(LORA_A_SUFFIX)
+        }
+        & {
+            key[: -len(LORA_B_SUFFIX)]
+            for key in header
+            if key.endswith(LORA_B_SUFFIX)
+        }
+    )
+    if not modules:
+        return None
+
+    with path.open("rb") as fh:
+        header_size = struct.unpack("<Q", fh.read(8))[0]
+        payload_base = 8 + header_size
+
+        def read(key: str):
+            info = header[key]
+            spec = _DTYPE_READERS.get(str(info.get("dtype")))
+            if spec is None:
+                return None
+            start, end = info["data_offsets"]
+            fh.seek(payload_base + start)
+            raw = fh.read(end - start)
+            dtype, conversion = spec
+            flat = np.frombuffer(raw, dtype=dtype)
+            if conversion == "bf16":
+                flat = (flat.astype(np.uint32) << 16).view(np.float32)
+            return flat.astype(np.float32).reshape(info["shape"])
+
+        rms: list[float] = []
+        zero = 0
+        for module in modules:
+            a = read(module + LORA_A_SUFFIX)
+            b = read(module + LORA_B_SUFFIX)
+            if a is None or b is None or a.ndim != 2 or b.ndim != 2:
+                continue
+            if a.shape[0] != b.shape[1]:
+                continue  # rank disagreement: a shape problem, not a size one
+            gram = b.T @ b
+            cov = a @ a.T
+            frob = float(np.sqrt(max(float((gram * cov.T).sum()), 0.0)))
+            entries = float(a.shape[1]) * float(b.shape[0])
+            value = frob / (entries**0.5) if entries else 0.0
+            rms.append(value)
+            if value == 0.0:
+                zero += 1
+
+    if not rms:
+        return None
+    rms.sort()
+    middle = len(rms) // 2
+    median = rms[middle] if len(rms) % 2 else (rms[middle - 1] + rms[middle]) / 2
+    return AdapterEffect(
+        lora_path=path,
+        modules=len(rms),
+        zero_modules=zero,
+        median_rms=median,
+        max_rms=rms[-1],
+        floor=floor,
+    )
+
+
+def validate_adapter_effects(
+    loras: Iterable[tuple[str, float]],
+    *,
+    reporter: Callable[[str], None] | None = None,
+) -> list[AdapterEffect]:
+    """Report every adapter's strength, and refuse the ones that are all zero.
+
+    Sits beside :func:`validate_lora_stack`: that one answers "can these keys
+    land on this checkpoint", this one answers "is there anything in them".
+    A weak-but-nonzero adapter is reported, never refused — the owner may be
+    deliberately running a light touch, and a threshold has no business
+    outranking a person.
+    """
+    measured: list[AdapterEffect] = []
+    for index, (path, strength) in enumerate(loras, start=1):
+        if float(strength) == 0.0:
+            continue
+        effect = measure_adapter_effect(path)
+        if effect is None:
+            continue
+        if reporter is not None:
+            reporter(f"LoRA[{index}] {effect.summary} file={effect.lora_path.name}")
+            if effect.weak:
+                reporter(f"LoRA[{index}] WARNING: {effect.weak_message()}")
+        effect.require_effective()
+        measured.append(effect)
+    return measured
+
+
 def resolve_distilled_transformer(model_dir: str | Path) -> Path | None:
     """Resolve the distilled file using the pinned pipeline's precedence."""
     root = Path(model_dir)
@@ -249,6 +472,80 @@ def validate_lora_stack(
     return reports
 
 
+#: Exit codes for :func:`main`.  ``weak`` deliberately does NOT fail: a light
+#: touch is the owner's call, not a threshold's (same doctrine as
+#: :func:`validate_adapter_effects`).  Only ``inert`` is unambiguously a failed
+#: training, and only an unreadable path is unambiguously the caller's mistake.
+_EXIT_FOR_STATUS = {"inert": 1, "missing": 2, "error": 2, "unmeasured": 2}
+
+
+def describe_adapter(lora_path: str | Path) -> tuple[str, str]:
+    """``(status, line)`` describing what a single adapter can do.
+
+    ``status`` is one of ``ok`` / ``weak`` / ``inert`` / ``missing`` /
+    ``error`` / ``unmeasured``; ``line`` is the human-readable report.
+
+    The whole #62 investigation was a person spending days proving a negative
+    about a file that was sitting on their disk the entire time.  The number
+    that answers it costs about a second to compute, so it should not require
+    a render, a re-train, or a 500 MB upload to see.
+    """
+    path = Path(lora_path)
+    if not path.is_file():
+        return "missing", f"{path.name}: NOT FOUND ({path})"
+    try:
+        effect = measure_adapter_effect(path)
+    except LoraCompatibilityError as exc:
+        return "error", f"{path.name}: UNREADABLE — {exc}"
+    if effect is None:
+        return "unmeasured", (
+            f"{path.name}: NOT MEASURED — either numpy is unavailable or the "
+            "file declares no complete lora_A/lora_B pair."
+        )
+    if effect.inert:
+        status = "inert"
+        verdict = "INERT — training moved nothing; treat the run as failed"
+    elif effect.weak:
+        status = "weak"
+        verdict = (
+            f"WEAK — under {effect.floor:.1e}, the floor every adapter that "
+            "has carried an identity here sits above"
+        )
+    else:
+        status = "ok"
+        verdict = "OK — in the band adapters that work sit in"
+    return status, f"{path.name}: {effect.summary} — {verdict}"
+
+
+def main(argv: list[str] | None = None) -> int:
+    """`python3 lora_compat.py <adapter.safetensors> [...]`.
+
+    Prints the delta each adapter carries and a verdict per file.  Exit 1
+    means at least one file is INERT (every low-rank product exactly zero) —
+    the one state that is unambiguously a failed training.  Exit 2 means a
+    path could not be measured at all, which is the caller's mistake rather
+    than the adapter's.  WEAK is reported and never fails the command: a
+    light touch is the owner's call, not a threshold's.
+    """
+    args = list(sys.argv[1:] if argv is None else argv)
+    if not args or args[0] in ("-h", "--help"):
+        sys.stdout.write(
+            "usage: python3 lora_compat.py <adapter.safetensors> [more ...]\n"
+            "\n"
+            "Measures the size of the weight delta each LoRA carries and says\n"
+            "whether it is big enough to change a render. Reference band: the\n"
+            "characters this repo ships measure 8.8e-04 to 1.6e-03; a freshly\n"
+            "initialised adapter that never trained measures ~1.7e-05.\n"
+        )
+        return 0 if args else 2
+    worst = 0
+    for raw in args:
+        status, line = describe_adapter(raw)
+        sys.stdout.write(line + "\n")
+        worst = max(worst, _EXIT_FOR_STATUS.get(status, 0))
+    return worst
+
+
 def validate_runtime_application(
     loras: Iterable[tuple[LoraCompatibility, float]],
     applied_module_names: Iterable[str],
@@ -288,3 +585,7 @@ def validate_runtime_application(
                 f"(minimum {report.minimum_match_ratio:.0%}). Rendering was "
                 "refused before it could produce a LoRA-free result."
             )
+
+
+if __name__ == "__main__":  # pragma: no cover - CLI entry
+    raise SystemExit(main())

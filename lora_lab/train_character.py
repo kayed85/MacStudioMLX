@@ -106,7 +106,18 @@ logger = logging.getLogger(__name__)
 
 
 # ----------------------------------------------------------------------
-# Presets + estimator (both must stay in lockstep with the panel JS mirror)
+# CLI-ONLY DEFAULTS. NOT a mirror of the panel's presets — they have never
+# matched, and the comment that said they must is what made a change to
+# either one look safe.
+#
+# The panel writes every hyperparameter it cares about into spec.json
+# (rank / alpha / steps / lr / resolution), and `resolve_preset` lets those
+# `advanced` values win — so on a panel-driven run this table is dead code.
+# It is live on the CLI path only, where `--preset quick` trains rank 16
+# while the panel's Quick trains rank 8, and the panel derives steps from
+# `epochs x image_count` while these are fixed. Same word, two recipes: read
+# them as this module's defaults and nothing else. If they ever need to agree,
+# make one of them import the other rather than restating it here.
 # ----------------------------------------------------------------------
 
 PRESETS: dict[str, dict[str, Any]] = {
@@ -126,7 +137,11 @@ PRESETS: dict[str, dict[str, Any]] = {
 
 TARGET_MODULES = ["to_q", "to_k", "to_v", "to_out"]
 
-# Estimator constants — keep in sync with panel mirror.
+# Estimator constants for THIS module's estimate. The panel's ETA is a
+# different formula, not a copy of this one: it uses a per-preset
+# `seconds_per_step` with no fixed term, and `3.0 * image_count` for
+# preprocessing. Nothing gates the two against each other because they are
+# not the same estimate.
 _BASE_STEP_S = 2.4            # M4 Max 64 GB, 576x576 rank 32
 _PREPROCESS_FIXED_S = 90.0    # model load + Gemma init
 _PREPROCESS_PER_IMAGE_S = 2.0 # VAE encode per image
@@ -732,6 +747,71 @@ def run_training(
 # Sidecar
 # ----------------------------------------------------------------------
 
+def report_adapter_strength(lora_path: Path) -> dict[str, Any] | None:
+    """Measure what the finished adapter can actually do, and say so.
+
+    A training run that completes is not a training run that worked. In August
+    2026 two users (issues #61, #62) trained characters that finished clean,
+    saved a 132–500 MB file, attached ``576/576`` modules at render — and moved
+    nothing a human eye could see. Nothing anywhere in the pipeline had ever
+    measured the one quantity that decides it: the size of the low-rank delta
+    the file carries. So the run ended with "done ✓" and the user spent days
+    proving a negative.
+
+    This emits that number at the end of every training run, next to the file
+    it describes, and shouts when it lands below the band every adapter that
+    has ever carried an identity here sits in (``lora_compat.WEAK_DELTA_RMS``,
+    calibrated against the shipped characters and third-party LoRAs). It does
+    not fail the job: the file is still saved, still usable, and the owner may
+    want a deliberately light touch. It just stops the silence.
+    """
+    try:
+        from lora_compat import measure_adapter_effect
+    except ImportError:  # pragma: no cover — panel root is always on PYTHONPATH
+        return None
+    try:
+        effect = measure_adapter_effect(lora_path)
+    except Exception as exc:  # noqa: BLE001 — a probe must never fail a run
+        emit("log", line=f"adapter strength: not measured ({exc})")
+        return None
+    if effect is None:
+        return None
+
+    payload = {
+        "modules": effect.modules,
+        "carrying_modules": effect.modules - effect.zero_modules,
+        "delta_rms_median": effect.median_rms,
+        "delta_rms_max": effect.max_rms,
+        "floor": effect.floor,
+        "verdict": "inert" if effect.inert else ("weak" if effect.weak else "ok"),
+    }
+    emit("adapter_strength", **payload)
+    emit("log", line=f"adapter strength: {effect.summary}")
+    if effect.inert:
+        emit(
+            "warning",
+            stage="verify",
+            message=(
+                f"{lora_path.name} carries no weight delta at all — every "
+                "low-rank product is zero, so it cannot change a render. "
+                "Training moved nothing; treat this run as failed."
+            ),
+        )
+    elif effect.weak:
+        emit(
+            "warning",
+            stage="verify",
+            message=(
+                f"{lora_path.name} is much weaker than the adapters that carry "
+                f"identity here (measured {effect.median_rms:.2e}, floor "
+                f"{effect.floor:.1e}, validated recipe ~1.4e-03). Expect little "
+                "or no visible effect. The High preset (rank 32, ~100 epochs, "
+                "lr 1e-4) is the only recipe graded for identity."
+            ),
+        )
+    return payload
+
+
 def write_sidecar(
     *,
     lora_path: Path,
@@ -739,6 +819,7 @@ def write_sidecar(
     trigger: str,
     image_count: int,
     training_wall_s: float,
+    strength: dict[str, Any] | None = None,
 ) -> Path:
     sidecar_path = lora_path.with_suffix(lora_path.suffix + ".json")
     payload = {
@@ -767,6 +848,11 @@ def write_sidecar(
         "lora_lab_version": "iter5",
         "loadable_via": "ltx_core_mlx.loader.fuse_loras.apply_loras",
     }
+    if strength is not None:
+        # Kept with the adapter so a file that turns up months later can be
+        # judged without re-measuring, and so the panel can show the verdict
+        # next to the character it belongs to.
+        payload["adapter_strength"] = strength
     sidecar_path.write_text(json.dumps(payload, indent=2))
     emit("sidecar_written", path=str(sidecar_path))
     return sidecar_path
@@ -935,6 +1021,10 @@ def run_pipeline(spec_path: Path) -> int:
     except Exception as exc:  # noqa: BLE001
         emit_error_and_exit("publish", f"failed to copy checkpoint: {exc}")
 
+    # Measure before the sidecar so the strength verdict is on record even if
+    # sidecar writing fails — the number is the part a stuck user needs.
+    strength = report_adapter_strength(output_lora_path)
+
     try:
         write_sidecar(
             lora_path=output_lora_path,
@@ -942,6 +1032,7 @@ def run_pipeline(spec_path: Path) -> int:
             trigger=trigger,
             image_count=image_count,
             training_wall_s=training_wall_s,
+            strength=strength,
         )
     except Exception as exc:  # noqa: BLE001
         emit_error_and_exit("sidecar", str(exc))

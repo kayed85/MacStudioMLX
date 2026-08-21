@@ -43,9 +43,23 @@ import storyboard_planner as P  # noqa: E402
 class StubSession(object):
     """Stands in for PlannerSession. Replays canned replies, records what it was asked."""
 
-    def __init__(self, replies):
+    def __init__(self, replies, screenplay="", geography=""):
         self.replies = list(replies)
+        # The screenplay pass answers from its OWN slot and never consumes a
+        # queued reply. `replies` is the shot-pass script in every test in this
+        # file, and threading a screenplay through all of them would have made
+        # 27 tests about pass ordering instead of about what they each test.
+        # Default "" == the model gave nothing usable, which is the documented
+        # fallback and makes the shot brief byte-identical to before this pass.
+        self.screenplay = screenplay
+        # The geography pass gets its own slot for the same reason, and needs
+        # one more than the screenplay did: it only runs when the brief carries
+        # a location, so the default "" leaves every test that names no place
+        # measuring exactly what it measured before it existed.
+        self.geography = geography
         self.calls = []
+        self.screenplay_calls = []
+        self.geography_calls = []
         self.model_path = Path("stub-model")
         self.stats = {"model_path": "stub-model", "load_s": 0.0, "calls": 0,
                       "gen_s_total": 0.0, "prompt_tokens": 0, "output_tokens": 0,
@@ -53,8 +67,24 @@ class StubSession(object):
         self.released = False
 
     def generate(self, system, user, **kw):
-        self.calls.append({"system": system, "user": user, "kw": kw})
         self.stats["calls"] += 1
+        if system == P._SCREENPLAY_SYSTEM:
+            # Recorded SEPARATELY. Every assertion in this file reads `calls` as
+            # "calls in the shot pass" — indexing into it for the repair prompt,
+            # and counting it to prove a clean plan cost no re-plan. Appending
+            # the screenplay call to the same list would silently redefine what
+            # eleven of those tests measure. `stats["calls"]` still counts it,
+            # so the real cost is not hidden anywhere.
+            self.screenplay_calls.append({"system": system, "user": user, "kw": kw})
+            return {"text": self.screenplay, "load_s": 0.0, "gen_s": 0.0,
+                    "prompt_tokens": 10, "output_tokens": 10,
+                    "peak_rss_bytes": 0, "mx_peak_bytes": 0}
+        if system == P._GEOGRAPHY_SYSTEM:
+            self.geography_calls.append({"system": system, "user": user, "kw": kw})
+            return {"text": self.geography, "load_s": 0.0, "gen_s": 0.0,
+                    "prompt_tokens": 10, "output_tokens": 10,
+                    "peak_rss_bytes": 0, "mx_peak_bytes": 0}
+        self.calls.append({"system": system, "user": user, "kw": kw})
         if not self.replies:
             raise AssertionError("stub ran out of replies after %d calls" % len(self.calls))
         nxt = self.replies.pop(0)
@@ -113,7 +143,8 @@ def _plan(replies, **kw):
     The stub is installed as the PlannerSession class rather than handed in as
     `session=`, so plan_film() owns it and its `finally:` release is exercised.
     """
-    stub = StubSession(replies)
+    stub = StubSession(replies, screenplay=kw.pop("screenplay_text", ""),
+                       geography=kw.pop("geography_text", ""))
     kw.setdefault("concept", "a lost brass key finds its door")
     kw.setdefault("n_shots", 6)
     concept = kw.pop("concept")
@@ -1318,6 +1349,534 @@ class TestLawEnforcement(unittest.TestCase):
         self.assertEqual(len(stub.calls), 2, [c["user"][:40] for c in stub.calls])
         self.assertIn("APPEARANCE (L12)", stub.calls[1]["user"])
         self.assertIn("SPEECH (L13)", stub.calls[1]["user"])
+
+
+class TestScreenplayPass(unittest.TestCase):
+    """Pass one writes the SCENE; pass two shoots it.
+
+    Owner, on the films this planner produced before it existed: "the prompt
+    writing should be like a movie director... The action is well planned. You
+    understand what I mean? It is not working properly. It's just a succession
+    of shots." Maestro does screenplay -> shot breakdown -> per-model polish;
+    this had no screenplay step at all, so structure and coverage were being
+    invented in the same breath.
+    """
+    SCENE = "\n".join([
+        "BEAT - He throws both arms wide in front of the soapy car.",
+        'BIZARRO: "Ladies and gentlemen."',
+        "BEAT - She keeps scrubbing and does not look up.",
+        'ARIA: "Update the app."',
+    ])
+
+    def _film(self, desc="A man stands in the rain."):
+        return json.dumps({"title": "T", "shots": [
+            {"n": i + 1, "title": "B%d" % (i + 1), "character_id": None,
+             "duration_s": 5, "camera": "static", "description": desc,
+             "settle": "he is still", "soundscape": "Rain, no voices.",
+             "music": "N/A"} for i in range(2)]})
+
+    def test_the_scene_is_written_before_the_shots(self):
+        spec, stub = _plan([self._film()], n_shots=2, screenplay_text=self.SCENE)
+        self.assertFalse(P.is_plan_error(spec), spec)
+        self.assertEqual(len(stub.screenplay_calls), 1)
+        self.assertIn("You are a screenwriter", stub.screenplay_calls[0]["system"])
+
+    def test_the_scene_reaches_the_shot_brief_verbatim(self):
+        spec, stub = _plan([self._film()], n_shots=2, screenplay_text=self.SCENE)
+        brief = stub.calls[0]["user"]
+        self.assertIn("THE SCENE", brief)
+        self.assertIn('BIZARRO: "Ladies and gentlemen."', brief)
+        self.assertIn("keep every spoken line", brief)
+
+    def test_a_model_that_answers_with_chatter_is_ignored(self):
+        # Small models like to open with "Sure! Here is the scene:" and a
+        # paragraph that is not a beat. Handing that down as if it were the
+        # scene is worse than having no scene.
+        _, stub = _plan([self._film()], n_shots=2,
+                        screenplay_text="Sure! Here is a great scene for you.\nEnjoy!")
+        self.assertNotIn("THE SCENE", stub.calls[0]["user"])
+
+    def test_no_screenplay_leaves_the_brief_exactly_as_it_was(self):
+        _, stub = _plan([self._film()], n_shots=2, screenplay_text="")
+        self.assertNotIn("THE SCENE", stub.calls[0]["user"])
+
+    def test_it_can_be_turned_off(self):
+        _, stub = _plan([self._film()], n_shots=2, screenplay=False,
+                        screenplay_text=self.SCENE)
+        self.assertEqual(stub.screenplay_calls, [])
+
+    def test_a_reroll_does_not_rewrite_the_scene(self):
+        # A per-shot re-roll is fixing ONE shot. Regenerating the screenplay
+        # under it would move the ground the other shots are standing on.
+        base, _ = _plan([_plan_json(6)])
+        _, stub = _plan([_plan_json(1)], n_shots=6, previous=base,
+                        feedback={"shot": 1, "note": "again"},
+                        screenplay_text=self.SCENE)
+        self.assertEqual(stub.screenplay_calls, [])
+
+
+# --------------------------------------------------------------------------------------
+# The geography pass — the screenplay is TIME, this is SPACE
+# --------------------------------------------------------------------------------------
+
+CARWASH = {"id": "carwash", "name": "The car wash",
+           "description": "a suburban driveway on a bright afternoon"}
+
+# What the blocking model is asked for, on the day's own scene. Everything the
+# feature promises is in these two views: the reverse does not hold the car and
+# SAYS so, and the sun that rakes in from camera left rakes in from camera right
+# once the camera has turned around.
+GEO_JSON = json.dumps({
+    "floor_plan":
+        "The driveway runs left to right in front of the garage. BIZARRO stands at the "
+        "near end of a soapy blue sedan facing the street; behind him is the garage door. "
+        "ARIA crouches at the front wheel with a sponge. Across the street, behind "
+        "BIZARRO's eyeline, is a row of low houses and a hand-painted sign on the verge. "
+        "The low afternoon sun comes over the houses.",
+    "views": [
+        {"location": "The car wash", "id": "establishing",
+         "name": "Establishing - facing the driveway", "light": "camera left",
+         "description": "the soapy blue sedan on the driveway with a woman crouched at "
+                        "the front wheel, the garage door behind them"},
+        {"location": "The car wash", "id": "reverse",
+         "name": "Reverse - facing the street", "light": "camera right",
+         "description": "the row of low houses across the street and a hand-painted sign "
+                        "on the far verge, no car in frame"},
+    ]})
+
+
+def _geo_film(shots):
+    return json.dumps({"title": "The Car Wash", "shots": shots})
+
+
+class TestGeographyPass(unittest.TestCase):
+    """The planner learns SPACE.
+
+    Owner, after a full day of manual continuity work: "Do you notice all the
+    work I had to do to make this scene happen in the same place and have
+    proper angles? ... You need to first make a concept of the whole situation.
+    For instance, a man or woman in a bar — behind him there is this, behind her
+    there is that. When they sit together, this is what you see."
+
+    The whole day was the prototype: carwash/carwash_reverse, the flipped sun,
+    the off-frame eyelines, the no-car reverse background — all hand-built, all
+    derivable from one paragraph of floor plan.
+    """
+
+    def _film(self, n=2, **kw):
+        rows = []
+        for i in range(n):
+            row = {"n": i + 1, "title": "B%d" % (i + 1), "character_id": None,
+                   "duration_s": 5, "camera": "static",
+                   "description": "A man throws both arms wide.",
+                   "settle": "he is still", "soundscape": "Hose water, no voices.",
+                   "music": "N/A", "location": "The car wash"}
+            row.update(kw)
+            rows.append(row)
+        return _geo_film(rows)
+
+    def _plan_carwash(self, replies=None, **kw):
+        kw.setdefault("n_shots", 2)
+        kw.setdefault("locations", [dict(CARWASH)])
+        kw.setdefault("geography_text", GEO_JSON)
+        return _plan(replies or [self._film()], **kw)
+
+    # ---- the pass itself ----------------------------------------------------
+    def test_the_floor_plan_is_written_before_the_shots(self):
+        spec, stub = self._plan_carwash()
+        self.assertFalse(P.is_plan_error(spec), spec)
+        self.assertEqual(len(stub.geography_calls), 1)
+        self.assertIn("You are a director blocking a scene",
+                      stub.geography_calls[0]["system"])
+        self.assertIn("The car wash", stub.geography_calls[0]["user"])
+
+    def test_it_reads_the_scene_so_it_knows_who_turns_to_whom(self):
+        scene = "\n".join(['BEAT - He turns to her.',
+                           'BIZARRO: "Ladies and gentlemen."',
+                           'BEAT - She keeps scrubbing.',
+                           'ARIA: "Update the app."'])
+        _, stub = self._plan_carwash(screenplay_text=scene)
+        self.assertIn("THE SCENE THAT HAPPENS HERE", stub.geography_calls[0]["user"])
+        self.assertIn("Ladies and gentlemen", stub.geography_calls[0]["user"])
+
+    def test_the_views_are_merged_into_the_boards_locations(self):
+        spec, _ = self._plan_carwash()
+        views = spec["locations"][0]["views"]
+        self.assertEqual([v["id"] for v in views], ["establishing", "reverse"])
+        self.assertIn("sedan", views[0]["description"])
+        self.assertIn("houses", views[1]["description"])
+        self.assertNotIn("sedan", views[1]["description"])
+
+    def test_the_light_flips_at_180_degrees(self):
+        # Measured on the real cut, and the one thing a second hand-authored
+        # location got right only because a human remembered to flip it.
+        spec, _ = self._plan_carwash()
+        front, back = spec["locations"][0]["views"]
+        self.assertIn("camera left", front["description"])
+        self.assertNotIn("camera right", front["description"])
+        self.assertIn("camera right", back["description"])
+        self.assertNotIn("camera left", back["description"])
+
+    def test_the_views_and_the_laws_reach_the_shot_brief(self):
+        _, stub = self._plan_carwash()
+        brief = stub.calls[0]["user"]
+        self.assertIn("VIEWS of The car wash", brief)
+        self.assertIn("establishing", brief)
+        self.assertIn("reverse", brief)
+        self.assertIn("THE FLOOR PLAN", brief)
+        self.assertIn("behind him is the garage door", brief)
+        self.assertIn("THE 180-DEGREE RULE", brief)
+        self.assertIn("Never put a character's own body in the view behind them", brief)
+
+    def test_views_without_a_floor_plan_still_reach_the_model(self):
+        # THE COERCION BUG. `_geography_plan` derives the floor plan from the
+        # model's own optional key, so a reply carrying views and no plan
+        # legitimately returns ("", {...views...}) — and the shot prompt was
+        # only rebuilt `if scene_text or floor_plan`. With the screenplay also
+        # empty (routine: `_screenplay_text` returns "" whenever fewer than
+        # three lines match the form), `locs` had been replaced by the merged
+        # list while the brief was still the pre-geography one: no view ids,
+        # no laws. The model named no view, `_apply_geography` found views on
+        # the location and none on any shot, and stamped views[0] on every
+        # shot — the whole film pinned to the establishing angle, which is the
+        # behaviour this pass exists to end.
+        geo = json.dumps({"views": json.loads(GEO_JSON)["views"]})
+        film = self._film(view="reverse")
+        spec, stub = self._plan_carwash([film], geography_text=geo,
+                                        screenplay_text="")
+        self.assertFalse(P.is_plan_error(spec), spec)
+        brief = stub.calls[0]["user"]
+        self.assertIn("VIEWS of The car wash", brief)
+        self.assertIn("establishing", brief)
+        self.assertIn("reverse", brief)
+        self.assertIn("THE 180-DEGREE RULE", brief)
+        # ...and a model that WAS told keeps the view it named, rather than
+        # being coerced onto the establishing angle it never saw.
+        self.assertEqual(spec["shots"][0]["view"], "reverse")
+        self.assertFalse([w for w in spec["_planner"]["warnings"]
+                          if "the establishing view" in w],
+                         spec["_planner"]["warnings"])
+
+    def test_a_film_with_no_views_reads_exactly_as_it_did_before(self):
+        _, stub = _plan([self._film()], n_shots=2, locations=[dict(CARWASH)],
+                        geography=False)
+        brief = stub.calls[0]["user"]
+        self.assertIn("LOCATIONS", brief)
+        self.assertNotIn("VIEWS of", brief)
+        self.assertNotIn("THE 180-DEGREE RULE", brief)
+        self.assertNotIn("THE FLOOR PLAN", brief)
+
+    def test_chatter_is_discarded_and_the_plan_proceeds(self):
+        # The screenplay pass's rule, one pass over: a model that answers a
+        # blocking brief with enthusiasm must leave the plan behaving exactly
+        # as it did before this pass existed.
+        spec, stub = self._plan_carwash(
+            geography_text="Sure! Here is a great layout for your scene. Enjoy!")
+        self.assertFalse(P.is_plan_error(spec), spec)
+        self.assertNotIn("views", spec["locations"][0])
+        self.assertNotIn("VIEWS of", stub.calls[0]["user"])
+        self.assertTrue(any("no usable floor plan" in w
+                            for w in spec["_planner"]["warnings"]),
+                        spec["_planner"]["warnings"])
+
+    def test_it_can_be_turned_off(self):
+        _, stub = self._plan_carwash(geography=False)
+        self.assertEqual(stub.geography_calls, [])
+
+    def test_a_film_with_nowhere_to_be_does_not_pay_for_a_floor_plan(self):
+        # There is nowhere to hang a view and no board field to carry it.
+        _, stub = _plan([_plan_json(2)], n_shots=2, geography_text=GEO_JSON)
+        self.assertEqual(stub.geography_calls, [])
+
+    def test_a_reroll_does_not_reblock_the_scene(self):
+        # The other shots are standing on this geography.
+        base, _ = self._plan_carwash()
+        _, stub = self._plan_carwash([self._film(1)], previous=base,
+                                     feedback={"shot": 1, "note": "again"})
+        self.assertEqual(stub.geography_calls, [])
+
+    # ---- what lands on the shots -------------------------------------------
+    def test_a_shot_carries_its_view_and_its_eyeline(self):
+        spec, _ = self._plan_carwash([self._film(view="reverse", eyeline="frame-left")])
+        self.assertEqual(spec["shots"][0]["view"], "reverse")
+        self.assertEqual(spec["shots"][0]["eyeline"], "left")
+        self.assertEqual(P._load_validator()[0](spec), [])
+
+    def test_a_shot_that_names_no_view_is_put_on_the_establishing_one(self):
+        # Unspecified coverage is the master. Leaving it blank composes the
+        # location's own neutral sentence — the pre-views behaviour this pass
+        # exists to end.
+        spec, _ = self._plan_carwash()
+        self.assertEqual(spec["shots"][0]["view"], "establishing")
+        self.assertTrue(any("no view of The car wash" in w
+                            for w in spec["_planner"]["warnings"]),
+                        spec["_planner"]["warnings"])
+
+    def test_a_view_that_is_not_on_the_floor_plan_never_reaches_the_board(self):
+        # `unknown_view` is a hard validator error; writing the model's
+        # invention onto the shot would fail the plan outright.
+        spec, _ = self._plan_carwash([self._film(view="from_the_roof")])
+        self.assertEqual(spec["shots"][0]["view"], "establishing")
+        self.assertEqual(P._load_validator()[0](spec), [])
+
+    def test_an_eyeline_outside_the_vocabulary_is_dropped_not_written(self):
+        spec, _ = self._plan_carwash([self._film(eyeline="over the shoulder")])
+        self.assertNotIn("eyeline", spec["shots"][0])
+        self.assertEqual(P._load_validator()[0](spec), [])
+        self.assertTrue(any("not left, right or lens" in w
+                            for w in spec["_planner"]["warnings"]))
+
+    def test_every_way_a_model_says_a_side_lands_in_the_vocabulary(self):
+        for raw, want in (("frame-right", "right"), ("screen left", "left"),
+                          ("Camera Right", "right"), ("to camera", "lens"),
+                          ("LENS", "lens"), ("left.", "left")):
+            self.assertEqual(P._eyeline_key(raw), want, raw)
+        for junk in ("over the shoulder", "up", "", None, "north"):
+            self.assertEqual(P._eyeline_key(junk), "")
+
+    def test_a_film_level_replan_is_shown_the_geography_it_must_keep(self):
+        # Without this the re-plan came back with every shot re-coerced onto
+        # the establishing view: nothing in the plan the model was shown said
+        # which way any of them had been pointing.
+        base, _ = self._plan_carwash([self._film(view="reverse", eyeline="right")])
+        _, stub = self._plan_carwash([self._film(view="reverse", eyeline="right")],
+                                     previous=base, feedback="make it colder")
+        brief = stub.calls[0]["user"]
+        self.assertIn('"view": "reverse"', brief)
+        self.assertIn('"eyeline": "right"', brief)
+        self.assertIn('"location": "carwash"', brief)
+
+    def test_the_plan_carries_the_places_its_shots_name(self):
+        # THE REGRESSION: shots have been stamped with `location_id` since
+        # locations existed and the spec never carried `locations`, so the
+        # validator returned `unknown_location` for EVERY shot — a brief with a
+        # location in it spent its one repair round-trip on a fault no model
+        # could fix and came back `invalid_plan`.
+        spec, _ = _plan([self._film()], n_shots=2, locations=[dict(CARWASH)])
+        self.assertFalse(P.is_plan_error(spec), spec)
+        self.assertEqual([l["id"] for l in spec["locations"]], ["carwash"])
+        self.assertEqual(spec["shots"][0]["location_id"], "carwash")
+        self.assertEqual(P._load_validator()[0](spec), [])
+
+
+class TestGeographyLaws(unittest.TestCase):
+    """Warning level, both of them, and neither can fail a plan.
+
+    A film whose eyelines are a little loose is still a film; a film that will
+    not render is not.
+    """
+    LOCS = [dict(CARWASH, views=[
+        {"id": "establishing", "name": "Establishing",
+         "description": "the soapy blue sedan on the driveway, camera left light"},
+        {"id": "reverse", "name": "Reverse",
+         "description": "the row of low houses across the street, no car in frame, "
+                        "camera right light"},
+    ])]
+
+    def _spec(self, *shots):
+        return {"shots": [dict({"n": i + 1, "location_id": "carwash"}, **s)
+                          for i, s in enumerate(shots)]}
+
+    # ---- the 180-degree line ------------------------------------------------
+    def test_two_people_cannot_both_look_the_same_way(self):
+        warn = []
+        spec = P._enforce_eyelines(
+            self._spec({"character_id": "bizarrotrn", "eyeline": "right"},
+                       {"character_id": "ariatrn", "eyeline": "right"}), warn)
+        self.assertEqual(spec["shots"][1]["eyeline"], "left")
+        self.assertIn("180-degree line", warn[0])
+
+    def test_a_complementary_pair_is_left_alone(self):
+        warn = []
+        spec = P._enforce_eyelines(
+            self._spec({"character_id": "bizarrotrn", "eyeline": "right"},
+                       {"character_id": "ariatrn", "eyeline": "left"}), warn)
+        self.assertEqual([s["eyeline"] for s in spec["shots"]], ["right", "left"])
+        self.assertEqual(warn, [])
+
+    def test_the_same_person_twice_is_not_a_reverse(self):
+        # Two shots of one man looking the same way is continuity, not a break.
+        warn = []
+        P._enforce_eyelines(
+            self._spec({"character_id": "bizarrotrn", "eyeline": "right"},
+                       {"character_id": "bizarrotrn", "eyeline": "right"}), warn)
+        self.assertEqual(warn, [])
+
+    def test_a_cut_to_another_place_does_not_cross_the_line(self):
+        warn = []
+        spec = self._spec({"character_id": "bizarrotrn", "eyeline": "right"},
+                          {"character_id": "ariatrn", "eyeline": "right"})
+        spec["shots"][1]["location_id"] = "kitchen"
+        P._enforce_eyelines(spec, warn)
+        self.assertEqual(spec["shots"][1]["eyeline"], "right")
+        self.assertEqual(warn, [])
+
+    def test_the_lens_and_the_unstated_are_never_flipped(self):
+        # "lens" is a claim; nothing is not. Neither is a side of the line.
+        warn = []
+        spec = P._enforce_eyelines(
+            self._spec({"character_id": "a", "eyeline": "lens"},
+                       {"character_id": "b", "eyeline": "lens"},
+                       {"character_id": "a"}, {"character_id": "b"}), warn)
+        self.assertEqual([s.get("eyeline") for s in spec["shots"]],
+                         ["lens", "lens", None, None])
+        self.assertEqual(warn, [])
+
+    # ---- what the reverse angle exists to keep out --------------------------
+    def test_the_car_is_not_allowed_back_into_the_reverse(self):
+        warn = []
+        spec = self._spec({"view": "reverse",
+                           "description": "He turns from the car and grins at her."})
+        P._enforce_geography(spec, self.LOCS, warn)
+        self.assertEqual(len(warn), 1, warn)
+        self.assertIn("shot 1", warn[0])
+        self.assertIn("'reverse'", warn[0])
+        self.assertIn("car", warn[0])
+
+    def test_the_same_object_on_the_view_that_holds_it_is_fine(self):
+        warn = []
+        P._enforce_geography(
+            self._spec({"view": "establishing",
+                        "description": "He turns from the car and grins at her."}),
+            self.LOCS, warn)
+        self.assertEqual(warn, [])
+
+    def test_the_other_person_in_a_reverse_is_never_a_violation(self):
+        # An earlier draft inferred absence by diffing the content words of the
+        # other views, and flagged exactly the thing a reverse angle is FOR:
+        # her, her sponge, her wheel, all legitimately in frame.
+        warn = []
+        P._enforce_geography(
+            self._spec({"view": "reverse",
+                        "description": "The woman looks up from the front wheel, sponge "
+                                       "in hand, and answers him."}),
+            self.LOCS, warn)
+        self.assertEqual(warn, [])
+
+    # ---- the wiring ---------------------------------------------------------
+    def test_both_laws_run_inside_plan_film(self):
+        # A law that is only unit-tested is a law that can be left unwired.
+        cast = [{"id": "bizarrotrn", "trigger": "bizarrotrn", "name": "Bizarro"},
+                {"id": "ariatrn", "trigger": "ariatrn", "name": "Aria"}]
+        rows = [
+            {"n": 1, "title": "A", "character_id": "bizarrotrn", "duration_s": 5,
+             "camera": "static", "description": "bizarrotrn throws both arms wide and grins.",
+             "settle": "he is still", "soundscape": "Hose water, no voices.",
+             "music": "N/A", "location": "The car wash", "view": "establishing",
+             "eyeline": "right"},
+            {"n": 2, "title": "B", "character_id": "ariatrn", "duration_s": 5,
+             "camera": "static",
+             "description": "ariatrn lifts the sponge from the car and shrugs.",
+             "settle": "she is still", "soundscape": "Hose water, no voices.",
+             "music": "N/A", "location": "The car wash", "view": "reverse",
+             "eyeline": "right"},
+        ]
+        spec, _ = _plan([json.dumps({"title": "The Car Wash", "shots": rows})],
+                        n_shots=2, characters=cast, engine="ltx",
+                        locations=[dict(CARWASH)], geography_text=GEO_JSON)
+        self.assertFalse(P.is_plan_error(spec), spec)
+        self.assertEqual([s["eyeline"] for s in spec["shots"]], ["right", "left"])
+        self.assertEqual(P._load_validator()[0](
+            spec, known_character_ids=["bizarrotrn", "ariatrn"]), [])
+        warns = spec["_planner"]["warnings"]
+        self.assertTrue(any("180-degree line" in w for w in warns), warns)
+        self.assertTrue(any("puts the car back in frame" in w for w in warns), warns)
+        # WARNING level: a loose eyeline is not a reason to call a film broken.
+        self.assertTrue(spec["_planner"]["ok"])
+        self.assertFalse(spec["_planner"]["degraded"])
+
+    def test_absence_is_read_from_the_views_own_words(self):
+        self.assertEqual(P._absent_terms("houses across the street, no car in frame"),
+                         ["car"])
+        self.assertEqual(P._absent_terms("the verge, without the hand-painted sign"),
+                         ["hand-painted", "sign"])
+        # A view that negates nothing constrains nothing.
+        self.assertEqual(P._absent_terms("the row of low houses across the street"), [])
+        self.assertEqual(P._absent_terms("the sign is not visible from here"), [])
+
+
+class TestGeographyParser(unittest.TestCase):
+    """`_geography_plan`: everything between the model's JSON and the board."""
+
+    def _plan_from(self, obj, locs=(CARWASH,)):
+        return P._geography_plan({"text": json.dumps(obj)}, [dict(l) for l in locs])
+
+    def test_the_carwash_reply_parses_into_two_views(self):
+        floor, views = P._geography_plan({"text": GEO_JSON}, [dict(CARWASH)])
+        self.assertIn("garage door", floor)
+        self.assertEqual([v["id"] for v in views["carwash"]],
+                         ["establishing", "reverse"])
+
+    def test_the_light_side_is_folded_into_the_sentence_that_renders(self):
+        # The side is the most load-bearing word in a reverse angle, and the
+        # model likes to answer it in `light` and forget it in the prose.
+        _, views = self._plan_from({"floor_plan": "x", "views": [
+            {"location": "The car wash", "id": "reverse",
+             "light": "camera right",
+             "description": "the row of low houses across the street"}]})
+        self.assertIn("the light rakes in from camera right",
+                      views["carwash"][0]["description"])
+
+    def test_a_sentence_that_already_names_a_side_is_left_alone(self):
+        _, views = self._plan_from({"floor_plan": "x", "views": [
+            {"location": "The car wash", "id": "reverse", "light": "camera right",
+             "description": "the houses, the sun raking in from camera right"}]})
+        self.assertEqual(views["carwash"][0]["description"].count("camera right"), 1)
+
+    def test_ids_are_slugged_deduped_and_capped(self):
+        _, views = self._plan_from({"floor_plan": "x", "views": [
+            {"location": "The car wash", "name": "Establishing — facing the drive",
+             "description": "the soapy sedan on the driveway, camera left"},
+            {"location": "The car wash", "id": "Reverse Angle!",
+             "description": "the houses across the street, no car, camera right"},
+            {"location": "The car wash", "id": "reverse_angle",
+             "description": "the houses again, a second time, camera right"},
+            {"location": "The car wash", "id": "d",
+             "description": "over her shoulder at the garage door, camera left"},
+            {"location": "The car wash", "id": "e",
+             "description": "the fifth angle nobody asked for, camera left"},
+        ]})
+        ids = [v["id"] for v in views["carwash"]]
+        self.assertEqual(len(ids), P.MAX_VIEWS_PER_LOCATION)
+        self.assertEqual(len(set(ids)), len(ids))
+        self.assertTrue(all(P._VIEW_ID_RE.match(i) for i in ids), ids)
+        self.assertEqual(ids[0], "establishing_facing_the_drive")
+
+    def test_a_view_with_no_description_is_not_a_view(self):
+        # An id with nothing under it composes the location's own text and
+        # pretends coverage exists.
+        floor, views = self._plan_from({"floor_plan": "x", "views": [
+            {"location": "The car wash", "id": "reverse", "description": "too short"}]})
+        self.assertEqual((floor, views), ("", {}))
+
+    def test_a_single_location_takes_the_views_that_name_nothing(self):
+        _, views = self._plan_from({"floor_plan": "x", "views": [
+            {"id": "reverse", "description": "the houses across the street, camera right"}]})
+        self.assertEqual(list(views), ["carwash"])
+
+    def test_a_view_for_a_place_that_is_not_in_the_film_is_dropped(self):
+        floor, views = self._plan_from(
+            {"floor_plan": "x", "views": [
+                {"location": "The bar", "id": "wide",
+                 "description": "the bar shelves behind him, camera left"}]},
+            locs=(CARWASH, {"id": "kitchen", "name": "The kitchen",
+                            "description": "a kitchen"}))
+        self.assertEqual((floor, views), ("", {}))
+
+    def test_chatter_and_broken_json_yield_nothing(self):
+        for text in ("Sure! Here is the layout.", "", "{not json",
+                     json.dumps({"floor_plan": "x"}),
+                     json.dumps({"floor_plan": "x", "views": "wide"})):
+            self.assertEqual(P._geography_plan({"text": text}, [dict(CARWASH)]),
+                             ("", {}), text)
+
+    def test_the_users_own_locations_are_never_rewritten_in_place(self):
+        # On the panel `locations` IS the user's Locations box, parsed.
+        mine = [dict(CARWASH)]
+        merged = P._merge_views(mine, {"carwash": [{"id": "a", "name": "A",
+                                                    "description": "d"}]})
+        self.assertNotIn("views", mine[0])
+        self.assertIn("views", merged[0])
 
 
 if __name__ == "__main__":

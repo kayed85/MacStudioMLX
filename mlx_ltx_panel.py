@@ -40,6 +40,16 @@ import urllib.parse
 import urllib.request
 from urllib.parse import parse_qs, quote, urlparse
 
+# WHAT THE USER CALLS THE THING BEING CUT. The owner: "these are not
+# films... something less bad than film." One noun, three forms, and every
+# user-visible mention in the Editor is a token replaced at serve time — so
+# changing his mind costs one line here and nothing else. Internal field
+# names (`film_start`, `film_end`, `sbeFilmDuration`) are untouched on
+# purpose: they are the schema, and a label is not worth a data migration.
+SEQ_NOUN = "sequence"
+SEQ_NOUN_PL = "sequences"
+SEQ_NOUN_CAP = "Sequence"
+
 # Image generation engine — used by the /image/generate endpoint.
 # Previously lived at agent/image_engine.py; moved to top level when the
 # agentic flows feature was removed 2026-05-15. The module is self-contained
@@ -160,6 +170,30 @@ COMFY_PATTERN = os.environ.get("LTX_COMFY_PATTERN", "pinokio/api/comfy.git.*main
 # get a one-time migration of root-level files into state/ at startup
 # (see _migrate_state_dir below) so users don't lose their queue.
 STATE_DIR = Path(os.environ.get("LTX_STATE_DIR", str(ROOT / "state")))
+
+
+def _state_dir_is_native() -> bool:
+    """Is this panel serving the install's OWN films?
+
+    False means somebody pointed LTX_STATE_DIR somewhere else — which is what
+    a verification instance does, and what the header has to shout about. The
+    symlinked `state/` of a dev clone still counts as native: it is resolved
+    on both sides, so a shared drive is the install's state, not a stranger's.
+    """
+    try:
+        return STATE_DIR.resolve() == (ROOT / "state").resolve()
+    except OSError:
+        return False
+# ONE CACHE, HOWEVER THE PANEL WAS LAUNCHED. start.js exports HF_HOME so every
+# weight lands in <install>/cache/HF_HOME — but the panel also gets launched
+# from bare shells (development, agents, a terminal after a crash), and every
+# subprocess it spawns (mflux, hf downloads) then silently re-downloads into
+# ~/.cache/huggingface instead of SEEING the tens of GB already on disk. That
+# forked cache twice nearly filled the system volume in one week — the second
+# time to 177 MB free, mid-render. setdefault, not assignment: an explicit
+# HF_HOME (a self-hoster's NAS, a test fixture) still wins.
+if (ROOT / "cache" / "HF_HOME").is_dir():
+    os.environ.setdefault("HF_HOME", str(ROOT / "cache" / "HF_HOME"))
 QUEUE_FILE = STATE_DIR / "panel_queue.json"
 HIDDEN_FILE = STATE_DIR / "panel_hidden.json"
 # Repo-stats dashboard (Mr Bizarro 2026-05-22: solo-maintainer signal,
@@ -180,6 +214,35 @@ PROMPT_ENHANCE_TIMEOUT = max(
     1.0, float(os.environ.get("LTX_PROMPT_ENHANCE_TIMEOUT", "90") or 90)
 )
 FPS = 24
+
+# THE MIX LIVES IN THE DOCUMENT NOW — see `storyboard_editor.audio_mix` and
+# the block above it. This file used to hold five numbers that decided what a
+# film sounded like and appeared on no screen: a hard-coded `volume=0.20` on
+# every `under` bed and a `sidechaincompress` keyed on the dialogue, neither of
+# them in any document, neither of them in the preview. The renderer was a
+# second author of the soundtrack's level, and the owner heard it: "when you
+# render it, there are some weird manipulations... the volume of the music goes
+# low when the dialogue appears."
+#
+# They are now `audio.mix.bed_gain` and `audio.mix.duck` on the timeline, read
+# by `bed_gain_points` — the ONE curve the preview, the render and the export
+# all consume. `migrate_edit` stamps the old pair onto documents that predate
+# the controls, so an approved film keeps the levels it was approved at.
+#
+# ONE THING STAYS HERE, AND ONLY BECAUSE THE PANEL MUST BOOT WITHOUT THE
+# EDITOR MODULE: the limiter's last-resort threshold. `MIX_CEILING` in
+# `storyboard_editor` is the definition; this is the value used if that import
+# fails, and shipping an UNLIMITED mix would be the worse failure of the two.
+# `test_the_panel_and_the_model_agree_about_the_ceiling` refuses a drift.
+SB_MIX_CEILING_FALLBACK = 0.9
+
+
+def _sb_mix_ceiling() -> float:
+    """The soft-clip knee, from the one place it is defined."""
+    try:
+        return float(_sbe_import().MIX_CEILING)
+    except Exception:                                           # noqa: BLE001
+        return SB_MIX_CEILING_FALLBACK
 
 
 def _optional_bool_env(name: str) -> bool | None:
@@ -1411,39 +1474,66 @@ _THUMBCACHE = UPLOADS / ".thumbcache"
 
 
 def _ensure_thumbnail(src: Path, width: int) -> Path:
-    """Return a path to a resized JPEG thumbnail of `src` at `width` pixels.
+    """Return a path to a resized thumbnail of `src` at `width` pixels.
 
     Cached on disk. Idempotent. Aspect ratio preserved (height derived
     from the source's aspect). Width is clamped to [16, 2048] before
     the lookup so a malformed query string can't force a giant resize.
+
+    JPEG for an opaque source, PNG for one with an alpha channel.
     """
     width = max(16, min(2048, int(width)))
     try:
         st = src.stat()
     except OSError:
         raise FileNotFoundError(f"source not found: {src}")
+    # TWO POSSIBLE OUTPUTS, because JPEG CANNOT CARRY ALPHA. The overlay lane
+    # asks this route for a width-limited copy of a transparent card, and a
+    # JPEG answer flattened it onto black — the card arrived as a black bar
+    # over the picture, which is exactly the thing the lane exists to avoid.
+    # A source with alpha is answered in PNG; everything else keeps the JPEG
+    # that makes the pool cheap.
+    from PIL import Image
+    # THE FORMAT IS DECIDED BEFORE THE CACHE IS CONSULTED, not after. Checking
+    # the .jpg first would keep serving a thumbnail flattened by the old code
+    # for as long as the source went unedited — the cache key is (path, mtime,
+    # size, width), and fixing the encoder does not change any of them. Reading
+    # the header is cheap: PIL parses it and defers the pixels.
+    #
+    # `getbands()` RATHER THAN A LIST OF MODES, so LA, PA and RGBA are one
+    # question instead of three that have to be remembered — and wrapped,
+    # because a header this cannot parse is a thumbnail that should fall back
+    # to the old behaviour rather than a 500 on a gallery paint.
+    try:
+        with Image.open(src) as probe:
+            keep_alpha = ("A" in probe.getbands()
+                          or "transparency" in probe.info)
+    except (OSError, ValueError):
+        keep_alpha = False
     # Cache key: hash of (resolved path, mtime, size, width). mtime
     # and size together catch the common "user edited the file" case
     # without needing a full content hash.
     import hashlib
     raw = f"{src.resolve()}|{st.st_mtime_ns}|{st.st_size}|{width}".encode()
     key = hashlib.sha1(raw).hexdigest()
-    out = _THUMBCACHE / f"{key}.jpg"
+    out = _THUMBCACHE / f"{key}.{'png' if keep_alpha else 'jpg'}"
     if out.exists() and out.stat().st_size > 0:
         return out
     _THUMBCACHE.mkdir(parents=True, exist_ok=True)
-    from PIL import Image
     with Image.open(src) as im:
-        im = im.convert("RGB")
+        im = im.convert("RGBA" if keep_alpha else "RGB")
         # PIL's thumbnail() preserves aspect ratio and only shrinks (never
         # upscales — passing w=2048 on a 1024-wide source returns the
         # original size).
         im.thumbnail((width, width * 10), Image.Resampling.LANCZOS)
-        # JPEG q=85 hits the sweet spot for thumbnails — visually
-        # indistinguishable from the source at carousel size, ~5-10x
-        # smaller than the equivalent PNG.
-        im.save(out, format="JPEG", quality=85, optimize=True,
-                progressive=False)
+        if keep_alpha:
+            im.save(out, format="PNG", optimize=True)
+        else:
+            # JPEG q=85 hits the sweet spot for thumbnails — visually
+            # indistinguishable from the source at carousel size, ~5-10x
+            # smaller than the equivalent PNG.
+            im.save(out, format="JPEG", quality=85, optimize=True,
+                    progressive=False)
     return out
 
 
@@ -1510,13 +1600,18 @@ TRAIN_PRESETS = {
     "quick":  {"epochs":  30, "rank": 8,  "lr": 1e-4, "resolution": 512,
                "seconds_per_step": 1.5,  "ram_peak_gb": 12,
                "label": "Quick",
-               "subtitle": "~30 epochs · rank 8 · 512px",
+               # HONEST ABOUT WHAT HAS BEEN GRADED. The rank-32 recipe is the
+               # one measured on faces (Aria_v2, Bizarro_v2); nobody has ever
+               # put a rank-8 result in front of the owner's eye and called
+               # the identity good. Saying "fast" and letting the user infer
+               # "as good, sooner" is the pill doing the lying.
+               "subtitle": "~30 epochs · rank 8 · 512px · fast, identity ungraded",
                "checkpoint_interval": 500,
                "max_steps": 8000},
     "medium": {"epochs":  60, "rank": 16, "lr": 1e-4, "resolution": 576,
                "seconds_per_step": 2.2,  "ram_peak_gb": 18,
                "label": "Medium",
-               "subtitle": "~60 epochs · rank 16 · 576px",
+               "subtitle": "~60 epochs · rank 16 · 576px · identity ungraded",
                "checkpoint_interval": 500,
                "max_steps": 12000},
     # high tier mirrors the validated CLI recipe (rank 32 / 100 epochs /
@@ -1605,26 +1700,34 @@ def _select_train_profile(total_ram_gb: float, tier_key: str) -> dict:
     them.
     """
     if 0 < float(total_ram_gb or 0) < 64:
+        # EVERY PRESET ON THIS HARDWARE IS UNGRADED, and the pills that most
+        # need to say so are these. The >=64GB table earns the warning on
+        # Quick and Medium because nobody has put a rank-8 identity in front
+        # of the owner's eye — down here HIGH is rank 8 at 500 steps, which is
+        # by definition the same regime, so a user meeting a `weak` adapter
+        # verdict is most likely looking at their machine and not at their
+        # photos. The preset NAMES do not change, so the subtitle is the only
+        # place this can be said.
         compact_modules = list(TRAIN_TARGET_MODULES_COMPACT)
         TRAIN_PRESETS.update({
             "quick":  {"epochs": 2,  "rank": 4, "lr": 1e-4, "resolution": 384,
                        "seconds_per_step": 14.0, "ram_peak_gb": 38,
                        "label": "Quick",
-                       "subtitle": "~2 epochs · rank 4 · 384px · max 120 steps",
+                       "subtitle": "~2 epochs · rank 4 · 384px · max 120 steps · identity ungraded",
                        "checkpoint_interval": 100,
                        "max_steps": 120, "max_rank": 4, "max_resolution": 384,
                        "target_modules": compact_modules},
             "medium": {"epochs": 5,  "rank": 8, "lr": 1e-4, "resolution": 384,
                        "seconds_per_step": 16.0, "ram_peak_gb": 40,
                        "label": "Medium",
-                       "subtitle": "~5 epochs · rank 8 · 384px · max 300 steps",
+                       "subtitle": "~5 epochs · rank 8 · 384px · max 300 steps · identity ungraded",
                        "checkpoint_interval": 100,
                        "max_steps": 300, "max_rank": 8, "max_resolution": 384,
                        "target_modules": compact_modules},
             "high":   {"epochs": 10, "rank": 8, "lr": 1e-4, "resolution": 448,
                        "seconds_per_step": 20.0, "ram_peak_gb": 44,
                        "label": "High",
-                       "subtitle": "~10 epochs · rank 8 · 448px · max 500 steps",
+                       "subtitle": "~10 epochs · rank 8 · 448px · max 500 steps · identity ungraded",
                        "checkpoint_interval": 100,
                        "max_steps": 500, "max_rank": 8, "max_resolution": 448,
                        "target_modules": compact_modules},
@@ -1793,9 +1896,26 @@ TRAIN_CAPTION_MAX_BYTES = 64 * 1024              # 64 KB per caption (huge headr
 TRAIN_BUNDLE_MAX_BYTES = 500 * 1024 * 1024        # 500 MB upper bound
 TRAIN_BUNDLE_MAX_ENTRIES = 200                    # paranoia cap on ZIP entries
 # Allowed entry name pattern — basename only, no subdirs, no path traversal.
-# Stem ≤ 64 chars, then a single dot + one of our extensions.
+#
+# 2026-08-16 (#61): the old pattern was `[A-Za-z0-9_\-]{1,64}` + a
+# lower-case extension, which silently rejected the filenames people
+# actually have. A user dropped 18 images and 12 arrived; the six that
+# vanished were ordinary names. All of these FAILED:
+#
+#     image (1).png     parentheses — what every browser download looks like
+#     shot 04.png       a space
+#     ComfyUI.00012.png a dot inside the stem
+#     IMG_2213.PNG      an upper-case extension
+#
+# Path safety never depended on this regex: the caller already reduces the
+# entry to `Path(info.filename).name`, and Pass 1 RENUMBERS every image on
+# save, so the user's characters never reach the filesystem. The pattern's
+# only real job is to keep out separators, control characters and the wrong
+# file types. It now says exactly that instead of also enforcing a house
+# style nobody was told about.
 TRAIN_BUNDLE_NAME_RE = re.compile(
-    r"^[A-Za-z0-9_\-]{1,64}\.(png|jpg|jpeg|webp|txt)$"
+    r"^(?![.\s])[^/\\\x00-\x1f]{1,120}\.(?:png|jpe?g|webp|txt)$",
+    re.IGNORECASE,
 )
 
 # Voice clip rules. The voice clip is optional — if the user uploads one and
@@ -2116,8 +2236,29 @@ def _train_list_completed() -> list[dict]:
                 "size_mb": round(stat.st_size / (1024 * 1024), 1),
                 "created_at": meta.get("created_at") or stat.st_mtime,
                 "image_count": meta.get("image_count") or 0,
+                # WHETHER THIS FILE CAN DO ANYTHING, carried out of the
+                # sidecar so the library can warn before somebody spends a
+                # render finding out. "unknown" for anything trained by a
+                # build that did not measure — silence is not weakness, and a
+                # chip on every older LoRA would be noise nobody could act on.
+                "adapter_verdict": _adapter_verdict(meta),
             })
     return out
+
+
+def _adapter_verdict(meta: dict) -> str:
+    """`ok` | `unknown` | whatever the trainer called it.
+
+    A LoRA can train to completion, write a valid safetensors, load without a
+    warning and change NOTHING — the deltas it learned are numerically too
+    small to move the model. Every gate we had said "done"; only the render
+    said otherwise. This is the one field that knows.
+    """
+    a = (meta or {}).get("adapter_strength")
+    if isinstance(a, dict):
+        v = str(a.get("verdict") or "unknown").lower()
+        return v if v else "unknown"
+    return "unknown"
 
 
 def _train_required_models() -> list[dict]:
@@ -3399,14 +3540,97 @@ def _fetch_raw_text(url: str, timeout: int = 10) -> str | None:
 #
 # This is deliberately captured at IMPORT, not inside a function that anything
 # else might call again.
+#
+# 2026-08-20 — except it was NOT captured at import. The only caller was
+# `version_check_loop`, a thread `__main__` starts only `if
+# VERSION_CHECK_ENABLED`. `PHOSPHENE_DISABLE_VERSION_CHECK=1` therefore left
+# _BOOT_HEAD_SHA at None for the life of the process, and `disk != boot` is
+# False when boot is None — the dead detector this comment is about, back
+# through the side door. The capture runs beside the definition now, which is
+# what "at IMPORT" has to mean.
+#
+# And it is a SNAPSHOT, not one SHA. Every field the header stamp renders —
+# version label, branch, commit date — has to come from the same frozen
+# moment. `_VERSION_STATE["local_*"]` re-reads all four from disk on every
+# poll, so the stamp described the WORKING TREE, not the running process: pull
+# under a live panel and the header immediately advertises the new build while
+# the old code keeps serving. The restart tooltip degenerated with it, since
+# both sides of "X is on disk but this process loaded Y" read the same
+# disk-derived label — "Phosphene 4.6.0 is on disk, but this panel process
+# loaded 4.6.0". The stamp is how the owner tells which build he is on; it
+# has to name the code that is answering him.
 _BOOT_HEAD_SHA: str | None = None
+_BOOT_VERSION: str | None = None
+_BOOT_BRANCH: str | None = None
+_BOOT_COMMIT_DATE: str | None = None
 
 
 def _capture_boot_head() -> None:
-    """Record this process's HEAD exactly once. Idempotent by design."""
-    global _BOOT_HEAD_SHA
-    if _BOOT_HEAD_SHA is None:
-        _BOOT_HEAD_SHA = _git_capture(["rev-parse", "HEAD"])
+    """Record what THIS process loaded, exactly once. Idempotent by design.
+
+    Runs at import. `version_check_loop` still calls it, belt-and-braces for
+    any path that reaches the loop without the import-time call having taken
+    (a test that reset the globals, a future entry point); the guard makes the
+    second call a no-op rather than a re-point at whatever is on disk now."""
+    global _BOOT_HEAD_SHA, _BOOT_VERSION, _BOOT_BRANCH, _BOOT_COMMIT_DATE
+    if _BOOT_VERSION is None:
+        # A zip install has no git and still ships a VERSION file. That file
+        # is a property of the code this process loaded, so freeze it whether
+        # or not the SHA lookup below works.
+        _BOOT_VERSION = _read_local_version()
+    if _BOOT_HEAD_SHA is not None:
+        return
+    sha = _git_capture(["rev-parse", "HEAD"])
+    if not sha:
+        return                      # not a checkout — the SHA fields stay None
+    _BOOT_HEAD_SHA = sha
+    _BOOT_BRANCH = _git_capture(["rev-parse", "--abbrev-ref", "HEAD"])
+    _BOOT_COMMIT_DATE = _git_capture(
+        ["log", "-1", "--format=%cd", "--date=format:%Y-%m-%d"])
+
+
+def boot_build_stamp() -> dict:
+    """What this process is running. ONE accessor, so a second reader cannot
+    quietly grow a second answer to "which build is this?"."""
+    return {
+        "sha": _BOOT_HEAD_SHA,
+        "short": _BOOT_HEAD_SHA[:7] if _BOOT_HEAD_SHA else None,
+        "version": _BOOT_VERSION,
+        "branch": _BOOT_BRANCH,
+        "commit_date": _BOOT_COMMIT_DATE,
+    }
+
+
+def running_version() -> str:
+    """The VERSION label of the code THIS PROCESS is running.
+
+    Everything that stamps a label onto something the process produced — an
+    analytics event, a rendered film, a sidecar — has to name the build that
+    produced it. `_read_local_version()` re-reads the tree, so after a pull
+    under a running panel every one of those said the NEW number while the
+    OLD code was doing the work: an app_boot event from a build that never
+    booted, a film crediting a renderer that never touched it. Same defect as
+    the header stamp, same fix. Disk is the fallback for a zip install with
+    no git, where the boot capture has no SHA to anchor to."""
+    return boot_build_stamp()["version"] or _read_local_version() or "dev"
+
+
+def build_stamp_text() -> str:
+    """The build stamp as one greppable line, for the `phosphene-build` meta
+    tag. The page is full of real SHAs in comments that reference historical
+    commits ("the loadParams fix (b024bb5)"); thirteen of them as of today,
+    and NONE of them the running build, which appeared nowhere in the served
+    HTML at all. Anyone answering "which build is this?" by searching the page
+    hit a decoy. This is the one line that is the answer."""
+    b = boot_build_stamp()
+    parts = [b["version"] or "dev", b["branch"] or "no-branch",
+             b["short"] or "no-git"]
+    if b["commit_date"]:
+        parts.append(b["commit_date"])
+    return " · ".join(parts)
+
+
+_capture_boot_head()      # AT IMPORT — before anything can serve a request
 
 
 def _detect_local_install_state() -> None:
@@ -3589,24 +3813,42 @@ def get_version_state() -> dict:
     """Snapshot of _VERSION_STATE for the /version endpoint. Returns a copy
     so the caller can't mutate the live state under the lock.
 
-    STALE-PROCESS DETECTION (v4.0.5): local_* is the boot snapshot, so a
-    checkout that advances UNDER a running panel — a promote landing while a
-    long-lived daemon serves, the exact 2026-08-14 incident where :8198
-    served pre-4.0.4 HTML for three hours after the folder updated — used to
-    be invisible: /version reported the boot SHA and nothing compared it to
-    disk. One git rev-parse per /version request (the pill polls every 5
-    minutes) answers the only question that matters: is the code on disk the
-    code this process loaded?"""
+    TWO BUILDS, ALWAYS BOTH. `local_*` is what THIS PROCESS LOADED — the boot
+    snapshot, frozen at import. `disk_*` is the working tree right now, one
+    `git rev-parse` per request (the pill polls every 5 minutes). On a healthy
+    install they are equal, and that is the point: when they diverge the
+    header has to keep naming the code that is actually answering, or the
+    stamp stops being the thing the owner uses to tell which build he is on.
+    The 2026-08-14 incident where :8198 served pre-4.0.4 HTML for three hours
+    after the folder updated is what `stale_process` is for.
+
+    `_VERSION_STATE["local_*"]` is NOT that snapshot, despite the name. It is
+    re-detected from disk at the top of every remote poll, deliberately, so a
+    tree that was dirty at boot and is clean now stops being suppressed
+    without a restart. It stays the basis for `behind_by` — being behind
+    origin/main is a fact about the TREE — and is overwritten here for
+    display, which is a fact about the PROCESS."""
     with _VERSION_LOCK:
         snap = dict(_VERSION_STATE)
+    boot = boot_build_stamp()
     disk_sha = _git_capture(["rev-parse", "HEAD"])
-    # _BOOT_HEAD_SHA, never snap["local_sha"]: the latter is re-detected on
-    # every remote poll and therefore always agrees with disk.
-    boot_sha = _BOOT_HEAD_SHA
-    snap["stale_process"] = bool(disk_sha and boot_sha and disk_sha != boot_sha)
-    if snap["stale_process"]:
-        snap["disk_short"] = disk_sha[:7]
-        snap["disk_version"] = _read_local_version()
+    # The header stamp answers exactly one question — what code is this
+    # process running — so it is answered from the boot snapshot or not at
+    # all. Never snap["local_*"]: that agrees with disk within one poll.
+    if boot["sha"]:
+        snap["local_sha"] = boot["sha"]
+        snap["local_short"] = boot["short"]
+        snap["local_version"] = boot["version"]
+        snap["local_branch"] = boot["branch"] or snap.get("local_branch")
+        snap["local_commit_date"] = boot["commit_date"]
+    # Unconditional, not "only when stale". A consumer that must check
+    # stale_process before it may trust disk_short is a consumer that will
+    # eventually forget to.
+    snap["disk_sha"] = disk_sha
+    snap["disk_short"] = disk_sha[:7] if disk_sha else None
+    snap["disk_version"] = _read_local_version()
+    snap["stale_process"] = bool(
+        disk_sha and boot["sha"] and disk_sha != boot["sha"])
     return snap
 
 
@@ -9496,9 +9738,9 @@ def h3_status() -> dict:
             "note": (
                 "" if (available and h3_live_preview_ready())
                 else ("This Hailuo H3 pack predates the live preview. "
-                      "Re-run \'Install Hailuo H3\' from the Phosphene "
-                      "sidebar in Pinokio to update the runner — your "
-                      "weights stay. Renders are unaffected meanwhile.")
+                      "Run \'Update Hailuo H3 runner\' from the Phosphene "
+                      "sidebar in Pinokio — your weights stay. Renders are "
+                      "unaffected meanwhile.")
                 if (available and not h3_supports_live_preview()) else ""),
         },
         # Turbo — the 4-step distill LoRA. A separate block rather than a bare
@@ -10337,13 +10579,13 @@ def _analytics_boot() -> None:
         # fresh install (new UUID) reports its own app_installed once.
         if not bool(get_settings().get("analytics_install_reported")):
             _analytics_capture("app_installed", {
-                "version": _read_local_version() or "unknown",
+                "version": running_version(),
                 "chip_family": _analytics_chip_family(),
                 "ram_gb": int(round(SYSTEM_RAM_GB)),
             })
             _settings_set_internal(analytics_install_reported=True)
         _analytics_capture("app_boot", {
-            "version": _read_local_version() or "unknown",
+            "version": running_version(),
             "os_version": _analytics_os_version(),
             "chip_family": _analytics_chip_family(),
             "ram_gb": int(round(SYSTEM_RAM_GB)),
@@ -10579,7 +10821,7 @@ def _analytics_render_event(job: dict) -> None:
             # by chip" and "wall time by machine class" are one-click
             # PostHog breakdowns instead of an unwritten join. No new
             # information about the person — only the render.
-            "version": _read_local_version() or "unknown",
+            "version": running_version(),
             "chip_family": _analytics_chip_family(),
             "ram_gb": int(round(SYSTEM_RAM_GB)),
             "os_version": _analytics_os_version(),
@@ -11564,12 +11806,33 @@ def list_outputs(
     image_root = UPLOADS / "library" / "manual"
     image_exts = {".png", ".jpg", ".jpeg", ".webp"}
     image_candidates: list[tuple[Path, float]] = []
+    # OUTPUT HOLDS PICTURES TOO, and this listing did not know it. The image
+    # queue drops its renders into the library below, so that is where the
+    # gallery looked — but an endcard, a reference sheet or a saved frame that
+    # lands in `mlx_outputs/` alongside the clips was invisible everywhere the
+    # gallery is the source: the carousel, and the Editor's Images tab, which
+    # is where a still becomes an overlay. The symptom was a user being told to
+    # pick a card that was sitting in his outputs folder and not in the list.
+    #
+    # NON-RECURSIVE, exactly like the `OUTPUT.glob("*.mp4")` above it. The
+    # subfolders under OUTPUT are working directories — proxies, per-film
+    # project folders, report intermediates — and they are not outputs; the
+    # root is. Both lists then go through the same merge-by-mtime and the same
+    # post-build limit, so no kind gets a private cap.
+    for p in OUTPUT.glob("*"):
+        try:
+            if p.suffix.lower() in image_exts and p.is_file():
+                image_candidates.append((p, p.stat().st_mtime))
+        except OSError:
+            continue
     if image_root.exists():
         # Safety bound — still cap at a generous value so a misconfigured
         # library (someone pointing panel_uploads at /Users) can't stall
         # the request. 5000 is well above any realistic single-machine
-        # gallery while keeping the worst-case rglob bounded.
-        MAX_IMG = 5000
+        # gallery while keeping the worst-case rglob bounded. Counted from
+        # where the OUTPUT pass left off, so the library's own bound is the
+        # same 5000 it always was.
+        MAX_IMG = 5000 + len(image_candidates)
         try:
             for p in image_root.rglob("*"):
                 if len(image_candidates) >= MAX_IMG:
@@ -13338,9 +13601,23 @@ def _sb_board_summary(board: dict) -> dict:
         "title": board.get("title") or "",
         "shots": len(shots),
         "done": sum(1 for s in shots if s.get("status") == "done"),
+        # `done` counts shots THIS PANEL rendered as jobs. A board can hold
+        # finished clips it never ran — imported with add-shot, restored from
+        # an export, or written by hand — and those boards are exactly as
+        # editable. Gating the editor on `done` hid the timeline on a film
+        # whose clips were sitting right there. `clips` counts what is on
+        # disk, which is the question the editor actually asks.
+        "clips": sum(1 for s in shots
+                     if isinstance(s, dict)
+                     and (s.get("final_output") or s.get("draft_output"))
+                     and Path(str(s.get("final_output")
+                                  or s.get("draft_output"))).is_file()),
         "failed": sum(1 for s in shots if s.get("status") == "failed"),
         "running": running,
         "planning": planning,
+        # A board that has produced a film says so on its row. Cheap by
+        # construction — see `_sb_film_summary`.
+        "film": _sb_film_summary(board),
     }
 
 
@@ -13401,6 +13678,99 @@ def storyboard_status() -> dict:
         },
         "boards": _sb_all_summaries(),
     }
+
+
+def _sb_import_shots(board: dict, src: dict, only: set[int] | None = None) -> tuple[list, list]:
+    """Bring rendered shots from `src` into `board`. Returns (imported, skipped).
+
+    A BOARD IS A TIMELINE, ONE TO ONE, and that is the problem this solves. The
+    moment coverage for a film is rendered as a second board — B-roll, pickups,
+    alternates, a re-plan — its clips are unreachable from the first board's
+    timeline. There was no way to move a clip between films and no way to cut
+    with both, so "I have clips in two projects" had no answer but re-rendering.
+
+    Clips are NOT copied on disk. A shot carries the path to its output, so an
+    import is a reference: it costs a JSON edit and no render time.
+
+    Mutates `board` in place; the caller saves.
+    """
+    have = {str(s.get("final_output") or s.get("draft_output") or "")
+            for s in (board.get("shots") or [])}
+    have.discard("")
+    nxt = len(board.get("shots") or [])
+    brought: list[dict] = []
+    skipped: list[dict] = []
+    for s in (src.get("shots") or []):
+        if only and s.get("n") not in only:
+            continue
+        out = str(s.get("final_output") or s.get("draft_output") or "")
+        if not out or not Path(out).is_file():
+            skipped.append({"n": s.get("n"), "why": "not rendered yet"})
+            continue
+        if out in have:
+            skipped.append({"n": s.get("n"), "why": "already here"})
+            continue
+        nxt += 1
+        copy = dict(s)
+        copy["n"] = nxt
+        # Provenance stays ON the shot. Without it an imported clip is
+        # indistinguishable from one this film planned, and a re-plan would
+        # rewrite somebody else's shot.
+        copy["imported_from"] = {"board": src.get("id") or "",
+                                 "n": s.get("n"), "title": src.get("title") or ""}
+        copy["status"] = "done"
+        board.setdefault("shots", []).append(copy)
+        have.add(out)
+        brought.append({"n": nxt, "title": copy.get("title") or ""})
+
+    # The source's locations and cast come too, or an imported shot points at a
+    # location this board has never heard of — which the validator correctly
+    # refuses to render, turning a successful import into an unrenderable film.
+    known = {l.get("id") for l in (board.get("locations") or [])}
+    for loc in (src.get("locations") or []):
+        if loc.get("id") and loc["id"] not in known:
+            board.setdefault("locations", []).append(loc)
+    cast_ids = {c.get("id") for c in (board.get("cast") or [])}
+    for row in (src.get("cast") or []):
+        if row.get("id") and row["id"] not in cast_ids:
+            board.setdefault("cast", []).append(row)
+    return brought, skipped
+
+
+def _sb_parse_locations(text: str) -> list[dict]:
+    """`name: description` per line -> the board's `locations`.
+
+    Mirrors sbParseLocations in the client. Parsed AGAIN on the server because
+    the client's version exists to render a live summary, not to be trusted —
+    this is what actually reaches the board and gets injected into prompts.
+    A line with no colon becomes its own description with a derived name rather
+    than being dropped: silently discarding what somebody just typed is worse
+    than an awkward name.
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+    for line in (text or "").splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        name, _, desc = raw.partition(":")
+        if not desc.strip():
+            name, desc = re.split(r"[,.]", raw, 1)[0], raw
+        name, desc = name.strip()[:60], desc.strip()[:storyboard.LOCATION_DESC_MAX]
+        if not name or not desc:
+            continue
+        lid = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")[:40]
+        if not lid:
+            lid = f"loc{len(out) + 1}"
+        if not lid[0].isalnum():
+            lid = "l" + lid
+        base, i = lid, 2
+        while lid in seen:
+            lid = f"{base}{i}"
+            i += 1
+        seen.add(lid)
+        out.append(storyboard.new_location(lid, name, desc))
+    return out
 
 
 def _sb_policy_for(draft_quality: str, final_quality: str) -> dict:
@@ -13546,6 +13916,7 @@ def _sb_plan_thread(board_id: str, brief: dict, previous: dict | None) -> None:
             # there is only one answer it could honestly give.
             engine=(brief.get("engine_mode") or "auto") if _sb_h3_available() else "ltx",
             board_id=board_id,
+            locations=brief.get("locations") or None,
             known_character_ids=_sb_known_character_ids(),
             max_dim=_sb_max_dim(),
             session=session,
@@ -13591,6 +13962,29 @@ def _sb_plan_thread(board_id: str, brief: dict, previous: dict | None) -> None:
                 _prev_out[_s["n"]] = (_s.get("draft_output") or _s.get("final_output")
                                       or _s.get("stale_output"))
         board["shots"] = result.get("shots") or []
+        # DIALOGUE MUST FIT THE SHOT. The validator rejects a line the clock
+        # cannot carry (`dialogue_does_not_fit`), because it renders as a
+        # sentence cut off mid-word. For planner output the fix is mechanical
+        # and free — extend the shot to the smallest legal frame count that
+        # fits the line — so it happens here, at adoption, rather than being
+        # bounced back through a 40-second repair round-trip. Hand-authored
+        # boards get no such mercy: there the author is present to decide
+        # whether to cut words or add seconds.
+        for _s in board["shots"]:
+            if not isinstance(_s, dict):
+                continue
+            _spans = storyboard.spoken_spans(_s.get("prompt") or "")
+            if not _spans:
+                continue
+            _words = sum(len(x.split()) for x in _spans)
+            _need = storyboard.speech_fit_frames(
+                _words, slow=storyboard.is_slow_read(_s.get("prompt") or ""))
+            if int(_s.get("frames") or 0) < _need:
+                _s["frames"] = _need
+                _s["duration_s"] = round(_need / 24.0, 2)
+                meta.setdefault("warnings", []).append(
+                    "shot %s: extended to %.1fs so its %d-word line is not cut off"
+                    % (_s.get("n"), _s["duration_s"], _words))
         # A rewritten shot must go back to being UN-RENDERED. Without this it
         # kept `status: "done"` with no output, and since shooting_order() and
         # estimate() both exclude "done" the film skipped it forever — the user
@@ -13611,6 +14005,13 @@ def _sb_plan_thread(board_id: str, brief: dict, previous: dict | None) -> None:
                            "draft_job_id", "final_job_id", "error"):
                     _s.pop(_k, None)
         board["cast"] = result.get("cast") or board.get("cast") or []
+        # THE GEOGRAPHY PASS'S VIEWS MUST REACH THE BOARD. Every planned shot
+        # now names a view id; without this merge the ids point at nothing and
+        # unknown_view — a HARD validator error — refuses the whole film.
+        # merge_location_views is patch-never-overwrite: the user's typed
+        # name/description win, a plan with no views leaves existing ones alone.
+        board["locations"] = storyboard.merge_location_views(
+            board.get("locations"), result.get("locations"))
         # The POLICY is the panel's, not the planner's: the user picked the two
         # passes in the film-level Quality control and a re-plan must not silently
         # reset them.
@@ -13717,7 +14118,9 @@ def _sb_render_thread(board_id: str, pass_name: str, only: list | None) -> None:
                     board_id=board_id, board_title=board.get("title") or "",
                     h3_available=h3_ok,
                     engine_mode=board.get("engine_mode") or "auto",
-                    h3_chain_prompts=chain_ok)
+                    h3_chain_prompts=chain_ok,
+                    locations=storyboard.board_locations(board),
+                    wardrobe=storyboard.board_wardrobe(board))
                 # make_job reads a form: every value is a string (or a list of
                 # them). Normalise here so a bool/int never reaches f().
                 job_form = {k: ("" if v is None else str(v)) for k, v in form.items()}
@@ -13773,6 +14176,41 @@ def _sb_render_thread(board_id: str, pass_name: str, only: list | None) -> None:
             _sb_sweep_stage_a(board)
         except Exception:
             pass
+
+
+def _sb_cancel_running_shot(job_ids) -> str | None:
+    """Cancel the in-flight render IF it is one of this film's shots.
+
+    Stop used to mean only "queue no more shots". Pressing it during a 20-minute
+    H3 render therefore left that render holding the GPU and ~40 GiB for another
+    20 minutes, with the UI already saying the film had stopped — the button did
+    not do the thing its label promises.
+
+    The cancellation is the panel's ONE existing job-cancel path,
+    `stop_current_job()` — the same call POST /stop makes. Nothing new is
+    invented here, and that matters for the aftermath as much as the kill: it
+    sets `cancel_requested` on the job, which is what makes the worker record
+    the job as **cancelled** rather than **failed**, and `_sb_reconcile()`
+    already knows how to fold a cancelled job back onto its shot. It also takes
+    down the H3 / mux / training process groups the helper does not own.
+
+    It fires ONLY when the running job is one of `job_ids`. Another film's shot,
+    an Image Studio generation or a LoRA training run is not this film's to
+    kill, and a blanket stop_current_job() here would have made Stop on a
+    finished board silently abort somebody else's work.
+
+    Returns the cancelled job id, or None when nothing of ours was running.
+    """
+    ids = set(job_ids or ())
+    if not ids:
+        return None
+    with LOCK:
+        cur = STATE.get("current") or {}
+        jid = cur.get("id") if isinstance(cur, dict) else None
+    if not jid or jid not in ids:
+        return None
+    stop_current_job()
+    return str(jid)
 
 
 def _sb_boot_reconcile() -> None:
@@ -13858,16 +14296,1513 @@ def _sb_slug(text: str, words: int = 5) -> str:
     return "-".join(parts[:words]) or "shot"
 
 
-def _sb_export(board: dict) -> dict:
-    """A folder and a manifest. No editor, no timeline, no assembly UI.
+def _sb_film_dir(board: dict) -> Path:
+    """The ONE folder a board's finished films and shot copies land in.
 
-    Clips are COPIED, never moved — the gallery keeps them.
+    Three call sites computed this by hand — Export, `reveal`, and the
+    timeline's render — which is three chances for a film to be written
+    somewhere the screen that shows films does not look. One function, one
+    convention: `<OUTPUT>/storyboards/<created-date>_<slug>/`.
     """
     title = board.get("title") or "storyboard"
-    day = time.strftime("%Y-%m-%d", time.localtime(board.get("created_at") or time.time()))
-    dest = OUTPUT / "storyboards" / f"{day}_{_sb_slug(title, 6)}"
+    day = time.strftime("%Y-%m-%d",
+                        time.localtime(board.get("created_at") or time.time()))
+    return OUTPUT / "storyboards" / f"{day}_{_sb_slug(title, 6)}"
+
+
+def _sb_display_path(p) -> str:
+    """A path a human can read.
+
+    Relative to the install when it is inside it (`mlx_outputs/storyboards/…`),
+    else relative to the outputs root, else the absolute path. Never a lie: the
+    fallback is the real path, however long.
+    """
+    # LEXICAL first, resolved second. `mlx_outputs` is a symlink into Pinokio's
+    # drive store on a real install, so resolving both ends walks the path
+    # clean out of the repo and the answer comes back absolute — for a
+    # directory the user thinks of as `mlx_outputs/storyboards/…`.
+    q = Path(p)
+    forms = [q]
+    bases = [ROOT, OUTPUT.parent]
+    try:
+        forms.append(q.resolve())
+        bases += [Path(b).resolve() for b in (ROOT, OUTPUT.parent)]
+    except OSError:
+        pass
+    for form in forms:
+        for base in bases:
+            try:
+                return str(form.relative_to(base))
+            except ValueError:
+                continue
+    return str(q)
+
+
+# Fallback audio rate for the assembled film when NOTHING in the cut carries a
+# sound track (a film of silent character tests). 48 kHz is what the LTX
+# vocoder writes; H3 writes 32 kHz, which is exactly why the assembler picks a
+# single rate rather than assuming one.
+_SB_FILM_SAMPLE_RATE = 48000
+
+
+def _sb_probe_clip(path) -> dict | None:
+    """Geometry + audio facts for one clip, or None when ffprobe can't read it.
+
+    Returns {"w", "h", "duration", "has_audio", "sample_rate"}. `duration` is
+    the VIDEO stream's duration, not the container's: an H3 clip's AAC track
+    runs ~40 ms past its last frame, and a concat that believed the container
+    would drift the sound later and later behind the picture across a 30-shot
+    film. The video is the timeline; the audio gets padded/trimmed to it.
+
+    None means "do not put this clip in the film" — same verdict a missing file
+    gets. It never means "fail the export".
+    """
+    p = Path(str(path))
+    try:
+        out = subprocess.run(
+            [str(FFPROBE), "-v", "error", "-show_entries",
+             "stream=codec_type,width,height,sample_rate,duration:format=duration",
+             "-of", "json", str(p)],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    try:
+        data = json.loads(out.stdout or "{}")
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    def _num(raw) -> float:
+        try:
+            v = float(raw)
+        except (TypeError, ValueError):
+            return 0.0
+        return v if v == v and v not in (float("inf"), float("-inf")) and v > 0 else 0.0
+
+    w = h = 0
+    v_dur = 0.0
+    has_audio = False
+    rate = 0
+    for st in (data.get("streams") or []):
+        if not isinstance(st, dict):
+            continue
+        kind = str(st.get("codec_type") or "")
+        if kind == "video" and not w:
+            try:
+                w, h = int(st.get("width") or 0), int(st.get("height") or 0)
+            except (TypeError, ValueError):
+                w = h = 0
+            v_dur = _num(st.get("duration"))
+        elif kind == "audio":
+            has_audio = True
+            try:
+                rate = max(rate, int(st.get("sample_rate") or 0))
+            except (TypeError, ValueError):
+                pass
+    if w <= 0 or h <= 0:
+        return None
+    duration = v_dur or _num((data.get("format") or {}).get("duration"))
+    if duration <= 0:
+        return None
+    return {"w": w, "h": h, "duration": round(duration, 6),
+            "has_audio": has_audio, "sample_rate": rate}
+
+
+def _sb_probe_still(path) -> dict | None:
+    """Geometry for a STILL, or None. Deliberately not `_sb_probe_clip`.
+
+    That one refuses anything with no duration — correct for a shot, and it is
+    exactly what an image is: a video stream of one frame with no clock.
+    Returning the same `{"w","h",...}` shape means the target-geometry maths in
+    `_sb_assemble_film` does not have to know which kind it is looking at.
+
+    `has_audio` is always False and `duration` is always 0: a still's length is
+    the slot the timeline gave it, never a property of the file.
+    """
+    p = Path(str(path))
+    try:
+        out = subprocess.run(
+            [str(FFPROBE), "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "json", str(p)],
+            capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    try:
+        data = json.loads(out.stdout or "{}")
+        st = (data.get("streams") or [{}])[0]
+        w, h = int(st.get("width") or 0), int(st.get("height") or 0)
+    except (ValueError, TypeError, IndexError, AttributeError):
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    return {"w": w, "h": h, "duration": 0.0, "has_audio": False,
+            "sample_rate": 0}
+
+
+# ---------------------------------------------------------------------------
+# AN OVERLAY THAT ARRIVES ON A BLACK PLATE
+# ---------------------------------------------------------------------------
+# "If the picture comes in a format that doesn't work, automatically make it
+# work."
+#
+# THE CASE. A card generated elsewhere HAS an alpha channel, so every tool that
+# looks at the header calls it transparent — but the artwork sits on an opaque
+# black backdrop and only the outer margins are clear. On the file that produced
+# the report the alpha over the neon burst is a SOLID DISC: the black between
+# the rays is declared fully opaque, so the overlay lane composited black over
+# the sky. Correctly. It read as "transparency not working", and it is not: the
+# file is telling the truth about an alpha channel that is wrong.
+#
+# WHY IT IS SAFE TO REBUILD THE ALPHA FROM THE PICTURE'S OWN LIGHT. Art drawn on
+# black is ADDITIVE — brightness IS coverage, and where the picture is black it
+# is contributing nothing. So `alpha' = alpha * max(R,G,B)/255` with the colour
+# divided back out reproduces the ORIGINAL EXACTLY over black (a'·C' = a·m/255 ·
+# C·255/m = a·C) and shows the background everywhere the backdrop was. That
+# identity is the reason this transform is defensible rather than a guess, and
+# `test_storyboard_editor_api` pins it.
+#
+# WHAT IS NOT BUILT: an edge-flood key for a flat NON-black plate. The identity
+# above only holds over black, so a white or grey plate would need a tolerance
+# nobody can pick for the user and a hard-edged matte with no soft edge left. A
+# non-black plate is therefore left alone rather than guessed at — the picture
+# lane still shows it, and the notice never lies about what was done.
+#
+# EVERY THRESHOLD BELOW IS A MEASUREMENT. Fixtures, measured 2026-08-20:
+#
+#   file                                clear  opaque   dark    hot   flat    ink
+#   the reported ChatGPT endcard        43.3%   41.2%   9.5%  27.2%  0.25  53.1%  KEY
+#     ...the same card at 1/1.5         43.3%   41.2%   9.6%  26.8%  0.34  52.9%  KEY
+#     ...the same card at 1/2.5         43.3%   41.2%   9.6%  26.0%  0.49  52.9%  KEY
+#   the same card once keyed            46.2%   11.6%   0.0%  97.0%     -  69.9%  leave
+#   endcard_..._overlay_A (real alpha)  75.9%    2.2%   0.0%  54.7%     -  72.1%  leave
+#   endcard_..._overlay_B (real alpha)  84.4%    2.2%  90.9%   0.0%  0.00  43.5%  leave
+#   endcard_..._overlay_C (real alpha)  82.8%    2.2%   0.0%   100%     -  74.0%  leave
+#   an opaque RGBA render                0.0%    100%  52.0%   0.5%  0.63  19.5%  leave
+#   88 photographs matted into overlays — every render in `mlx_outputs`, cut
+#   with an ellipse, each also at a quarter brightness — ZERO keyed.
+#
+# The two clauses that do the work, and why neither alone is enough:
+#
+# `flat` separates a synthetic backdrop from a photograph's shadows — the mean
+# distance from a 3x3 box mean, measured on the dark pixels whose whole
+# neighbourhood is also dark, so the ink's own crisp border is not counted as
+# "texture". The reported card reads 0.25; a matted photograph reads 0.3-1.5,
+# and the two populations OVERLAP: four of the 88 come in under 0.35.
+#
+# `hot` is what closes that gap. Additive artwork has a saturated ceiling as
+# well as a black floor — neon, a logo and rendered type all clip at 255, while
+# a photograph's highlights roll off. The reported card is 27.2% saturated and
+# stays above 26% at every scale down to 1/2.5; the highest of the 88 controls
+# reaches 10.2%. That is the only measurement in this report that separates the
+# two populations cleanly, with 1.5x of daylight on both sides.
+#
+# `ink` is the safety net that does not care which population a file is in: if
+# keying would erase the design instead of freeing it — black artwork on
+# transparency, a dark cut-out — it is refused whatever else says.
+SBE_PLATE_SUFFIX = ".keyed.png"
+SBE_PLATE_CLEAR_A = 8            # alpha at or below this reads as "clear"
+SBE_PLATE_OPAQUE_A = 248         # alpha at or above this reads as "opaque"
+SBE_PLATE_DARK_M = 32            # max(R,G,B) at or below this reads as "black"
+SBE_PLATE_HOT_M = 240            # ...and at or above this reads as "saturated"
+SBE_PLATE_CLEAR_MIN = 0.15       # the file must CLAIM transparency, and mean it
+SBE_PLATE_OPAQUE_MIN = 0.15      # ...and still declare a large solid body
+SBE_PLATE_DARK_SHARE_MIN = 0.05  # ...part of which is black
+SBE_PLATE_DARK_IMAGE_MIN = 0.02  # ...and not just a handful of pixels
+SBE_PLATE_HOT_SHARE_MIN = 0.15   # ...with saturated ink on it, not a photograph
+SBE_PLATE_FLAT_MAX = 0.60        # ...and black that is a backdrop, not shadow
+SBE_PLATE_INK_MIN = 0.30         # ...and keying must leave a card, not a hole
+SBE_PLATE_MAX_PIXELS = 40_000_000
+
+
+def _sbe_plate_report(path) -> dict:
+    """Measure an overlay candidate. Reads one file and writes nothing.
+
+    Returns `{"ok", "plate", "why", ...numbers}`. `plate` is True only when
+    every threshold above is met; `why` names the FIRST clause that refused, so
+    a false negative can be diagnosed from the response instead of from a
+    rebuild.
+    """
+    try:
+        from PIL import Image, ImageFilter
+        import numpy as np
+    except Exception as exc:                                        # noqa: BLE001
+        return {"ok": False, "plate": False, "why": f"no image library: {exc}"}
+    p = Path(str(path))
+    if p.name.lower().endswith(SBE_PLATE_SUFFIX):
+        # OUR OWN DERIVATIVE. The measurement below already refuses it (keying
+        # leaves no black under an opaque alpha), but a name check costs
+        # nothing and makes the idempotence obvious to a reader.
+        return {"ok": True, "plate": False, "why": "already keyed"}
+    try:
+        with Image.open(p) as im:
+            if im.width * im.height > SBE_PLATE_MAX_PIXELS:
+                return {"ok": True, "plate": False, "why": "too large to measure"}
+            if "A" not in im.getbands() and "transparency" not in im.info:
+                # A FILE THAT NEVER CLAIMED TRANSPARENCY IS NOT LYING ABOUT IT.
+                # This is the clause that makes a photograph — jpg, or an
+                # opaque png — unreachable by any of the maths below.
+                return {"ok": True, "plate": False, "why": "no alpha channel"}
+            rgba = im.convert("RGBA")
+        arr = np.asarray(rgba, dtype=np.float32)
+        # RGBA -> RGB in Pillow DISCARDS alpha, it does not composite, so this
+        # is the picture's own colour and not the picture over black.
+        blur = np.asarray(rgba.convert("RGB").filter(ImageFilter.BoxBlur(1)),
+                          dtype=np.float32)
+    except (OSError, ValueError) as exc:
+        return {"ok": False, "plate": False, "why": str(exc)}
+    if arr.ndim != 3 or arr.shape[2] != 4 or arr.size == 0:
+        return {"ok": False, "plate": False, "why": "unreadable pixels"}
+    a = arr[..., 3]
+    rgb = arr[..., :3]
+    m = rgb.max(axis=2)
+    opaque = a >= SBE_PLATE_OPAQUE_A
+    dark = opaque & (m <= SBE_PLATE_DARK_M)
+    n_op = float(opaque.sum())
+    n_dark = float(dark.sum())
+    a_sum = float(a.sum())
+    # THE BACKDROP'S INTERIOR, NOT ITS EDGES. Flatness is measured on the dark
+    # pixels whose whole 3x3 neighbourhood is also dark — the ink's own border
+    # is a step of 200-odd levels and would read as "texture" in every drawing
+    # ever made, which said far more about the artwork being crisp than about
+    # where it came from. Eroding the mask first asks the only question worth
+    # asking: is the BACKDROP itself smooth?
+    core = np.asarray(
+        Image.fromarray((dark * 255).astype(np.uint8)).filter(
+            ImageFilter.MinFilter(3)), dtype=np.float32) > 127
+    n_core = float(core.sum())
+    rep = {
+        "ok": True,
+        "plate": False,
+        "why": "",
+        "clear_share": round(float((a <= SBE_PLATE_CLEAR_A).mean()), 5),
+        "opaque_share": round(float(opaque.mean()), 5),
+        "dark_share": round((n_dark / n_op) if n_op else 0.0, 5),
+        "dark_of_image": round(n_dark / float(a.size), 5),
+        # THE OTHER END OF THE HISTOGRAM, and it is the clause that tells a
+        # design from a photograph. Additive artwork has a saturated ceiling as
+        # well as a black floor — neon, a logo, rendered type all clip at 255 —
+        # while a photograph's highlights roll off. Measured over 88 controls
+        # (every render in `mlx_outputs`, matted into an overlay, each also at
+        # a quarter brightness): the reported card is 27.2% saturated and holds
+        # 25.5-27.2% at every scale from 1/3 to 1x, and the highest any of the
+        # 88 reaches is 10.2%. Nothing else in this report separates those two
+        # populations; this does, with 1.5x of daylight on both sides.
+        "hot_share": round(float((m[opaque] >= SBE_PLATE_HOT_M).mean())
+                           if n_op else 0.0, 5),
+        "flat": (round(float(np.abs(rgb[core] - blur[core]).mean()), 4)
+                 if n_core >= 64 else None),
+        "ink_kept": round((float((a * (m / 255.0)).sum()) / a_sum)
+                          if a_sum else 0.0, 5),
+    }
+    for why, ok in (
+            ("the alpha channel is barely used", rep["clear_share"] >= SBE_PLATE_CLEAR_MIN),
+            ("nothing large is declared opaque", rep["opaque_share"] >= SBE_PLATE_OPAQUE_MIN),
+            ("the opaque part is not black", rep["dark_share"] >= SBE_PLATE_DARK_SHARE_MIN),
+            ("too little of it to be a backdrop", rep["dark_of_image"] >= SBE_PLATE_DARK_IMAGE_MIN),
+            ("it reads as a photograph, not as artwork on black",
+             rep["hot_share"] >= SBE_PLATE_HOT_SHARE_MIN),
+            ("the black has photographic detail in it",
+             rep["flat"] is not None and rep["flat"] <= SBE_PLATE_FLAT_MAX),
+            ("keying it would erase the picture", rep["ink_kept"] >= SBE_PLATE_INK_MIN)):
+        if not ok:
+            rep["why"] = why
+            return rep
+    rep["plate"] = True
+    return rep
+
+
+def _sbe_key_plate(path) -> dict:
+    """Write the keyed DERIVATIVE next to the original. Never edits the source.
+
+    `alpha' = alpha * max(R,G,B)/255` and `colour' = colour / (max(R,G,B)/255)`,
+    which is the straight-alpha spelling of "this was composited over black".
+    Both the browser's `<img>`, ffmpeg's `overlay` filter and every NLE on the
+    far side read straight alpha, so ONE file is what preview, render and export
+    all receive — the parity is by construction, not by three code paths
+    agreeing.
+    """
+    try:
+        from PIL import Image
+        import numpy as np
+    except Exception as exc:                                        # noqa: BLE001
+        return {"ok": False, "error": f"no image library: {exc}"}
+    p = Path(str(path))
+    dest = p.with_name(p.stem + SBE_PLATE_SUFFIX)
+    try:
+        if dest.is_file() and dest.stat().st_mtime >= p.stat().st_mtime:
+            # Already built for this exact source. Placing the same card twice
+            # should cost nothing and must not produce a second file.
+            return {"ok": True, "path": str(dest), "reused": True}
+    except OSError:
+        pass
+    try:
+        with Image.open(p) as im:
+            arr = np.asarray(im.convert("RGBA"), dtype=np.float32)
+        a = arr[..., 3]
+        rgb = arr[..., :3]
+        cover = rgb.max(axis=2) / 255.0
+        lit = cover > 0.0
+        # Unpremultiply only where there is light. Where there is none the
+        # pixel is fully transparent, so its colour cannot be observed and
+        # dividing by zero would be inventing one.
+        out = np.zeros_like(arr)
+        scale = np.where(lit, 1.0 / np.where(lit, cover, 1.0), 0.0)
+        out[..., :3] = np.clip(rgb * scale[..., None], 0.0, 255.0)
+        out[..., 3] = a * cover
+        img = Image.fromarray(np.rint(out).astype(np.uint8), "RGBA")
+        tmp = dest.with_name(dest.name + ".part")
+        img.save(tmp, "PNG")
+        os.replace(tmp, dest)
+    except (OSError, ValueError) as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "path": str(dest), "reused": False}
+
+
+def _sb_probe_audio_rate(path) -> int:
+    """Sample rate of a soundtrack, or 0. Separate from `_sb_probe_clip`
+    because that one answers None for a file with no VIDEO stream — correct
+    for a shot, useless for an mp3."""
+    try:
+        out = subprocess.run(
+            [str(FFPROBE), "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=sample_rate", "-of",
+             "default=nw=1:nk=1", str(path)],
+            capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    try:
+        return int((out.stdout or "0").strip().splitlines()[0])
+    except (ValueError, IndexError):
+        return 0
+
+
+def _sb_cut_index(plan) -> dict:
+    """{resolved path: [{start, end}, ...]} from a cut plan, or {}.
+
+    Keyed by path rather than by position because `_sb_assemble_film` DROPS
+    clips ffprobe cannot read, and a positional plan would then apply shot 4's
+    window to shot 5 — silently, and only in the presence of a broken file.
+
+    The value is a LIST, in plan order, because one source can legitimately
+    appear in the cut more than once: the timeline editor's whole reason for
+    existing is that a shot can be used twice or split in half, and a
+    path->one-window map collapsed both occurrences onto the last window
+    silently. Callers consume the list in order (`_sb_segment_windows`); a
+    single dict is still accepted there, so a hand-built `cuts` from before
+    this change behaves exactly as it did.
+    """
+    if not plan:
+        return {}
+    out: dict[str, list] = {}
+    for entry in plan:
+        if not isinstance(entry, dict) or not entry.get("path"):
+            continue
+        try:
+            start = float(entry.get("start") or 0.0)
+            end = float(entry.get("end") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if end <= start:
+            continue
+        # WIDENED (Wave 2). This copy used to be `{"start", "end"}` and threw
+        # everything else away, which made it the reason a per-clip treatment
+        # could not exist: the list is already per-OCCURRENCE, so the same
+        # source used twice can carry two different grades — the index just
+        # never carried anything to differ about. Extra keys are added ONLY
+        # when the entry says something, so a plan of plain trims produces the
+        # identical index it always did and the graph below is unchanged.
+        win = {"start": start, "end": end}
+        kind = str(entry.get("kind") or "video")
+        if kind != "video":
+            win["kind"] = kind
+        adjust = entry.get("adjust")
+        if isinstance(adjust, dict) and adjust:
+            win["adjust"] = dict(adjust)
+        if entry.get("mute") is True:
+            win["mute"] = True
+        if isinstance(entry.get("fx"), dict) and entry["fx"]:
+            win["fx"] = dict(entry["fx"])
+        out.setdefault(str(Path(str(entry["path"]))), []).append(win)
+    return out
+
+
+def _sb_segment_windows(probes: list[tuple], cuts: dict | None) -> list:
+    """The window each INPUT plays, or None for "play the whole clip".
+
+    One pass, consumed in order per path, so the second appearance of a source
+    gets the second window planned for it. A path with no entry — or one whose
+    windows are already spent — plays whole, which is the documented behaviour
+    of a partial plan and the reason a missing entry can never trim a shot to
+    zero.
+    """
+    queues: dict[str, list] = {}
+    for key, val in (cuts or {}).items():
+        queues[key] = [val] if isinstance(val, dict) else list(val or [])
+    out: list = []
+    for clip, _info in probes:
+        q = queues.get(str(Path(str(clip))))
+        out.append(q.pop(0) if q else None)
+    return out
+
+
+def _sb_volume_term(curve) -> str:
+    """A `volume` envelope from `[[t, gain], ...]`, or "" for a flat one.
+
+    THE EMPTY STRING IS THE POINT, the third time: a sound with no envelope
+    adds no filter, so every film ever exported builds the identical audio
+    graph. The curve comes from `audio_gain_points`, which has already folded
+    the fades and the keyframes into ONE breakpoint list — so a fade and a
+    keyframed dip cannot disagree here about what the sound does.
+
+    `eval=frame` because the expression is a function of `t`; without it
+    ffmpeg evaluates once at init and the envelope becomes a constant. The
+    expression is piecewise-linear between breakpoints, which is exactly what
+    the level line on the strip draws and what the NLE keyframes describe.
+    """
+    pts = [(float(t), float(g)) for t, g in (curve or [])]
+    if len(pts) < 2:
+        return ""
+    expr = f"{pts[-1][1]:.6f}"
+    for (t0, g0), (t1, g1) in reversed(list(zip(pts, pts[1:]))):
+        if t1 - t0 <= 1e-9:
+            continue
+        seg = (f"{g0:.6f}+({g1 - g0:.6f})*(t-{t0:.6f})/{t1 - t0:.6f}")
+        expr = f"if(lt(t,{t1:.6f}),{seg},{expr})"
+    return f"volume=volume='{expr}':eval=frame,"
+
+
+def _sb_fade_term(fx, seconds: float, *, alpha: bool = False) -> str:
+    """`fade=t=in…,fade=t=out…,` for a clip with fades, or "" for the rest.
+
+    THE EMPTY STRING IS THE POINT, the same rule `_sb_brightness_term` follows:
+    a clip with no fade adds no filter at all, so every film ever exported
+    builds the identical graph and the byte-for-byte default the assembly
+    suite pins is untouched.
+
+    ON THE SEGMENT'S OWN TIMELINE. The fade runs after `trim`+`setpts`, so
+    `st=0` is this clip's first frame whatever window it plays — fades compose
+    with trims without either knowing about the other. This is a fade to BLACK
+    on the picture lane, which is what a fade means on a bottom track; the
+    overlay lane will want `alpha=1`, and that is a different lane's decision.
+
+    `clip_effects` has already clamped the pair so they cannot cross.
+    """
+    if not isinstance(fx, dict):
+        return ""
+    try:
+        fin = float(fx.get("fade_in") or 0.0)
+        fout = float(fx.get("fade_out") or 0.0)
+    except (TypeError, ValueError):
+        return ""
+    # `alpha=1` RAMPS THE ALPHA CHANNEL instead of mixing toward black. On the
+    # picture lane a fade IS to black — it is the bottom track. On the OVERLAY
+    # lane fading to black would paint a black card over the picture, which is
+    # the exact failure the whole feature is about; there, the ramp has to be
+    # transparency.
+    a = ":alpha=1" if alpha else ""
+    out = ""
+    if fin == fin and fin > 1e-9:
+        out += f"fade=t=in:st=0:d={fin:.6f}{a},"
+    if fout == fout and fout > 1e-9 and seconds > 0:
+        st = max(0.0, seconds - fout)
+        out += f"fade=t=out:st={st:.6f}:d={fout:.6f}{a},"
+    return out
+
+
+def _sb_brightness_term(adjust) -> str:
+    """`eq=brightness=X,` for a graded segment, or "" for every other one.
+
+    THE EMPTY STRING IS THE POINT. A neutral clip must add no filter at all —
+    not `eq=brightness=0.000000`, which would change the graph of every film
+    ever exported to express nothing, and would break the byte-for-byte
+    default the assembly suite pins.
+
+    ffmpeg's `eq=brightness` is an ADDITIVE offset in [-1, 1]. The client
+    previews it with CSS `filter: brightness()`, which is MULTIPLICATIVE, so
+    the two agree at mid-grey and drift at the ends — the preview says so, and
+    the render is the one that is exact.
+    """
+    if not isinstance(adjust, dict):
+        return ""
+    try:
+        b = float(adjust.get("brightness") or 0.0)
+    except (TypeError, ValueError):
+        return ""
+    if b != b or b in (float("inf"), float("-inf")) or abs(b) < 1e-9:
+        return ""
+    b = max(-0.5, min(0.5, b))
+    return f"eq=brightness={b:.6f},"
+
+
+def _sb_film_segments(probes: list[tuple], cuts: dict | None) -> list[dict]:
+    """The legacy `probes` list, expressed as segments.
+
+    ONE INPUT PER PROBE, IN ORDER — which is the assumption the whole module
+    made implicitly until stills and slugs arrived and segment index stopped
+    being input index. Keeping the derivation here means the old positional
+    path produces a segment list that is indistinguishable from the one it
+    used to build inline, and the graph below has exactly one shape to render.
+    """
+    windows = _sb_segment_windows(probes, cuts)
+    out: list[dict] = []
+    for idx, (_clip, info) in enumerate(probes):
+        win = windows[idx]
+        out.append({"kind": "video", "input": idx, "info": info,
+                    "window": ({"start": win["start"], "end": win["end"]}
+                               if win else None),
+                    "adjust": (win or {}).get("adjust")})
+    return out
+
+
+def _sb_seg_seconds(sg: dict) -> float:
+    """How long ONE segment plays. The same arithmetic the graph loop does,
+    factored out because the split-audio plan has to know it BEFORE the loop
+    emits anything — where each segment lands in the concatenated film is what
+    a decoupled sound is offset from."""
+    kind = str(sg.get("kind") or "video")
+    if kind in ("slug", "still"):
+        return max(0.0, float(sg.get("duration") or 0.0))
+    info = sg.get("info") or {}
+    cut = sg.get("window")
+    if cut:
+        return min(max(0.0, float(cut["end"]) - float(cut["start"])),
+                   float(info["duration"]))
+    return float(info["duration"])
+
+
+def _sb_split_audio_plan(segs: list[dict]) -> dict:
+    """Where every clip's SOUND plays in the concatenated film.
+
+    Returns {"split": bool, "total": float, "lanes": [{idx, start, end, at,
+    len}]}. `split` is False when nothing is unlinked, and that is what keeps
+    the ordinary graph byte-identical: the whole decoupled path is skipped.
+
+    ONE LANE, ENFORCED HERE TOO. The validator refuses overlapping sound in
+    the EDITOR's clock, but the assembler closes gaps, so two clips can slide
+    into each other on the way out. Rather than emit a graph that would need a
+    mixer, a later lane's head is trimmed to the one before it — deterministic,
+    and the only alternative is the second audio track this feature is
+    explicitly not.
+    """
+    cum, rows, split = 0.0, [], False
+    for i, sg in enumerate(segs):
+        n = _sb_seg_seconds(sg)
+        kind = str(sg.get("kind") or "video")
+        has_audio = bool((sg.get("info") or {}).get("has_audio")) and kind == "video"
+        # MUTE IS THE ABSENCE OF A LANE. This graph lays sound and silence end
+        # to end with `concat`, so "do not play this clip" is expressed by
+        # contributing no row and letting the hush fill the slot — no volume
+        # filter, no mixer, and nothing that could sum. It also FORCES the
+        # split path: without it a film whose only decoupling was a mute would
+        # take the plain `concat ... a=1` branch and play the audio the user
+        # had just switched off.
+        if has_audio and sg.get("mute"):
+            split = True
+            has_audio = False
+        aud = sg.get("audio") if isinstance(sg.get("audio"), dict) else None
+        if has_audio:
+            if aud:
+                split = True
+                rows.append({"idx": i, "start": float(aud["start"]),
+                             "end": float(aud["end"]),
+                             "at": cum + float(aud.get("delta") or 0.0)})
+            else:
+                cut = sg.get("window")
+                st = float(cut["start"]) if cut else 0.0
+                rows.append({"idx": i, "start": st, "end": st + n, "at": cum})
+        cum += n
+    total = round(cum, 6)
+    rows.sort(key=lambda r: r["at"])
+    lanes = []
+    for r in rows:
+        at, st, en = r["at"], r["start"], r["end"]
+        if at < 0:
+            # A J-cut on the FIRST clip has nothing to lead from, so the head
+            # is CUT rather than shifted — shifting would slide the whole
+            # performance late against a picture that did not move.
+            st += -at
+            at = 0.0
+        if en - st <= 1e-6 or at >= total - 1e-6:
+            continue
+        if at + (en - st) > total:      # an L-cut past the last frame is cut
+            en = st + (total - at)
+        lanes.append({"idx": r["idx"], "start": st, "end": en, "at": at})
+    # THE INCOMING SOUND WINS ITS OWN START, and that IS the J-cut: the
+    # OUTGOING clip's tail is what gives way. Trimming the incoming head
+    # instead would put its first syllable back where the picture cuts, which
+    # is the edit the user was trying to get away from.
+    for a, b in zip(lanes, lanes[1:]):
+        room = b["at"] - a["at"]
+        if a["end"] - a["start"] > room + 1e-9:
+            a["end"] = a["start"] + max(0.0, room)
+    out = []
+    for L in lanes:
+        n = L["end"] - L["start"]
+        if n <= 1e-6:
+            continue                    # entirely covered by its neighbour
+        out.append({"idx": L["idx"], "start": round(L["start"], 6),
+                    "end": round(L["end"], 6), "at": round(L["at"], 6),
+                    "len": round(n, 6)})
+    return {"split": split, "total": total, "lanes": out}
+
+
+def _sb_split_audio_chains(lanes: list[dict], total: float, rate: int,
+                           out_label: str) -> list[str]:
+    """The film's ONE audio lane, as silence and sound laid end to end.
+
+    `concat` and not `amix`, deliberately: concat cannot sum, so this graph is
+    incapable of becoming the mixer the refuse list bans, and the gaps between
+    split edits are honest `anullsrc` rather than an input that happens to be
+    quiet.
+    """
+    chains, parts, cursor, n = [], [], 0.0, 0
+
+    def hush(seconds: float) -> None:
+        nonlocal n
+        lab = f"aq{n}"
+        n += 1
+        chains.append(f"anullsrc=channel_layout=stereo:sample_rate={rate}:"
+                      f"d={seconds:.6f}[{lab}]")
+        parts.append(f"[{lab}]")
+
+    for lane in lanes:
+        if lane["at"] - cursor > 1e-6:
+            hush(lane["at"] - cursor)
+        parts.append(f"[a{lane['idx']}]")
+        cursor = lane["at"] + lane["len"]
+    if total - cursor > 1e-6:
+        hush(total - cursor)
+    if not parts:
+        hush(max(total, 1e-3))
+    chains.append(f"{''.join(parts)}concat=n={len(parts)}:v=0:a=1{out_label}")
+    return chains
+
+
+def _sb_music_head(music: dict | None, n_inputs: int) -> str:
+    """The soundtrack's own trim/place chain, up to (not including) resample.
+
+    ONE PLACE, TWO CALLERS. `replace` and `under` both open with the same three
+    decisions about the track — where it starts, where it stops, and how far
+    into the film it drops in — and they had drifted into two copies of one
+    line that only differed by what came after it.
+
+    `start` is where playback begins IN THE TRACK, `end` where it stops (None
+    plays to the end), and `delay` the film second the music lands on. The
+    string is CHARACTER-FOR-CHARACTER what it was before trims existed when
+    `end` is None and `delay` is 0, which is every timeline written before
+    today and every one where the music still starts with the film.
+
+    `adelay` and NOT a longer `atrim`: silence in front of a track is not a
+    property of the track, and asking atrim for negative time is asking for
+    nothing at all. `all=1` because the delay must apply to both channels and
+    the default applies it to the first one only — a music bed that arrives in
+    the left speaker is the failure mode this argument exists for.
+    """
+    m = music or {}
+    start = max(0.0, float(m.get("start") or 0.0))
+    end = m.get("end")
+    delay = max(0.0, float(m.get("delay") or 0.0))
+    trim = f"atrim=start={start:.6f}"
+    if end is not None and float(end) > start:
+        trim += f":end={float(end):.6f}"
+    head = f"[{n_inputs}:a]{trim},asetpts=PTS-STARTPTS,"
+    if delay > 1e-6:
+        head += f"adelay=delays={int(round(delay * 1000))}:all=1,"
+    return head
+
+
+def _sb_film_filtergraph(probes: list[tuple], target_w: int, target_h: int,
+                         rate: int, pix_fmt: str,
+                         cuts: dict | None = None,
+                         music: dict | None = None,
+                         overlays: list | None = None,
+                         overlay_base: int = 0,
+                         segments: list[dict] | None = None) -> tuple[str, str]:
+    """The concat FILTER graph for a mixed-geometry cut → (graph, video_label).
+
+    A bare concat DEMUXER cannot do this job. The shots in one film are not
+    uniform and never were: the draft pass writes 640×448, delivery writes
+    1024×576, H3's own export lands 768×448 or 1280×720, LTX carries 48 kHz
+    audio and H3 carries 32 kHz, and a character test may carry none at all.
+    The demuxer requires identical streams and answers a mismatch with either a
+    hard failure or — worse — a file that plays the first shot and then garbles.
+
+    So every segment is normalised into one geometry first:
+      * `fps` → one frame rate for the whole film;
+      * `scale=…:force_original_aspect_ratio=decrease` + `pad` → the picture
+        fits inside the target with bars, never cropped and never stretched;
+      * `setsar=1` → square pixels, so a 4:3-flagged source can't skew the cut;
+      * `format=<the requested pix_fmt>` → concat negotiates ONE pixel format
+        across its inputs, and this makes that format the one the encode was
+        going to write anyway.
+    and every segment is guaranteed an audio stream: a real track is resampled
+    to the film's rate and padded/trimmed to the picture's length, and a SILENT
+    clip gets `anullsrc` of exactly that length. Without that, the graph has an
+    uneven stream count and ffmpeg refuses to build it at all.
+
+    `cuts` (from `storyboard_edit.plan_cut`, keyed by path) turns each segment
+    into the WINDOW of the clip the auto-editor chose, with `trim`/`atrim` in
+    THIS graph — the same single pass, the same single encode. Trimming in a
+    separate ffmpeg run would mean decoding and re-encoding every shot twice,
+    which costs both time and a generation of quality for nothing.
+
+    `music` carries a soundtrack, and `music["mode"]` decides what happens to
+    the sound the clips already have:
+
+      * `replace` (default) — the segments carry picture only, concat is asked
+        for video alone, and the audio output is the music trimmed to the
+        film's length. This is what a beat-aligned cut needs: the cuts were
+        planned against THIS track's grid, so the track has to be what plays.
+
+      * `under` — the clips keep their audio and the music plays beneath it.
+        Needed the moment a film has anyone speaking in it: `replace` on a
+        dialogue cut silences the performance, which is not "adding a
+        soundtrack", it is deleting the acting.
+
+    `music["gain"]` is the BED'S CURVE, from `bed_render_gain` — the fader,
+    the authored envelope and the auto-duck already resolved into one
+    breakpoint list on the film's clock. Absent means unity means no filter.
+    Every gain this graph applies to the bed comes from there and from nowhere
+    else, which is the property that makes the preview able to play the same
+    mix; the only term left outside the document is the limiter on the sum.
+
+    With neither argument the graph is character-for-character what it was
+    before either existed. That is the point: the auto-edit is opt-in, and the
+    default path cannot change behaviour by accident.
+    """
+    chains: list[str] = []
+    pads: list[str] = []
+    segs = segments if segments is not None else _sb_film_segments(probes, cuts)
+    # THE MUSIC IS THE LAST INPUT, AND `-i` COUNT IS NO LONGER SEGMENT COUNT.
+    # A slug consumes no input at all (it is a `color=` source inside the
+    # graph), so `len(probes)` stopped being the soundtrack's index the moment
+    # black became first-class. Counting the segments that actually carry an
+    # input is the only thing that stays true for every mix of kinds.
+    n_inputs = sum(1 for s in segs if s.get("input") is not None)
+    # THE SPLIT PLAN IS COMPUTED FIRST, because a decoupled sound's place in
+    # the film depends on where its clip lands in the concatenation, and the
+    # loop below only learns that as it goes. `split` False leaves every line
+    # after this exactly as it was.
+    aplan = _sb_split_audio_plan(segs)
+    alane = {L["idx"]: L for L in aplan["lanes"]}
+    split = bool(aplan["split"])
+    music_mode = str((music or {}).get("mode") or "replace").lower()
+    if music_mode not in ("replace", "under"):
+        music_mode = "replace"
+    # Only `replace` throws the clips' own audio away. `under` needs it — it is
+    # the thing the bed is ducking against.
+    silent_segments = bool(music) and music_mode == "replace"
+    total = 0.0
+    for idx, sg in enumerate(segs):
+        kind = str(sg.get("kind") or "video")
+        info = sg.get("info") or {}
+        inp = sg.get("input")
+        cut = sg.get("window")
+        bright = _sb_brightness_term(sg.get("adjust"))
+        fx = sg.get("fx")
+        has_audio = bool(info.get("has_audio")) and kind == "video"
+        if kind == "slug":
+            # NO FILE, NO INPUT, NO PROBE. `color` is a source filter, so the
+            # cheapest of the three kinds is also the one that needed the
+            # refactor: it is a chain in the graph and nothing else.
+            seg = max(0.0, float(sg.get("duration") or 0.0))
+            dur = f"{seg:.6f}"
+            total += seg
+            chains.append(
+                f"color=c=black:s={target_w}x{target_h}:r={FPS}:d={dur},"
+                f"setsar=1,{bright}{_sb_fade_term(fx, seg)}format={pix_fmt}[v{idx}]")
+        elif kind == "still":
+            # The picture arrives already looped to length by `-loop 1 -t D`
+            # on the input; the trim here pins it to the exact slot so the
+            # video and the synthesised silence below cannot disagree by a
+            # frame, which is all concat needs to go wrong.
+            seg = max(0.0, float(sg.get("duration") or 0.0))
+            dur = f"{seg:.6f}"
+            total += seg
+            chains.append(
+                f"[{inp}:v]trim=0:{dur},setpts=PTS-STARTPTS,fps={FPS},"
+                f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
+                f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2,"
+                f"setsar=1,{bright}{_sb_fade_term(fx, seg)}format={pix_fmt}[v{idx}]")
+        else:
+            if cut:
+                seg = max(0.0, float(cut["end"]) - float(cut["start"]))
+                seg = min(seg, float(info["duration"]))
+                head = (f"[{inp}:v]trim=start={float(cut['start']):.6f}:"
+                        f"end={float(cut['end']):.6f},setpts=PTS-STARTPTS,")
+                ahead = (f"[{inp}:a]atrim=start={float(cut['start']):.6f}:"
+                         f"end={float(cut['end']):.6f},asetpts=PTS-STARTPTS,")
+            else:
+                seg = float(info["duration"])
+                head = f"[{inp}:v]"
+                ahead = f"[{inp}:a]"
+            total += seg
+            dur = f"{seg:.6f}"
+            chains.append(
+                f"{head}fps={FPS},"
+                f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
+                f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2,"
+                f"setsar=1,{bright}{_sb_fade_term(fx, seg)}format={pix_fmt}[v{idx}]")
+        if silent_segments:
+            pads.append(f"[v{idx}]")
+            continue
+        if has_audio and split:
+            # THE SOUND HAS ITS OWN WINDOW NOW. Same input, same filters, a
+            # different pair of numbers — and it is padded to the length of
+            # the SOUND, not of the picture, because the two stopped being the
+            # same fact the moment they were unlinked.
+            L = alane.get(idx)
+            if L:
+                # NO ENVELOPE, NO FILTER — and no trailing `anull` either. A
+                # sound nobody shaped must build the identical chain it always
+                # did, or every film ever exported changes to express nothing.
+                vol = _sb_volume_term(sg.get("gain"))
+                vtail = ("," + vol.rstrip(",")) if vol else ""
+                chains.append(
+                    f"[{inp}:a]atrim=start={L['start']:.6f}:end={L['end']:.6f},"
+                    f"asetpts=PTS-STARTPTS,aresample={rate},"
+                    f"aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                    f"apad,atrim=0:{L['len']:.6f},asetpts=PTS-STARTPTS"
+                    f"{vtail}[a{idx}]")
+            pads.append(f"[v{idx}]")
+            continue
+        if split:
+            pads.append(f"[v{idx}]")
+            continue
+        if has_audio:
+            vol = _sb_volume_term(sg.get("gain"))
+            vtail = ("," + vol.rstrip(",")) if vol else ""
+            chains.append(
+                f"{ahead}aresample={rate},"
+                f"aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                f"apad,atrim=0:{dur},asetpts=PTS-STARTPTS"
+                f"{vtail}[a{idx}]")
+        else:
+            # A still and a slug are silent by construction; a silent clip is
+            # silent by accident. All three need the same synthesised track or
+            # concat has an uneven stream count and refuses to build at all.
+            chains.append(
+                f"anullsrc=channel_layout=stereo:sample_rate={rate}:d={dur}"
+                f"[a{idx}]")
+        pads.append(f"[v{idx}][a{idx}]")
+    music_head = _sb_music_head(music, n_inputs)
+    # THE BED'S OWN ENVELOPE, and it is the SAME curve the preview plays and
+    # the level line on the block draws — `storyboard_editor.bed_render_gain`,
+    # already on the film's clock. Empty for a bed nobody has mixed, which is
+    # what keeps the graph character-for-character what it was for every film
+    # written before the mix was a control. It applies in BOTH modes: "fade
+    # the music out under the last shot" is the same request whether or not
+    # the clips kept their own sound.
+    bed_env = _sb_volume_term((music or {}).get("gain"))
+    bed_tail = ("," + bed_env.rstrip(",")) if bed_env else ""
+    if silent_segments:
+        chains.append(f"{''.join(pads)}concat=n={len(segs)}:v=1:a=0[vcat]")
+        # `apad` before the trim so a soundtrack shorter than the film ends in
+        # silence rather than ending the film.
+        chains.append(
+            f"{music_head}aresample={rate},"
+            f"aformat=sample_fmts=fltp:channel_layouts=stereo,"
+            f"apad,atrim=0:{total:.6f},asetpts=PTS-STARTPTS"
+            f"{bed_tail}[aout]")
+    elif music and music_mode == "under":
+        if split:
+            # The picture concatenates on its own; the sound was already laid
+            # out end to end by the plan, gaps and all.
+            chains.append(f"{''.join(pads)}concat=n={len(segs)}:v=1:a=0[vcat]")
+            chains.extend(_sb_split_audio_chains(aplan["lanes"], total, rate,
+                                                 "[acat]"))
+        else:
+            chains.append(
+                f"{''.join(pads)}concat=n={len(segs)}:v=1:a=1[vcat][acat]")
+        # The bed: same trim/pad treatment as `replace`, then the document's
+        # own curve and nothing else.
+        #
+        # THE DUCK IS IN THAT CURVE NOW, NOT IN A COMPRESSOR. What stood here
+        # was `volume=0.20` followed by `[bed][key]sidechaincompress=...`, keyed
+        # on an `asplit` of the clip audio. It worked, and it was unknowable: a
+        # compressor's output is a function of samples, so there was no value
+        # anywhere the preview could read to play the same mix, and the one
+        # surface the user checks his work on played a film that did not exist.
+        # `storyboard_editor.bed_duck_points` expresses the same decision — the
+        # bed steps back by the measured 11.4 dB wherever a clip's own sound is
+        # playing, in 5 ms, back up over 400 ms — as breakpoints derived from
+        # the TIMELINE, which the preview and the export can read too. Same
+        # depth, same times, three outputs that agree.
+        chains.append(
+            f"{music_head}aresample={rate},"
+            f"aformat=sample_fmts=fltp:channel_layouts=stereo,"
+            f"apad,atrim=0:{total:.6f},asetpts=PTS-STARTPTS"
+            f"{bed_tail}[bed]")
+        # normalize=0 or amix halves everything to protect a headroom budget we
+        # have already set deliberately; duration=first pins the result to the
+        # picture rather than to whichever input happens to run longer.
+        # normalize=0 stops amix halving both inputs — and it also means NOTHING
+        # is protecting the sum. Engine dialogue comes out hot (0.35 RMS on a
+        # measured opening line), and hot dialogue plus a bed peaked the first
+        # under-mix film at 1.31 pre-encode, 1341 hard-clipped samples, silent
+        # about it.
+        #
+        # asoftclip and NOT alimiter. alimiter is the filter this obviously
+        # wants, and on this build it is a NO-OP on float samples — measured on
+        # the real mix, input peak 1.3075, output peak 1.3075, with and without
+        # level=disabled, and unchanged by an aformat to s16 on either side of
+        # it. asoftclip actually holds: same signal comes out at 0.98 for 7% of
+        # RMS. Do not "fix" this back to alimiter without re-measuring the peak
+        # of the output — it fails silently and the failure is audible.
+        #
+        # THE LIMITER IS THE ONE TERM THAT IS NOT IN THE DOCUMENT, and it is
+        # the honest exception rather than a leak: it acts on the SUM of two
+        # signals, which a browser playing two <audio> elements never computes,
+        # so a preview could only fake it. It is a safety net, not a mix
+        # decision — and the render MEASURES what it did (`mix_peak`) and says
+        # so, which is what a net owes the person it is under.
+        chains.append(
+            "[acat][bed]amix=inputs=2:duration=first:dropout_transition=0:"
+            f"normalize=0,asoftclip=type=tanh:threshold={_sb_mix_ceiling():g}"
+            "[aout]")
+    elif split:
+        chains.append(f"{''.join(pads)}concat=n={len(segs)}:v=1:a=0[vcat]")
+        chains.extend(_sb_split_audio_chains(aplan["lanes"], total, rate,
+                                             "[aout]"))
+    else:
+        chains.append(
+            f"{''.join(pads)}concat=n={len(segs)}:v=1:a=1[vcat][aout]")
+    # ---- THE OVERLAY LANE, composited over the finished picture ----------
+    # A SECOND VIDEO TRACK, and the alpha is the whole of it. The card arrives
+    # 1536x832 for a 768x416 frame — authored at 2x on purpose — so it is
+    # DOWNSCALED, and a scale that drops the alpha channel delivers a black
+    # rectangle where the transparency was. That is the failure mode this lane
+    # exists to avoid, so `format=rgba` is asserted on BOTH sides of the
+    # scale: once to make sure what enters the scaler carries alpha, once
+    # because a scaler is free to pick an output format that does not.
+    base = "[vcat]"
+    total_v = total
+    rows = list(overlays or [])
+    if rows:
+        # A CARD MAY OUTLIVE THE LAST SHOT. The picture lane ends where its
+        # clips end; an endcard laid over the final seconds can legitimately
+        # run past that, and vanishing at the last frame of picture would be
+        # the wrong answer. The base is padded with black so the card
+        # composites over something.
+        far = max(float(r.get("film_end") or 0.0) for r in rows)
+        if far > total_v + 1e-6:
+            chains.append(f"{base}tpad=stop_mode=add:stop_duration="
+                          f"{far - total_v:.6f}:color=black[vpad]")
+            base = "[vpad]"
+            total_v = far
+        for i, r in enumerate(rows):
+            fs = max(0.0, float(r.get("film_start") or 0.0))
+            fe = max(fs, float(r.get("film_end") or 0.0))
+            span = fe - fs
+            if span <= 1e-6:
+                continue
+            inp = overlay_base + i
+            fade = _sb_fade_term(r.get("fx"), span, alpha=True)
+            chains.append(
+                f"[{inp}:v]format=rgba,"
+                f"scale={target_w}:{target_h}:flags=lanczos,"
+                f"format=rgba,setsar=1,{fade}"
+                # The overlay stream's own clock starts at 0; this puts its
+                # first frame at the film second it was placed on.
+                f"setpts=PTS+{fs:.6f}/TB[ov{i}]")
+            # `repeatlast=0` or the last frame of the card sticks for the rest
+            # of the film; `enable` is what makes the lane a lane rather than a
+            # watermark.
+            chains.append(
+                f"{base}[ov{i}]overlay=0:0:eof_action=pass:repeatlast=0:"
+                f"enable='between(t,{fs:.6f},{fe:.6f})'[vov{i}]")
+            base = f"[vov{i}]"
+        # THE SOUND IS NOT PADDED, and does not need to be. Nothing is mapped
+        # but `[vout]` and `[aout]`, and with no `-shortest` the output runs as
+        # long as the LONGEST mapped stream — so the padded picture sets the
+        # length and the audio simply ends where the last clip's sound ended,
+        # which is what silence after the final shot means anyway. A pad chain
+        # here would have been a label nothing maps.
+    tail = bt709_vf("")
+    if tail:
+        chains.append(f"{base}{tail}[vout]")
+        return ";".join(chains), "[vout]"
+    return ";".join(chains), base
+
+
+def _sb_timeline_segments(timeline: list) -> tuple[list[dict], list[str], list]:
+    """A timeline (from `edit_to_cuts`) → (segments, unreadable, inputs).
+
+    THE REFACTOR THE WHOLE OF WAVE 2 TURNS ON. Until stills and slugs existed,
+    segment index WAS ffmpeg input index — `-i` per probe, in probe order, and
+    the soundtrack addressed as `len(probes)`. A slug consumes no input; a
+    still consumes one but arrives through `-loop 1 -framerate F -t D` and
+    never reaches ffprobe. So the segment list and the input list stop being
+    the same list, and every index after the first slug shifts.
+
+    Assigning the indices in ONE place, next to the argv that will honour them,
+    is what stops that shift being discovered by a film whose sound is one shot
+    late. `inputs` is the argv fragment list, in the exact order the graph
+    expects; `segments[i]["input"]` is the index into it, or None.
+    """
+    segs: list[dict] = []
+    unreadable: list[str] = []
+    inputs: list[list[str]] = []
+    for entry in timeline or []:
+        if not isinstance(entry, dict):
+            continue
+        kind = str(entry.get("kind") or "video")
+        try:
+            start = float(entry.get("start") or 0.0)
+            end = float(entry.get("end") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        length = max(0.0, end - start)
+        if length <= 0:
+            continue
+        adjust = entry.get("adjust") if isinstance(entry.get("adjust"), dict) else None
+        if kind == "slug":
+            segs.append({"kind": "slug", "input": None, "info": None,
+                         "window": None, "adjust": adjust,
+                         "duration": length})
+            continue
+        path = str(entry.get("path") or "")
+        if kind == "still":
+            info = _sb_probe_still(path)
+            if info is None:
+                unreadable.append(Path(path).name)
+                continue
+            segs.append({"kind": "still", "input": len(inputs), "info": info,
+                         "window": None, "adjust": adjust,
+                         "duration": length, "path": path})
+            # `-loop 1` with an explicit `-t` is what turns one image into a
+            # stream of the right length. Without `-t` the loop is infinite and
+            # ffmpeg runs until the disk is full.
+            inputs.append(["-loop", "1", "-framerate", str(FPS),
+                           "-t", f"{length:.6f}", "-i", path])
+            continue
+        info = _sb_probe_clip(path)
+        if info is None:
+            unreadable.append(Path(path).name)
+            continue
+        seg = {"kind": "video", "input": len(inputs), "info": info,
+               "window": {"start": start, "end": end},
+               "adjust": adjust,
+               "duration": min(length, float(info["duration"])),
+               "path": path}
+        if entry.get("mute") is True:
+            seg["mute"] = True
+        if isinstance(entry.get("fx"), dict) and entry["fx"]:
+            seg["fx"] = dict(entry["fx"])
+        if entry.get("gain"):
+            seg["gain"] = [list(pt) for pt in entry["gain"]]
+        aud = entry.get("audio")
+        if isinstance(aud, dict):
+            # A DELTA, NOT A FILM SECOND. The assembler CONCATENATES, so a
+            # hole in the timeline closes and every clip after it slides
+            # earlier — an absolute offset taken from the editor's clock would
+            # put the sound where the picture used to be. What survives the
+            # slide is how far the sound sits from ITS OWN clip.
+            try:
+                seg["audio"] = {
+                    "start": float(aud.get("start") or 0.0),
+                    "end": float(aud.get("end") or 0.0),
+                    "delta": round(float(aud.get("film_start") or 0.0)
+                                   - float(entry.get("film_start") or 0.0), 6),
+                }
+            except (TypeError, ValueError):
+                pass
+        segs.append(seg)
+        inputs.append(["-i", path])
+    return segs, unreadable, inputs
+
+
+def _sb_assemble_film(clips: list, out_path, *, plan: list | None = None,
+                      timeline: list | None = None,
+                      overlays: list | None = None,
+                      music=None, music_start: float = 0.0,
+                      music_end: float | None = None,
+                      music_delay: float = 0.0,
+                      music_mode: str = "replace",
+                      music_gain: list | None = None) -> dict:
+    """Concatenate the exported shots into ONE playable film.
+
+    `clips` is the export directory's own copies, in `n` order, already
+    filtered by the copy loop — the film is exactly what the folder contains,
+    never a second, differently-derived selection.
+
+    Encodes with the panel's output settings (`output_codec_settings()`, the
+    same call the upscale/H3-export/mux passes make) plus `+faststart`, so the
+    film is subject to the same codec gate as every other file the panel emits.
+
+    `plan` is an OPTIONAL cut plan from `storyboard_edit.plan_cut()` — a list
+    of {"path", "start", "end"} — and `music` an OPTIONAL soundtrack path.
+    With neither, this is the whole-clip concatenation it has always been, so
+    an existing export cannot change under anybody. With them, each shot is
+    trimmed to its chosen window and the soundtrack replaces the clip audio,
+    both inside the ONE filtergraph pass that was already going to run: the
+    auto-edit costs no extra decode and no second generation of encoding.
+
+    `timeline` is the Editor's own list (`edit_to_cuts`) and, when present, it
+    REPLACES `clips`/`plan` as the description of the film: it is the only
+    shape that can carry a kind, because a slug has no file to appear in a
+    `clips` list at all.
+
+    Returns {"ok": True, "path", "clips", "width", "height", "duration"} or
+    {"ok": False, "error"}. It NEVER raises: the folder + manifest are the
+    export's contract and an assembly that could not run must not take them
+    down with it. Source clips are only ever read.
+    """
+    out_path = Path(str(out_path))
+    segments: list[dict] | None = None
+    seg_inputs: list[list[str]] = []
+    if timeline is not None:
+        segments, unreadable, seg_inputs = _sb_timeline_segments(timeline)
+        if not segments:
+            return {"ok": False,
+                    "error": "nothing on the timeline could be read"}
+        probes = [(Path(s["path"]), s["info"]) for s in segments
+                  if s.get("path") and s.get("info")]
+    else:
+        if not clips:
+            return {"ok": False, "error": "no clips to assemble"}
+        probes = []
+        unreadable = []
+        for c in clips:
+            info = _sb_probe_clip(c)
+            if info is None:
+                unreadable.append(Path(str(c)).name)
+                continue
+            probes.append((Path(str(c)), info))
+        if not probes:
+            return {"ok": False,
+                    "error": "ffprobe could not read any exported clip"}
+
+    # Target geometry = the largest picture in the cut, so nothing is ever
+    # scaled DOWN and no detail is thrown away; every smaller shot is
+    # letter/pillarboxed up to it. Even numbers because H.264 4:2:0 has no
+    # odd-dimension form.
+    #
+    # A film of nothing but slugs has no picture to measure, and `color=`
+    # still has to be told a size — so the fallback is the panel's own default
+    # geometry rather than a crash on max() of an empty list.
+    target_w = max([i["w"] for _, i in probes] or [1024])
+    target_h = max([i["h"] for _, i in probes] or [576])
+    target_w += target_w % 2
+    target_h += target_h % 2
+    rates = [i["sample_rate"] for _, i in probes if i["sample_rate"]]
+    rate = max(rates) if rates else _SB_FILM_SAMPLE_RATE
+    if music:
+        # When a soundtrack replaces the clip audio, the clips' rates are
+        # irrelevant and actively harmful: the LTX/H3 tracks are 32-48 kHz and
+        # resampling a 44.1 kHz song DOWN to a rate no longer in the film is a
+        # quality loss for nothing.
+        m_rate = _sb_probe_audio_rate(music)
+        if m_rate:
+            rate = m_rate
+
+    cuts = _sb_cut_index(plan)
+    # `music_start` is where in the TRACK the film begins — the timeline
+    # editor's audio offset. The filtergraph has always read it; before the
+    # editor there was nothing that could set it, so it was pinned at 0.
+    # `music_end` and `music_delay` are the soundtrack's other two edges: where
+    # the trim stops it, and how far into the film it drops in. Both default to
+    # "no opinion", so a caller that predates the music being an object builds
+    # the identical graph it always did.
+    #
+    # `music_gain` is the bed's resolved curve on the film's clock. It was the
+    # one field the graph already read (`(music or {}).get('gain')`) and that
+    # NOTHING EVER SET — so the bed's `afx`, which the model normalised,
+    # validated and drew, reached the render as silence about itself. A fade on
+    # the soundtrack was expressible everywhere except in the file.
+    music_arg = ({"path": str(music), "start": max(0.0, float(music_start or 0.0)),
+                  "end": (float(music_end) if music_end is not None else None),
+                  "delay": max(0.0, float(music_delay or 0.0)),
+                  "mode": str(music_mode or "replace").lower(),
+                  "gain": [list(p) for p in (music_gain or [])]}
+                 if music else None)
+    # THE OVERLAY LANE'S INPUTS GO LAST, after the segments and after the
+    # music. Anywhere else and every index after them shifts: the music is
+    # addressed as `len(segment inputs)` and the graph would start reading a
+    # card where it expected a soundtrack.
+    ov_rows, ov_inputs = [], []
+    for o in (overlays or []):
+        if not isinstance(o, dict):
+            continue
+        fs = max(0.0, float(o.get("film_start") or 0.0))
+        fe = max(fs, float(o.get("film_end") or 0.0))
+        if fe - fs <= 1e-6:
+            continue
+        src = str(o.get("path") or "")
+        if not src or not Path(src).is_file():
+            unreadable.append(Path(src).name if src else "overlay")
+            continue
+        if str(o.get("kind") or "still") == "still":
+            # `-loop 1` with an explicit `-t` is what turns one PNG into a
+            # stream of the right length, the same shape a still CLIP uses.
+            ov_inputs.append(["-loop", "1", "-framerate", str(FPS),
+                              "-t", f"{fe - fs:.6f}", "-i", src])
+        else:
+            ov_inputs.append(["-i", src])
+        ov_rows.append(o)
+    overlay_base = (len(seg_inputs) if segments is not None else len(probes)) \
+        + (1 if music else 0)
+    codec = output_codec_settings()
+    graph, vlabel = _sb_film_filtergraph(probes, target_w, target_h, rate,
+                                         codec["pix_fmt"], cuts=cuts,
+                                         music=music_arg, segments=segments,
+                                         overlays=ov_rows,
+                                         overlay_base=overlay_base)
+
+    cmd = [str(FFMPEG), "-y"]
+    if segments is not None:
+        # THE ARGV THE SEGMENT LIST PROMISED. Built by the same function that
+        # assigned the indices, in the same order, so `[3:v]` in the graph and
+        # the fourth `-i` on the command line cannot come apart.
+        for frag in seg_inputs:
+            cmd += frag
+    else:
+        for clip, _ in probes:
+            cmd += ["-i", str(clip)]
+    if music_arg:
+        cmd += ["-i", music_arg["path"]]
+    for frag in ov_inputs:
+        cmd += frag
+    cmd += [
+        "-filter_complex", graph,
+        "-map", vlabel, "-map", "[aout]",
+        "-c:v", "libx264", "-pix_fmt", codec["pix_fmt"], "-crf", codec["crf"],
+        "-preset", "medium",
+        *BT709_FLAGS,
+        "-movflags", "+faststart",
+        "-c:a", "aac", "-b:a", "192k", "-ar", str(rate),
+        str(out_path),
+    ]
+    try:
+        run_ffmpeg_tracked(cmd, "Storyboard film")
+    except Exception as exc:                                       # noqa: BLE001
+        # A half-written mp4 is worse than none — it looks like a finished film
+        # in Finder and plays for two seconds.
+        try:
+            out_path.unlink()
+        except OSError:
+            pass
+        return {"ok": False, "error": f"ffmpeg could not assemble the film: {exc}"}
+    if not out_path.is_file() or out_path.stat().st_size == 0:
+        return {"ok": False, "error": "ffmpeg exited cleanly but wrote no film"}
+    # The SAME per-occurrence consumption the graph just did, so the reported
+    # duration and the film agree even when one source is used twice — and, on
+    # the timeline path, even when some of what played was never a file.
+    if segments is not None:
+        played = sum(float(s.get("duration") or 0.0) for s in segments)
+        n_clips = len(segments)
+    else:
+        played = sum(
+            min(float(w["end"]) - float(w["start"]), i["duration"]) if w
+            else i["duration"]
+            for (_c, i), w in zip(probes, _sb_segment_windows(probes, cuts)))
+        n_clips = len(probes)
+    facts = {"ok": True, "path": str(out_path), "clips": n_clips,
+             "width": target_w, "height": target_h,
+             "sample_rate": rate,
+             "duration": round(played, 3),
+             "trimmed": bool(cuts) or segments is not None,
+             "music": bool(music_arg),
+             "kinds": ({k: sum(1 for s in segments if s["kind"] == k)
+                        for k in ("video", "still", "slug")}
+                       if segments is not None else None),
+             "unreadable": unreadable}
+    # WHAT THE LIMITER DID, MEASURED. It is the one gain in this graph that is
+    # not a value in the document, because it acts on the sum of two signals
+    # and nothing outside ffmpeg has those samples — so instead of a preview
+    # pretending to apply it, the render reports it. A peak sitting above the
+    # soft-clip knee is the knee working: tanh only pushes a sample past the
+    # threshold when it was already over it.
+    if music_arg and str(music_arg.get("mode") or "") == "under":
+        peak = _sb_audio_peak(out_path)
+        if peak is not None:
+            facts["mix_peak"] = round(peak, 4)
+            facts["mix_ceiling"] = round(_sb_mix_ceiling(), 4)
+            facts["mix_limited"] = bool(peak > _sb_mix_ceiling() + 1e-4)
+    # What the assembler already knows, written down beside the film. Without
+    # it the only way to answer "how long is this film" is an ffprobe, and the
+    # board list asks that question every two seconds.
+    _sb_write_film_sidecar(out_path, facts)
+    return facts
+
+
+def _sb_audio_peak(path) -> float | None:
+    """The finished film's true peak, LINEAR, or None when it cannot be had.
+
+    `volumedetect` reports dBFS; the mix works in linear 0..1 because that is
+    what `volume` and `asoftclip` take, so the conversion happens here and the
+    rest of the panel never sees two units for one quantity. Best-effort by
+    construction: a peak nobody could measure must not fail a film that
+    rendered perfectly well.
+    """
+    try:
+        res = subprocess.run(
+            [FFMPEG, "-v", "info", "-nostdin", "-i", str(path),
+             "-map", "0:a:0", "-af", "volumedetect", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=120, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"max_volume:\s*(-?\d+(?:\.\d+)?)\s*dB",
+                  (res.stderr or "") + (res.stdout or ""))
+    if not m:
+        return None
+    try:
+        return float(10.0 ** (float(m.group(1)) / 20.0))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _sb_plan_auto_edit(clips: list, *, music=None,
+                       target_seconds: float | None = None,
+                       min_shot: float = 1.5,
+                       max_shot: float | None = None) -> tuple[list | None, str]:
+    """Ask `storyboard_edit` for a cut plan → (plan, one-line summary).
+
+    Imported HERE rather than at module scope, and behind a try, for two
+    reasons: the panel must still boot on an install whose `storyboard_edit.py`
+    is missing or broken, and nothing in the default export path should pay for
+    an import it will not use. A failure is (None, "why") — the export then
+    assembles whole clips exactly as it always did.
+    """
+    try:
+        import storyboard_edit as sedit                              # noqa: PLC0415
+    except Exception as exc:                                         # noqa: BLE001
+        return None, f"auto-edit unavailable ({type(exc).__name__}: {exc})"
+    try:
+        plan = sedit.plan_cut([str(c) for c in clips], audio=music,
+                              target_seconds=target_seconds,
+                              min_shot=min_shot, max_shot=max_shot)
+    except Exception as exc:                                         # noqa: BLE001
+        return None, f"auto-edit failed ({type(exc).__name__}: {exc})"
+    if not plan:
+        return None, "auto-edit produced no plan"
+    snapped = sum(1 for p in plan if p["snap"]["kind"] != "none")
+    return plan, (f"auto-edit: {len(plan)} shots, "
+                  f"{sedit.plan_total(plan):g} s, {snapped}/{len(plan)} cuts "
+                  f"on the grid")
+
+
+def _sb_film_name(board: dict) -> str:
+    """ONE film per board, one name.
+
+    Export wrote `<slug>_film.mp4` and the timeline's render wrote
+    `<slug>_timeline.mp4`, into the same folder, from the same assembler — so
+    one board produced two films of the same movie and the Film screen could
+    only tell them apart by a chip that said which button you had pressed.
+    That is the whole of the 2026-08-17 "two films in one folder" finding.
+    """
+    return f"{_sb_slug(board.get('title') or 'storyboard', 6)}_film.mp4"
+
+
+def _sbe_render_edit(board: dict, edit: dict, *, music=None,
+                     music_mode: str | None = None,
+                     out_name: str | None = None) -> dict:
+    """Assemble the film the TIMELINE describes. The one assembler.
+
+    Both doors come here now: the Editor's Render, and Export whenever the
+    board has an edit.json. The alternative — Export running its own second
+    auto-editor over its own copies — meant the same board rendered two
+    different films depending on which button was nearer.
+    """
+    sedit = _sbe_import()
+    cuts = sedit.edit_to_cuts(edit)
+    if not cuts:
+        # `status` rides along so the HTTP seam can keep telling a bad request
+        # apart from a failed encode. A caller that ignores it loses nothing.
+        return {"ok": False, "error": "the timeline is empty", "status": 400}
+    audio = edit.get("audio") or {}
+    music = music or audio.get("path") or None
+    if music and not Path(str(music)).is_file():
+        return {"ok": False, "error": f"no soundtrack at {music}",
+                "status": 400}
+    # The soundtrack's three numbers, from the one function that owns them —
+    # so the render, the NLE export and the waveform on screen cannot disagree
+    # about where the music starts.
+    win = sedit.music_window(audio)
+    dest = _sb_film_dir(board)
+    dest.mkdir(parents=True, exist_ok=True)
+    name = out_name or _sb_film_name(board)
+    gaps = sedit.edit_gaps(edit)
+    kinds = {}
+    for c in cuts:
+        kinds[str(c.get("kind") or "video")] = kinds.get(
+            str(c.get("kind") or "video"), 0) + 1
+    push(f"[timeline] rendering {len(cuts)} clip(s) → {name}"
+         + (f" ({kinds.get('still', 0)} still, {kinds.get('slug', 0)} black)"
+            if (kinds.get("still") or kinds.get("slug")) else ""))
+    # `under` keeps the clips' own audio and ducks the bed beneath it. It is
+    # the right default for anything with a voice in it, but `replace` stays
+    # the default HERE because a beat-cut music video wants the track and
+    # nothing else, and that is what this path has always done.
+    mmode = str(music_mode or audio.get("mode") or "replace").lower()
+    # `timeline=` rather than `clips=` + `plan=`: the cut list is the film now,
+    # kinds and all. A slug has no path, so it could never have appeared in the
+    # `clips` argument, and a still's `-i` needs `-loop 1 -t` in front of it —
+    # neither is expressible in a list of filenames.
+    # THE MIX, FROM THE DOCUMENT. One curve — the bed fader, whatever envelope
+    # the user drew, and the auto-duck if it is on and nothing outranks it —
+    # resolved by the model, so the file that comes out plays what the Editor
+    # played. Nothing about the level is decided in this function or below it.
+    film = _sb_assemble_film(
+        [c["path"] for c in cuts if c.get("path")], dest / name,
+        timeline=cuts, music=music, music_start=win["start"],
+        music_end=win["end"], music_delay=win["delay"], music_mode=mmode,
+        music_gain=sedit.bed_render_gain(edit),
+        overlays=sedit.overlay_items(edit))
+    film["gaps"] = gaps
+    if gaps:
+        # An honest limitation, disclosed rather than discovered: this
+        # assembler concatenates, so a hole in the timeline closes and
+        # everything after it slides earlier — off the beat it was cut to.
+        film["gaps_note"] = (
+            f"{len(gaps)} gap(s) totalling "
+            f"{sum(g['duration'] for g in gaps):.2f}s were closed by the "
+            f"concatenation — the film is that much shorter than the "
+            f"timeline.")
+    film["timeline_duration"] = sedit.edit_duration(edit)
+    return film
+
+
+def _sb_export(board: dict, *, auto_edit: bool = False, music=None,
+               music_mode: str | None = None,
+               target_seconds: float | None = None,
+               min_shot: float = 1.5,
+               max_shot: float | None = None) -> dict:
+    """A folder, a manifest, and ONE playable film.
+
+    ONE ASSEMBLER (2026-08-17). When the board has an `edit.json` — i.e. the
+    user has been in the Editor — the film is the CUT, rendered by the same
+    path the Editor's Render button uses, under the same name. Export used to
+    ignore the timeline entirely and run a second auto-editor over its own
+    copies, so a board that had been cut produced two differently-named films
+    from one folder and neither the screen nor the file said which was the
+    real one. The folder and the manifest are unchanged; only who assembles
+    the film changed.
+
+    Clips are COPIED, never moved — the gallery keeps them — and the film is
+    built from those copies, so the sources are read-only throughout.
+
+    Assembly is best-effort by design: if ffmpeg is missing, wedged, or refuses
+    the cut, the folder and the shot list still land and the return payload and
+    the markdown both say so in plain words.
+
+    `auto_edit` is OFF by default and the only thing that turns it on. With it,
+    `storyboard_edit` chooses the best window inside each shot and lands the
+    cuts on the soundtrack's beat; without it the film is the whole-clip
+    concatenation it has always been. An auto-edit that cannot run is a note in
+    the manifest, never a failed export.
+    """
+    title = board.get("title") or "storyboard"
+    dest = _sb_film_dir(board)
     dest.mkdir(parents=True, exist_ok=True)
     rows, cut, files = [], [], []
+    cut_list: list = []                      # the copies, in `n` order
     for s in sorted((board.get("shots") or []), key=lambda x: x.get("n") or 0):
         if not isinstance(s, dict):
             continue
@@ -13886,6 +15821,11 @@ def _sb_export(board: dict) -> dict:
             push(f"[storyboard] could not copy shot {n}: {exc}")
             continue
         files.append(name)
+        # ONE list, built by the loop that already made the include/exclude
+        # decision. The film is assembled from these exact copies, in this
+        # exact order, so "what is in the folder" and "what is in the film"
+        # can never drift apart.
+        cut_list.append(dest / name)
         rows.append(f"| {n:02d} | {name} | {s.get('duration_s')} s | "
                     f"{s.get('seed')} | {which} | "
                     f"{(s.get('prompt') or '')[:90].replace('|', '/')}… |")
@@ -13895,18 +15835,827 @@ def _sb_export(board: dict) -> dict:
                   if isinstance(s, dict) and s.get("status") != "skipped")
     cast = ", ".join(sorted({str(s.get("character_id")) for s in (board.get("shots") or [])
                              if isinstance(s, dict) and s.get("character_id")})) or "none"
+    # ---- the film -------------------------------------------------------
+    # Assembled from the copies above, so a failure here cannot touch a source
+    # clip, and cannot stop the folder + manifest from being written.
+    film_name = _sb_film_name(board)
+    film: dict = {"ok": False, "error": "no shots to assemble"}
+    plan = None
+    edit_note = ""
+    # THE TIMELINE WINS. An arrangement a human made outranks anything this
+    # function could derive from the shot list, and rendering the shot list
+    # instead is how "Export" and "Render the timeline" came to mean two
+    # different films.
+    sedit_edit = None
+    try:
+        sedit_edit = _sbe_import().load_edit(_sbe_board_dir(board.get("id") or ""))
+    except Exception:                                              # noqa: BLE001
+        sedit_edit = None
+    if sedit_edit and (sedit_edit.get("clips") or []):
+        try:
+            film = _sbe_render_edit(board, sedit_edit, music=music,
+                                    music_mode=music_mode,
+                                    out_name=film_name)
+        except Exception as exc:                                   # noqa: BLE001
+            film = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        edit_note = "assembled from the timeline in the Editor"
+        push(f"[storyboard] {edit_note} → {film_name}")
+    elif cut_list and auto_edit:
+        plan, edit_note = _sb_plan_auto_edit(
+            cut_list, music=music, target_seconds=target_seconds,
+            min_shot=min_shot, max_shot=max_shot)
+        push(f"[storyboard] {edit_note}")
+    if cut_list and not (sedit_edit and (sedit_edit.get("clips") or [])):
+        push(f"[storyboard] assembling {len(cut_list)} shot(s) into "
+             f"{film_name} — mixed sizes are normalised, this re-encodes")
+        try:
+            # The default call is the call that always was — same arguments,
+            # same argv, same bytes out. The auto-edit only ever ADDS kwargs,
+            # and only when it actually produced a plan.
+            if plan:
+                film = _sb_assemble_film(cut_list, dest / film_name,
+                                         plan=plan, music=music)
+            else:
+                film = _sb_assemble_film(cut_list, dest / film_name)
+        except Exception as exc:                                   # noqa: BLE001
+            film = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    if film.get("ok"):
+        push(f"[storyboard] film ready → {film_name} "
+             f"({film['clips']} shots, {film['width']}×{film['height']}, "
+             f"{film['duration']:g} s)")
+        film_md = (f"**Film:** [`{film_name}`]({film_name}) — {film['clips']} "
+                   f"shots joined, {film['width']}×{film['height']} @ {FPS} fps, "
+                   f"{film['duration']:g} s.")
+        if film.get("unreadable"):
+            film_md += (" Left out of the cut (unreadable): "
+                        + ", ".join(f"`{u}`" for u in film["unreadable"]) + ".")
+        if sedit_edit and (sedit_edit.get("clips") or []):
+            film_md += (f" Assembled from the timeline in the Editor "
+                        f"({len(sedit_edit.get('clips') or [])} clips) — the "
+                        f"same file that button renders, under the same name.")
+        elif plan:
+            snapped = sum(1 for p in plan if p["snap"]["kind"] != "none")
+            film_md += (f" Auto-edited: each shot trimmed to its best window, "
+                        f"{snapped} of {len(plan)} cuts landed on the beat.")
+        elif auto_edit and edit_note:
+            film_md += f" Whole clips — {edit_note}."
+    else:
+        push(f"[storyboard] film not assembled: {film.get('error')} — "
+             f"the folder and the shot list are complete")
+        film_md = (f"**Film:** not assembled — {film.get('error')}. "
+                   f"The clips above and this list are complete; re-run Export "
+                   f"to try the assembly again.")
+
     md = [f"# {title}", "",
           f"{len(board.get('shots') or [])} shots planned · {delivered} delivered · "
           f"{round(runtime)} s", "",
-          f"Rendered with Phosphene {_read_local_version() or 'dev'} · character: {cast}", "",
+          f"Rendered with Phosphene {running_version()} · character: {cast}", "",
+          film_md, "",
           "| # | file | length | seed | pass | prompt |",
           "|---|---|---|---|---|---|"] + rows
+    if plan:
+        # The edit, in the manifest, in the same place the shot list is — so
+        # "why is shot 3 only four seconds and why does it start at 0.86" is
+        # answerable without re-running anything.
+        md += ["", "## The edit", "",
+               "| # | file | window | length | at | cut on | shift |",
+               "|---|---|---|---|---|---|---|"]
+        for p in plan:
+            md.append(f"| {p['n']:02d} | {Path(p['path']).name} | "
+                      f"{p['start']:.2f}–{p['end']:.2f} s | "
+                      f"{p['duration']:.3f} s | {p['film_start']:.3f} s | "
+                      f"{p['snap']['kind']} | "
+                      f"{p['snap']['shift_ms']:+.0f} ms |")
+        md += [""] + [f"- **S{p['n']:02d}** — {p['window']['reason']}"
+                      for p in plan]
     if cut:
         md += ["", "## Cut", ""] + cut
     (dest / "storyboard.md").write_text("\n".join(md) + "\n", encoding="utf-8")
     (dest / "storyboard.json").write_text(
         json.dumps(board, indent=2, ensure_ascii=False), encoding="utf-8")
-    return {"ok": True, "dir": str(dest), "files": files}
+    if plan:
+        (dest / "storyboard_edit.json").write_text(
+            json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8")
+    return {"ok": True, "dir": str(dest), "files": files,
+            "film": film.get("path") if film.get("ok") else None,
+            "film_name": film_name if film.get("ok") else None,
+            "film_error": None if film.get("ok") else str(film.get("error") or ""),
+            "film_duration": film.get("duration") if film.get("ok") else None,
+            "auto_edit": bool(plan),
+            "auto_edit_note": edit_note or None}
+
+
+# ===========================================================================
+# THE FILMS A BOARD HAS PRODUCED
+# ===========================================================================
+# Both assemblies — Export's whole-clip join and the timeline's render — write
+# an mp4 into `_sb_film_dir(board)` and then said nothing about it. The panel's
+# gallery could not help either: `list_outputs` globs `OUTPUT/*.mp4` and never
+# descends, so the finished film was the one thing the app made that the app
+# could not show you. Everything below exists to answer one question the owner
+# asked out loud — "where is the finalized clip?".
+
+# A shot copy is `S07_the-empty-hall.mp4`; anything else ending in .mp4 in that
+# folder is a film. That is the export's own naming, so a film can never be
+# mistaken for one of its own shots.
+_SB_SHOT_COPY_RE = re.compile(r"^S\d+_")
+
+_SB_FILM_FACTS: dict = {}          # (path, mtime, size) -> probed facts
+
+
+def _sb_film_sidecar(path) -> Path:
+    p = Path(str(path))
+    return p.with_name(p.name + ".json")
+
+
+def _sb_write_film_sidecar(path, facts: dict) -> None:
+    """Best-effort, and silent when it fails: a missing sidecar costs one
+    ffprobe, never a film."""
+    try:
+        _sb_film_sidecar(path).write_text(json.dumps({
+            "film": {k: facts.get(k) for k in
+                     ("clips", "width", "height", "duration", "sample_rate",
+                      "trimmed", "music")},
+            "created_at": time.time(),
+            "phosphene": running_version(),
+        }, indent=2), encoding="utf-8")
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def _sb_sidecar_is_current(side: Path, film_stat) -> bool:
+    """Was this sidecar written for the film that is there NOW?
+
+    A one-second slack because the sidecar is written immediately AFTER the
+    mp4 and both timestamps come from the same second's worth of syscalls;
+    anything genuinely stale is stale by minutes.
+    """
+    try:
+        return side.stat().st_mtime >= film_stat.st_mtime - 1.0
+    except OSError:
+        return False
+
+
+def _sb_film_facts(path: Path, *, probe: bool = True) -> dict:
+    """Duration and geometry for one film. Sidecar first, ffprobe once.
+
+    `probe=False` is the polling path: the board list wants to say "this one
+    has a film" every two seconds and must not shell out to do it.
+    """
+    facts = {"duration": None, "width": None, "height": None, "clips": None}
+    try:
+        st = path.stat()
+    except OSError:
+        return facts
+    key = (str(path), int(st.st_mtime), st.st_size)
+    hit = _SB_FILM_FACTS.get(key)
+    if hit is not None:
+        return dict(hit)
+    side = _sb_film_sidecar(path)
+    # A SIDECAR OLDER THAN ITS FILM IS A CACHE THAT OUTLIVED ITS SUBJECT —
+    # the same rule the peaks lane already follows ("a cache that outlives its
+    # subject is the music strip reading 44.99s under a different file"). One
+    # film per board and one name for it means every re-render lands on the
+    # same path, so a sidecar that was not rewritten describes a film that is
+    # no longer there. Cheap: a stat that was already taken.
+    if side.is_file() and _sb_sidecar_is_current(side, st):
+        try:
+            doc = json.loads(side.read_text(encoding="utf-8"))
+            f = doc.get("film") if isinstance(doc, dict) else None
+            if isinstance(f, dict):
+                for k in facts:
+                    if f.get(k) is not None:
+                        facts[k] = f[k]
+        except (OSError, ValueError):
+            pass
+    if probe and facts["duration"] is None:
+        info = _sb_probe_clip(path)
+        if info:
+            facts["duration"] = round(float(info["duration"]), 3)
+            facts["width"] = info["w"]
+            facts["height"] = info["h"]
+            # Films assembled before sidecars existed get one now, so the board
+            # list can say how long they are without shelling out. Same idiom
+            # as the thumbnail cache: a derived file beside the source.
+            _sb_write_film_sidecar(path, facts)
+    if facts["duration"] is not None:
+        _SB_FILM_FACTS[key] = dict(facts)
+    return facts
+
+
+def _sb_films(board: dict, *, probe: bool = True) -> list[dict]:
+    """Every finished film this board has produced, newest first."""
+    d = _sb_film_dir(board)
+    out: list[dict] = []
+    try:
+        entries = sorted(d.iterdir())
+    except OSError:
+        return out
+    for p in entries:
+        if p.suffix.lower() != ".mp4" or _SB_SHOT_COPY_RE.match(p.name):
+            continue
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        row = {
+            "name": p.name,
+            "path": str(p),
+            # `&v=<mtime>` — THE SAME CACHE BUST `list_outputs` HAS CARRIED
+            # SINCE Y1.039, and this list never got it. It matters more here
+            # than anywhere: there is exactly ONE film per board and one name
+            # for it (`_sb_film_name`), so every re-render replaces the bytes
+            # behind a URL that does not change by one character. The `<video>`
+            # on the Film screen is built from this string, and a media element
+            # asked for a URL it already has will happily play what it already
+            # holds. "The sound issues are still there. Maybe it's caching, I
+            # don't know." — the answer to which was yes, it can be.
+            "url": f"/file?path={quote(str(p))}&v={int(st.st_mtime)}",
+            "bytes": st.st_size,
+            "at": st.st_mtime,
+            # There is ONE assembler now, and one name, so a new `_film.mp4`
+            # is just "the film" — labelling it "Export" would name a button
+            # that no longer decides anything. `_timeline.mp4` is kept as a
+            # legacy label: those files were written before the merge and the
+            # screen should not pretend they were not.
+            "kind": ("timeline" if p.stem.endswith("_timeline") else "film"),
+        }
+        row.update(_sb_film_facts(p, probe=probe))
+        out.append(row)
+    out.sort(key=lambda r: r.get("at") or 0, reverse=True)
+    return out
+
+
+def _sb_film_summary(board: dict) -> dict | None:
+    """The newest film, cheap enough for a two-second poll.
+
+    One directory read, one stat, and whatever the assembler wrote down. Never
+    an ffprobe — a board list that shells out is a board list that stutters.
+    """
+    try:
+        films = _sb_films(board, probe=False)
+    except Exception:                                              # noqa: BLE001
+        return None
+    if not films:
+        return None
+    f = films[0]
+    return {"name": f["name"], "at": f["at"], "bytes": f["bytes"],
+            "duration": f["duration"], "kind": f["kind"], "count": len(films)}
+
+
+# ===========================================================================
+# THE TIMELINE EDITOR — proxies, peaks, edit.json, and the endpoints for them
+# ===========================================================================
+# The measurement this whole section is built around: OUR RENDERED CLIPS
+# CONTAIN EXACTLY ONE KEYFRAME. The entire clip is a single GOP, because that
+# is what the encoder writes for a 5 s clip at these settings, and nothing ever
+# needed otherwise — the gallery plays clips from the start.
+#
+# A timeline does not play from the start. It seeks, constantly, and a seek
+# into a single-GOP file decodes from frame zero. Measured in Chrome on this
+# corpus: 235 ms median, 1266 ms p90 per seek. Against an all-intra proxy the
+# same seek is 3.5 ms — two orders of magnitude, and the difference between a
+# scrub and a slideshow.
+#
+# What that costs, measured on ten AURELIUS clips (56.25 s of 1024x576, 25.7 MB
+# of source): 0.81 s of ffmpeg for all ten, 8.16 MB of proxy — 0.14 s and
+# 1.45 MB per 10 s of video. Verified all-intra: 123 keyframes in a 123-frame
+# proxy, against 1 in its source.
+#
+# So proxies are not an optimisation to add later. They are the floor the
+# feature stands on, which is why `prepare` builds them before the UI is
+# allowed to believe it has a timeline.
+#
+# `storyboard_editor.py` owns the formats and the file writes (and stays
+# importable without the panel). Everything here is the part that needs the
+# panel: the queue, the process group, the log pane, the HTTP seam.
+
+_SBE_LOCK = threading.Lock()
+_SBE_JOBS: dict = {}                 # board_id -> prepare job state
+
+
+def _sbe_import():
+    """`storyboard_editor`, imported late and behind a try.
+
+    Same rule as `_sb_plan_auto_edit`: the panel must boot on an install whose
+    editor module is missing or broken, and the storyboard tab must keep
+    working when it is. A failure here is a 503 on the editor routes, never a
+    dead panel.
+    """
+    import storyboard_editor as sedit                                # noqa: PLC0415
+    return sedit
+
+
+def _sbe_board_dir(board_id: str) -> Path:
+    return storyboard.board_dir(STATE_DIR, board_id)
+
+
+def _sbe_board_clips(board: dict) -> list[dict]:
+    """The shots that HAVE a rendered file, in `n` order.
+
+    Exactly the selection `_sb_export` makes — delivery beats draft, skipped
+    shots are out, a shot whose file is gone is out — because a timeline built
+    from a different selection than the export's would show the user a film
+    they cannot render.
+    """
+    out: list[dict] = []
+    for s in sorted((board.get("shots") or []), key=lambda x: x.get("n") or 0):
+        if not isinstance(s, dict) or s.get("status") == "skipped":
+            continue
+        src = s.get("final_output") or s.get("draft_output")
+        if not src or not Path(str(src)).is_file():
+            continue
+        out.append({
+            "n": s.get("n"),
+            "path": str(src),
+            "title": (s.get("title") or s.get("prompt") or "")[:80],
+            "pass": "delivery" if s.get("final_output") else "draft",
+            "duration_s": s.get("duration_s"),
+            # Where the person who ordered this shot wanted it to land. Set by
+            # `edit/generate`; the client uses it to drop a freshly rendered
+            # clip into the hole it was generated for instead of at the end.
+            "slot": s.get("edit_slot"),
+        })
+    return out
+
+
+def _sbe_job_state(board_id: str) -> dict:
+    with _SBE_LOCK:
+        job = _SBE_JOBS.get(board_id)
+        return dict(job) if job else {}
+
+
+def _sbe_set(board_id: str, **kw) -> None:
+    with _SBE_LOCK:
+        job = _SBE_JOBS.get(board_id)
+        if job is not None:
+            job.update(kw)
+
+
+def _sbe_cancelled(board_id: str) -> bool:
+    with _SBE_LOCK:
+        return bool((_SBE_JOBS.get(board_id) or {}).get("cancel"))
+
+
+def _sbe_prepare_thread(board_id: str, music: str | None,
+                        target_seconds: float | None) -> None:
+    """Build the proxies, the peaks and the beat grid for one board.
+
+    Ordered deliberately: proxies FIRST, because they are what the timeline
+    cannot open without, and each one that lands is immediately usable — the
+    progress this reports is real progress, not a spinner. Peaks and beats are
+    one decode of the soundtrack each and land at the end.
+
+    Cancellation is checked between clips. One proxy is ~0.22 s, so `cancel`
+    is honoured within about a fifth of a second, and the panel's own /stop
+    still kills an ffmpeg in flight because every proxy runs through
+    `run_ffmpeg_tracked` — the same tracked process group as every other
+    post-process here. Nothing gets a private subprocess path.
+    """
+    try:
+        _sbe_prepare_inner(board_id, music, target_seconds)
+    except Exception as exc:                                        # noqa: BLE001
+        # A prepare that dies must leave a job the client can SEE die. A
+        # thread that vanishes leaves "running" on the poll forever, which
+        # reads as a hang and is the worst of the possible failures.
+        push(f"[timeline] prepare failed: {exc}")
+        _sbe_set(board_id, state="failed", error=str(exc), stage=None,
+                 finished_at=time.time())
+
+
+def _sbe_prepare_inner(board_id: str, music: str | None,
+                       target_seconds: float | None) -> None:
+    sedit = _sbe_import()
+    board = storyboard.load_storyboard(STATE_DIR, board_id)
+    bdir = _sbe_board_dir(board_id)
+    clips = _sbe_board_clips(board)
+    # PROXIES FOLLOW THE TIMELINE, NOT JUST THE BOARD. plan_proxies prunes
+    # anything not in `clips`, and the timeline may legally hold clips that are
+    # not live board shots — imported ones, and clips whose shot was later
+    # re-rolled. Feeding it board shots alone made Prepare DELETE the proxies
+    # of exactly the clips the user just imported, so every import scrubbed at
+    # source speed again after the next Prepare. (2026-08-17 review, live bug.)
+    try:
+        _edit = sedit.load_edit(bdir) or {}
+        _have = {c["path"] for c in clips}
+        for _c in (_edit.get("clips") or []):
+            # A STILL AND A SLUG ARE NOT PROXY WORK. The slug has no file; the
+            # still is one frame the browser paints from an <img>, so an
+            # all-intra proxy of it would be an mp4 nothing ever plays — built
+            # every Prepare, and counted as "wanted" so the prune has to keep
+            # it forever.
+            if sedit.clip_kind(_c) != "video":
+                continue
+            _p = str(_c.get("path") or "")
+            if _p and _p not in _have and Path(_p).is_file():
+                clips.append({"path": _p, "title": _c.get("title") or ""})
+                _have.add(_p)
+    except Exception:                                                # noqa: BLE001
+        pass
+    plan = sedit.plan_proxies(clips, bdir)
+    plan["dir"].mkdir(parents=True, exist_ok=True)
+    total = len(plan["build"])
+    _sbe_set(board_id, state="running", stage="proxies", done=0, total=total,
+             reused=len(plan["reuse"]), built=0, failed=[],
+             clips=len(clips))
+    t0 = time.time()
+    built = 0
+    failed: list[dict] = []
+    for i, row in enumerate(plan["build"]):
+        if _sbe_cancelled(board_id):
+            _sbe_set(board_id, state="cancelled", stage=None,
+                     finished_at=time.time())
+            return
+        _sbe_set(board_id, stage="proxies", done=i,
+                 current=Path(row["path"]).name)
+        try:
+            run_ffmpeg_tracked(
+                sedit.proxy_cmd(FFMPEG, row["path"], row["proxy"]),
+                "Timeline proxy")
+            built += 1
+        except Exception as exc:                                    # noqa: BLE001
+            # One unreadable clip must not cost the other eleven their
+            # timeline. Record it and keep going; the edit will carry a null
+            # proxy for that clip and the UI can show it as un-scrubbable.
+            failed.append({"path": row["path"], "error": str(exc)})
+            try:
+                Path(row["proxy"]).unlink()
+            except OSError:
+                pass
+    freed = sedit.prune_proxies(plan["stale"])
+    proxy_secs = round(time.time() - t0, 3)
+    _sbe_set(board_id, done=total, built=built, failed=failed,
+             pruned=freed, proxy_seconds=proxy_secs)
+    if built or plan["reuse"]:
+        push(f"[timeline] {built} proxy(s) built in {proxy_secs:g}s, "
+             f"{len(plan['reuse'])} reused, {freed} stale removed")
+
+    # ---- the soundtrack: peaks, then the grid ---------------------------
+    peaks_info = None
+    beats_info = None
+    # TWO errors, not one. The waveform and the beat grid are independent
+    # decodes with independent failure modes, and folding them into a single
+    # `music_error` meant the second one overwrote the first — so a track that
+    # failed both reported only the tracker, and a UI could not tell the user
+    # which half of the soundtrack it actually lost.
+    peaks_err = None
+    beats_err = None
+    if music and Path(str(music)).is_file():
+        if _sbe_cancelled(board_id):
+            _sbe_set(board_id, state="cancelled", finished_at=time.time())
+            return
+        _sbe_set(board_id, stage="peaks")
+        t1 = time.time()
+        try:
+            peaks = sedit.compute_peaks(music)
+            sedit.save_peaks(bdir, peaks)
+            peaks_info = {"count": peaks["count"],
+                          "duration": peaks["duration"],
+                          "buckets_per_second": peaks["buckets_per_second"],
+                          "bytes": sedit.peaks_path(bdir).stat().st_size,
+                          "seconds": round(time.time() - t1, 3)}
+            push(f"[timeline] waveform: {peaks['count']} buckets, "
+                 f"{peaks_info['bytes'] / 1024:.0f} KB, "
+                 f"{peaks_info['seconds']:g}s")
+        except Exception as exc:                                    # noqa: BLE001
+            peaks_err = f"waveform failed: {exc}"
+        if not _sbe_cancelled(board_id):
+            _sbe_set(board_id, stage="beats")
+            try:
+                import storyboard_edit as _se                        # noqa: PLC0415
+                span = _se.audio_span_for(
+                    target_seconds or sum(
+                        float(c.get("duration_s") or 0) for c in clips) or None)
+                beats_info = _se.beat_map(music, span=span)
+            except Exception as exc:                                # noqa: BLE001
+                beats_err = f"beat tracking failed: {exc}"
+    _sbe_set(board_id, state="done", stage=None, finished_at=time.time(),
+             peaks=peaks_info, peaks_error=peaks_err,
+             beats_error=beats_err,
+             music_error="; ".join(x for x in (peaks_err, beats_err) if x)
+             or None,
+             beats={"bpm": beats_info.get("bpm"),
+                    "confidence": beats_info.get("confidence"),
+                    "n_beats": len(beats_info.get("beats") or [])}
+             if beats_info else None)
+
+    # The prepared analysis is cached beside the board so `GET /storyboard/edit`
+    # can auto-generate an edit without re-running any of it.
+    try:
+        cache = {"music": str(music) if music else None,
+                 "beats": beats_info, "built_at": int(time.time())}
+        (bdir / "edit_prepare.json").write_text(
+            json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _sbe_prepare_cache(board_dir: Path) -> dict:
+    try:
+        data = json.loads((board_dir / "edit_prepare.json").read_text(
+            encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _sbe_proxy_map(board_dir: Path, clips: list[dict], sedit) -> dict:
+    """{source path: "proxy/<name>.mp4"} for the proxies that EXIST.
+
+    Relative, because the client fetches it by name from
+    `/storyboard/edit/proxy` and an absolute path there would be a file
+    browser for the whole disk. Missing proxies are simply absent, so a clip
+    with no proxy carries `null` and the UI can say so instead of showing a
+    broken player.
+    """
+    out: dict[str, str] = {}
+    d = sedit.proxy_dir(board_dir)
+    for c in clips:
+        name = sedit.proxy_name(c["path"])
+        if (d / name).is_file():
+            out[c["path"]] = f"proxy/{name}"
+    return out
+
+
+def _sbe_accept_upload(filename: str, data: bytes, *,
+                       images: set, videos: set) -> dict:
+    """One uploaded file → a pool row, or an honest refusal.
+
+    WHERE THE BYTES LAND IS THE WHOLE DESIGN:
+
+    * a PICTURE goes into `UPLOADS/library/manual/<date>/uploads/`, which
+      `list_outputs` already walks — so it turns up in the Images source on the
+      next refresh and STAYS there across restarts, with no second listing to
+      keep in sync with the first;
+    * a CLIP goes into `UPLOADS/timeline/`, listed by
+      `GET /storyboard/edit/uploads`. NOT into OUTPUT: the gallery scans
+      `OUTPUT/*.mp4`, and dropping somebody's phone clip in among the renders
+      would put a file the panel never made into the one folder whose whole
+      meaning is "the panel made this".
+
+    Both roots are already inside `_sbe_pool_path_ok`, which is what makes an
+    uploaded file addable by exactly the rule everything else is.
+
+    THE FILE IS PROBED BEFORE THIS ANSWERS. A .png that is not a png would
+    otherwise sit in the pool looking perfectly fine and fail at the render
+    hours later, with the upload long forgotten — so it is opened here, while
+    there is still a filename on screen to blame.
+    """
+    raw = Path(str(filename or "")).name
+    suffix = Path(raw).suffix.lower()
+    if suffix in images:
+        kind = "still"
+        dest_dir = (UPLOADS / "library" / "manual"
+                    / time.strftime("%Y%m%d") / "uploads")
+    elif suffix in videos:
+        kind = "video"
+        dest_dir = UPLOADS / "timeline"
+    else:
+        return {"ok": False, "status": 400,
+                "error": f"{suffix or 'that file'} is not a picture or a clip "
+                         f"this panel can read"}
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", raw) or ("file" + suffix)
+    dest = dest_dir / f"{int(time.time() * 1000)}_{safe}"
+    dest.write_bytes(data or b"")
+    info = (_sb_probe_still(str(dest)) if kind == "still"
+            else _sb_probe_clip(str(dest)))
+    if not info:
+        try:
+            dest.unlink()
+        except OSError:
+            pass
+        return {"ok": False, "status": 400,
+                "error": f"{raw} is not a "
+                         f"{'picture' if kind == 'still' else 'clip'} this "
+                         f"panel can read"}
+    push(f"[timeline] uploaded {dest.name} ({kind})")
+    return {"ok": True, "path": str(dest), "kind": kind,
+            "title": Path(raw).stem[:80],
+            "w": info.get("w"), "h": info.get("h"),
+            "duration_s": (round(float(info.get("duration") or 0), 3)
+                           if kind == "video" else None)}
+
+
+def _sbe_pool_path_ok(path: str) -> bool:
+    """Is this a file the Editor is allowed to put on a timeline?
+
+    The pool draws from three places and all three are the panel's own: the
+    outputs gallery (OUTPUT), the boards' folders (STATE_DIR), and — since
+    stills — the image library (UPLOADS/library/manual, where the image queue
+    worker drops every render). Anything else — a path typed into a request, a
+    symlink out of the tree — is refused here rather than at the ffmpeg that
+    would otherwise read it. Resolved first, so `..` cannot walk out of any
+    root.
+
+    UPLOADS is the same root `/image` already serves from, which is what makes
+    a still previewable and addable by the same rule.
+    """
+    try:
+        target = Path(str(path)).resolve()
+    except OSError:
+        return False
+    if not target.is_file():
+        return False
+    for root in (OUTPUT, STATE_DIR, UPLOADS):
+        try:
+            if target.is_relative_to(Path(root).resolve()):
+                return True
+        except OSError:                                             # noqa: PERF203
+            continue
+    return False
+
+
+def _sbe_proxy_now(board_dir: Path, paths: list[str], sedit) -> dict:
+    """Build proxies for EXACTLY these paths, and prune nothing.
+
+    The Prepare job is the wrong tool for one clip: it re-plans the whole
+    board, and its `stale` set would delete the proxies of everything the
+    timeline holds that the board does not. This is the scoped version — the
+    same `proxy_cmd`, the same tracked process group, one clip at a time, and
+    `plan_proxies`' own reuse check so a clip that already has a proxy costs
+    nothing.
+
+    Synchronous on purpose: one proxy is ~0.22 s measured, and a click that
+    lands a scrubbable clip is worth a fifth of a second more than a spinner
+    and a poll.
+    """
+    rows = [{"path": q} for q in paths if q]
+    if not rows:
+        return {"built": 0, "reused": 0, "failed": []}
+    plan = sedit.plan_proxies(rows, board_dir)
+    plan["dir"].mkdir(parents=True, exist_ok=True)
+    built, failed = 0, []
+    for row in plan["build"]:
+        try:
+            run_ffmpeg_tracked(
+                sedit.proxy_cmd(FFMPEG, row["path"], row["proxy"]),
+                "Timeline proxy")
+            built += 1
+        except Exception as exc:                                    # noqa: BLE001
+            failed.append({"path": row["path"], "error": str(exc)})
+            try:
+                Path(row["proxy"]).unlink()
+            except OSError:
+                pass
+    return {"built": built, "reused": len(plan["reuse"]), "failed": failed}
+
+
+def _sbe_auto_edit(board: dict, *, music: str | None = None,
+                   target_seconds: float | None = None,
+                   min_shot: float = 1.5,
+                   max_shot: float | None = None) -> dict:
+    """Derive an `edit.json` from the board with the auto-editor.
+
+    This is the ONLY place an edit is invented. Every other path either reads
+    the file or saves what a human sent, which is what makes "the auto-edit
+    overwrote my arrangement" impossible rather than unlikely.
+    """
+    sedit = _sbe_import()
+    import storyboard_edit as _se                                    # noqa: PLC0415
+    bdir = _sbe_board_dir(board["id"])
+    clips = _sbe_board_clips(board)
+    cache = _sbe_prepare_cache(bdir)
+    music = music or cache.get("music")
+    beats = cache.get("beats") if (music and cache.get("music") == music) else None
+    if not clips:
+        return sedit.edit_from_plan([], board_id=board["id"])
+    audio_arg = beats or (music if music and Path(str(music)).is_file() else None)
+    plan = _se.plan_cut([c["path"] for c in clips], audio=audio_arg,
+                        target_seconds=target_seconds, min_shot=min_shot,
+                        max_shot=max_shot)
+    if beats is None and audio_arg and not isinstance(audio_arg, dict):
+        # plan_cut fitted a grid we did not have cached; recover it for the
+        # timeline rather than making the client ask for it separately.
+        try:
+            beats = _se.beat_map(music, span=_se.audio_span_for(
+                target_seconds or _se.plan_total(plan)))
+        except Exception:                                            # noqa: BLE001
+            beats = None
+    audio = None
+    if music and Path(str(music)).is_file():
+        peaks = sedit.load_peaks(bdir)
+        # The track's length is what a waveform axis is drawn against, so it
+        # must be present whether or not the peaks have been built yet —
+        # otherwise the ruler has no scale until `prepare` finishes.
+        dur = (peaks or {}).get("duration")
+        if dur is None:
+            dur = (_se.probe_media(music) or {}).get("duration")
+        audio = {"path": str(music), "offset": 0.0,
+                 "peaks": "peaks.json" if peaks else None,
+                 "duration": dur}
+    return sedit.edit_from_plan(
+        plan, board_id=board["id"], audio=audio, beats=beats,
+        proxies=_sbe_proxy_map(bdir, clips, sedit),
+        labels={c["path"]: f"S{(c.get('n') or 0):02d} · {c['title']}"
+                for c in clips},
+        settings={"target_seconds": target_seconds, "min_shot": min_shot,
+                  "max_shot": max_shot})
+
+
+def _sbe_relinks(board: dict, edit: dict) -> list[dict]:
+    """Timeline clips still pointing at a draft whose delivery now exists.
+
+    THE LIVE BUG THIS ANSWERS (2026-08-17 review): `_sbe_board_clips` picks
+    delivery over draft, and its docstring says so — but `edit.json` freezes
+    the PATH at the moment the cut was made, and nothing rewrote it. So
+    "Finish keepers" rendered full-size files the film never used: the user
+    waited for a delivery pass and then rendered the drafts again, silently.
+
+    Detection only. The rewrite is one button, never automatic, because the
+    arrangement is the human's — the same rule `_sbe_payload` already states.
+    """
+    finals: dict[str, dict] = {}
+    for s in (board.get("shots") or []):
+        if not isinstance(s, dict):
+            continue
+        draft, final = s.get("draft_output"), s.get("final_output")
+        if not draft or not final or draft == final:
+            continue
+        if not Path(str(final)).is_file():
+            continue
+        finals[str(draft)] = {"to": str(final), "n": s.get("n"),
+                              "title": (s.get("title") or s.get("prompt")
+                                        or "")[:80]}
+    out: list[dict] = []
+    for c in (edit.get("clips") or []):
+        if not isinstance(c, dict):
+            continue
+        hit = finals.get(str(c.get("path") or ""))
+        if hit:
+            out.append({"id": c.get("id"), "path": str(c.get("path")),
+                        **hit})
+    return out
+
+
+def _sbe_payload(board: dict, edit: dict) -> dict:
+    """The editor's read shape. One object, everything a timeline needs."""
+    sedit = _sbe_import()
+    bdir = _sbe_board_dir(board["id"])
+    clips = _sbe_board_clips(board)
+    # Only the clips that ARE a video file can be `placed` for proxy purposes:
+    # a slug has no path at all and a still is painted by an <img>, so putting
+    # either in this set would ask `_sbe_proxy_map` to fingerprint the string
+    # "None".
+    placed = {str(c.get("path")) for c in (edit.get("clips") or [])
+              if isinstance(c, dict) and sedit.clip_kind(c) == "video"
+              and c.get("path")}
+    # THE MAP FOLLOWS THE TIMELINE, NOT JUST THE BOARD — the same rule
+    # `_sbe_prepare_inner` follows when it decides what to build. A timeline
+    # may legally hold clips that are not board shots (anything added from the
+    # media pool, and clips whose shot was later re-rolled), and a map built
+    # from board shots alone answered `null` for exactly those: the proxy was
+    # on disk, freshly built, and the payload said there was none, so the
+    # player fell back to the source and the clip scrubbed at 235 ms a seek.
+    proxies = _sbe_proxy_map(
+        bdir, clips + [{"path": q} for q in sorted(placed)
+                       if q not in {c["path"] for c in clips}], sedit)
+    # Refresh every clip's proxy pointer on the way out: a proxy built after
+    # the edit was saved must not need a re-save to become visible, and one
+    # that was pruned must not leave a dead URL behind.
+    for c in (edit.get("clips") or []):
+        if isinstance(c, dict):
+            c["proxy"] = proxies.get(str(c.get("path")))
+    return {
+        "ok": True,
+        "id": board["id"],
+        "title": board.get("title") or "",
+        # WHICH SESSION OWNS THE SNAPSHOT LANE. Claimed by whoever loaded
+        # last, because that is the tab the person is looking at; an older one
+        # is told rather than merged. See docs/EDITOR_SAVE_MODEL.md §5.
+        "session": sedit.current_session(bdir),
+        "edit": edit,
+        "duration": sedit.edit_duration(edit),
+        "gaps": sedit.edit_gaps(edit),
+        # ...and the same kind of answer for the SOUND: which unlinked strips
+        # no longer line up with their own picture, and where each one goes
+        # back to. Never an error — a J-cut is a deliberate drift — but the
+        # panel cannot flag what the server does not say.
+        "sync": sedit.edit_sync_flags(edit),
+        # Board clips that are NOT on the timeline — a shot rendered after the
+        # edit was saved, or one generated into a gap that has just landed.
+        # Never auto-inserted: the arrangement is the human's, and a server
+        # that quietly appends to it is a server that moves their cuts.
+        "unplaced": [dict(c, proxy=proxies.get(c["path"])) for c in clips
+                     if c["path"] not in placed],
+        # EVERY clip this film has, placed or not, for the media pool. The
+        # pool is a place to browse from, so it shows what is already on the
+        # track as well — marked, so adding it twice is a choice and not an
+        # accident.
+        "clips": [dict(c, proxy=proxies.get(c["path"]),
+                       placed=c["path"] in placed) for c in clips],
+        # Shots finished since this cut was made. See _sbe_relinks.
+        "relink": _sbe_relinks(board, edit),
+        "prepare": _sbe_job_state(board["id"]),
+        # DRAFTS RIDE ON EVERY READ. The panel has to know which document it is
+        # looking at and whether a crash left something newer behind, and both
+        # are cheap enough that a second round trip to learn them would be the
+        # only slow part of opening a film.
+        "drafts": sedit.list_drafts(bdir),
+        "active_draft": sedit.load_draft_index(bdir)["active"],
+        "backup": sedit.pending_backup(bdir),
+        "proxy_url": "/storyboard/edit/proxy?id=" + board["id"] + "&name=",
+    }
 
 
 class CharacterRequestError(ValueError):
@@ -15602,6 +18351,21 @@ def run_image_job_inner(job: dict) -> None:
 _TRAIN_LOCK = threading.Lock()
 
 
+# Abort signatures worth naming in a training failure. Same family the render
+# helper's _METAL_TIMEOUT_RX watches, plus the bare C++ abort line the trainer
+# prints on its way out — training runs in its own process and never saw any of
+# this mitigation (#61).
+_TRAIN_ABORT_RX = re.compile(
+    r"kIOGPUCommandBufferCallbackErrorTimeout"
+    r"|kIOGPUCommandBufferCallbackErrorImpactingInteractivity"
+    r"|Caused GPU Timeout Error"
+    r"|Impacting Interactivity"
+    r"|libc\+\+abi.*terminating"
+    r"|Command buffer execution failed",
+    re.IGNORECASE,
+)
+
+
 def run_train_job_inner(job: dict) -> None:
     """Run a Train Character job. Reads the dataset that /train/upload built
     under state/train_character/<train_job_id>/, writes a job-spec JSON the
@@ -15620,6 +18384,11 @@ def run_train_job_inner(job: dict) -> None:
     actionable error in the job's `error` field — the job card still
     shows up in Recent, just marked failed.
     """
+    _train_watchdog_seen = False   # set when the trainer logs a GPU-abort signature (#61)
+    # The trainer's own verdict on whether the adapter it wrote can move the
+    # model at all. "unknown" until it says — an older trainer emits nothing
+    # and must not be reported as weak for staying silent.
+    train_verdict = "unknown"
     p = job["params"]
     try:
         train_job_id = _safe_job_id(p.get("train_job_id") or "")
@@ -15913,6 +18682,37 @@ def run_train_job_inner(job: dict) -> None:
                         push(f"[train] step {last_step}/{total_steps} loss={last_loss}")
                 elif evt == "log":
                     push(f"[train] {payload.get('msg', '')}")
+                elif evt == "adapter_strength":
+                    # A GREEN TALLY WAS NEVER PROOF THE FILE COULD DO
+                    # ANYTHING. A LoRA can train to completion, write a
+                    # perfectly valid safetensors, load without a warning and
+                    # change NOTHING in the picture — because the deltas it
+                    # learned are numerically too small to move the model.
+                    # Every gate we had said "done"; only the render said
+                    # otherwise, hours later, on the owner's eye.
+                    #
+                    # The trainer measures the adapter's own delta RMS against
+                    # a floor and says so. Surfacing it here is the difference
+                    # between a training run that reports success and one that
+                    # reports the truth.
+                    med = payload.get("delta_rms_median")
+                    mx = payload.get("delta_rms_max")
+                    verdict = str(payload.get("verdict") or "unknown")
+                    carrying = payload.get("carrying_modules")
+                    mods = payload.get("modules")
+                    bits = [f"median={med}", f"max={mx}"]
+                    if carrying is not None and mods is not None:
+                        bits.append(f"{carrying}/{mods} modules carrying")
+                    if payload.get("floor") is not None:
+                        bits.append(f"floor={payload.get('floor')}")
+                    push(f"[train] adapter strength: delta_rms "
+                         f"{' · '.join(bits)} ({verdict})")
+                    train_verdict = verdict
+                    if verdict != "ok":
+                        push("[train] WARNING: this adapter may not visibly "
+                             "change anything it is applied to. Train longer, "
+                             "raise the rank, or check the captions — a file "
+                             "that loads is not a file that works.")
                 elif evt == "checkpoint":
                     push(f"[train] checkpoint → {payload.get('path', '?')}")
                 elif evt == "done":
@@ -15921,12 +18721,34 @@ def run_train_job_inner(job: dict) -> None:
                     push(f"[train] {line}")
             else:
                 push(f"[train] {line}")
+            # The trainer dies by SIGABRT when macOS kills its GPU command
+            # buffer, and `code -6` on its own tells the user nothing. Watch
+            # the same signatures the render helper watches (#61).
+            if not _train_watchdog_seen and _TRAIN_ABORT_RX.search(line or ""):
+                _train_watchdog_seen = True
         rc = proc.wait()
         proc = None
         with LOCK:
             STATE["pid"] = None
             STATE["train_pgid"] = None
         if rc != 0:
+            # -6 is SIGABRT. With a watchdog signature in the log it is macOS
+            # killing the GPU command buffer, not our code faulting — and the
+            # lever is the canvas, not the preset. Reported in #61: 576x576
+            # aborted on quick AND medium while 512x512 trained fine, which is
+            # canvas-shaped, not preset-shaped.
+            if rc == -6 and _train_watchdog_seen:
+                raise RuntimeError(
+                    "macOS killed the training GPU command buffer (Metal "
+                    "watchdog, SIGABRT). This is the canvas, not the preset — "
+                    "512x512 is the shape that survives on machines where "
+                    "576x576 aborts. Retry at 512x512, and close other GPU "
+                    "apps. See Logs for the raw abort.")
+            if rc == -6:
+                raise RuntimeError(
+                    f"training aborted (SIGABRT, code {rc}). No Metal-watchdog "
+                    "signature was logged, so this is a crash rather than a "
+                    "GPU timeout — please attach the Logs tail to an issue.")
             raise RuntimeError(
                 f"training exited with code {rc} — see Logs for stack trace")
     finally:
@@ -15987,6 +18809,11 @@ def run_train_job_inner(job: dict) -> None:
         "created_at": time.time(),
         "elapsed_sec": elapsed,
         "source": sidecar_source,
+        # THE ONLY FIELD THAT SAYS WHETHER THE FILE CAN DO ANYTHING. Written
+        # so the library can warn BEFORE somebody spends a render finding out.
+        # Absent on runs by an older trainer, which is why "unknown" is not a
+        # warning — silence is not weakness.
+        "adapter_strength": {"verdict": train_verdict},
     }
     try:
         final_sidecar_path.write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
@@ -16013,6 +18840,17 @@ def run_train_job_inner(job: dict) -> None:
     except OSError as e:
         push(f"[train] warn: could not copy avatar: {e}")
 
+    # A TRAINING RUN THAT PRODUCED AN INERT ADAPTER IS NOT A SUCCESS, and
+    # "done" is the one word that would hide it. The file is kept — it may
+    # still be worth something at a higher strength — but the job says what it
+    # is, in the place the user is already looking when it finishes.
+    if train_verdict not in ("ok", "unknown"):
+        job["warning"] = (
+            f"The adapter came out weak ({train_verdict}): its learned deltas "
+            f"may be too small to visibly change anything. Train longer, raise "
+            f"the rank, or check the captions.")
+        push("[train] finished with a WARNING — see the adapter strength line "
+             "above. The file was kept.")
     job["output_path"] = str(final_lora_path)
     job["raw_path"] = str(final_lora_path)
     p["elapsed_seconds"] = elapsed
@@ -20097,16 +22935,21 @@ class Handler(BaseHTTPRequestHandler):
             # server-side and ship it back as a single JSON payload. Used to
             # pre-fill the description textarea in openBugModal().
             try:
-                ver = _read_local_version() or "unknown"
-                sha = _VERSION_STATE.get("local_short") or ""
-                branch = ""
-                try:
-                    branch = subprocess.run(
-                        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                        capture_output=True, text=True, timeout=2, cwd=str(ROOT),
-                    ).stdout.strip()
-                except Exception:                                   # noqa: BLE001
-                    pass
+                # The build the PROCESS is running, never the working tree.
+                # A report filed from a panel that has not been restarted has
+                # to name the code that produced the bug — and when disk has
+                # moved on, say so in the report, because that is frequently
+                # the bug ("the fix didn't work" from a panel still serving
+                # the code from before the fix).
+                _boot = boot_build_stamp()
+                _live = get_version_state()
+                ver = _boot["version"] or _read_local_version() or "unknown"
+                sha = _boot["short"] or ""
+                branch = _boot["branch"] or ""
+                if _live.get("stale_process"):
+                    sha = (f"{sha or '?'} (RUNNING; disk is at "
+                           f"{_live.get('disk_short') or '?'} — panel not "
+                           f"restarted since the update)")
                 mac_ver = ""
                 try:
                     mac_ver = subprocess.run(
@@ -20424,6 +23267,20 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/storyboard/list":
             self._json({"ok": True, "boards": _sb_all_summaries()})
             return
+        # The finished films, for the screen that shows them. Reads the folder
+        # the assemblers write into; makes nothing, changes nothing.
+        if parsed.path == "/storyboard/films":
+            bid = (parse_qs(parsed.query).get("id") or [""])[0].strip()
+            try:
+                board = storyboard.load_storyboard(STATE_DIR, bid)
+            except Exception as exc:                                # noqa: BLE001
+                self._json({"ok": False, "error": str(exc)}, 404)
+                return
+            d = _sb_film_dir(board)
+            self._json({"ok": True, "dir": str(d),
+                        "dir_short": _sb_display_path(d),
+                        "films": _sb_films(board)})
+            return
         if parsed.path == "/storyboard/get":
             bid = (parse_qs(parsed.query).get("id") or [""])[0].strip()
             try:
@@ -20440,6 +23297,14 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
             self._json(_sb_payload(board))
+            return
+
+        # ---- Timeline editor reads -------------------------------------
+        # Its own method rather than four more branches in a 3,000-line
+        # do_GET: these routes have to be reachable from a test without
+        # standing up a socket, and a route nobody can test is a route that
+        # regresses quietly.
+        if self._storyboard_edit_get(parsed):
             return
 
         # Progress poll for the one-click sample-character download.
@@ -21059,6 +23924,233 @@ class Handler(BaseHTTPRequestHandler):
     # normalise it, reply with the full payload the plan screen repaints from).
     # Called from do_POST AFTER the body/form parse — the routes below read
     # both, and /storyboard/save posts JSON rather than a form.
+    def _storyboard_edit_get(self, parsed) -> bool:
+        """The timeline editor's SEVEN read routes. Every branch returns True.
+
+        `edit` is the arrangement, `status` is the prepare job, `peaks` is the
+        waveform (fetched once — it is a few hundred KB and must never ride on
+        a poll), `uploads` is the pool's list of clips somebody brought with
+        them, `drafts` is the index plus any crash offer, `versions` is the
+        history metadata, and `proxy` is a video file and therefore goes
+        through the SAME range-request path the gallery uses. That last one is
+        not cosmetic: Safari will not seek a `<video>` whose server does not
+        answer 206, so a proxy served as a plain 200 would undo the entire
+        reason proxies exist.
+
+        TRUE == HANDLED, on EVERY branch — do_GET reads the answer as "did
+        anybody serve this" and falls through to send_error(404) when it is
+        false. `uploads` used to end in a bare `return`, so a request that had
+        already been answered in full got a second, complete 404 response
+        written onto the same socket behind it. It survives only because this
+        handler never sets protocol_version and HTTP/1.0 closes the
+        connection; turning on keep-alive would make those bytes the head of
+        the next response. An enumeration in a docstring stops being
+        exhaustive silently, which is how a route ends up in neither this list
+        nor the contract — so the rule is stated once, above, and applies to
+        all of them.
+        """
+        path = parsed.path
+        if not path.startswith("/storyboard/edit"):
+            return False
+        q = parse_qs(parsed.query)
+        bid = (q.get("id") or [""])[0].strip()
+
+        if path == "/storyboard/edit/status":
+            self._json({"ok": True, "id": bid, "prepare": _sbe_job_state(bid)})
+            return True
+
+        if path == "/storyboard/edit/proxy":
+            name = (q.get("name") or [""])[0].strip()
+            # The name is a BASENAME the server itself minted, so anything
+            # that is not one is a probe, not a typo. Rejecting on the SHAPE
+            # (rather than resolving and hoping) keeps the containment check
+            # from being the only thing between this route and the disk.
+            if not bid or not re.fullmatch(r"[A-Za-z0-9._-]{1,120}\.mp4", name):
+                self.send_error(400)
+                return True
+            try:
+                sedit = _sbe_import()
+            except Exception:                                       # noqa: BLE001
+                self.send_error(503)
+                return True
+            root = sedit.proxy_dir(_sbe_board_dir(bid)).resolve()
+            try:
+                target = (root / name).resolve()
+            except OSError:
+                self.send_error(400)
+                return True
+            if not target.is_relative_to(root) or not target.is_file():
+                self.send_error(404)
+                return True
+            self._serve_video_with_range(target)
+            return True
+
+        try:
+            sedit = _sbe_import()
+        except Exception as exc:                                    # noqa: BLE001
+            self._json({"ok": False,
+                        "error": f"timeline editor unavailable: {exc}"}, 503)
+            return True
+
+        if path == "/storyboard/edit/peaks":
+            # SCOPED TO THE TRACK THE TIMELINE ACTUALLY CARRIES. A waveform
+            # cached from the soundtrack that was swapped out is a wrong
+            # duration on the music strip, and the strip has no way to know.
+            want_track = ""
+            if bid:
+                try:
+                    cur = sedit.load_edit(_sbe_board_dir(bid)) or {}
+                    want_track = str((cur.get("audio") or {}).get("path") or "")
+                except Exception:                                  # noqa: BLE001
+                    want_track = ""
+            peaks = (sedit.load_peaks(_sbe_board_dir(bid), path=want_track)
+                     if bid else None)
+            if not peaks:
+                self._json({"ok": False,
+                            "error": "no waveform yet — run "
+                                     "/storyboard/edit/prepare"}, 404)
+                return True
+            self._json(peaks)
+            return True
+
+        if path == "/storyboard/edit/clip-peaks":
+            # ONE SOURCE, ON DEMAND, CACHED. Computed the first time a strip
+            # asks and read from disk forever after — the same `compute_peaks`
+            # the bed uses, so there is one waveform implementation and not a
+            # second one that could disagree with it.
+            want = (q.get("path") or [""])[0]
+            if not bid or not want:
+                self._json({"ok": False, "error": "need id and path"}, 400)
+                return True
+            try:
+                data = sedit.clip_peaks(_sbe_board_dir(bid), want)
+            except sedit.EditError as exc:
+                # A take with no audio track is a FACT, not a failure: the lane
+                # already draws that state and must not show an error for it.
+                self._json({"ok": False, "silent": True,
+                            "error": str(exc)}, 404)
+                return True
+            except Exception as exc:                                # noqa: BLE001
+                self._json({"ok": False, "error": str(exc)}, 500)
+                return True
+            self._json(data)
+            return True
+
+        if path == "/storyboard/edit/uploads":
+            # The clips somebody brought with them. Images need no route —
+            # they land in the library the gallery already walks — but a video
+            # is deliberately kept out of OUTPUT (see the upload handler), so
+            # this is how the pool finds it. Newest first, capped, and every
+            # row is a file that exists right now.
+            root = UPLOADS / "timeline"
+            rows = []
+            if root.is_dir():
+                exts = {".mp4", ".mov", ".m4v", ".webm"}
+                try:
+                    found = [p for p in root.iterdir()
+                             if p.is_file() and p.suffix.lower() in exts]
+                except OSError:
+                    found = []
+                for p in sorted(found, key=lambda q: q.stat().st_mtime,
+                                reverse=True)[:200]:
+                    # The stored name is `<unix-ms>_<their name>`; showing the
+                    # stamp would be showing them our bookkeeping.
+                    label = re.sub(r"^\d{10,}_", "", p.name)
+                    rows.append({"path": str(p), "name": label,
+                                 "mtime": int(p.stat().st_mtime)})
+            self._json({"ok": True, "uploads": rows})
+            return True
+
+        if path == "/storyboard/edit/drafts":
+            if not bid:
+                self._json({"ok": False, "error": "no film"}, 400)
+                return True
+            # The same existence check every other editor route takes. Without
+            # it `?id=../../..` walks out of state/storyboards/ and this route
+            # reports on whatever it finds — read-only and same-origin, but it
+            # is the one containment rule the rest of this file keeps without
+            # exception.
+            try:
+                storyboard.load_storyboard(STATE_DIR, bid)
+            except Exception as exc:                                # noqa: BLE001
+                self._json({"ok": False, "error": str(exc)}, 404)
+                return True
+            bdir = _sbe_board_dir(bid)
+            self._json({"ok": True, "id": bid,
+                        "active": sedit.load_draft_index(bdir)["active"],
+                        "drafts": sedit.list_drafts(bdir),
+                        "backup": sedit.pending_backup(bdir)})
+            return True
+
+        if path == "/storyboard/edit/versions":
+            # METADATA ONLY. The picker shows what each entry WOULD restore —
+            # its name, its revision, when it was kept, how many clips and how
+            # long — and nothing in this list is big enough to make opening the
+            # panel a download. The documents themselves are read once, by
+            # `restore`, on the user's word.
+            if not bid:
+                self._json({"ok": False, "error": "no film"}, 400)
+                return True
+            try:
+                storyboard.load_storyboard(STATE_DIR, bid)
+            except Exception as exc:                                # noqa: BLE001
+                self._json({"ok": False, "error": str(exc)}, 404)
+                return True
+            self._json({"ok": True, "id": bid,
+                        "keep": sedit.EDIT_HISTORY_KEEP,
+                        "versions": sedit.list_history(_sbe_board_dir(bid))})
+            return True
+
+        if path != "/storyboard/edit":
+            return False
+
+        try:
+            board = storyboard.load_storyboard(STATE_DIR, bid)
+        except Exception as exc:                                    # noqa: BLE001
+            self._json({"ok": False, "error": str(exc)}, 404)
+            return True
+        bdir = _sbe_board_dir(bid)
+        try:
+            edit = sedit.load_edit(bdir)
+        except sedit.EditError as exc:
+            # A corrupt edit is NEVER silently replaced with a fresh
+            # auto-edit — that would throw away the arrangement it is a
+            # broken copy of. Say so, and let a human decide.
+            self._json({"ok": False, "error": str(exc), "corrupt": True}, 500)
+            return True
+        fresh = edit is None
+        if fresh:
+            # The auto-edit runs ONCE, here, and is persisted — it decodes
+            # every clip in the board and a read route that did that on every
+            # poll would be unusable. Every later GET is a file read.
+            try:
+                target = float((q.get("target_seconds") or [""])[0] or 0) or None
+            except ValueError:
+                target = None
+            music = (q.get("music") or [""])[0].strip() or None
+            edit = _sbe_auto_edit(board, music=music, target_seconds=target)
+            try:
+                # THE MACHINE'S OWN CUT. It lands in the automatic lane so a
+                # user walking back through his work meets his decisions
+                # first, not the auto-editor's.
+                sedit.save_edit(bdir, edit, origin="auto")
+                edit = sedit.load_edit(bdir)
+            except sedit.EditError as exc:
+                self._json({"ok": False,
+                            "error": f"auto-edit refused: {exc}"}, 500)
+                return True
+        # A READ CLAIMS NOTHING. This used to claim the board for whoever
+        # loaded last, which meant a page LOAD — a second window, a headless
+        # browser, an agent reading the film, a preview — took the snapshot
+        # lane away from the tab the person was actually cutting in, and that
+        # tab then stopped writing snapshots. Opening a film is not editing it.
+        # The claim is taken by the write path now; see the block above
+        # `SESSION_STALE_AFTER` in storyboard_editor.py.
+        payload = _sbe_payload(board, edit)
+        payload["generated"] = fresh
+        self._json(payload)
+        return True
+
     def _storyboard_post(self, action: str, body: str, form: dict) -> None:
         def f(name: str, default: str = "") -> str:
             v = form.get(name, default)
@@ -21157,9 +24249,26 @@ class Handler(BaseHTTPRequestHandler):
                 board["concept"] = concept
                 board["style"] = f("style", "")
                 board["must"] = must
+                # PATCH, never overwrite. Re-plan and Try again rebuild this
+                # form by hand and send neither `locations` nor `wardrobe`, so
+                # unconditional assignment ERASED both on the first re-plan —
+                # the exact continuity drift the fields were built to prevent,
+                # returned as data loss. An absent field keeps the board's
+                # value; only a field the client actually sent replaces it.
+                # (Confirmed by the 2026-08-17 UX review, red-team verified.)
+                if "locations" in form:
+                    board["locations"] = _sb_parse_locations(f("locations", ""))
                 board["shots_target"] = shots_n
+                # One wardrobe line for the whole film, attached to the cast
+                # member rather than repeated per shot — the same fix locations
+                # are, one axis over. Repeating it per shot is what drifts.
+                _prev_ward = {c.get("id"): c.get("wardrobe") or ""
+                              for c in (board.get("cast") or [])}
+                wardrobe = (f("wardrobe", "") if "wardrobe" in form else None)
                 board["cast"] = [{"id": c.get("id"),
-                                  "trigger": c.get("trigger") or c.get("id")}
+                                  "trigger": c.get("trigger") or c.get("id"),
+                                  "wardrobe": (wardrobe if wardrobe is not None
+                                               else _prev_ward.get(c.get("id"), ""))}
                                  for c in chars]
                 board.setdefault("policy", _sb_policy_for(
                     get_settings().get("storyboard_draft_quality", "quick"),
@@ -21177,6 +24286,7 @@ class Handler(BaseHTTPRequestHandler):
                     args=(bid, {"concept": concept, "n_shots": shots_n,
                                 "style": board["style"], "characters": chars,
                                 "must": must, "feedback": notes or None,
+                                "locations": board.get("locations") or [],
                                 "engine_mode": emode},
                           previous if notes else None))
                 with _SB_LOCK:
@@ -21392,13 +24502,24 @@ class Handler(BaseHTTPRequestHandler):
                     removed = before - len(STATE["queue"])
                     QUEUE_COND.notify_all()
                 persist_queue()
+                # ...and cancel the shot ALREADY RENDERING, through the panel's
+                # own /stop path. Dropping the queue alone left an H3 shot
+                # burning the GPU for another 20 minutes after the user had
+                # been told the film stopped.
+                cancelled = _sb_cancel_running_shot(mine)
                 for s in (board.get("shots") or []):
                     if isinstance(s, dict) and s.get("status") in ("queued",):
                         s["status"] = "pending"
+                # The cancelled shot is deliberately NOT rewritten here. The
+                # worker is still unwinding the kill; its job goes terminal a
+                # moment later and _sb_reconcile() folds that verdict onto the
+                # shot on the next read. Guessing the outcome now would race it.
                 storyboard.save_storyboard(STATE_DIR, board)
                 push(f"[storyboard] stopped — {removed} queued shot(s) removed; "
-                     f"the shot in flight finishes")
-                self._json({"ok": True, "removed": removed})
+                     + (f"cancelled the shot in flight ({cancelled})"
+                        if cancelled else "nothing was rendering"))
+                self._json({"ok": True, "removed": removed,
+                            "cancelled": cancelled})
                 return
 
             if action == "replan-shots":
@@ -21437,6 +24558,7 @@ class Handler(BaseHTTPRequestHandler):
                                 "style": board.get("style") or "",
                                 "characters": chars,
                                 "must": board.get("must") or [],
+                                "locations": board.get("locations") or [],
                                 "feedback": "\n".join(notes),
                                 "engine_mode": board.get("engine_mode") or "auto",
                                 "reroll_ns": ns},
@@ -21498,23 +24620,101 @@ class Handler(BaseHTTPRequestHandler):
                             "title": board.get("title") or ""})
                 return
 
+            if action == "import-shots":
+                # A BOARD IS A TIMELINE, ONE TO ONE, and that is the whole
+                # problem this fixes. The moment coverage for a film gets
+                # rendered as a second board — B-roll, pickups, alternates, a
+                # re-plan — its clips are unreachable from the first board's
+                # timeline. There was no way to move a clip between films and
+                # no way to cut with both, so the answer to "I have clips in
+                # two projects" was "render them again".
+                #
+                # This is the media-pool answer at the size that fits here: pull
+                # the shots you want into the film you are cutting. The clips
+                # are NOT copied on disk — a shot carries the path to its output,
+                # so an import is a reference and costs nothing but a JSON edit.
+                bid = f("id", "")
+                src_id = f("from", "")
+                if not bid or not src_id or bid == src_id:
+                    self._json({"ok": False,
+                                "error": "import needs a different source film"}, 400)
+                    return
+                # A RUNNING RENDER OWNS THE BOARD FILE. It writes each shot's
+                # status and output back as the shot lands, so an import that
+                # read the board a second earlier would save a copy with those
+                # writes missing — losing rendered clips, silently, at the exact
+                # moment somebody is trying to collect them. Verified live: an
+                # import during a four-shot render happened to survive, which is
+                # luck, not a design.
+                with _SB_LOCK:
+                    live = _SB_RENDERS.get(bid)
+                    busy = bool(live and not live.get("stop"))
+                if busy:
+                    self._json({"ok": False, "busy": True,
+                                "error": "This film is rendering. Importing now could "
+                                         "drop a clip that just finished — try again "
+                                         "when it stops."}, 409)
+                    return
+                board = load(bid)
+                src = load(src_id)
+                if not src:
+                    self._json({"ok": False, "error": f"no film {src_id!r}"}, 404)
+                    return
+                want = {int(x) for x in (f("only", "") or "").split(",")
+                        if x.strip().lstrip("-").isdigit()}
+                brought, skipped = _sb_import_shots(board, src, want or None)
+                _sb_normalize(board)
+                storyboard.save_storyboard(STATE_DIR, board)
+                self._json({"ok": True, "id": bid, "imported": brought,
+                            "skipped": skipped,
+                            "shots": len(board.get("shots") or [])})
+                return
+
             # ---- export / housekeeping -----------------------------------
             if action == "export":
                 board = load(f("id", ""))
-                self._json(_sb_export(board))
+                # Opt-in, and only from an explicit request. Absent these the
+                # export is byte-for-byte the one that shipped: whole clips,
+                # clip audio, no analysis run at all.
+                auto = f("auto_edit", "") in ("1", "true", "on", "yes")
+                music = f("music", "") or None
+                if music and not Path(music).is_file():
+                    self._json({"ok": False,
+                                "error": f"no soundtrack at {music}"}, 400)
+                    return
+                try:
+                    target = float(f("target_seconds", "") or 0) or None
+                except ValueError:
+                    target = None
+                # The soundtrack the CUT was made with, when there is a cut.
+                # Export posted `id` and nothing else, so a film with a score
+                # in the Editor came out silent from this door — one screen
+                # apart, two different films. `_sbe_render_edit` reads the
+                # edit's own audio when these are empty.
+                mmode = f("music_mode", "") or None
+                self._json(_sb_export(board, auto_edit=auto, music=music,
+                                      music_mode=mmode, target_seconds=target))
                 return
 
             if action == "reveal":
                 board = load(f("id", ""))
-                title = board.get("title") or "storyboard"
-                day = time.strftime("%Y-%m-%d",
-                                    time.localtime(board.get("created_at") or time.time()))
-                d = OUTPUT / "storyboards" / f"{day}_{_sb_slug(title, 6)}"
+                d = _sb_film_dir(board)
                 if not d.is_dir():
                     self._json({"ok": False, "error": "nothing exported yet"}, 404)
                     return
+                # `name` reveals ONE file inside that folder, selected in
+                # Finder — the film the user is looking at, not the folder it
+                # is buried in. Constrained to a plain filename that resolves
+                # inside the board's own directory, so it can never become an
+                # argument to `open` pointing somewhere else.
+                cmd = ["open", str(d)]
+                name = f("name", "")
+                if name and re.fullmatch(r"[A-Za-z0-9._-]{1,120}", name):
+                    cand = d / name
+                    if cand.is_file():
+                        cmd = ["open", "-R", str(cand)]
                 try:
-                    subprocess.Popen(["open", str(d)])
+                    subprocess.Popen(cmd)
                 except Exception as exc:                            # noqa: BLE001
                     self._json({"ok": False, "error": str(exc)}, 500)
                     return
@@ -21533,6 +24733,842 @@ class Handler(BaseHTTPRequestHandler):
                     shutil.rmtree(d, ignore_errors=True)
                 # Deletes the plan. The clips it rendered stay in mlx_outputs/.
                 self._json({"ok": True})
+                return
+
+            # ---- the timeline editor -------------------------------------
+            # Same shapes, same auth, same error style as everything above.
+            # The one structural difference is that these read and write
+            # `edit.json`, never `storyboard.json` — except `edit/generate`,
+            # which adds a SHOT, because a shot to be rendered is intent and
+            # intent lives on the board.
+            if action.startswith("edit/"):
+                try:
+                    sedit = _sbe_import()
+                except Exception as exc:                            # noqa: BLE001
+                    self._json({"ok": False,
+                                "error": f"timeline editor unavailable: {exc}"},
+                               503)
+                    return
+                sub = action[len("edit/"):]
+
+                if sub == "prepare":
+                    bid = f("id", "")
+                    board = load(bid)
+                    music = f("music", "") or None
+                    if music and not Path(music).is_file():
+                        self._json({"ok": False,
+                                    "error": f"no soundtrack at {music}"}, 400)
+                        return
+                    try:
+                        target = float(f("target_seconds", "") or 0) or None
+                    except ValueError:
+                        target = None
+                    with _SBE_LOCK:
+                        live = _SBE_JOBS.get(bid)
+                        if live and live.get("state") == "running":
+                            self._json({"ok": False, "busy": True,
+                                        "error": "Already preparing this "
+                                                 "timeline.",
+                                        "prepare": dict(live)}, 409)
+                            return
+                        _SBE_JOBS[bid] = {"id": bid, "state": "running",
+                                          "stage": "start", "cancel": False,
+                                          "done": 0, "total": 0,
+                                          "started_at": time.time(),
+                                          "music": music}
+                    th = threading.Thread(
+                        target=_sbe_prepare_thread, daemon=True,
+                        name=f"phos-sbe-prep-{bid}", args=(bid, music, target))
+                    th.start()
+                    self._json({"ok": True, "id": bid,
+                                "prepare": _sbe_job_state(bid)}, 202)
+                    return
+
+                if sub == "overlay-key":
+                    # THE OVERLAY LANE'S DOOR, and only the overlay lane's. A
+                    # still on the PICTURE lane legitimately keeps its black —
+                    # it is the whole frame there, nothing is underneath it —
+                    # so this runs on the way to V2 and nowhere else.
+                    path = f("path", "")
+                    if not path or not _sbe_pool_path_ok(path):
+                        self._json({"ok": False,
+                                    "error": "that image is not in this "
+                                             "panel's outputs"}, 400)
+                        return
+                    rep = _sbe_plate_report(path)
+                    out = {"ok": True, "keyed": False, "path": path,
+                           "original": path, "why": rep.get("why") or "",
+                           "measured": {k: v for k, v in rep.items()
+                                        if k not in ("ok", "plate", "why")}}
+                    if not rep.get("plate"):
+                        self._json(out)
+                        return
+                    made = _sbe_key_plate(path)
+                    if not made.get("ok"):
+                        # A KEY THAT COULD NOT BE WRITTEN IS NOT AN ERROR THE
+                        # USER HAS TO ANSWER. The card still goes on the lane
+                        # exactly as it arrived; it just arrives plated.
+                        out["why"] = made.get("error") or "could not be written"
+                        self._json(out)
+                        return
+                    push(f"[timeline] keyed the black backdrop off "
+                         f"{Path(path).name}")
+                    out.update({"keyed": True, "path": made["path"],
+                                "name": re.sub(r"^\d{10,}_", "",
+                                               Path(path).name)})
+                    self._json(out)
+                    return
+
+                if sub == "add-clip":
+                    # THE MEDIA POOL'S ONE VERB. Everything the pool offers —
+                    # this film's own shots, a clip from another film, anything
+                    # in the generations gallery — arrives here as a path, and
+                    # leaves with a proxy already built. That last part is the
+                    # point: a clip added without one scrubs at source speed
+                    # (235 ms a seek, measured) and reads as the editor being
+                    # broken. The client places it on the TRACK and saves, so
+                    # the next Prepare keeps the proxy (pruning follows
+                    # timeline ∪ board).
+                    bid = f("id", "")
+                    board = load(bid)
+                    bdir = _sbe_board_dir(bid)
+                    src_id = f("from", "")
+                    only = f("only", "")
+                    path = f("path", "")
+                    title = f("title", "")
+                    n = None
+                    # A STILL SHORT-CIRCUITS ALL OF IT. It is not a board shot
+                    # (no prompt, no seed, nothing rendered it), it needs no
+                    # proxy (a browser paints an <img> exactly and instantly),
+                    # and it has no source duration — the hold is whatever slot
+                    # the timeline gives it. What it DOES need is the same
+                    # containment check every other path gets, which is the
+                    # only reason it comes through the server at all.
+                    # THE SERVER DECIDES WHAT A FILE IS. The client used to
+                    # be the only thing that knew, and the first time a pool
+                    # row reached this route without its `kind` — an upload
+                    # dragged onto the track — the picture became a "video":
+                    # the client asked for /file instead of /image, loaded a
+                    # PNG into a <video>, and the preview went black with
+                    # nothing on screen to say why. A suffix is not a guess
+                    # here, it is the same test `_STILL_SUFFIXES` already
+                    # makes for the NLE export.
+                    _sfx = Path(str(path or "")).suffix.lower()
+                    if f("kind", "") == "still" or (
+                            path and not src_id
+                            and _sfx in sedit._STILL_SUFFIXES):
+                        if not path or not _sbe_pool_path_ok(path):
+                            self._json({"ok": False,
+                                        "error": "that image is not in this "
+                                                 "panel's outputs"}, 400)
+                            return
+                        geo = _sb_probe_still(path) or {}
+                        if not geo:
+                            self._json({"ok": False,
+                                        "error": "that file is not an image "
+                                                 "this panel can read"}, 400)
+                            return
+                        self._json({"ok": True, "id": bid,
+                                    "clip": {"path": path, "kind": "still",
+                                             "title": title or Path(path).stem[:80],
+                                             "proxy": None, "duration_s": None,
+                                             "w": geo.get("w"),
+                                             "h": geo.get("h")}})
+                        return
+                    if src_id:
+                        # Another film's clip. Import it as a shot first —
+                        # references, not copies — so the board carries its
+                        # prompt and seed and the clip stops being an orphan.
+                        if src_id == bid:
+                            self._json({"ok": False,
+                                        "error": "that clip is already in "
+                                                 "this film"}, 400)
+                            return
+                        with _SB_LOCK:
+                            live = _SB_RENDERS.get(bid)
+                            busy = bool(live and not live.get("stop"))
+                        if busy:
+                            self._json({"ok": False, "busy": True,
+                                        "error": "This film is rendering. "
+                                                 "Importing now could drop a "
+                                                 "clip that just finished — "
+                                                 "try again when it stops."},
+                                       409)
+                            return
+                        src = load(src_id)
+                        want = {int(x) for x in (only or "").split(",")
+                                if x.strip().lstrip("-").isdigit()}
+                        # The file we are after, resolved from the SOURCE
+                        # before anything is renumbered: `_sb_import_shots`
+                        # returns positions, and _sb_normalize may move them.
+                        # The path is the one identity that survives both.
+                        wanted_path = ""
+                        for row in (src.get("shots") or []):
+                            if want and row.get("n") not in want:
+                                continue
+                            cand = str(row.get("final_output")
+                                       or row.get("draft_output") or "")
+                            if cand:
+                                wanted_path = cand
+                                title = title or (row.get("title")
+                                                  or row.get("prompt") or "")[:80]
+                                break
+                        brought, _skipped = _sb_import_shots(board, src,
+                                                             want or None)
+                        if not brought:
+                            # Already here is not a failure — the pool can
+                            # still put it on the track, which is what the
+                            # click asked for.
+                            if not wanted_path:
+                                self._json({"ok": False,
+                                            "error": "that clip has not "
+                                                     "rendered yet"}, 404)
+                                return
+                        else:
+                            _sb_normalize(board)
+                            storyboard.save_storyboard(STATE_DIR, board)
+                        for row in (board.get("shots") or []):
+                            cand = str(row.get("final_output")
+                                       or row.get("draft_output") or "")
+                            if cand and cand == wanted_path:
+                                n = row.get("n")
+                                break
+                        path = wanted_path
+                    if not path or not _sbe_pool_path_ok(path):
+                        self._json({"ok": False,
+                                    "error": "that file is not in this "
+                                             "panel's outputs"}, 400)
+                        return
+                    # What the timeline needs to place it: how long it is.
+                    dur = None
+                    try:
+                        import storyboard_edit as _se                 # noqa: PLC0415
+                        dur = (_se.probe_media(path) or {}).get("duration")
+                    except Exception:                                # noqa: BLE001
+                        dur = None
+                    proxied = _sbe_proxy_now(bdir, [path], sedit)
+                    pmap = _sbe_proxy_map(bdir, [{"path": path}], sedit)
+                    if not title:
+                        title = Path(path).stem[:80]
+                    self._json({"ok": True, "id": bid,
+                                "clip": {"path": path, "title": title,
+                                         "n": n, "duration_s": dur,
+                                         "proxy": pmap.get(path)},
+                                "proxy": proxied})
+                    return
+
+                if sub == "relink":
+                    # Draft → delivery, on the user's word. Server-side because
+                    # it is one write: load, rewrite the paths the GET already
+                    # flagged, save, and build the delivery proxies before
+                    # answering, so the timeline that comes back is scrubbable.
+                    bid = f("id", "")
+                    board = load(bid)
+                    bdir = _sbe_board_dir(bid)
+                    try:
+                        edit = sedit.load_edit(bdir)
+                    except sedit.EditError as exc:
+                        self._json({"ok": False, "error": str(exc)}, 500)
+                        return
+                    if not edit:
+                        self._json({"ok": False,
+                                    "error": "no timeline to relink"}, 404)
+                        return
+                    swaps = {r["path"]: r["to"] for r in _sbe_relinks(board, edit)}
+                    if not swaps:
+                        self._json(_sbe_payload(board, edit))
+                        return
+                    for c in (edit.get("clips") or []):
+                        if not isinstance(c, dict):
+                            continue
+                        to = swaps.get(str(c.get("path") or ""))
+                        if to:
+                            c["path"] = to
+                            # The proxy belonged to the DRAFT. Dropping it here
+                            # stops the player showing yesterday's file under
+                            # today's path until the rebuild lands.
+                            c["proxy"] = None
+                    try:
+                        sedit.save_edit(bdir, edit)
+                        edit = sedit.load_edit(bdir)
+                    except sedit.EditError as exc:
+                        self._json({"ok": False,
+                                    "error": f"relink refused: {exc}"}, 500)
+                        return
+                    _sbe_proxy_now(bdir, sorted(set(swaps.values())), sedit)
+                    push(f"[timeline] relinked {len(swaps)} clip(s) to their "
+                         f"finished versions")
+                    payload = _sbe_payload(board, sedit.load_edit(bdir))
+                    payload["relinked"] = len(swaps)
+                    self._json(payload)
+                    return
+
+                if sub == "cancel":
+                    bid = f("id", "")
+                    with _SBE_LOCK:
+                        job = _SBE_JOBS.get(bid)
+                        if job:
+                            job["cancel"] = True
+                    self._json({"ok": True, "prepare": _sbe_job_state(bid)})
+                    return
+
+                if sub == "auto":
+                    # Deliberate, explicit, destructive: rebuild the
+                    # arrangement from the auto-editor and throw away what was
+                    # there. Nothing else in this API does that, and GET never
+                    # does it to an edit that exists.
+                    bid = f("id", "")
+                    board = load(bid)
+                    music = f("music", "") or None
+                    try:
+                        target = float(f("target_seconds", "") or 0) or None
+                    except ValueError:
+                        target = None
+                    try:
+                        min_shot = float(f("min_shot", "1.5") or 1.5)
+                    except ValueError:
+                        min_shot = 1.5
+                    try:
+                        max_shot = float(f("max_shot", "") or 0) or None
+                    except ValueError:
+                        max_shot = None
+                    edit = _sbe_auto_edit(board, music=music,
+                                          target_seconds=target,
+                                          min_shot=min_shot, max_shot=max_shot)
+                    old = None
+                    try:
+                        old = sedit.load_edit(_sbe_board_dir(bid))
+                    except sedit.EditError:
+                        old = None
+                    if old:
+                        edit["revision"] = int(old.get("revision") or 0)
+                    try:
+                        sedit.save_edit(_sbe_board_dir(bid), edit, origin="auto")
+                    except sedit.EditError as exc:
+                        self._json({"ok": False, "error": str(exc)}, 400)
+                        return
+                    self._json(_sbe_payload(
+                        board, sedit.load_edit(_sbe_board_dir(bid))))
+                    return
+
+                if sub == "save":
+                    try:
+                        payload = json.loads(body or "{}")
+                    except json.JSONDecodeError as exc:
+                        self._json({"ok": False,
+                                    "error": f"bad JSON: {exc}"}, 400)
+                        return
+                    bid = str(payload.get("id") or "").strip()
+                    incoming = payload.get("edit")
+                    if not isinstance(incoming, dict):
+                        self._json({"ok": False, "error": "no edit"}, 400)
+                        return
+                    board = load(bid)
+                    incoming["board_id"] = bid
+                    # `revision` is the SERVER's counter, based on what is on
+                    # disk rather than on what the client remembered. A stale
+                    # tab must not be able to wind it backwards, and
+                    # `expect_revision` lets a client that cares find out it
+                    # was overtaken instead of silently overwriting the other
+                    # tab's arrangement.
+                    #
+                    # THIS CHECK IS THE EARLY ANSWER, NOT THE GUARD. It exists
+                    # so an overtaken tab is told so without the server first
+                    # validating and archiving a document it is going to
+                    # refuse. The guard that actually holds is inside
+                    # `save_edit`, under the board's write lock, because the
+                    # panel is a ThreadingHTTPServer and this read and that
+                    # write used to be in different critical sections: two
+                    # tabs whose debounces landed together both read revision
+                    # 7, both compared 7 == 7, and both got HTTP 200. One
+                    # arrangement was gone, recoverable only from history/ and
+                    # only by somebody who knew to look.
+                    try:
+                        current = sedit.load_edit(_sbe_board_dir(bid)) or {}
+                    except sedit.EditError:
+                        current = {}
+                    on_disk = int(current.get("revision") or 0)
+                    expect = payload.get("expect_revision")
+                    if expect is not None and int(expect) != on_disk:
+                        self._json({"ok": False, "conflict": True,
+                                    "revision": on_disk,
+                                    "error": f"this timeline moved on without "
+                                             f"you — it is at revision "
+                                             f"{on_disk}, you saved from "
+                                             f"{expect}"}, 409)
+                        return
+                    incoming["revision"] = on_disk
+                    errs = sedit.validate_edit(incoming)
+                    blocking = sedit.blocking_errors(errs)
+                    if blocking:
+                        # Structured, ALL of them, and the file on disk is
+                        # untouched — the client can highlight every bad clip
+                        # at once instead of playing whack-a-mole.
+                        self._json({"ok": False, "errors": blocking,
+                                    "error": blocking[0]["message"]}, 400)
+                        return
+                    # A WARNING NEVER STOPS A WRITE. It rides back on the
+                    # payload so the panel can note it beside the clip without
+                    # the document being held hostage to it.
+                    warnings = [e for e in errs if e not in blocking]
+                    # AN ABSENT GUARD IS ACCEPTED, AND LOGGED. Refusing it was
+                    # the other option and it is the wrong one: the client
+                    # sends no `expect_revision` on purpose for the "Keep
+                    # mine" button — a user looking at a conflict notice and
+                    # choosing to overwrite — and a 409 that button cannot
+                    # answer would strand the arrangement on screen. So the
+                    # unguarded write stays last-write-wins, but it stops
+                    # being SILENT: it says whose revision it landed on, in
+                    # the log the panel already shows, and the outgoing
+                    # document is in history/ either way.
+                    if expect is None:
+                        push(f"[timeline] unguarded save on {bid} — no "
+                             f"expect_revision, overwriting revision "
+                             f"{on_disk} (last write wins)")
+                    try:
+                        sedit.save_edit(_sbe_board_dir(bid), incoming,
+                                        expect=expect)
+                    except sedit.EditConflict as exc:
+                        # THE RACE, CAUGHT AT THE WRITE. Same body the
+                        # sequential case produces, because to the tab that
+                        # lost it is the same event: somebody else is ahead,
+                        # your arrangement is still on your screen.
+                        self._json({"ok": False, "conflict": True,
+                                    "revision": exc.revision,
+                                    "error": str(exc)}, 409)
+                        return
+                    except sedit.EditError as exc:
+                        self._json({"ok": False, "error": str(exc)}, 400)
+                        return
+                    # A SAVE ANSWERS THE RECOVERY OFFER. The crash backup is
+                    # insurance against work that never reached edit.json, and
+                    # the moment the user presses Save it has. Leaving the file
+                    # behind kept the amber bar on screen over a saved film,
+                    # armed a "Recover it" button that would revert the save
+                    # the user had just made, and — because `write_backup`
+                    # refuses to overwrite an unanswered offer — killed the
+                    # backup lane for the rest of the session, at which point
+                    # the watchdog started calling a perfectly healthy panel
+                    # broken.
+                    sedit.discard_backup(_sbe_board_dir(bid))
+                    out = _sbe_payload(board, sedit.load_edit(_sbe_board_dir(bid)))
+                    if warnings:
+                        out["warnings"] = warnings
+                    self._json(out)
+                    return
+
+                if sub == "draft":
+                    # ONE ROUTE, FIVE VERBS, because they are five edits to the
+                    # same index and splitting them would be five places for
+                    # the active pointer to be wrong.
+                    bid = f("id", "")
+                    board = load(bid)
+                    bdir = _sbe_board_dir(bid)
+                    op = (f("op", "") or "").strip().lower()
+                    slug = f("slug", "")
+                    name = f("name", "")
+                    with _SB_LOCK:
+                        live = _SB_RENDERS.get(bid)
+                        busy = bool(live and not live.get("stop"))
+                    if busy and op in ("activate", "delete", "new", "duplicate"):
+                        # Same guard import-shots and restore take: the render
+                        # is reading this document clip by clip.
+                        self._json({"ok": False, "busy": True,
+                                    "error": "This film is rendering. Changing "
+                                             "drafts now would swap the "
+                                             "timeline out from under it — try "
+                                             "again when it stops."}, 409)
+                        return
+                    try:
+                        if op == "new":
+                            out = sedit.create_draft(
+                                bdir, name,
+                                from_current=(f("from", "") == "current"))
+                        elif op == "duplicate":
+                            out = sedit.duplicate_draft(bdir, slug, name)
+                        elif op == "rename":
+                            out = sedit.rename_draft(bdir, slug, name)
+                        elif op == "delete":
+                            out = sedit.delete_draft(bdir, slug)
+                        elif op == "activate":
+                            out = sedit.activate_draft(bdir, slug)
+                        else:
+                            self._json({"ok": False,
+                                        "error": f"unknown draft action "
+                                                 f"{op!r}"}, 400)
+                            return
+                    except sedit.EditError as exc:
+                        self._json({"ok": False, "error": str(exc)}, 400)
+                        return
+                    payload = _sbe_payload(board, sedit.load_edit(bdir) or {})
+                    payload["draft"] = out
+                    payload["op"] = op
+                    self._json(payload)
+                    return
+
+                if sub == "backup":
+                    # THE QUIET LANE, AND IT IS QUIET IN BOTH DIRECTIONS. It
+                    # writes history/backup-<draft>.json and nothing else: no
+                    # edit.json, no revision, no conflict check. The user's
+                    # saved draft is exactly what he last saved.
+                    try:
+                        payload = json.loads(body or "{}")
+                    except json.JSONDecodeError as exc:
+                        self._json({"ok": False,
+                                    "error": f"bad JSON: {exc}"}, 400)
+                        return
+                    bid = str(payload.get("id") or "").strip()
+                    incoming = payload.get("edit")
+                    if not isinstance(incoming, dict):
+                        self._json({"ok": False, "error": "no edit"}, 400)
+                        return
+                    load(bid)
+                    incoming["board_id"] = bid
+                    # THE PAYLOAD SAYS WHICH DRAFT IT WAS COMPOSED FROM, and
+                    # write_backup refuses it if that draft has been left. The
+                    # client debounces this write and the server is threaded,
+                    # so without the name a backup of draft A can land as
+                    # draft B's unsaved work.
+                    # ...AND WHICH SESSION, which now CLAIMS rather than is
+                    # checked. This route used to answer a session that did not
+                    # hold the claim with 409 `stale_session`, and the claim was
+                    # taken by loading the page — so a passive page load in
+                    # another browser stopped this lane in the tab the person
+                    # was working in, for as long as it stayed open. The safety
+                    # net may not have an opinion; this was its last one.
+                    token = str(payload.get("session") or "")
+                    bdir = _sbe_board_dir(bid)
+                    try:
+                        sedit.write_backup(bdir, incoming,
+                                           draft=str(payload.get("draft") or ""),
+                                           session=token)
+                    except sedit.EditError as exc:
+                        self._json({"ok": False, "error": str(exc)}, 400)
+                        return
+                    # WHO ELSE IS EDITING, as information. A tab that finds
+                    # another token on the claim tells its user there is a
+                    # second editor — and keeps writing, because being second
+                    # is not a reason to stop protecting somebody.
+                    self._json({"ok": True, "id": bid, "at": int(time.time()),
+                                "session": sedit.current_session(bdir)})
+                    return
+
+                if sub == "recover":
+                    bid = f("id", "")
+                    board = load(bid)
+                    bdir = _sbe_board_dir(bid)
+                    try:
+                        edit = sedit.recover_backup(bdir)
+                    except sedit.EditError as exc:
+                        self._json({"ok": False, "error": str(exc)}, 400)
+                        return
+                    push(f"[timeline] recovered the unsaved backup "
+                         f"({len(edit.get('clips') or [])} clips)")
+                    self._json(_sbe_payload(board, edit))
+                    return
+
+                if sub == "discard-backup":
+                    bid = f("id", "")
+                    load(bid)
+                    sedit.discard_backup(_sbe_board_dir(bid))
+                    self._json({"ok": True, "id": bid})
+                    return
+
+                if sub == "version":
+                    # NAMING A VERSION IS NOT SAVING ONE. The document on disk
+                    # is already the arrangement on screen (the editor saves on
+                    # a debounce); what this adds is a copy of it that the
+                    # fifty-save prune will never take, under a name a person
+                    # chose. So: no revision bump, no write to edit.json, and
+                    # nothing about the timeline changes — which is exactly why
+                    # it is safe to press at any moment.
+                    bid = f("id", "")
+                    load(bid)                       # 404s an unknown film
+                    bdir = _sbe_board_dir(bid)
+                    label = (f("label", "") or "").strip()[:80]
+                    if not label:
+                        self._json({"ok": False,
+                                    "error": "a version needs a name"}, 400)
+                        return
+                    try:
+                        edit = sedit.load_edit(bdir)
+                    except sedit.EditError as exc:
+                        self._json({"ok": False, "error": str(exc)}, 500)
+                        return
+                    if not edit:
+                        self._json({"ok": False,
+                                    "error": "there is no timeline to keep "
+                                             "yet"}, 404)
+                        return
+                    dst = sedit.archive_edit(bdir, edit, label)
+                    self._json({"ok": True, "id": bid, "label": label,
+                                "file": (dst.name if dst else ""),
+                                "already": dst is None,
+                                "revision": int(edit.get("revision") or 0),
+                                "versions": sedit.list_history(bdir)})
+                    return
+
+                if sub == "restore":
+                    bid = f("id", "")
+                    board = load(bid)
+                    bdir = _sbe_board_dir(bid)
+                    # A RUNNING RENDER OWNS THIS FILM. The same guard
+                    # import-shots takes, for the same reason: the render is
+                    # reading the arrangement clip by clip, and swapping the
+                    # document under it produces a film that is half of one cut
+                    # and half of another with nothing on screen to say so.
+                    with _SB_LOCK:
+                        live = _SB_RENDERS.get(bid)
+                        busy = bool(live and not live.get("stop"))
+                    if busy:
+                        self._json({"ok": False, "busy": True,
+                                    "error": "This film is rendering. "
+                                             "Restoring now would swap the "
+                                             "timeline out from under it — "
+                                             "try again when it stops."}, 409)
+                        return
+                    try:
+                        edit = sedit.restore_edit(bdir, f("file", ""))
+                    except sedit.EditError as exc:
+                        self._json({"ok": False, "error": str(exc)}, 400)
+                        return
+                    push(f"[timeline] restored {f('file', '')} "
+                         f"({len(edit.get('clips') or [])} clips)")
+                    payload = _sbe_payload(board, edit)
+                    payload["restored"] = f("file", "")
+                    payload["versions"] = sedit.list_history(bdir)
+                    self._json(payload)
+                    return
+
+                if sub == "render":
+                    bid = f("id", "")
+                    board = load(bid)
+                    bdir = _sbe_board_dir(bid)
+                    try:
+                        edit = sedit.load_edit(bdir)
+                    except sedit.EditError as exc:
+                        self._json({"ok": False, "error": str(exc)}, 500)
+                        return
+                    if not edit:
+                        self._json({"ok": False,
+                                    "error": "no edit to render — "
+                                             "GET /storyboard/edit first"}, 404)
+                        return
+                    name = f("out", "") or _sb_film_name(board)
+                    if not re.fullmatch(r"[A-Za-z0-9._-]{1,120}\.mp4", name):
+                        self._json({"ok": False,
+                                    "error": "out must be a plain .mp4 "
+                                             "filename"}, 400)
+                        return
+                    # The SAME assembler the export uses, given one plan entry
+                    # per timeline clip — repeats included, which is why
+                    # `_sb_cut_index` keeps a list per path.
+                    film = _sbe_render_edit(
+                        board, edit, music=f("music", "") or None,
+                        music_mode=f("music_mode", "") or None,
+                        out_name=name)
+                    self._json(film if film.get("ok") else (film | {"ok": False}),
+                               200 if film.get("ok")
+                               else int(film.get("status") or 500))
+                    return
+
+                if sub == "export-nle":
+                    # THE FILM, AS A PROJECT SOMEBODY ELSE'S EDITOR CAN OPEN.
+                    # A folder next to the film: one FCP7 XML (the single
+                    # interchange Premiere and Resolve both import), one
+                    # ExtendScript for After Effects (which has no timeline
+                    # import at all), and a `media/` of hardlinks so the whole
+                    # thing relinks by name wherever it is dropped.
+                    bid = f("id", "")
+                    board = load(bid)
+                    bdir = _sbe_board_dir(bid)
+                    try:
+                        edit = sedit.load_edit(bdir)
+                    except sedit.EditError as exc:
+                        self._json({"ok": False, "error": str(exc)}, 500)
+                        return
+                    if not edit or not (edit.get("clips") or []):
+                        self._json({"ok": False,
+                                    "error": "there is no timeline to "
+                                             "export"}, 404)
+                        return
+                    dest = _sb_film_dir(board)
+                    dest.mkdir(parents=True, exist_ok=True)
+                    audio = edit.get("audio") or None
+                    if audio and not Path(str(audio.get("path") or "")).is_file():
+                        audio = None
+
+                    def _probe(p):
+                        """Geometry for the XML, per clip. A still has no
+                        duration and `_sb_probe_clip` refuses it for exactly
+                        that reason, so the two probes are tried in turn."""
+                        return _sb_probe_clip(p) or _sb_probe_still(p)
+
+                    try:
+                        res = sedit.export_nle(
+                            edit.get("clips") or [], dest,
+                            name=Path(_sb_film_name(board)).stem,
+                            fps=FPS, audio=audio, probe=_probe)
+                    except sedit.EditError as exc:
+                        self._json({"ok": False, "error": str(exc)}, 400)
+                        return
+                    except OSError as exc:
+                        self._json({"ok": False,
+                                    "error": f"could not write the project "
+                                             f"folder: {exc}"}, 500)
+                        return
+                    push(f"[timeline] project folder → "
+                         f"{Path(res['dir']).name} ({res['clips']} clips, "
+                         f"{res['linked']} hardlinked, {res['copied']} copied)")
+                    self._json(res)
+                    return
+
+                if sub == "reveal":
+                    # `open -R` on a path the SERVER computed. The client sends
+                    # nothing but the board id, so this can never become an
+                    # argument to `open` pointing outside the board's folder.
+                    bid = f("id", "")
+                    board = load(bid)
+                    what = f("what", "")
+                    d = _sb_film_dir(board)
+                    target = d
+                    if what == "project":
+                        cand = d / (
+                            re.sub(r"[^a-zA-Z0-9]+", "-",
+                                   Path(_sb_film_name(board)).stem).strip("-")
+                            .lower() + "_project")
+                        if cand.is_dir():
+                            target = cand
+                    if not target.is_dir():
+                        self._json({"ok": False,
+                                    "error": "nothing exported yet"}, 404)
+                        return
+                    try:
+                        subprocess.Popen(["open", str(target)])
+                    except Exception as exc:                       # noqa: BLE001
+                        self._json({"ok": False, "error": str(exc)}, 500)
+                        return
+                    self._json({"ok": True, "path": str(target)})
+                    return
+
+                if sub == "generate":
+                    bid = f("id", "")
+                    board = load(bid)
+                    prompt = f("prompt", "")
+                    if not prompt:
+                        self._json({"ok": False,
+                                    "error": "Write what the shot shows."}, 400)
+                        return
+                    try:
+                        dur = float(f("duration", "") or f("duration_s", "")
+                                    or 5.0)
+                    except ValueError:
+                        dur = 5.0
+                    if not (0 < dur <= 60):
+                        self._json({"ok": False,
+                                    "error": f"duration must be between 0 and "
+                                             f"60 s (got {dur})"}, 400)
+                        return
+                    try:
+                        film_start = float(f("film_start", "0") or 0.0)
+                    except ValueError:
+                        film_start = 0.0
+                    pass_name = "final" if f("pass", "draft") == "final" else "draft"
+                    cid = f("character_id", "")
+                    if cid and cid not in set(_sb_known_character_ids()):
+                        self._json({"ok": False,
+                                    "error": f"character {cid!r} is not "
+                                             f"installed"}, 400)
+                        return
+                    try:
+                        seed = int(f("seed", "-1") or -1)
+                    except ValueError:
+                        seed = -1
+                    shots = [s for s in (board.get("shots") or [])
+                             if isinstance(s, dict)]
+                    n = max([int(s.get("n") or 0) for s in shots] or [0]) + 1
+                    shot = {
+                        "n": n,
+                        "title": (f("title", "") or prompt)[:60],
+                        "mode": "character" if cid else "text",
+                        "engine": (f("engine", "")
+                                   or board.get("engine_mode") or "ltx"),
+                        "prompt": prompt,
+                        "duration_s": dur,
+                        "seed": seed,
+                        "refs": [],
+                        "status": "pending",
+                        # The hole this shot was ordered for. Carried on the
+                        # BOARD (it is intent) and echoed to the client on the
+                        # edit payload's `unplaced` list when the clip lands.
+                        "edit_slot": {"film_start": round(film_start, 6),
+                                      "duration": round(dur, 6)},
+                    }
+                    if cid:
+                        shot["character_id"] = cid
+                        shot["trigger"] = f("trigger", "") or cid
+                    board.setdefault("shots", []).append(shot)
+                    _sb_normalize(board)
+                    # `_sb_normalize` may renumber; find the shot again by the
+                    # object identity the list still holds.
+                    shot = board["shots"][-1]
+                    policy = ((board.get("policy") or {}).get(pass_name)
+                              or _sb_policy_for(
+                                  get_settings().get("storyboard_draft_quality",
+                                                     "quick"),
+                                  get_settings().get("storyboard_final_quality",
+                                                     "standard"))[pass_name])
+                    h3_ok = _sb_h3_available()
+                    try:
+                        chain_ok = bool(h3_ok and h3_supports_chain_prompts())
+                    except Exception:                               # noqa: BLE001
+                        chain_ok = False
+                    form_out = storyboard.shot_to_job(
+                        shot, policy, board_id=bid,
+                        board_title=board.get("title") or "",
+                        h3_available=h3_ok,
+                        engine_mode=board.get("engine_mode") or "auto",
+                        h3_chain_prompts=chain_ok,
+                        locations=storyboard.board_locations(board),
+                        wardrobe=storyboard.board_wardrobe(board))
+                    job_form = {k: ("" if v is None else str(v))
+                                for k, v in form_out.items()}
+                    try:
+                        jid = _sb_enqueue(job_form)
+                    except Exception as exc:                        # noqa: BLE001
+                        self._json({"ok": False,
+                                    "error": f"could not queue the shot: "
+                                             f"{exc}"}, 500)
+                        return
+                    shot[storyboard.pass_job_key(pass_name)] = jid
+                    shot["status"] = "queued"
+                    storyboard.save_storyboard(STATE_DIR, board)
+                    # THE ALLOWLIST CHECK, RUN LIVE. `make_job` silently drops
+                    # any form field it does not name, so a control can look
+                    # perfectly wired and do nothing. Rather than trust that,
+                    # read the params back off the job that is now in the queue
+                    # and hand them to the client: what you see here is what
+                    # will actually render.
+                    landed = {}
+                    with LOCK:
+                        for j in (STATE.get("queue") or []):
+                            if j.get("id") == jid:
+                                p = j.get("params") or {}
+                                landed = {k: p.get(k) for k in
+                                          ("mode", "engine", "prompt", "frames",
+                                           "width", "height", "quality", "seed",
+                                           "session_tag", "label", "enhance",
+                                           "h3_length", "h3_quality")}
+                                break
+                    push(f"[timeline] queued a shot for the {film_start:.2f}s "
+                         f"slot — {dur:g}s, {pass_name} pass")
+                    self._json({"ok": True, "id": bid, "job_id": jid,
+                                "n": shot.get("n"), "pass": pass_name,
+                                "shot": shot, "params": landed}, 202)
+                    return
+
+                self._json({"ok": False,
+                            "error": f"unknown editor action: {sub}"}, 404)
                 return
 
             self._json({"ok": False, "error": f"unknown storyboard action: {action}"}, 404)
@@ -21622,6 +25658,57 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "path": str(dest)})
             except Exception as exc:
                 self._json({"error": f"upload failed: {exc}"}, 500)
+            return
+
+        # ====== the Editor's media pool — bring your own file =============
+        # "You cannot upload your own images and insert them into the
+        # timeline." The pool could show everything the panel MADE and nothing
+        # the user already had, which for a title card, a logo or a phone clip
+        # meant re-rendering something that was already on disk.
+        #
+        # WHERE THE BYTES LAND IS THE WHOLE DESIGN. An image goes into
+        # UPLOADS/library/manual/, which `list_outputs` already walks — so it
+        # appears in the Images source on the next refresh and STAYS there
+        # across restarts, with no second listing to keep in sync. A video
+        # goes into UPLOADS/timeline/, which `_sbe_pool_path_ok` already
+        # accepts, and is listed by the route below: the gallery scans
+        # OUTPUT/*.mp4 only, and dropping somebody's phone clip in among the
+        # renders would put a file the panel never made into the one folder
+        # that means "the panel made this".
+        if path == "/storyboard/edit/upload" and ctype.startswith("multipart/form-data"):
+            # 320 MB. `_parse_multipart_form` reads the body into memory, so
+            # this is a real ceiling and not a formality — big enough for any
+            # clip somebody drags in, small enough that two at once cannot
+            # take the panel down.
+            SBE_UPLOAD_MAX = 320 * 1024 * 1024
+            SBE_UPLOAD_IMAGE = {".png", ".jpg", ".jpeg", ".webp"}
+            SBE_UPLOAD_VIDEO = {".mp4", ".mov", ".m4v", ".webm"}
+            try:
+                clen = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                clen = 0
+            if clen <= 0:
+                self._json({"ok": False, "error": "Content-Length required"}, 411)
+                return
+            if clen > SBE_UPLOAD_MAX:
+                self._json({"ok": False,
+                            "error": f"that file is larger than "
+                                     f"{SBE_UPLOAD_MAX // (1024 * 1024)} MB"}, 413)
+                return
+            try:
+                form = _parse_multipart_form(self.rfile, ctype, clen)
+                fld = form["file"] if "file" in form else None
+                if fld is None or not getattr(fld, "filename", None):
+                    self._json({"ok": False, "error": "no file"}, 400)
+                    return
+                out = _sbe_accept_upload(str(fld.filename), fld.file.read(),
+                                         images=SBE_UPLOAD_IMAGE,
+                                         videos=SBE_UPLOAD_VIDEO)
+            except Exception as exc:                                # noqa: BLE001
+                out = {"ok": False, "error": f"upload failed: {exc}",
+                       "status": 500}
+            self._json({k: v for k, v in out.items() if k != "status"},
+                       200 if out.get("ok") else int(out.get("status") or 400))
             return
 
         # ====== Train Character — multipart dataset upload ===============
@@ -23436,6 +27523,47 @@ class Handler(BaseHTTPRequestHandler):
             _analytics_capture("star_prompt", {"via": _via})
             self._json({"ok": True}); return
 
+        if path == "/restart":
+            # The "Restart to finish update" pill used to open an alert() that
+            # told the user to go and do it themselves in Pinokio — a button
+            # naming an action and delivering a paragraph. Worse, Chrome
+            # silently swallows repeat dialogs once "prevent additional
+            # dialogs" is ticked, so for some users the click did visibly
+            # nothing at all (reported 2026-08-16).
+            #
+            # os.execv REPLACES this process with a fresh one: same pid, same
+            # port, same argv and cwd, running the code that is on disk NOW.
+            # That is exactly what a stale process needs. The queue and
+            # settings live on disk, so nothing in flight is lost EXCEPT a
+            # running render — which is why a busy panel refuses instead.
+            with LOCK:
+                _busy = STATE.get("current") is not None
+            if _busy:
+                self._json({"ok": False, "busy": True,
+                            "error": "A render is running. Stop it first, or "
+                                     "wait for it to finish — restarting now "
+                                     "would kill it."}, 409); return
+            persist_queue()
+            self._json({"ok": True, "restarting": True})
+            try:
+                self.wfile.flush()
+            except Exception:                                      # noqa: BLE001
+                pass
+
+            def _reexec() -> None:
+                # Give the response a moment to reach the browser; the socket
+                # is non-inheritable (PEP 446) so exec closes the listener and
+                # the new image rebinds the port cleanly.
+                time.sleep(0.4)
+                try:
+                    os.chdir(str(ROOT))
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                except Exception as exc:                           # noqa: BLE001
+                    sys.stderr.write(f"restart failed: {exc}\n")
+            threading.Thread(target=_reexec, name="panel-restart",
+                             daemon=True).start()
+            return
+
         if path == "/queue/pause":
             with QUEUE_COND:
                 STATE["paused"] = True
@@ -23886,6 +28014,10 @@ class Handler(BaseHTTPRequestHandler):
                 with _VERSION_LOCK:
                     _VERSION_STATE["pull_state"] = "pulled"
                     _VERSION_STATE["pull_message"] = (pull_out.splitlines() or ["pulled"])[-1]
+                    # _VERSION_STATE, not the /version snapshot: these two
+                    # mean "what we pulled TO", which is a fact about the tree.
+                    # The snapshot's local_* deliberately means the opposite —
+                    # the build this process is still running.
                     _VERSION_STATE["pull_pulled_to_short"] = _VERSION_STATE["local_short"]
                     _VERSION_STATE["pull_pulled_to_version"] = _VERSION_STATE["local_version"]
                     _VERSION_STATE["pull_requires_full_update"] = deps_touched
@@ -25303,15 +29435,47 @@ def page() -> str:
         + str(PORT) + '">DEV</span>'
         if PROFILE == "dev" else ""
     )
+    # A TEST PANEL MUST NOT BE ABLE TO IMPERSONATE THE REAL ONE. A verifying
+    # agent runs a second copy against a throwaway LTX_STATE_DIR so it can
+    # cut, save and restore without touching the owner's films — and an
+    # abandoned tab of THAT is indistinguishable from his own panel showing a
+    # stale build. It cost an evening: he read a test instance as his install
+    # and reported the app had gone backwards.
+    #
+    # The tell is the state dir, because that is exactly what makes it a
+    # different panel: a STATE_DIR outside the install root is by definition
+    # not the install's own films. Loud badge, and the tab title changes too —
+    # a background tab is a title and a favicon and nothing else.
+    is_test = not _state_dir_is_native()
+    if is_test:
+        profile_badge = (
+            '<span class="profile-badge test-badge" title="This is a TEST panel. '
+            'Its ' + SEQ_NOUN_PL + ' live in ' + html.escape(str(STATE_DIR)) + ', not in this '
+            'install — nothing you do here touches your own work.">TEST PANEL</span>'
+            + profile_badge)
     return (HTML
+            .replace("__SEQCAP__", SEQ_NOUN_CAP)
+            .replace("__SEQS__", SEQ_NOUN_PL)
+            .replace("__SEQ__", SEQ_NOUN)
+            .replace("<title>Phosphene</title>",
+                     "<title>Phosphene TEST</title>" if is_test
+                     else "<title>Phosphene</title>")
             .replace("__BOOTSTRAP__", bootstrap)
             .replace("__PROFILE_BADGE__", profile_badge)
             .replace("__Q8_CHARACTER_INSTALL_COPY__",
                      q8_character_install_copy())
+            .replace("__BUILD_STAMP__", html.escape(build_stamp_text()))
             # The header badge used to be the literal string "3.0", so it kept
             # claiming 3.0 through every release since. It reads the VERSION
             # file now — the same source /version and the update pill use.
-            .replace("__PANEL_VERSION__", html.escape(_read_local_version() or "dev"))
+            #
+            # The BOOT version, not the file on disk. _read_local_version()
+            # re-reads the tree, so a pull under a running panel moved this
+            # badge to the new number while the old code kept serving. The
+            # disk fallback covers a zip install with no git.
+            .replace("__PANEL_VERSION__",
+                     html.escape(boot_build_stamp()["version"]
+                                 or _read_local_version() or "dev"))
             .replace("__ENGINE_RULES__", _engine_css())
             .replace("__CAP_TIER__", cap_tier))
 
@@ -25322,6 +29486,10 @@ HTML = r"""<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Phosphene</title>
+  <!-- The build this PROCESS is serving, not the one in the working tree.
+       Server-rendered, so it answers before a byte of JS runs and survives
+       a page saved to disk. See build_stamp_text(). -->
+  <meta name="phosphene-build" content="__BUILD_STAMP__">
   <link rel="icon" type="image/png" sizes="64x64" href="/assets/favicon-64.png">
   <link rel="icon" type="image/png" sizes="256x256" href="/assets/favicon.png">
   <style>
@@ -25347,6 +29515,16 @@ HTML = r"""<!doctype html>
       --shadow-2: 0 8px 24px rgba(0,0,0,0.40);
       --ring: 0 0 0 3px var(--accent-dim);
       --r-xs: 6px; --r-sm: 8px; --r-md: 10px; --r-lg: 14px; --r-pill: 999px;
+      /* TWO RUNGS FOR CONTROLS AND FIVE FOR TYPE, because the Editor had
+         eight control heights and eleven type sizes on one screen — four of
+         them half a pixel apart, which is below the threshold where a
+         difference reads as hierarchy and above the one where it reads as
+         sloppiness. Half-pixel sizes also land on non-integer line boxes,
+         which is why rows in the rail and the drafts panel came out a pixel
+         off each other. Anything new picks a rung; nothing declares its own. */
+      --ctl-h: 32px; --ctl-h-sm: 28px; --ctl-h-lg: 36px;
+      --fs-2xs: 10px; --fs-xs: 11px; --fs-sm: 12px; --fs-md: 13px;
+      --fs-lg: 15px;
       --t-fast: 120ms cubic-bezier(.2,.8,.2,1);
       --t-base: 180ms cubic-bezier(.2,.8,.2,1);
       --t-slow: 240ms cubic-bezier(.2,.8,.2,1);
@@ -25396,6 +29574,13 @@ HTML = r"""<!doctype html>
     }
     .brand { display: inline-flex; align-items: center; flex-shrink: 0; }
     .brand img { height: 124px; width: auto; display: block; }
+    /* The impostor badge. Red, first in the row, and deliberately the loudest
+       thing in the header: its whole job is to stop somebody reading a
+       throwaway instance as their own install. */
+    .profile-badge.test-badge {
+      background: var(--danger); border-color: var(--danger); color: #fff;
+      letter-spacing: 0.06em;
+    }
     /* DEV badge — visible only on the dev panel (PROFILE == 'dev'). Sits
        next to the Phosphene wordmark so it's the first thing you notice
        when comparing dev vs production tabs. */
@@ -25861,7 +30046,15 @@ HTML = r"""<!doctype html>
        stays visible — training surfaces progress through the existing Now /
        Queue / Recent / Logs panes. */
     body[data-workflow="train"] #modelsInline,
+    /* #remixSubGroup RIDES WITH #modeGroup IN ALL SIX RULES, and it has to be
+       said once so the seventh surface does not repeat it. The Remix sub-row
+       is a SIBLING of the mode bar, not a child — it sits outside #genForm —
+       so hiding the bar left the row behind on every non-Video surface. A
+       Pinokio user (fuschichou) found it as a stray control on the Audio tab.
+       The rule to keep: the sub-row is visible exactly when its parent bar is,
+       which means these two ids are never listed apart. */
     body[data-workflow="train"] #modeGroup,
+    body[data-workflow="train"] #remixSubGroup,
     body[data-workflow="train"] aside.form-pane > h2,
     body[data-workflow="train"] #genForm,
     body[data-workflow="train"] #studioSection,
@@ -25874,6 +30067,7 @@ HTML = r"""<!doctype html>
        Hides the manual-only chrome the same way Train / Studio do. */
     body[data-workflow="audio"] #modelsInline,
     body[data-workflow="audio"] #modeGroup,
+    body[data-workflow="audio"] #remixSubGroup,
     body[data-workflow="audio"] aside.form-pane > h2,
     body[data-workflow="audio"] #genForm,
     body[data-workflow="audio"] #studioSection,
@@ -25893,6 +30087,7 @@ HTML = r"""<!doctype html>
        fonts, no libraries — the panel is offline-capable and dark-only. */
     body[data-workflow="storyboard"] #modelsInline,
     body[data-workflow="storyboard"] #modeGroup,
+    body[data-workflow="storyboard"] #remixSubGroup,
     body[data-workflow="storyboard"] aside.form-pane > h2,
     body[data-workflow="storyboard"] #genForm,
     body[data-workflow="storyboard"] #studioSection,
@@ -26414,7 +30609,58 @@ HTML = r"""<!doctype html>
     .sb-runbar .sb-danger { color: var(--danger); border-color: rgba(248,81,73,0.4); }
 
     /* ---- board list -------------------------------------------------- */
-    .sb-boardlist li { grid-template-columns: 1fr auto auto auto; cursor: pointer; }
+    /* Five columns, and the TITLE keeps the flexible one. The first cut of
+       this row gave `.params` its natural width and left `.ttl` a 1fr that
+       collapsed to nothing — at 1000px the rows read "7 shots · 0…  PLAN ONLY
+       Edit ×" with no film name anywhere on screen. minmax(0,1fr) on the title
+       and a shrinkable, ellipsised `.params` puts the name back. */
+    .sb-boardlist li {
+      grid-template-columns: minmax(0, 1fr) auto auto max-content auto !important;
+      cursor: pointer;
+    }
+    .sb-boardlist li .ttl { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    /* The sidebar copy of the same list is ~230 px wide, and one line cannot
+       hold a film's name, a shot count, a state badge, a chip and a delete
+       button. The name is what lost: at 1000 px the rows read "DRAFTS DONE
+       Film · 0:28 ×" with no title on them at all. So the narrow copy drops
+       the shot count and goes to two lines — the name, then what it is and
+       where it goes. */
+    #sbBoardListMini li .params { display: none; }
+    /* And it gets its own scroll box. Two lines a board is worth it for names
+       you can read, but twelve boards must not push `Plan film` off the
+       column — the list scrolls, the brief below it does not move. */
+    #sbBoardListMini { max-height: 184px; overflow-y: auto; padding-right: 2px; }
+    #sbBoardListMini li {
+      grid-template-columns: minmax(0, 1fr) 22px !important;
+      row-gap: 5px; padding: 6px 9px;
+    }
+    #sbBoardListMini li .ttl { grid-area: 1 / 1 / 2 / 2; }
+    #sbBoardListMini li > button:last-child { grid-area: 1 / 2 / 2 / 3; }
+    #sbBoardListMini li .badge {
+      grid-area: 2 / 1 / 3 / 3; justify-self: start;
+      max-width: 52%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    #sbBoardListMini li .sb-row-go { grid-area: 2 / 1 / 3 / 3; justify-self: end; }
+    /* The trailing slot names the FURTHEST place this board has got to —
+       "Film" once one exists, "Edit" once there are clips to arrange, nothing
+       before that. One slot, never two, and it always points forward. */
+    /* Specificity, not luck: `.row-list li button` is 22x22 with no padding and
+       is defined further down the sheet, so a plain `.sb-row-go` lost and the
+       label overflowed across the badge beside it. Three classes deep beats it
+       wherever either rule ends up. */
+    .sb-boardlist li .sb-row-go {
+      display: inline-flex; align-items: center; gap: 5px;
+      width: auto; height: auto;
+      padding: 3px 9px; font-size: 11.5px; font-weight: 600; cursor: pointer;
+      color: var(--accent-bright); background: var(--accent-dim);
+      border: 1px solid var(--accent);
+      border-radius: var(--r-pill); white-space: nowrap;
+    }
+    .sb-boardlist li .sb-row-go:hover {
+      color: var(--accent-bright); background: rgba(47,129,247,0.30);
+      border-color: var(--accent);
+    }
+    .sb-boardlist li .sb-row-go .ph { width: 13px; height: 13px; }
     .sb-boardlist li .badge { color: var(--muted); background: rgba(255,255,255,0.05); }
     .sb-boardlist li.is-live .badge {
       color: var(--accent-bright); background: var(--accent-dim);
@@ -26449,6 +30695,1676 @@ HTML = r"""<!doctype html>
        any tier the registry grows. */
     body[data-cap-tier="q4"] #sbFinalQuality [data-pack="q8"] { display: none !important; }
 
+    /* =========================================================
+       THE RAIL — one place that says where you are and what is next.
+       =========================================================
+       Six stage states shared one scroller and nothing said which of them you
+       were in, so the timeline was findable only by knowing it was the fifth
+       button in a five-button grading bar. This is the fix: the four things a
+       film goes through, always in the same place, on every screen that has a
+       board open. It is navigation, not decoration — every step is a door. */
+    .sb-rail {
+      /* No longer sticky: the rail now lives ABOVE the player as the pane's
+         first child, permanently on screen, instead of being sticky inside
+         #sbStage's scroller — where it shared top:0 with the stats row and
+         ate it, and sat BELOW the video whenever a clip was showing. */
+      z-index: 6;
+      display: flex; align-items: center; gap: 2px;
+      flex: 0 0 auto; flex-wrap: wrap;
+      /* Deliberately thin. The timeline below it is the one surface in this
+         app whose usefulness is measured in pixels per second, and the rail
+         is navigation — it earns its ~34 px and not one more. */
+      margin: 0 0 10px; padding: 4px 6px;
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: var(--r-md);
+    }
+    .sb-rail[hidden] { display: none !important; }
+    /* Belt for the new position: the rail is now a direct child of the shared
+       stage pane, so CSS — not just the JS `hidden` flag — guarantees it can
+       never appear on Video/Images/Audio/Train. */
+    body:not([data-workflow="storyboard"]) .sb-rail { display: none !important; }
+    /* `width: auto` on both, because the panel's base rule makes a bare
+       <button> fill its parent — without it the rail stacks four steps down
+       the page instead of across it. */
+    .sb-rail-back {
+      display: inline-flex; align-items: center; gap: 5px; width: auto;
+      flex: 0 0 auto;
+      padding: 4px 9px; margin-right: 4px; font-size: 11.5px;
+      color: var(--muted); background: transparent;
+      border: 1px solid transparent; border-radius: var(--r-pill);
+      cursor: pointer; white-space: nowrap;
+    }
+    .sb-rail-back:hover { color: var(--text); background: var(--panel-2); }
+    .sb-rail-back .ph { width: 12px; height: 12px; }
+    .sb-rail-step {
+      display: inline-flex; align-items: baseline; gap: 6px; width: auto;
+      flex: 0 0 auto;
+      padding: 3px 10px; font-size: 12px; font-weight: 600;
+      color: var(--muted); background: transparent;
+      border: 1px solid transparent; border-radius: var(--r-pill);
+      cursor: pointer; white-space: nowrap; font-family: inherit;
+    }
+    .sb-rail-step .sb-rail-n {
+      font-size: 9.5px; font-weight: 700; letter-spacing: 0.04em;
+      color: var(--muted); opacity: 0.75;
+    }
+    .sb-rail-step .sb-rail-sub {
+      font-size: 10.5px; font-weight: 500; color: var(--muted); opacity: 0.85;
+    }
+    .sb-rail-step:hover { color: var(--text); background: var(--panel-2); }
+    .sb-rail-step.is-done { color: var(--text); }
+    .sb-rail-step.is-done .sb-rail-n { color: var(--success); opacity: 1; }
+    .sb-rail-step.is-now {
+      color: var(--accent-bright); background: var(--accent-dim);
+      border-color: var(--accent);
+    }
+    .sb-rail-step.is-now .sb-rail-n,
+    .sb-rail-step.is-now .sb-rail-sub { color: var(--accent-bright); opacity: 1; }
+    /* Locked is not hidden. A step you cannot reach yet still has to say what
+       it is and what would unlock it — that is the whole point of a path. */
+    .sb-rail-step.is-locked { opacity: 0.42; cursor: not-allowed; }
+    .sb-rail-step.is-locked:hover { color: var(--muted); background: transparent; }
+    .sb-rail-sep {
+      flex: 0 0 auto; width: 14px; height: 1px; background: var(--border-strong);
+      opacity: 0.7;
+    }
+    @media (max-width: 900px) { .sb-rail-sep { width: 6px; } }
+
+    /* =========================================================
+       THE FILM — the seventh stage state, and the point of the other six.
+       =========================================================
+       Both assemblers wrote an mp4 and then said nothing, so the user was left
+       looking at a list of shots wondering which one was the movie. This is
+       the movie: one player, four facts, and the folder it lives in. Built
+       from the same primitives as the shot list (.carousel-head, .sb-summary,
+       .row-list) because it is the same screen's last page, not a second app. */
+    .sb-film { gap: 10px; }
+    .sb-film > * { flex: 0 0 auto; }
+    .sb-film-stage {
+      position: relative; background: #000;
+      border: 1px solid var(--border); border-radius: var(--r-md);
+      overflow: hidden; line-height: 0;
+    }
+    .sb-film-stage video {
+      display: block; width: 100%; max-height: min(56vh, 560px);
+      background: #000; object-fit: contain;
+    }
+    .sb-film-name {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      margin-top: 10px; font-size: 12.5px; color: var(--text);
+    }
+    .sb-film-name code {
+      font-size: 11.5px; color: var(--muted); background: var(--panel-2);
+      border: 1px solid var(--border); border-radius: var(--r-xs);
+      padding: 2px 7px;
+    }
+    .sb-film-kind {
+      font-size: 9px; font-weight: 700; letter-spacing: 0.07em;
+      text-transform: uppercase; padding: 2px 7px;
+      border-radius: var(--r-pill);
+      color: var(--accent-bright); background: var(--accent-dim);
+      border: 1px solid var(--accent);
+    }
+    .sb-film-where {
+      font-size: 11.5px; color: var(--muted); margin-top: 2px;
+      overflow-wrap: anywhere;
+    }
+    .sb-film-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+    /* .ghost-btn is display:block and .ph is display:block, so an icon inside
+       one lands on its own line. Every other icon+label button in the panel
+       flips to inline-flex for exactly this reason. */
+    .sb-film-actions .ghost-btn, .sb-film-actions .primary {
+      width: auto; padding: 7px 14px;
+      display: inline-flex; align-items: center; gap: 6px;
+    }
+    .sb-film-actions .ph { width: 14px; height: 14px; }
+    .sb-filmlist li { grid-template-columns: minmax(0, 1fr) auto auto !important; cursor: pointer; }
+    .sb-filmlist li .ttl { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .sb-filmlist li.is-open { border-color: var(--accent); background: var(--accent-dim); }
+
+    /* =========================================================
+       THE TIMELINE EDITOR — the sixth storyboard stage state.
+       =========================================================
+       Same tokens, same radii, same motion as every other storyboard
+       surface: this is the shot list's next screen, not a second app. The
+       only new primitive is the track, and it is built from the same
+       --panel / --border / --accent scale as the cards above it.
+
+       NOTE ON TOKENS: the panel's palette is --text / --muted / --border /
+       --panel / --panel-2 / --accent. The ink/line scale some other Anthropic
+       surfaces use is NOT defined in this app — the dozen or so references to
+       it that exist here all carry a hard-coded fallback and are therefore
+       decorative. Nothing below invents one. */
+    /* THE EDITOR OWNS ITS OWN WINDOW.
+       This block used to read `body[data-workflow="storyboard"].sbe-open` and
+       fold the storyboard's planning column away while the timeline was open
+       — a mode, inside another tab, which is exactly what the 2026-08-17 UX
+       review took apart: "the editor deserves its own window … for all
+       models … called Editor". It is a workflow now, so there is nothing to
+       fold and nothing to steal. The two columns are the media pool and the
+       cut, which is the layout every editor on earth uses.
+
+       300px is the pool: wide enough for a thumbnail, a title and an Add
+       button, and no wider — the cut is what the window is for. */
+    body[data-workflow="editor"] main.layout {
+      grid-template-columns: minmax(0, 300px) minmax(0, 1fr);
+    }
+    body[data-workflow="editor"] main.layout > aside.form-pane {
+      /* Anything that cannot survive 300px scrolls. */
+      overflow-x: hidden;
+    }
+    /* THE CUT SPANS BOTH ROWS, exactly as the base layout does for every
+       other workflow. This rule said `grid-row: 1 / 2` for two releases, so
+       row 2 — the bottomPane's own height, 170px measured at 1440x900 — was
+       reserved across the WHOLE grid while only the 300px left column had
+       anything in it. The remaining 1140x170 under the timeline was page
+       background and nothing else: the band the owner circled and called
+       "black space down below". Spanning gives it back to the picture. */
+    body[data-workflow="editor"] main.layout > .stage-pane {
+      grid-column: 2 / 3; grid-row: 1 / span 2;
+    }
+    /* Below this the two columns stack. The pool is a short list, not the
+       storyboard's ~730px brief, so it stacks above the cut rather than
+       folding away — losing the pool would lose the tab's other half. */
+    @media (max-width: 1100px) {
+      body[data-workflow="editor"] main.layout {
+        grid-template-columns: minmax(0, 1fr);
+      }
+      body[data-workflow="editor"] main.layout > aside.form-pane {
+        grid-column: 1 / 2; grid-row: 1 / 2; max-height: 38vh;
+      }
+      body[data-workflow="editor"] main.layout > .stage-pane {
+        grid-column: 1 / 2; grid-row: 2 / 3;
+      }
+      body[data-workflow="editor"] main.layout > #bottomPane {
+        grid-column: 1 / 2; grid-row: 3 / 4;
+      }
+    }
+    /* The queue and the log stay: a shot generated into a hole is rendering
+       somewhere, and that is where it reports. */
+    body[data-workflow="editor"] main.layout > #bottomPane {
+      grid-column: 1 / 2; grid-row: 2 / 3;
+    }
+
+    /* ---- the Editor workflow fold ------------------------------------
+       Same shape as the storyboard fold above: the form pane becomes the
+       media pool, the stage column becomes the cut. The player surface and
+       the carousel go — the editor IS a player, and a second one beside it
+       is two videos competing for one decoder. */
+    body[data-workflow="editor"] #modelsInline,
+    body[data-workflow="editor"] #modeGroup,
+    body[data-workflow="editor"] #remixSubGroup,
+    body[data-workflow="editor"] aside.form-pane > h2,
+    body[data-workflow="editor"] #genForm,
+    body[data-workflow="editor"] #studioSection,
+    body[data-workflow="editor"] #trainSection,
+    body[data-workflow="editor"] #sbSectionTab,
+    body[data-workflow="editor"] #audioSectionTab { display: none !important; }
+    body[data-workflow="editor"] #edSectionTab { display: flex; }
+    .form-pane > #edSectionTab { padding: 0 18px; }
+    body[data-workflow="editor"] .stage-pane > .player-surface,
+    body[data-workflow="editor"] .stage-pane > .carousel-wrap,
+    body[data-workflow="editor"] .ideo-stage-bar,
+    body[data-workflow="editor"] .ideo-canvas-host { display: none !important; }
+    /* #modelTag names ONE model; a cut is made of clips from many. */
+    body[data-workflow="editor"] #modelTag { display: none !important; }
+    body[data-workflow="editor"] #edStage { display: flex; }
+    #edStage {
+      display: none;
+      flex: 1 1 auto;
+      flex-direction: column;
+      min-height: 240px;
+      overflow-y: auto;
+      padding-right: 2px;
+    }
+    #edStage > .sbe { flex: 1 1 auto; }
+    /* The empty state is the whole column when there is no document. */
+    #edEmpty { margin: auto 0; }
+    /* ---- the media pool ---------------------------------------------
+       A column, not a grid: at 300px a two-up grid gives 130px tiles that
+       can hold neither a title nor a button, and the thing being chosen here
+       is "which clip", which is a name and a length before it is a picture.
+       The picture is still there — a 64px frame, loaded as metadata only, so
+       a pool of two hundred clips costs two hundred headers and no decode. */
+    #edSectionTab { flex-direction: column; min-height: 0; gap: 8px; padding-bottom: 14px; }
+    .ed-pool-head { margin: 0; }
+    .ed-pool-head h3 { margin: 0; }
+    .ed-pool-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+    /* Four sources in a ~200px column. `flex: 1 1 auto` laid them out three
+       and one, which reads as the fourth being an afterthought rather than a
+       peer. A 40% basis wraps them two and two. */
+    .ed-pool-tabs .pill-btn { flex: 1 1 40%; width: auto; }
+    .ed-pool-film, .ed-pool-search { width: 100%; }
+    .ed-pool-film[hidden] { display: none !important; }
+    .ed-pool-list {
+      display: flex; flex-direction: column; gap: 4px;
+      overflow-y: auto; min-height: 120px; flex: 1 1 auto;
+      padding-right: 2px;
+    }
+    .ed-pool-row {
+      display: flex; align-items: center; gap: 9px; width: 100%;
+      padding: 5px 7px; text-align: left; cursor: pointer;
+      user-select: none; -webkit-user-select: none;
+      background: var(--panel-2); border: 1px solid var(--border);
+      border-radius: var(--r-sm); color: var(--text);
+      font-family: inherit; font-size: var(--fs-sm);
+    }
+    .ed-pool-row:hover { border-color: var(--accent); background: var(--panel); }
+    .ed-pool-row:disabled { opacity: .55; cursor: default; }
+    /* THE STILL WAS NOT IN THIS RULE, and the still branch emits a bare
+       <img>. So an image row had no width cap: the picture took 180px of a
+       261px row, the text column was squeezed to 22px, and every filename
+       ellipsised to one character and a dot — rows three times the height of
+       the Generations tab next door, two of them visible at a time. */
+    .ed-pool-row img, .ed-pool-row video, .ed-pool-row .ed-pool-blank {
+      width: 64px; height: 36px; flex: 0 0 auto; object-fit: cover;
+      border-radius: 3px; background: #000; pointer-events: none;
+    }
+    .ed-pool-row .ed-pool-meta {
+      min-width: 0; flex: 1 1 auto; display: flex; flex-direction: column;
+      gap: 1px;
+    }
+    .ed-pool-row .ed-pool-name {
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .ed-pool-row .ed-pool-sub { color: var(--muted); font-size: var(--fs-xs); }
+    /* + IS ITS OWN BUTTON NOW. The whole row used to be one <button> whose
+       click added the clip; clicking a row previews it instead, so the verb
+       that still adds needs a control of its own — and a <button> inside a
+       <button> is not markup, which is why the row became a div with a
+       role. The panel's base `button { width: 100% }` would make this 200px
+       wide, hence the override. */
+    .ed-pool-row .ed-pool-add {
+      margin-left: auto; flex: 0 0 auto; width: auto; padding: 2px 7px;
+      color: var(--muted); font-size: var(--fs-lg); line-height: 1;
+      background: transparent; border: 1px solid transparent;
+      border-radius: var(--r-xs); font-family: inherit; cursor: pointer;
+    }
+    .ed-pool-row:hover .ed-pool-add { color: var(--accent); }
+    .ed-pool-row .ed-pool-add:hover {
+      color: var(--accent-bright); border-color: var(--accent);
+      background: var(--accent-dim);
+    }
+    /* Which row the source monitor is showing. The pool is a list of things
+       you are choosing between, so it has to say which one you are looking
+       at — otherwise the left screen is unattributed. */
+    .ed-pool-row.is-source {
+      border-color: var(--accent); background: var(--accent-dim);
+    }
+    .ed-pool-note { color: var(--muted); font-size: var(--fs-xs); line-height: 1.5; }
+    /* ---- the relink banner ------------------------------------------- */
+    .sbe-relink {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      padding: 8px 10px; border-radius: var(--r-sm);
+      border: 1px solid var(--warning); background: var(--panel-2);
+      color: var(--text); font-size: var(--fs-sm);
+    }
+    .sbe-relink[hidden] { display: none !important; }
+    .sbe-relink .sbe-relink-why { color: var(--muted); font-size: var(--fs-xs); }
+    .ed-pick {
+      display: flex; flex-direction: column; gap: 6px;
+      margin-top: 14px; width: 100%; max-width: 460px;
+      margin-inline: auto; text-align: left;
+    }
+    .ed-pick button {
+      display: flex; align-items: center; gap: 10px; width: 100%;
+      padding: 9px 12px; text-align: left;
+      background: var(--panel-2); border: 1px solid var(--border);
+      border-radius: var(--r-sm); color: var(--text);
+      font-size: var(--fs-sm); font-family: inherit; cursor: pointer;
+    }
+    .ed-pick button:hover { border-color: var(--accent); background: var(--panel); }
+    .ed-pick button .sub { color: var(--muted); font-size: var(--fs-xs); margin-left: auto; }
+
+    /* 8px, not 10. Seven gaps at 10px is 70px of the column, and 14 of them
+       bought nothing that the borders below were not already saying. */
+    .sbe { gap: 8px; }
+    /* ---- the command bar's own controls -----------------------------
+       The draft chip is IDENTITY, so it sits beside the name and is drawn
+       quieter than a verb; the split primary is the only filled thing on the
+       screen; the kebab is a square. */
+    .sbe-draftchip { width: auto; gap: 6px; color: var(--muted); }
+    .sbe-draftchip #sbeDraftName { color: var(--text); font-weight: 600; }
+    .sbe-car { color: var(--muted); font-size: var(--fs-2xs); }
+    .sbe-split { display: inline-flex; }
+    .sbe-split > .primary:first-child {
+      border-top-right-radius: 0; border-bottom-right-radius: 0;
+    }
+    .sbe-split > .sbe-car-btn {
+      border-top-left-radius: 0; border-bottom-left-radius: 0;
+      width: auto; padding-inline: 8px; margin-left: 1px;
+    }
+    .sbe-kebab { width: auto; padding-inline: 9px; letter-spacing: 0.06em; }
+    /* ---- the popover, four times ------------------------------------
+       FIXED, so an open menu is not part of the column's height and cannot
+       push the workspace around — the rule the notice surface set. */
+    .sbe-pop {
+      position: fixed; z-index: 60; min-width: 190px; max-width: 360px;
+      display: flex; flex-direction: column; gap: 6px; padding: 8px;
+      background: var(--panel); border: 1px solid var(--border-strong);
+      border-radius: var(--r-md); box-shadow: var(--shadow-2);
+    }
+    .sbe-pop[hidden] { display: none !important; }
+    .sbe-pop-wide { min-width: 300px; }
+    .sbe-pop .ghost-btn {
+      width: 100%; justify-content: flex-start; text-align: left;
+      height: var(--ctl-h-sm); padding-inline: 10px; font-size: var(--fs-xs);
+    }
+    .sbe-pop-row { display: flex; gap: 6px; }
+    .sbe-pop-row .ghost-btn { width: auto; flex: 1 1 auto; }
+    .sbe-pop-note {
+      font-size: var(--fs-xs); color: var(--muted); line-height: 1.4;
+    }
+    .sbe-pop-sep { height: 1px; background: var(--border); margin: 2px 0; }
+    .sbe-pop .sbe-keys { grid-template-columns: 1fr; }
+    /* The ⓘ that two lines of prose became. */
+    .sbe-info {
+      width: 17px; height: 17px; flex: 0 0 auto; border-radius: 50%;
+      border: 1px solid var(--border-strong); color: var(--muted);
+      display: inline-flex; align-items: center; justify-content: center;
+      font-size: var(--fs-2xs); font-style: italic; cursor: help;
+    }
+    .sbe-info:hover { color: var(--text); border-color: var(--accent); }
+    /* ---- the lane gutter --------------------------------------------
+       Its heads read the SAME variables the lanes do, so the two columns
+       cannot drift apart at any height the handle is dragged to. The two
+       +1s are the scroller's own borders, which the gutter does not have. */
+    .sbe-tlwrap {
+      flex: 1 1 auto; display: flex; min-width: 0;
+      min-height: var(--sbe-tl-h, 280px);
+    }
+    .sbe-gutter {
+      flex: 0 0 124px; display: flex; flex-direction: column; min-width: 0;
+      border: 1px solid var(--border); border-right: 0;
+      border-radius: var(--r-md) 0 0 var(--r-md);
+      background: var(--bg-2); overflow: hidden;
+    }
+    .sbe-gh {
+      display: flex; flex-direction: column; justify-content: center;
+      gap: 2px; padding: 0 9px; min-width: 0; overflow: hidden;
+    }
+    .sbe-gh-top { flex: 0 0 calc(18px + 1px); border-bottom: 1px solid var(--border); }
+    .sbe-gh-ov { flex: 0 0 var(--sbe-ov-h, 32px); border-bottom: 1px solid var(--border); }
+    .sbe-gh-pic {
+      flex: 1 1 auto; min-height: var(--sbe-track-h, 64px); max-height: 120px;
+      justify-content: flex-start; padding-top: 8px;
+    }
+    .sbe-gh-aud {
+      flex: 0 0 var(--sbe-alane-h, 44px); border-top: 1px solid var(--border);
+      justify-content: flex-start; padding-top: 6px;
+    }
+    .sbe-gh-mus {
+      flex: 0 0 var(--sbe-wave-h, 108px); border-top: 1px solid var(--border);
+      justify-content: flex-start; padding-top: 6px; gap: 4px;
+    }
+    .sbe-gh-foot { flex: 0 0 13px; }
+    .sbe-gh-tag {
+      display: flex; align-items: center; gap: 5px; min-width: 0;
+      font-size: var(--fs-2xs); color: var(--text); font-weight: 600;
+    }
+    .sbe-gh-tag i {
+      font-style: normal; font-size: 9px; letter-spacing: 0.04em;
+      color: var(--muted); border: 1px solid var(--border);
+      border-radius: 3px; padding: 1px 3px; flex: 0 0 auto;
+    }
+    .sbe-gh-tag b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .sbe-gh-sub {
+      font-size: var(--fs-2xs); color: var(--muted); overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap;
+    }
+    .sbe-gh-sub.is-live { color: var(--accent-bright); }
+    .sbe-gh-more {
+      margin-left: auto; flex: 0 0 auto; width: 18px; height: 16px;
+      border: 1px solid var(--border); border-radius: var(--r-xs);
+      background: var(--panel); color: var(--muted); cursor: pointer;
+      font-size: 9px; line-height: 1; padding: 0;
+    }
+    .sbe-gh-more:hover { border-color: var(--accent); color: var(--text); }
+    .sbe-gh-mode {
+      height: 20px; padding: 0 4px; font-size: var(--fs-2xs); width: 100%;
+      min-width: 0;
+    }
+    .sbe-gh-mus .sbe-music-name {
+      font-size: var(--fs-2xs); color: var(--muted); overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
+    }
+    /* THE MIX, ON THE HEAD THAT OWNS IT. Two controls that used to be two
+       constants in the renderer. They are deliberately plain — a level and a
+       checkbox — because the interesting thing about them is that they exist
+       and that the render obeys them, not that they are pretty. */
+    .sbe-mix-row {
+      display: flex; flex-direction: column; gap: 3px; width: 100%;
+      min-width: 0;
+    }
+    .sbe-mix-lvl {
+      display: flex; align-items: center; gap: 4px; margin: 0;
+      font-size: var(--fs-2xs); color: var(--muted); min-width: 0;
+    }
+    .sbe-mix-lvl > span { flex: 0 0 auto; }
+    .sbe-mix-lvl input[type=range] {
+      flex: 1 1 auto; min-width: 0; height: 12px; margin: 0; accent-color: var(--accent);
+    }
+    .sbe-mix-lvl b {
+      flex: 0 0 auto; font-weight: 600; color: var(--text);
+      font-variant-numeric: tabular-nums; min-width: 30px; text-align: right;
+    }
+    .sbe-gh-mus .sbe-mix-duck {
+      margin: 0; font-size: var(--fs-2xs); color: var(--muted);
+      display: flex; align-items: center; gap: 4px; min-width: 0;
+    }
+    .sbe-gh-mus .sbe-mix-duck input { margin: 0; flex: 0 0 auto; }
+    .sbe-gh-mus .sbe-mix-duck span {
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    /* A CONTROL THAT HAS STOPPED ACTING SAYS SO. The duck stands down under an
+       authored envelope (see sbeBedDuckSuppressed) and a checkbox that stayed
+       ticked while doing nothing would be the silent guard this editor keeps
+       paying for. */
+    .sbe-mix-note {
+      font-size: 9px; line-height: 1.25; color: var(--warn, #d29922);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .sbe-gh-mus.is-duck-off .sbe-mix-duck { opacity: 0.55; }
+    /* #edStage is the scroller (flex column, overflow-y auto). Its children
+       must keep their natural height or the track ends up half a track tall —
+       which is exactly what happened the first time this was rendered in a
+       browser: the stage stole the space and the clip blocks were clipped out
+       of the scroll box. ONE exception, stated here as well as on the rule
+       itself: the timeline is what absorbs the slack. */
+    .sbe > * { flex: 0 0 auto; }
+    .sbe > .sbe-tlwrap { flex: 1 1 auto; }
+    /* [hidden] is display:none only until something gives the element a
+       display. Four things here do, so four things here have to say it. */
+    .sbe-conflict[hidden], .sbe-prep[hidden], .sbe-unplaced[hidden],
+    .sbe-wave[hidden], .sbe-wave-none[hidden], .sbe-errs[hidden],
+    .sbe-params[hidden] { display: none !important; }
+    /* ONE ROW, ALWAYS. `flex-wrap: wrap` was the second half of a live bug:
+       the owner saw "the save button pops up sometimes and it's super big" —
+       1554px wide, in a 1920px window, with the header three rows tall.
+       WRAPPING WAS NOT THE CAUSE, IT WAS THE PERMISSION. The cause is one line
+       below; wrap is what let an over-wide item take a row of its own instead
+       of being shrunk into the line with everything else. A header that stacks
+       is never the right answer here — it pushes the monitors and the timeline
+       down the column, which is the one thing this layout is built not to do —
+       so it degrades by ELLIPSIS and by folding, never by wrapping. */
+    /* TWO CLASSES, DELIBERATELY. The element is `carousel-head sbe-head`, and
+       `.carousel-head { flex-wrap: wrap }` is declared LATER in this sheet —
+       equal specificity, so it wins. Written as a single class this rule was
+       silently a no-op, which is how the first version of this fix measured a
+       header that still wrapped. */
+    .carousel-head.sbe-head {
+      position: relative; z-index: 4; gap: 8px; flex-wrap: nowrap;
+    }
+    /* SEVEN IDENTICAL BUTTONS, NO PRIMARY. Undo, Redo, Save, the draft name,
+       Drafts, Storyboard and Close all rendered at the same fill, border,
+       height and type — so the safest action in the row and the one that
+       LEAVES looked alike, and the row did not change when the state chip
+       went amber. Save earns the fill exactly while there is something to
+       save; Undo/Redo become one segmented control; and Close is pushed to
+       the far end behind a divider, so leaving does not sit in the same
+       cluster as saving. */
+    /* THE BUG, AND THE WHOLE OF IT. The global form rule is
+       `input, textarea, select, button { width: 100% }`; `.ghost-btn` cancels
+       it with `width: auto`, and `button.primary` NEVER DID. Save is a ghost
+       button until there is something to save and `sbePaintChrome` swaps it to
+       `.primary` — so the moment the owner made an edit, Save's flex basis
+       became 100% of the header, which is 1554px, and the row wrapped around
+       it. "Sometimes" was exactly "while unsaved", which is why it looked
+       random. The same trap is why Render survived: it sits inside
+       `.sbe-split`, whose inline-flex shrink-to-fit made its 100% resolve
+       against its own content. `.sbe-actions` used to carry this rule for the
+       old bottom bar's primary; deleting that bar moved the primary into a row
+       that had no such rule. Both widths are stated here so neither control
+       can inherit a stretch again. */
+    .sbe-head .ghost-btn, .sbe-head .primary {
+      height: var(--ctl-h-sm); padding-block: 0; font-size: var(--fs-xs);
+      width: auto; flex: 0 0 auto;
+    }
+    .sbe-head .sbe-undogroup { display: inline-flex; gap: 0; }
+    .sbe-head .sbe-undogroup .ghost-btn:first-child {
+      border-top-right-radius: 0; border-bottom-right-radius: 0;
+    }
+    .sbe-head .sbe-undogroup .ghost-btn:last-child {
+      border-top-left-radius: 0; border-bottom-left-radius: 0;
+      border-left-color: transparent; margin-left: -1px;
+    }
+    .sbe-head #sbeCloseBtn {
+      margin-left: 10px; padding-left: 14px;
+      border-left: 1px solid var(--border);
+      border-top-left-radius: 0; border-bottom-left-radius: 0;
+    }
+    /* THE ONE THING THAT YIELDS. Everything else in the row is a control at
+       its intrinsic width; the title is prose, so it is the item that shrinks
+       and ellipsises when the window does. Without `min-width: 0` a flex item
+       refuses to go below its content and the row overflows instead. */
+    .sbe-head .sbe-title {
+      font-size: var(--fs-md); font-weight: 600; color: var(--text);
+      min-width: 40px; flex: 0 1 auto;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    /* ...and the two things that FOLD, in the order they stop being worth
+       their width: the save state's words go first (the dot still carries the
+       state, and the chip's title says it in full), then the draft chip's
+       name. Neither is a control that can only be reached here — Drafts is in
+       the ⋯ menu — so folding them costs nothing a narrow window cannot pay. */
+    .sbe-head .sbe-state { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+    @media (max-width: 1180px) {
+      .sbe-head .sbe-state #sbeStateText { display: none; }
+    }
+    @media (max-width: 1040px) {
+      .sbe-head .sbe-draftchip #sbeDraftName { display: none; }
+      .sbe-head .sbe-draftchip { padding-inline: 8px; }
+    }
+    .sbe-state {
+      font-size: var(--fs-xs); color: var(--muted); display: inline-flex;
+      align-items: center; gap: 6px; white-space: nowrap;
+    }
+    .sbe-state .sbe-dot {
+      width: 6px; height: 6px; border-radius: 999px; background: var(--muted);
+    }
+    .sbe-state.is-dirty { color: var(--warning); }
+    .sbe-state.is-dirty .sbe-dot { background: var(--warning); }
+    .sbe-state.is-saved { color: var(--success); }
+    .sbe-state.is-saved .sbe-dot { background: var(--success); }
+
+    /* ---- THE TWO MONITORS — source and program ----------------------
+       The classic NLE stage, asked for by name: "a split screen with the
+       left screen showing you when you click on the clips … you have two
+       screens." LEFT is the source — a media-pool clip, auditioned before
+       it is cut in — and RIGHT is the program, which is the timeline and
+       everything it already did.
+
+       This does NOT break the one-decoder rule the single-stage comment
+       below was written for. That rule was about double-BUFFERING one
+       stream: two elements taking turns on the same timeline bought
+       nothing against all-intra proxies. These two show different things
+       and never both play — sbeSrcPlay stops the program, sbePlay stops
+       the source — so it is still one decode at a time.
+
+       THE HEIGHT IS COMPUTED, NOT GUESSED. sbeFitMonitors() measures the
+       column and this row and writes --sbe-prog-h / --sbe-src-h; the
+       values here are what the page shows for the frame before it runs,
+       and if JS ever dies. See sbeMonitorFit() for the arithmetic and for
+       why the split slides between 40/60 and 50/50 rather than being
+       fixed: a 16:9 pair needs ~2.96 px of width per px of height, and no
+       window this app runs in has that much width to spare AND that much
+       height at once.
+
+       THE FALLBACK BUDGET, RE-MEASURED 2026-08-18 in the Editor's own tab,
+       with the row-span fix above: the column is 100vh - 116px (88px of
+       header + 28px of stage-pane padding), and everything else inside it
+       comes to 452px — header 50, prepare 55, transport 32, ruler +
+       waveform + 78px track + 26px audio lane + 12px scrollbar 190, inspector 38, action bar
+       65, six 8px gaps 48. Hence 100vh - 568px, still capped at 34vh so a
+       very tall window does not hand the whole screen to one frame. Do not
+       round it DOWN without re-measuring — what it buys is silent and it
+       lands on the timeline. */
+    .sbe-monitors {
+      display: flex; gap: 12px; align-items: flex-start;
+      justify-content: center; min-width: 0;
+      --sbe-prog-h: min(34vh, 460px, calc(100vh - 568px));
+      --sbe-src-h: calc(var(--sbe-prog-h) * 2 / 3);
+    }
+    .sbe-mon { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+    .sbe-mon-label {
+      font-size: var(--fs-2xs); letter-spacing: 0.08em; text-transform: uppercase;
+      color: var(--muted); font-weight: 700; flex: 0 0 auto;
+    }
+    .sbe-mon-src .sbe-mon-label { color: var(--accent-bright); }
+    /* The bar under each monitor: which screen this is, what is on it, and —
+       on the source — the one verb. `min-height` on BOTH so the two columns
+       have the same overhead above the picture, which is the assumption
+       sbeFitMonitors makes when it reads the row's chrome off the program
+       side. `nowrap`, because a bar that wraps changes that overhead and the
+       budget silently goes wrong by a line. */
+    .sbe-mon-bar {
+      display: flex; align-items: center; gap: 8px; min-width: 0;
+      font-size: var(--fs-xs); color: var(--muted); flex-wrap: nowrap;
+      min-height: 24px; overflow: hidden;
+    }
+    .sbe-mon-bar .sbe-mon-name {
+      min-width: 0; flex: 1 1 90px; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap;
+    }
+    /* The two bars under the monitors and the transport share the header's
+       rung: they are the same rank of control and were 29px against 28. */
+    .sbe-mon-bar .ghost-btn, .sbe-transport .ghost-btn,
+    .sbe-transport .primary {
+      width: auto; flex: 0 0 auto; height: var(--ctl-h-sm);
+      padding-block: 0; padding-inline: 10px; font-size: var(--fs-xs);
+    }
+    .sbe-mon-src .sbe-stage { height: var(--sbe-src-h); }
+    /* The rail takes an EXPLICIT height, never `stretch`. A stretched flex
+       item still offers its content height as the line's hypothetical size,
+       so a long inspector would have grown the row and pushed the picture
+       back down — the budget solving itself into the opposite of what it
+       was solving for. This height comes from the program column, which is
+       always the taller of the two monitors, and anything longer scrolls. */
+    .sbe-rail {
+      flex: 0 0 auto; display: flex; flex-direction: column; gap: 8px;
+      width: var(--sbe-rail-w, 240px);
+      height: var(--sbe-row-h, auto); min-height: 0; overflow-y: auto;
+      overflow-x: hidden;
+    }
+    .sbe-rail > * { flex: 0 0 auto; }
+    /* WHICH CHILD SCROLLS IS THE WHOLE QUESTION, and it was answered the
+       wrong way round. The inspector was the one that absorbed the rail's
+       shortfall while the unplaced strip below it — an unbounded list, 695px
+       at thirteen shots — never shrank. So on a 900px screen the inspector
+       came out THIRTY-SIX PIXELS tall around 223px of content: "Unlink
+       sound", the single entry point to the J/L feature, was off-screen, and
+       the one control fully visible at the bottom of that unmarked scroll was
+       Ripple delete. The inspector's content is bounded and known; the list
+       is not, so the list is the scroller.
+       The inspector still fills the rail when there is nothing unplaced —
+       otherwise it is a 70px card floating in 255px of page background, which
+       is the dead-space bug one column over. */
+    .sbe-rail > .sbe-inspect {
+      flex: 0 0 auto; align-content: flex-start; overflow: visible;
+    }
+    .sbe-rail:has(> .sbe-unplaced[hidden]) > .sbe-inspect { flex: 1 1 auto; }
+    .sbe-rail > .sbe-unplaced {
+      flex: 1 1 auto; min-height: 84px; overflow-y: auto;
+      /* A clipped list has to READ as clipped. */
+      scrollbar-color: var(--border) transparent; scrollbar-width: thin;
+    }
+    /* ---- the stage: ONE <video> per monitor. Double-buffering measured no
+       benefit once proxies are all-intra, and two elements on one stream is
+       two decoders for nothing. ---- */
+    .sbe-stage {
+      /* `width: 100%` + `aspect-ratio` + `max-height` DO NOT COMPOSE. A block
+         box's auto width is stretch-fit, which outranks the ratio, so the cap
+         won on height, the stretch won on width, and the box came out 1070x300
+         — a 3.6:1 slot with a 16:9 picture floating in the middle of it and
+         ~270px of black either side. That is what the owner saw and called
+         warped, and it was not the video: the video was fine, the frame around
+         it was the wrong shape.
+         `height` (definite) + `width: fit-content` resolves the other way
+         round: the ratio now feeds the intrinsic width, so the box is exactly
+         as wide as the picture is tall x 16/9, and it centres. */
+      position: relative; aspect-ratio: 16 / 9;
+      width: fit-content; max-width: 100%; margin-inline: auto;
+      /* THE PICTURE YIELDS TO THE TIMELINE, because the timeline is the
+         point — and the height that expresses that now lives on
+         .sbe-monitors above, where both monitors can read it and where
+         sbeFitMonitors() can overwrite it with a measured one. The
+         previous constant (100vh - 748px) is gone: it was measured against
+         a column that was 170px shorter than this one and against a stage
+         that was alone on its row. min-height keeps the frame watchable
+         when the budget runs out; inside the narrow breakpoint the PAGE
+         scrolls instead, so the cap relaxes there. */
+      height: var(--sbe-prog-h);
+      min-height: 120px;
+      background: #000; overflow: hidden;
+      border: 1px solid var(--border); border-radius: var(--r-md);
+      box-shadow: var(--shadow-1);
+    }
+    /* opacity, NEVER display:none — WebKit will not load a display:none
+       <video>, which is one of the two traps this feature already paid for. */
+    .sbe-stage video {
+      position: absolute; inset: 0; width: 100%; height: 100%;
+      object-fit: contain; opacity: 0; background: #000;
+    }
+    .sbe-stage video.is-on { opacity: 1; }
+    /* A STILL IS AN <img>, NOT A ONE-FRAME PROXY. Seeking an image is a
+       no-op, so the proxy an all-intra mp4 buys would be an encode nobody
+       ever plays; an <img> is exact, free, and cannot land on the wrong
+       frame. Same opacity rule as the video for the same WebKit reason. */
+    .sbe-stage img.sbe-still {
+      position: absolute; inset: 0; width: 100%; height: 100%;
+      object-fit: contain; opacity: 0; background: #000;
+    }
+    .sbe-stage img.sbe-still.is-on { opacity: 1; }
+    .sbe-stage-badge {
+      position: absolute; left: 8px; top: 8px; z-index: 3;
+      background: rgba(0,0,0,0.62); border: 1px solid var(--border);
+      border-radius: var(--r-xs); padding: 3px 8px;
+      font-size: var(--fs-xs); color: var(--muted); pointer-events: none;
+      max-width: calc(100% - 16px); overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap;
+    }
+    .sbe-stage-empty {
+      position: absolute; inset: 0; display: flex; align-items: center;
+      justify-content: center; color: var(--muted); font-size: var(--fs-sm);
+      text-align: center; padding: 0 24px;
+    }
+    /* `display: flex` above outranks the UA's [hidden] rule, so the source
+       monitor's hint would never go away once a clip was loaded behind it. */
+    .sbe-stage-empty[hidden] { display: none !important; }
+    /* The empty timeline explains itself ON the timeline. It used to say so in
+       the inspector, a short auto-scrolled box in the corner, where a new
+       draft's user met the sentence starting mid-word. */
+    .sbe-track-empty {
+      position: absolute; inset: 0; display: flex; align-items: center;
+      padding: 0 14px; color: var(--muted); font-size: var(--fs-sm);
+      pointer-events: none; max-width: 640px;
+    }
+
+    .sbe-transport {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      position: relative;
+    }
+    /* ---- THE TIMELINE'S TOP EDGE, as a handle ------------------------
+       "It needs to allow you to drag the upper side of the timeline, which
+       will change the layout a little bit, enabling expansion in case you
+       have some sound editing in there."
+
+       It is a CHILD OF THE TRANSPORT, positioned over the 8px gap below it,
+       so it costs the column no height of its own — sbeFitMonitors budgets
+       against every child it can measure, and a 10px strip plus its gap would
+       have come straight off the picture to pay for a grip. `bottom: -8px`
+       puts it exactly on the seam the pointer is already aiming at. */
+    .sbe-tl-grab {
+      position: absolute; left: 0; right: 0; bottom: -8px; height: 10px;
+      cursor: row-resize; touch-action: none; z-index: 5;
+    }
+    .sbe-tl-grab::after {
+      content: ''; position: absolute; left: 50%; top: 4px;
+      width: 46px; height: 3px; margin-left: -23px; border-radius: 999px;
+      background: var(--border-strong); opacity: 0.6;
+      transition: background var(--t-fast), opacity var(--t-fast);
+    }
+    .sbe-tl-grab:hover::after, .sbe-tl-grab:focus-visible::after,
+    body.sbe-resizing .sbe-tl-grab::after {
+      background: var(--accent); opacity: 1;
+    }
+    .sbe-tl-grab:focus-visible { outline: none; }
+    /* A drag that selects the transport's labels on the way past ends with
+       half the editor highlighted blue, and the cursor has to stay row-resize
+       even when the pointer has run off the 10px strip it started on. */
+    body.sbe-resizing { user-select: none; cursor: row-resize; }
+    body.sbe-resizing .sbe-tl { border-color: var(--accent); }
+    /* The mute button carries state, so it has to look like it does — a muted
+       editor that looks identical to an audible one is the bug this whole pass
+       is about. */
+    .sbe-music-warn {
+      font-size: var(--fs-xs); color: var(--warning); white-space: nowrap;
+    }
+    .sbe-mute { min-width: 34px; padding-left: 8px; padding-right: 8px; font-size: var(--fs-md); }
+    .sbe-mute.is-off { opacity: .55; }
+    .sbe-time {
+      font-variant-numeric: tabular-nums; font-size: var(--fs-sm); color: var(--text);
+      min-width: 104px;
+    }
+    .sbe-time span { color: var(--muted); }
+    .sbe-approx {
+      flex: 1 1 220px; font-size: var(--fs-xs); color: var(--muted);
+      line-height: 1.35; min-width: 0;
+    }
+    /* THE SECOND SLIDER. "Normal video editors usually have two sliders: one
+       to move and one to make the clips smaller." The first is the scrollbar
+       on .sbe-tl below; this is the other one. The − / + buttons stay — they
+       are the keyboard-free way to step through the same scale — and both
+       ends of the slider are honest: its minimum is whatever px/sec puts the
+       WHOLE film in the box, recomputed on every paint and every resize. */
+    .sbe-zoom { display: inline-flex; gap: 6px; align-items: center; }
+    .sbe-zoom .ghost-btn { width: auto; padding: 4px 9px; }
+    .sbe-zoom input[type="range"] {
+      width: 116px; flex: 0 0 auto; accent-color: var(--accent);
+      margin: 0; cursor: ew-resize;
+    }
+
+    /* ---- the track ----
+       THE SCROLLBAR IS THE "MOVE" SLIDER, AND IT HAS TO BE VISIBLE.
+       `overflow-x: auto` was here from the first version and the box really
+       did scroll — but macOS overlay scrollbars paint nothing until
+       something is already scrolling, and nothing on a mouse scrolls a
+       horizontal box. So on the owner's 71.6s film at 42 px/s the inner was
+       3031px wide inside a 1108px viewport and the last 35 seconds were
+       simply unreachable: "when you get to the 36 seconds, you cannot
+       scroll." Declaring ::-webkit-scrollbar opts the element out of
+       overlay scrollbars in Chrome and Safari, which is the whole fix; the
+       12px it costs is in the height budget above. `scroll`, not `auto`, so
+       the gutter never appears and disappears under the pointer. */
+    .sbe-tl {
+      position: relative; border: 1px solid var(--border);
+      border-radius: var(--r-md); background: var(--bg-2);
+      overflow-x: scroll; overflow-y: hidden; padding: 0;
+      box-shadow: var(--shadow-1);
+      /* ---- WHERE THE EDGE GESTURES END AND THE CORNER GESTURE BEGINS ----
+         Declared ONCE, here, because the fade handle's position is DERIVED
+         from the grip's: the two used to be written as independent numbers and
+         they landed on top of each other. "Not sure that grabbing the top
+         corner is working. I'm not being able to do it." — measured on his
+         screen: a 12x12 fade handle at `top:0; left:0` inside a grip whose hit
+         area covers the same column for the block's whole height. The fade
+         owned the top 12px of that corner and the trim owned the other 40, so
+         aiming at "the top corner" of a 52px block hit trim four times in five.
+
+         The two gestures are SEPARATED IN SPACE now, not stacked:
+           · the grip keeps the outer vertical strip, full height — trimming is
+             an EDGE gesture and the edge is where the hand goes;
+           · the fade handle sits INSET from that strip, starting exactly where
+             the grip's hit area stops. The band's inset is `grip width +
+             skirt`, so no arithmetic can drift: change the grip and the handle
+             moves with it. Resolve puts its fade handles in the same place for
+             the same reason.
+
+         AND THE SIZE IS INDEPENDENT OF THE LANE'S HEIGHT. The 12px was a
+         fraction of a lane the user can drag, so the calm-chrome rebalance
+         (picture base 78 -> 64, cap 240 -> 120) shrank it without anybody
+         touching it. 22px is a real target at the SHORTEST height SBE_LANES
+         allows — a 52px picture block, a 37px sound strip — and it does not
+         move when the lane does. `scripts/measure_editor_layout.py` measures
+         both ends in a real browser and fails on either. */
+      --sbe-grip-w: 9px;        /* what a grip DRAWS */
+      --sbe-grip-skirt: 3px;    /* ...and how far past that it can be hit */
+      --sbe-fade-hit: 22px;     /* the fade handle's target, square */
+      --sbe-fade-draw: 15px;    /* ...and the triangle drawn inside it */
+      /* NO `scrollbar-width` HERE, deliberately. Chrome 121+ treats the
+         standard property as the authority and ignores every
+         ::-webkit-scrollbar rule the moment it is present — and
+         `scrollbar-width: thin` on macOS is still an OVERLAY scrollbar, which
+         paints nothing until you are already scrolling. Measured: with it,
+         offsetHeight - clientHeight was 2px (the borders) and there was no
+         gutter at all; without it, 12px and a bar you can see and drag. */
+      /* The one row that takes what the monitors leave. Without this, a
+         window taller than the picture needs puts the slack UNDER the
+         sticky action bar, which is a dead band; with it the track gets
+         taller and the column always ends where the viewport does. */
+      /* THE FLOOR IS A VARIABLE NOW, because the user owns it: the handle on
+         the transport's bottom edge writes --sbe-tl-h and sbeFitMonitors
+         budgets the monitors against whatever it says. It lives on the WRAPPER
+         since the gutter shares the height; this row only has to fill it. */
+      flex: 1 1 auto; min-width: 0; min-height: 0;
+      border-radius: 0 var(--r-md) var(--r-md) 0;
+    }
+    .sbe-tl::-webkit-scrollbar { height: 12px; }
+    .sbe-tl::-webkit-scrollbar-track { background: transparent; }
+    .sbe-tl::-webkit-scrollbar-thumb {
+      background: var(--border-strong); border-radius: 999px;
+      border: 3px solid transparent; background-clip: content-box;
+    }
+    .sbe-tl::-webkit-scrollbar-thumb:hover { background-color: var(--muted); }
+    .sbe-tl-inner {
+      position: relative; min-width: 100%;
+      display: flex; flex-direction: column; min-height: 100%;
+    }
+    /* Same reason .sbe > * carries it: the ruler and the waveform have exact
+       heights and a flex column would otherwise shrink them. */
+    .sbe-tl-inner > * { flex: 0 0 auto; }
+    .sbe-ruler {
+      position: relative; height: 18px; border-bottom: 1px solid var(--border);
+      color: var(--muted); font-size: var(--fs-2xs); user-select: none; cursor: pointer;
+    }
+    .sbe-ruler i {
+      position: absolute; top: 0; bottom: 0; width: 1px;
+      background: var(--border);
+    }
+    .sbe-ruler b {
+      position: absolute; top: 3px; font-weight: 500;
+      transform: translateX(3px); font-variant-numeric: tabular-nums;
+    }
+    /* The soundtrack lane lives UNDER the picture now, so the rule that
+       separates it from the track is its own top border — the track's was
+       removed for the same reason, or the ruler's bottom edge would have been
+       drawn twice. */
+    .sbe-wave {
+      display: block; width: 100%; height: var(--sbe-wave-h, 108px);
+      cursor: crosshair;
+      border-top: 1px solid var(--border);
+    }
+    .sbe-wave-none {
+      height: var(--sbe-wave-h, 108px); display: flex; align-items: center; gap: 8px;
+      padding: 0 10px; color: var(--muted); font-size: var(--fs-xs);
+      border-top: 1px solid var(--border);
+    }
+    /* The lane is the positioning context for the block; the canvas keeps its
+       own borders and heights, so the lane adds nothing to the 164px floor. */
+    .sbe-lane { position: relative; }
+    /* The per-clip sound. Slim on purpose: it is a second reading of blocks
+       you have already read, and a lane as tall as the pictures would say the
+       two matter equally. */
+    /* THE OVERLAY LANE. Shallower than the picture track — a card is placed,
+       not performed — and it sits ABOVE it so the lane order on screen is the
+       stacking order in the film. */
+    .sbe-ovlane {
+      position: relative; height: var(--sbe-ov-h, 32px);
+      border-bottom: 1px solid var(--border);
+      user-select: none; touch-action: none;
+    }
+    .sbe-ov {
+      position: absolute; top: 3px; bottom: 3px; border-radius: var(--r-xs);
+      background: rgba(190,120,255,0.20); border: 1px solid #a970ff;
+      color: #d9bcff; font-size: var(--fs-2xs); line-height: 22px;
+      padding: 0 6px; overflow: hidden; white-space: nowrap; cursor: grab;
+    }
+    .sbe-ov.is-sel { box-shadow: 0 0 0 1px #a970ff; }
+    .sbe-ovlane-empty {
+      position: absolute; inset: 0; display: flex; align-items: center;
+      padding-left: 10px; font-size: var(--fs-2xs); color: var(--muted);
+      pointer-events: none; white-space: nowrap; overflow: hidden;
+    }
+    .sbe-ov.is-drag { cursor: grabbing; opacity: 0.85; }
+    .sbe-ov-thumb {
+      position: absolute; inset: 0; width: 100%; height: 100%;
+      object-fit: contain; opacity: 0.35; pointer-events: none;
+    }
+    .sbe-ov .sbe-cl-fade { border-radius: var(--r-xs); }
+    /* THE STAGE'S OWN OVERLAY, positioned over the picture and nothing else:
+       the card composites over whatever is beneath, exactly as the render
+       will, and carries its own opacity so its fade is independent of the
+       picture's. */
+    .sbe-ov-layer {
+      position: absolute; inset: 0; width: 100%; height: 100%;
+      object-fit: contain; pointer-events: none; display: none; z-index: 4;
+    }
+    .sbe-ov-layer.is-on { display: block; }
+    /* THE LANE THE HANDLE EXISTS FOR. 26px was a second reading of blocks you
+       had already read; it is now a waveform with a level line and draggable
+       points on it, and a point you cannot hit is a control you do not have.
+       Its height is the biggest share of every pixel the top edge is dragged
+       — see sbeLaneHeights. */
+    .sbe-alane {
+      position: relative; height: var(--sbe-alane-h, 44px);
+      border-top: 1px solid var(--border);
+      user-select: none; touch-action: none;
+    }
+    .sbe-aclip {
+      position: absolute; top: 3px; bottom: 3px; border-radius: var(--r-xs);
+      background: rgba(88,166,255,0.14); border: 1px solid var(--border-strong);
+      overflow: hidden; font-size: var(--fs-2xs); color: var(--muted);
+      padding: 0 6px; line-height: 18px; white-space: nowrap;
+    }
+    /* LINKED IS THE DEFAULT AND IT LOOKS LIKE IT: dimmer, no grips, and it
+       cannot be grabbed — a strip that moves when you did not unlink it is
+       the bug this whole default exists to prevent. */
+    .sbe-aclip.is-linked { opacity: 0.55; cursor: default; }
+    .sbe-aclip.is-split {
+      cursor: grab; border-color: var(--accent); color: var(--accent-bright);
+      background: rgba(88,166,255,0.22);
+    }
+    .sbe-aclip.is-split.is-drag { cursor: grabbing; opacity: 0.85; }
+    .sbe-aclip.is-sel { box-shadow: 0 0 0 1px var(--accent); }
+    /* A strip is thinner than a block, so its grips are too — and because the
+       fade handle's inset is derived from this number, saying it once here
+       moves the handle with it. */
+    .sbe-aclip { --sbe-grip-w: 7px; }
+    /* THE WAVEFORM, behind everything else in the strip. The label sits on
+       top of it with its own z-index so a loud passage cannot swallow the
+       one word the strip says. */
+    /* IT FILLS THE STRIP, and the `inset: 3px 0` it replaces did not: the
+       height attribute the JS writes over-constrained the box, so the picture
+       started 3px down and its last 3px were cut off by the strip's own
+       `overflow: hidden` — the bottom of the level line, which is silence,
+       was drawn outside the box. `height: 100%` outranks a presentation
+       attribute, so the viewBox now maps onto the real strip whatever height
+       the lane was given. */
+    .sbe-wave-svg {
+      position: absolute; inset: 0; width: 100%; height: 100%; z-index: 0;
+    }
+    .sbe-wave-p { stroke: currentColor; stroke-width: 1; opacity: 0.42; }
+    .sbe-aclip-t { position: relative; z-index: 2; }
+    /* THE LEVEL LINE. Unity at the TOP — a gain of 1 is all of it, and a line
+       that sat in the middle at unity would read as half.
+       IT HAS TO READ AS A CONTROL AT REST. "I still don't understand how to
+       add keyframes": a 1.5px line at 0.9 opacity, drawn over a waveform in a
+       20px band, is decoration. Two strokes now — a dark one underneath so it
+       survives a loud passage, and the line itself, opaque and 2px — and a
+       third, fat and invisible, that is the TARGET. */
+    .sbe-lvl {
+      fill: none; stroke: var(--warning); stroke-width: 2; opacity: 1;
+      pointer-events: none;
+    }
+    .sbe-lvl-u {
+      fill: none; stroke: rgba(6,10,26,0.85); stroke-width: 4.5;
+      pointer-events: none;
+    }
+    /* `pointer-events: stroke` makes an invisible path hittable along its
+       length — this is what turns the level from something you look at into
+       something you can click. */
+    .sbe-lvl-hit {
+      fill: none; stroke: transparent; stroke-width: 14;
+      pointer-events: stroke; cursor: ns-resize;
+    }
+    /* THE GHOST. Where the click would put a point, drawn before it is
+       clicked — the answer to "how do I add one" arriving before the
+       question is finished. */
+    .sbe-kf-ghost {
+      fill: rgba(210,153,34,0.28); stroke: var(--warning); stroke-width: 1.5;
+      stroke-dasharray: 2.5 2; pointer-events: none;
+    }
+    .sbe-kf {
+      fill: var(--warning); stroke: #1a1200; stroke-width: 1;
+      cursor: ns-resize; pointer-events: auto;
+    }
+    /* The dot's radius is a variable now, because the strip's height is one:
+       a flat `r: 4.5` on hover SHRANK the handle on a lane that had been
+       dragged tall. The 3.2px fallback is the size it has always been. */
+    .sbe-kf:hover { r: calc(var(--kf-r, 3.2px) * 1.35); }
+    /* The legend row inside the Keys sheet: a term and what it does. */
+    .sbe-key-row {
+      display: flex; gap: 8px; align-items: baseline;
+      font-size: var(--fs-xs); color: var(--muted); line-height: 1.5;
+    }
+    .sbe-key-row b {
+      flex: 0 0 74px; color: var(--text); font-weight: 600;
+      display: flex; gap: 3px; align-items: center; flex-wrap: wrap;
+    }
+    /* A clip with no sound at all still gets a slot, and it says so rather
+       than leaving a gap that reads as a bug. */
+    .sbe-aclip.is-mute { background: transparent; border-style: dashed; opacity: 0.4; }
+    /* ---- the inspector's three sections ----
+       It grew one control at a time and had become a flat run of buttons with
+       a brightness slider floating in the middle. Clip / Sound / Effects. */
+    .sbe-sect { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+    .sbe-sect-h {
+      font-size: var(--fs-2xs); letter-spacing: 0.08em; text-transform: uppercase;
+      color: var(--muted); font-weight: 700;
+    }
+    .sbe-sect-b { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+    .sbe-fade-row { display: inline-flex; align-items: center; gap: 5px; }
+    .sbe-fade-row label { font-size: var(--fs-xs); color: var(--muted); }
+    .sbe-fade-num {
+      width: 66px; height: var(--ctl-h-sm); padding: 0 6px;
+      font-size: var(--fs-xs); font-variant-numeric: tabular-nums;
+    }
+    /* THE CORNER HANDLE, which is how a fade is set in every NLE ever made:
+       drag the top corner inward and the ramp follows. Intuitive first; the
+       numeric field beside it is the precise second. Drawn as a triangle so
+       the shape itself says "ramp". */
+    /* THE BAND IS WHY THE TWO HANDLES CANNOT COLLIDE WITH EACH OTHER EITHER.
+       They used to be two absolutely positioned boxes at `left:0` and
+       `right:0`, so on a block narrower than their combined width they
+       overlapped — at 22px each that would start happening at ordinary zooms.
+       A flex row inset from both grips instead: `space-between` puts one at
+       each end, and `flex: 0 1` makes them SHARE a band too narrow for both
+       rather than stack on it. Zero overlap is structural here, not
+       arithmetic, so it holds at every zoom and every lane height with no
+       magic number to keep in step.
+
+       `pointer-events: none` on the band and `auto` on the handles: the band
+       is layout, not a target, so the strip body underneath it — the level
+       line, the double-click that adds a point — keeps every pixel the two
+       handles are not standing on. */
+    .sbe-fade-band {
+      position: absolute; top: 0; z-index: 7; pointer-events: none;
+      left: calc(var(--sbe-grip-w, 9px) + var(--sbe-grip-skirt, 3px));
+      right: calc(var(--sbe-grip-w, 9px) + var(--sbe-grip-skirt, 3px));
+      height: var(--sbe-fade-hit, 22px);
+      display: flex; justify-content: space-between; align-items: stretch;
+    }
+    .sbe-fade-h {
+      position: relative; pointer-events: auto; cursor: ew-resize;
+      flex: 0 1 var(--sbe-fade-hit, 22px); min-width: 0;
+    }
+    /* IT HAS TO READ AS A CONTROL AT REST — the same thing that was wrong with
+       the level line, and the same fix. `opacity: 0.55` on a small dark
+       triangle over a clip's own thumbnail is decoration: there was nothing on
+       screen to aim AT, which is half of "I'm not being able to do it". Full
+       strength now, with a dark halo under it so it survives a bright frame
+       (the level line spends a whole second 4.5px stroke on exactly this), and
+       it grows to fill its entire target on hover — the same answer `.sbe-kf`
+       gives when the pointer comes near it. */
+    .sbe-fade-h::before {
+      content: ''; position: absolute; top: 0;
+      width: min(100%, var(--sbe-fade-draw, 15px));
+      height: var(--sbe-fade-draw, 15px);
+      background: var(--accent-bright);
+      filter: drop-shadow(0 0 1.5px rgba(6,10,26,0.95));
+      transition: width var(--t-fast), height var(--t-fast);
+    }
+    .sbe-fade-h.in::before { left: 0; clip-path: polygon(0 0, 100% 0, 0 100%); }
+    .sbe-fade-h.out::before { right: 0; clip-path: polygon(0 0, 100% 0, 100% 100%); }
+    .sbe-fade-h:hover::before {
+      width: 100%; height: var(--sbe-fade-hit, 22px);
+    }
+    .sbe-clip.is-locked .sbe-fade-band,
+    .sbe-clip.is-locked .sbe-fade-h { display: none; }
+    /* The ramp itself, painted on the block so the length is visible without
+       selecting the clip. */
+    .sbe-cl-fade {
+      position: absolute; top: 0; bottom: 0; z-index: 2; pointer-events: none;
+      background: linear-gradient(90deg, rgba(0,0,0,0.66), transparent);
+    }
+    .sbe-cl-fade.out {
+      background: linear-gradient(270deg, rgba(0,0,0,0.66), transparent);
+    }
+    /* THE SYNC FLAG, on BOTH halves of a pair that has drifted. Every NLE
+       prints this number and nothing else does the job: the two blocks sit in
+       different lanes, so "are these still together" is not a question the eye
+       can answer at fit zoom. It is a button, not a warning — one click is the
+       rematch — so it is the one thing inside a clip block that takes the
+       pointer, and both pointerdown handlers step around it. */
+    .sbe-sync {
+      position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+      z-index: 3; padding: 0 5px; border-radius: var(--r-xs);
+      background: var(--warning); color: #1a1200; cursor: pointer;
+      font-size: var(--fs-2xs); font-weight: 700; line-height: 15px;
+      font-variant-numeric: tabular-nums; letter-spacing: 0.02em;
+      border: 1px solid rgba(0,0,0,0.25); pointer-events: auto;
+    }
+    .sbe-sync:hover { filter: brightness(1.12); }
+    /* Clear of BOTH grips (9px + a 3px hit-area skirt) so the flag can never
+       stand between a pointer and the edge it was reaching for. */
+    /* ...AND CLEAR OF THE FADE HANDLE TOO, which is the same rule applied to
+       the control that has just moved into that corner. At `right: 14px` the
+       flag stood in the middle of the fade-out target, and the fade handle,
+       being higher in the stack, would have swallowed the clicks meant for it.
+       Derived from the same three variables the handle is, so it cannot be
+       left behind again; `z-index: 8` above the band is the belt to that pair
+       of braces, since both pointerdown handlers already test the flag first. */
+    .sbe-sync {
+      right: calc(var(--sbe-grip-w, 9px) + var(--sbe-grip-skirt, 3px)
+                  + var(--sbe-fade-hit, 22px) + 3px);
+      z-index: 8;
+    }
+    .sbe-clip .sbe-sync { top: 6px; transform: none; }
+    .sbe-clip.has-flag .sbe-sync { top: 22px; }
+    /* MUTED. The strip STAYS — it is still where the sound would be, and the
+       decision has to be visible and reversible in the place it was made — so
+       it is struck through rather than removed. Distinct from `.is-mute`,
+       which means the FILE has no audio track at all: one is a decision and
+       one is a fact about the source, and they must not read the same. */
+    .sbe-aclip.is-silenced {
+      background: repeating-linear-gradient(135deg,
+        rgba(248,81,73,0.10), rgba(248,81,73,0.10) 5px,
+        transparent 5px, transparent 10px);
+      border-color: var(--danger); color: var(--danger);
+      text-decoration: line-through; opacity: 0.85;
+    }
+    /* A COUPLED strip is not a linked one: it is offset on purpose and it
+       travels with its picture, so it reads as deliberate rather than dimmed
+       out. It still cannot be grabbed — the picture drags the pair. */
+    .sbe-aclip.is-coupled {
+      opacity: 1; cursor: default; border-style: dashed;
+      border-color: var(--accent); color: var(--accent-bright);
+      background: rgba(88,166,255,0.16);
+    }
+    /* The alarm. Deliberately the only thing in the Editor with a filled
+       danger background: it must not read as one more chip in a row of chips. */
+    /* ---- the one notice surface ----
+       A row, not a stack: whichever notice is leading takes the width it needs
+       and the others sit beside it as chips. Four full-width blocks cost ~180px
+       of the timeline when they coincided, which is exactly when they matter
+       least — the film they are about goes off the bottom of the screen. */
+    /* Quiet by default — it is good news most of the time — and it turns into
+       the danger colour on the same threshold the watchdog alarms on, so the
+       chip and the banner can never disagree about whether work is safe. */
+    .sbe-protected {
+      font-size: var(--fs-xs); color: var(--text-dim); white-space: nowrap;
+    }
+    .sbe-protected[hidden] { display: none; }
+    .sbe-protected.is-cold { color: var(--danger); font-weight: 600; }
+    .sbe-notices {
+      display: flex; align-items: stretch; gap: 8px; flex-wrap: wrap;
+    }
+    .sbe-notices[hidden] { display: none; }
+    .sbe-notices > * { flex: 1 1 auto; min-width: 0; margin: 0; }
+    /* FOLDED IS A CHIP AND NOTHING ELSE. The children keep their own markup —
+       every gate that reads this HTML still finds the sentence it is looking
+       for — and CSS is what decides whether it is on screen, so folding can
+       never be the reason a message does not exist. */
+    .sbe-notices > .is-folded {
+      flex: 0 0 auto; cursor: pointer; padding: 6px 10px; gap: 0;
+      font-size: var(--fs-xs); box-shadow: none;
+    }
+    .sbe-notices > .is-folded > * { display: none !important; }
+    .sbe-notices > .is-folded::before {
+      content: attr(data-short); display: inline; white-space: nowrap;
+      font-weight: 600;
+    }
+    .sbe-notices > .is-folded::after {
+      content: ' \2039 open'; opacity: 0.7; white-space: nowrap;
+    }
+    .sbe-alarm {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      padding: 9px 12px; border-radius: var(--r-md);
+      /* WHITE ON RAW DANGER RED IS 3.3:1, and the line that says WHY the save
+         failed is the one thing in the Editor that has to be read under
+         stress. The red moves into the surface and the border: the banner is
+         still the only filled danger object on the screen, and its body text
+         now clears 7:1. */
+      background: rgba(248,81,73,0.16); color: var(--text);
+      border: 1px solid var(--danger); font-size: var(--fs-sm);
+      box-shadow: var(--shadow-2);
+    }
+    .sbe-alarm[hidden] { display: none; }
+    .sbe-alarm b { letter-spacing: 0.01em; color: var(--danger); font-weight: 700; }
+    .sbe-alarm .ghost-btn {
+      width: auto; height: var(--ctl-h-sm); padding-block: 0; padding-inline: 12px;
+      font-size: var(--fs-xs);
+      background: var(--panel); color: var(--text); border-color: var(--danger);
+    }
+    /* The chip agrees with the banner. A red chip beside a red banner is one
+       message; a grey chip beside a red banner is two, and the grey one wins
+       the glance. */
+    .sbe-state.is-alarm { color: #fff; background: var(--danger); border-color: var(--danger); }
+    .sbe-state.is-alarm .sbe-dot { background: #fff; }
+    /* ---- the versions panel ----
+       `position: fixed` and portalled to <body>: every ancestor it was born
+       under carries overflow, and a panel clipped at the header's edge is the
+       bug this app has already paid for twice. */
+    .sbe-vers {
+      position: fixed; z-index: 120; width: 400px; max-width: calc(100vw - 24px);
+      background: var(--panel); border: 1px solid var(--border-strong);
+      border-radius: var(--r-md); box-shadow: var(--shadow-2);
+      display: flex; flex-direction: column; overflow: hidden;
+      max-height: min(60vh, 520px);
+    }
+    .sbe-vers[hidden] { display: none; }
+    .sbe-vers > header {
+      display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+      border-bottom: 1px solid var(--border); font-size: var(--fs-sm);
+      flex: 0 0 auto;
+    }
+    .sbe-vers > header .ghost-btn { width: auto; padding: 4px 10px; font-size: var(--fs-xs); }
+    .sbe-vers-new {
+      display: flex; gap: 6px; padding: 8px 10px; flex: 0 0 auto;
+      border-bottom: 1px solid var(--border);
+    }
+    .sbe-vers-new .sb-input { flex: 1 1 auto; min-width: 0; font-size: var(--fs-sm); }
+    .sbe-vers-new .primary { flex: 0 0 auto; width: auto; padding: 6px 14px; font-size: var(--fs-sm); }
+    .sbe-vers-note {
+      padding: 6px 10px; font-size: var(--fs-xs); color: var(--muted);
+      line-height: 1.4; flex: 0 0 auto;
+    }
+    .sbe-vers-list { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+    /* TWO LISTS, ONE BOX, AND ONLY ONE OF THEM IS UNBOUNDED. Both carried
+       `flex: 1 1 auto; min-height: 0`, so whichever had more content took the
+       space: expanding fifty automatic snapshots collapsed "This film's
+       drafts" — the headline of the whole feature — to an eleven-pixel
+       sliver, with the row for the draft you have OPEN the one cut in half.
+       A film has a handful of drafts and hundreds of saves, so the drafts are
+       always shown and the saves are the grower. */
+    #sbeDraftList { flex: 0 0 auto; max-height: 176px; }
+    #sbeVersList { flex: 1 1 auto; min-height: 108px; }
+    .sbe-vers-row {
+      display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+      border-top: 1px solid var(--border); font-size: var(--fs-xs); min-width: 0;
+    }
+    .sbe-vers-row:hover { background: var(--panel-2); }
+    .sbe-vers-row .ghost-btn.is-danger {
+      color: var(--danger); border-color: var(--danger);
+    }
+    .sbe-vers-row .sbe-vr-main { min-width: 0; flex: 1 1 auto; }
+    .sbe-vers-row .sbe-vr-name {
+      color: var(--text); font-weight: 600; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap;
+    }
+    /* A version somebody stopped to name is not a breadcrumb, and the prune
+       never takes it — so it does not look like one either. */
+    .sbe-vers-row.is-kept .sbe-vr-name { color: var(--accent-bright); }
+    .sbe-vers-row.is-bad .sbe-vr-name { color: var(--danger); }
+    .sbe-vers-row .sbe-vr-meta {
+      color: var(--muted); font-size: var(--fs-xs); font-variant-numeric: tabular-nums;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .sbe-vers-row .ghost-btn { width: auto; flex: 0 0 auto; padding: 4px 10px; font-size: var(--fs-xs); }
+    .sbe-vers-empty { padding: 14px 10px; color: var(--muted); font-size: var(--fs-xs); }
+    /* The automatic lane: present, reachable, and folded away. */
+    .sbe-vers-auto > summary {
+      padding: 7px 10px; font-size: var(--fs-2xs); letter-spacing: 0.08em;
+      text-transform: uppercase; color: var(--muted); font-weight: 700;
+      border-top: 1px solid var(--border); cursor: pointer;
+    }
+    .sbe-vers-auto > summary:hover { color: var(--text); }
+    .sbe-vers-row.is-active { background: rgba(88,166,255,0.10); }
+    .sbe-vers-row.is-active .sbe-vr-name { color: var(--accent-bright); }
+    .sbe-vers-head {
+      padding: 7px 10px 4px; font-size: var(--fs-2xs); letter-spacing: 0.08em;
+      text-transform: uppercase; color: var(--muted); font-weight: 700;
+      border-top: 1px solid var(--border);
+      position: sticky; top: 0; background: var(--panel); z-index: 1;
+    }
+    /* The hint that rides on a lane heading: same line, not shouting. */
+    .sbe-vers-head span {
+      text-transform: none; letter-spacing: 0; font-weight: 500;
+      opacity: 0.72; margin-left: 6px;
+    }
+    /* The unsaved dot. One pixel of state beside the draft's own name, which
+       is where somebody looking for "did that land" actually looks. */
+    .sbe-draft-dot {
+      display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+      background: var(--warning); margin-right: 6px; vertical-align: middle;
+    }
+    .sbe-draft-dot[hidden] { display: none; }
+    /* The recovery offer. Amber, not red: nothing is broken and nothing is
+       lost — there is simply a choice to make. */
+    .sbe-recover {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      padding: 8px 12px; border-radius: var(--r-md); font-size: var(--fs-sm);
+      background: rgba(210,153,34,0.14); border: 1px solid var(--warning);
+      color: var(--text);
+    }
+    .sbe-recover[hidden] { display: none; }
+    .sbe-recover .ghost-btn, .sbe-recover .primary {
+      width: auto; padding: 5px 12px; font-size: var(--fs-xs); flex: 0 0 auto;
+    }
+    /* THE MUSIC, AS A THING YOU CAN PICK UP. Same grips, same cursors and the
+       same selected outline as a clip — the owner asked for "features similar
+       to what you did with the clips", and an object that behaves like a clip
+       but does not LOOK like one is a second idiom to learn. Translucent,
+       because the waveform underneath is what tells you where you are in the
+       track while you drag it. */
+    .sbe-music-clip {
+      position: absolute; top: 3px; bottom: 3px; border-radius: var(--r-sm);
+      border: 1px solid var(--border-strong); cursor: grab;
+      background: rgba(88,166,255,0.10); z-index: 4; overflow: hidden;
+      min-width: 3px;
+    }
+    .sbe-music-clip:hover { border-color: var(--accent); }
+    .sbe-music-clip.is-sel {
+      border-color: var(--accent); background: rgba(88,166,255,0.16);
+      box-shadow: 0 0 0 1px var(--accent);
+    }
+    .sbe-music-clip.is-drag { cursor: grabbing; opacity: 0.85; }
+    .sbe-music-clip[hidden] { display: none; }
+    .sbe-mc-name {
+      padding: 3px 8px; font-size: var(--fs-2xs); font-weight: 600;
+      color: var(--accent-bright); white-space: nowrap; overflow: hidden;
+      text-overflow: ellipsis; pointer-events: none;
+      font-variant-numeric: tabular-nums;
+      position: relative; z-index: 1;
+    }
+    /* THE LEVEL LINE ON THE BED, and it is the same SVG the strips carry: an
+       absolute layer over the block so the label above it keeps its own box.
+       `pointer-events: none` on the layer and `stroke` on the fat transparent
+       path inside it — the line is a thing you can hit, the empty space around
+       it belongs to the drag underneath. */
+    .sbe-mc-lvl {
+      position: absolute; inset: 0; pointer-events: none;
+    }
+    .sbe-mc-lvl svg { display: block; width: 100%; height: 100%; }
+    .sbe-music-clip .sbe-lvl-hit, .sbe-music-clip .sbe-kf { pointer-events: auto; }
+    .sbe-music-clip { --sbe-grip-w: 7px; }
+    /* The lane grows into whatever .sbe-tl was given above its floor, and the
+       blocks grow with it (top/bottom insets, not a fixed 66px). Capped, or a
+       1600px-tall display would draw 400px clip blocks. It keeps `flex: 1 1
+       auto` as well as the variable: the variable is its SHARE of a dragged
+       edge, the flex is what absorbs the rounding and any height the monitors
+       could not use. */
+    .sbe-track {
+      position: relative; min-height: var(--sbe-track-h, 64px); max-height: 120px;
+      flex: 1 1 auto;
+      user-select: none; touch-action: none;
+    }
+    .sbe-clip {
+      position: absolute; top: 6px; bottom: 6px; border-radius: var(--r-sm);
+      background: linear-gradient(180deg, var(--panel-2), var(--panel));
+      border: 1px solid var(--border-strong); overflow: hidden; cursor: grab;
+      box-shadow: var(--shadow-1); transition: box-shadow var(--t-fast);
+    }
+    .sbe-clip:hover { border-color: var(--accent); }
+    .sbe-clip.is-sel {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px var(--accent), var(--shadow-2);
+    }
+    .sbe-clip.is-playing { border-color: var(--success); }
+    .sbe-clip.is-playing::after {
+      content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 2px;
+      background: var(--success);
+    }
+    .sbe-clip.is-bad { border-color: var(--danger); box-shadow: 0 0 0 1px var(--danger); }
+    .sbe-clip.is-drag { opacity: 0.8; cursor: grabbing; z-index: 20; }
+    .sbe-clip.is-locked { cursor: not-allowed; }
+    .sbe-clip .sbe-cl-name {
+      padding: 6px 8px 0; font-size: var(--fs-xs); font-weight: 600; color: var(--text);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      pointer-events: none;
+    }
+    .sbe-clip .sbe-cl-meta {
+      padding: 2px 8px; font-size: var(--fs-2xs); color: var(--muted);
+      white-space: nowrap; overflow: hidden; pointer-events: none;
+      font-variant-numeric: tabular-nums;
+    }
+    .sbe-clip .sbe-cl-flag {
+      position: absolute; right: 6px; top: 6px; font-size: var(--fs-2xs);
+      letter-spacing: 0.06em; text-transform: uppercase; font-weight: 700;
+      color: var(--accent-bright); pointer-events: none;
+      font-variant-numeric: tabular-nums;
+    }
+    /* The flag is absolutely positioned, so the name runs UNDER it. It always
+       did — "lock" and "slow" are short enough to hide it — and a grade like
+       "-0.30" is wide enough to make it obvious. The name yields; it already
+       ellipsises. */
+    .sbe-clip.has-flag .sbe-cl-name { padding-right: 44px; }
+    .sbe-clip[data-source="human"] .sbe-cl-name { color: var(--accent-bright); }
+    /* ---- the three kinds, told apart without clicking ----
+       A track whose blocks all look identical is a track you have to select
+       your way through to read. A still shows its own picture behind its name;
+       a slug is the only thing on the timeline that is actually black, so it
+       is drawn black and says so. */
+    .sbe-clip.is-still { border-style: dashed; }
+    .sbe-clip .sbe-cl-thumb {
+      position: absolute; inset: 0; width: 100%; height: 100%;
+      object-fit: cover; opacity: 0.38; z-index: 0; pointer-events: none;
+    }
+    .sbe-clip .sbe-cl-name, .sbe-clip .sbe-cl-meta { position: relative; z-index: 1; }
+    .sbe-clip.is-slug {
+      background: #000; border-color: var(--border-strong);
+    }
+    .sbe-clip.is-slug .sbe-cl-name { color: var(--muted); }
+    .sbe-clip.is-graded .sbe-cl-flag { color: var(--warning); }
+    /* The insertion point a drop is aiming at. Painted on the track rather
+       than as a cursor, because the question the user is asking is "between
+       WHICH two clips", and only the track can answer that. */
+    .sbe-drop-line {
+      position: absolute; top: 0; bottom: 0; width: 2px; z-index: 25;
+      background: var(--accent); pointer-events: none;
+      box-shadow: 0 0 6px var(--accent);
+    }
+    .sbe-track.is-dropping { background: rgba(255,255,255,0.035); }
+    .sbe-grip {
+      position: absolute; top: 0; bottom: 0; width: var(--sbe-grip-w, 9px);
+      z-index: 6;
+      cursor: ew-resize; background: linear-gradient(90deg, rgba(255,255,255,0.10), transparent);
+    }
+    .sbe-grip.r { right: 0; background: linear-gradient(270deg, rgba(255,255,255,0.10), transparent); }
+    /* THE TARGET IS BIGGER THAN THE PAINT. The grips sat inside the clip's
+       1px border, so the exact pixel column somebody aims at when they reach
+       for an edge belonged to the MOVE handler: a drag begun on the music
+       block's leftmost pixel slid the whole block instead of trimming it.
+       `left: 0` covers the border column and the pseudo-element widens the
+       hit area by 3px either side without widening what is drawn.
+
+       ...AND IT MUST NOT REACH THE RIGHT ONE. This rule is written after
+       `.sbe-grip.r`, so it gave the right grip `left: 0` on top of its own
+       `right: 0`. An absolutely positioned box with left, right AND width all
+       set is over-constrained, and in a left-to-right document the browser
+       drops `right` — so BOTH grips rendered on top of each other at the LEFT
+       edge of every clip. Measured in the panel: clip at x 315–455, `.l` at
+       316–325, `.r` at 316–325. The consequences are the owner's report
+       exactly: the right edge of a clip had NO handle on it (hit-testing the
+       last pixel column returned the block, so pulling the tail MOVED the
+       clip), and the left edge hit `.r` — later in DOM order — so reaching for
+       the head performed a TAIL trim. "Trying to drag the video clip from
+       either edge" did something other than what the edge promised, on the
+       track and on the sound lane both. `left: auto` puts it back; the 3px
+       skirt still covers the border column on that side. */
+    .sbe-grip { left: 0; }
+    .sbe-grip.r { left: auto; right: 0; }
+    /* The skirt is a VARIABLE because the fade handle's inset is measured from
+       the far side of it — `grip-w + skirt` is the first pixel that is not a
+       trim, and hard-coding the 3 in two places is how those two numbers drift
+       apart. `measure_editor_layout.py` reads the same custom property off the
+       live grip to reconstruct the rectangle a pointer actually sees. */
+    .sbe-grip::before {
+      content: ''; position: absolute;
+      inset: 0 calc(-1 * var(--sbe-grip-skirt, 3px));
+    }
+    .sbe-grip:hover { background: var(--accent); }
+    .sbe-clip.is-locked .sbe-grip { display: none; }
+    .sbe-gap {
+      position: absolute; top: 6px; bottom: 6px; border-radius: var(--r-sm);
+      border: 1px dashed var(--border-strong); cursor: pointer;
+      background: repeating-linear-gradient(45deg,
+        rgba(255,255,255,0.03), rgba(255,255,255,0.03) 6px,
+        transparent 6px, transparent 12px);
+      display: flex; align-items: center; justify-content: center;
+      color: var(--muted); font-size: var(--fs-xs); text-align: center;
+      padding: 0 4px; overflow: hidden;
+    }
+    .sbe-gap:hover { border-color: var(--accent); color: var(--text); }
+    .sbe-head-line {
+      position: absolute; top: 0; bottom: 0; width: 2px; z-index: 30;
+      background: var(--warning); pointer-events: none;
+      box-shadow: 0 0 6px rgba(210,153,34,0.7);
+    }
+
+    /* ---- inspector + lists ---- */
+    .sbe-inspect {
+      display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap;
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: var(--r-md); padding: 8px 10px; font-size: var(--fs-xs);
+      color: var(--muted); min-height: 38px;
+    }
+    .sbe-inspect b { color: var(--text); font-weight: 600; }
+    /* The legend, laid out as rows rather than one run-on sentence: it is a
+       reference, and a reference you have to parse is a reference nobody
+       reads. */
+    .sbe-keys {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 1px 18px;
+      align-items: baseline;
+    }
+    .sbe-levels label { flex: 0 0 auto; }
+    .sbe-inspect .sbe-why { flex: 1 1 240px; min-width: 0; }
+    /* ONE SLIDER, FLAT. CapCut's Adjust panel, not Resolve's Color page —
+       constant per clip, no curve, no keyframe, no wheel. */
+    .sbe-adjust {
+      display: flex; align-items: center; gap: 6px;
+      flex: 1 1 220px; min-width: 190px;
+    }
+    .sbe-adjust input[type="range"] {
+      flex: 1 1 auto; min-width: 80px; accent-color: var(--accent);
+    }
+    .sbe-adjust .sbe-adj-val {
+      font-variant-numeric: tabular-nums; color: var(--text);
+      min-width: 42px; text-align: right;
+    }
+    .ed-pool-make { display: flex; gap: 6px; align-items: center; }
+    .ed-pool-make .sb-input { width: 66px; flex: 0 0 auto; }
+    .ed-pool-make .ghost-btn { flex: 1 1 auto; }
+    /* The thing under the pointer while a pool row is being dragged onto the
+       track. PORTALLED TO <body> — inside .ed-pool-list it would be clipped
+       by the list's own overflow the instant it left the column. */
+    .ed-drag-ghost {
+      position: fixed; z-index: 9999; pointer-events: none;
+      background: var(--panel-2); border: 1px solid var(--accent);
+      border-radius: var(--r-sm); padding: 4px 8px; font-size: var(--fs-xs);
+      color: var(--text); box-shadow: var(--shadow-2); opacity: 0.96;
+      max-width: 220px; overflow: hidden; white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+    .sbe-errs {
+      background: rgba(248,81,73,0.10); border: 1px solid rgba(248,81,73,0.45);
+      border-radius: var(--r-md); padding: 8px 10px; font-size: var(--fs-xs);
+      color: var(--text);
+    }
+    .sbe-errs ul { margin: 4px 0 0; padding-left: 16px; }
+    .sbe-errs li { margin: 2px 0; }
+    .sbe-conflict {
+      background: rgba(210,153,34,0.10); border: 1px solid rgba(210,153,34,0.5);
+      border-radius: var(--r-md); padding: 8px 10px; font-size: var(--fs-xs);
+      display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    }
+    .sbe-prep {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: var(--r-md); padding: 8px 10px; font-size: var(--fs-xs);
+      color: var(--muted); display: flex; gap: 8px; align-items: center;
+      flex-wrap: wrap;
+    }
+    /* ONE RUNG PER ROW. Measured before: an input at 37px beside a select at
+       35 beside three buttons at 29, all `align-items: center`, so no top
+       edge, no bottom edge and no baseline in the row agreed. */
+    .sbe-prep .sb-input, .sbe-prep select,
+    .sbe-prep .ghost-btn, .sbe-prep .primary {
+      height: var(--ctl-h); padding-block: 0; font-size: var(--fs-sm);
+    }
+    /* THE SOUNDTRACK IS A NAME, NOT A PATH. It was a 291px input holding
+       "/Users/salo/pinokio/drive/drivers/peers/d17777…" truncated mid
+       directory — the most machine-looking element on the screen, in the row
+       the user reads first after opening a film. The full path is on the
+       title and one click away. */
+    .sbe-music-name {
+      display: inline-flex; align-items: center; height: var(--ctl-h);
+      max-width: 240px; overflow: hidden; text-overflow: ellipsis;
+      white-space: nowrap; color: var(--text); font-size: var(--fs-sm);
+    }
+    .sbe-prep.is-editing #sbeMusicPath,
+    .sbe-prep.is-editing #sbeMusicChange { display: none; }
+    .sbe-prep:not(.is-editing) #sbeMusic { display: none; }
+    .sbe-bar {
+      flex: 1 1 140px; height: 5px; border-radius: 999px;
+      background: var(--panel-2); overflow: hidden; min-width: 80px;
+    }
+    .sbe-bar i {
+      display: block; height: 100%; background: var(--accent);
+      transition: width var(--t-base);
+    }
+    .sbe-unplaced { display: flex; flex-direction: column; gap: 6px; }
+    .sbe-unplaced-head {
+      font-size: var(--fs-2xs); letter-spacing: 0.08em; text-transform: uppercase;
+      color: var(--muted); font-weight: 700;
+      /* The strip scrolls inside the rail now, and a heading that scrolls
+         away leaves a column of unlabelled chips. */
+      position: sticky; top: 0; z-index: 1;
+      background: var(--panel); padding-bottom: 2px;
+    }
+    .sbe-chiprow { display: flex; gap: 6px; flex-wrap: wrap; }
+    .sbe-chip {
+      display: inline-flex; align-items: center; gap: 6px; max-width: 100%;
+      background: var(--panel-2); border: 1px solid var(--border);
+      border-radius: var(--r-pill); padding: 3px 5px 3px 10px;
+      font-size: var(--fs-xs); color: var(--text);
+    }
+    .sbe-chip span { color: var(--muted); font-size: var(--fs-xs); }
+    .sbe-chip button { padding: 3px 9px; font-size: var(--fs-xs); }
+    /* IN THE RAIL IT IS A LIST, NOT A SHELF. The wrapping-pill idiom belongs
+       on a wide horizontal strip; in a 230px column every pill wrapped
+       differently, so no two rows shared a height and no two buttons shared a
+       width — measured 48/48/48/32px tall with buttons at four widths — and
+       the identical action read out thirteen times as "Place at 0:46.70". */
+    .sbe-rail .sbe-chiprow { flex-direction: column; flex-wrap: nowrap; gap: 4px; }
+    .sbe-rail .sbe-chip {
+      width: 100%; flex-wrap: nowrap; justify-content: space-between;
+      height: var(--ctl-h); border-radius: var(--r-sm); gap: 8px;
+    }
+    .sbe-rail .sbe-chip b {
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      flex: 1 1 auto; font-weight: 500;
+    }
+    .sbe-rail .sbe-chip span { flex: 0 0 auto; }
+    .sbe-rail .sbe-chip button { flex: 0 0 auto; height: 22px; padding-block: 0; }
+    /* Every other row idiom in this panel answers the pointer. */
+    .sbe-chip:hover { border-color: var(--accent); }
+    .sbe-params {
+      font: 10.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: var(--muted); background: var(--bg-2); border: 1px solid var(--border);
+      border-radius: var(--r-sm); padding: 6px 8px; margin-top: 8px;
+      max-height: 132px; overflow: auto; white-space: pre-wrap;
+    }
+    /* Sticky, exactly like .sb-actionbar on the shot list next door: the
+       inspector and the unplaced strip both grow, and a Render button that
+       falls below the fold is a Render button nobody finds. */
+    .sbe-actions {
+      position: sticky; bottom: 0; z-index: 4;
+      display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+      padding: 10px 0 12px; border-top: 1px solid var(--border);
+      background: linear-gradient(180deg, rgba(0,6,26,0) 0%,
+                                  rgba(0,6,26,0.85) 22%, var(--bg) 50%, var(--bg) 100%);
+      backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    }
+    .sbe-actions .sbe-spacer { flex: 1 1 auto; }
+    /* Two buttons that differ by 13px of height read as two ranks. They are
+       one rank with two jobs; the FILL says which is the one you came for. */
+    .sbe-actions .primary, .sbe-actions .ghost-btn {
+      height: var(--ctl-h-lg); padding-block: 0; font-size: var(--fs-sm);
+    }
+    /* The panel's base rule is `button { width: 100% }`, and this bar never
+       overrode it — so "Render the timeline" was 1590px wide, wrapped onto its
+       own line, and made the sticky bar 89px tall instead of 40px. At a 1000px
+       window that bar came down on top of the inspector, which is the ONLY
+       surface that explains a cut. `.sb-film-actions` and `.sb-rail-step` both
+       carry this same line, for this same reason. (2026-08-17 review.) */
+    .sbe-actions .primary, .sbe-actions .ghost-btn { width: auto; }
+    .sbe-note { font-size: var(--fs-xs); color: var(--muted); }
+    .sbe-kbd {
+      font: 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+      border: 1px solid var(--border); border-radius: 4px;
+      padding: 2px 4px; color: var(--muted); background: var(--panel-2);
+    }
+
     /* The panel has no layout breakpoint today. Storyboard adds one, scoped
        to itself so nothing else can regress. */
     @media (max-width: 900px) {
@@ -26462,6 +32378,18 @@ HTML = r"""<!doctype html>
         height: auto;
         min-height: 0;
         overflow: visible;
+        /* `height: auto` NEVER DID ANYTHING HERE, and the rule above has been
+           promising a scrolling page since it was written. `.layout` is
+           `flex: 1 1 auto` inside a `display:flex; min-height:100vh` body, so
+           the flex algorithm stretched it to the leftover viewport height —
+           812px on a 900px window — whatever `height` said. The three `auto`
+           rows were then squeezed into that, the form column got ~316px for
+           ~730px of brief, and `overflow: visible` spilled the remaining
+           ~480px straight down THROUGH the stage: the shot list and the
+           timeline both had the ENGINE strip and the character picker printed
+           over them. Opting out of the stretch is the whole fix — the grid
+           takes its content height and the page scrolls, as advertised. */
+        flex: 0 0 auto;
       }
       body[data-workflow="storyboard"] main.layout > aside.form-pane {
         grid-column: 1; grid-row: 1;
@@ -26477,6 +32405,29 @@ HTML = r"""<!doctype html>
       .sb-shot-head { flex-wrap: wrap; }
       .sb-summary { flex-direction: column; align-items: stretch; gap: 8px; }
       .sb-runbar { flex-wrap: wrap; }
+      /* Here the PAGE is the scroller, not #sbStage, so the picture is not
+         competing with the track for a fixed box and the tight third term of
+         its cap would only make it small for nothing. */
+      /* The var, not the element: both monitors read it, and sbeFitMonitors
+         is told to stand down at this width (there is no fixed column to
+         budget against once the page is the scroller). Side by side, two
+         16:9 frames in a ~880px page are two postage stamps, so they stack
+         and the source goes second — it is the one you are done with. */
+      .sbe-monitors {
+        flex-direction: column; align-items: stretch;
+        --sbe-prog-h: min(38vh, 340px);
+        --sbe-src-h: min(30vh, 260px);
+      }
+      .sbe-monitors .sbe-mon-prog { order: 1; }
+      .sbe-monitors .sbe-mon-src { order: 2; }
+      /* Stacked, the rail is a row again and takes its own height back. */
+      .sbe-rail { order: 3; width: auto; height: auto; overflow: visible; }
+      .sbe-time { min-width: 0; }
+      /* NO HANDLE HERE, and sbeFitMonitors stands down at the same width for
+         the same reason: the page is the scroller, the column has no fixed
+         height, and there is nothing for the timeline to take height FROM. A
+         grip that moved nothing would be worse than no grip. */
+      .sbe-tl-grab { display: none; }
     }
 
     /* =========================================================
@@ -27776,6 +33727,7 @@ HTML = r"""<!doctype html>
        Mirrors the train workflow rules above. */
     body[data-workflow="characters"] #modelsInline,
     body[data-workflow="characters"] #modeGroup,
+    body[data-workflow="characters"] #remixSubGroup,
     body[data-workflow="characters"] aside.form-pane > h2,
     body[data-workflow="characters"] #genForm,
     body[data-workflow="characters"] #studioSection { display: none !important; }
@@ -27788,6 +33740,7 @@ HTML = r"""<!doctype html>
        which workflowSwitch calls when entering this branch. */
     body[data-workflow="studio"] #modelsInline,
     body[data-workflow="studio"] #modeGroup,
+    body[data-workflow="studio"] #remixSubGroup,
     body[data-workflow="studio"] aside.form-pane > h2,
     body[data-workflow="studio"] #genForm,
     body[data-workflow="studio"] #trainSection,
@@ -32160,6 +38113,23 @@ HTML = r"""<!doctype html>
       -webkit-backdrop-filter: blur(12px);
       overflow: hidden;
     }
+    /* THE END OF THE BAR IS NOT THE PART THAT SHOULD YIELD. `nowrap` +
+       `overflow: hidden` means the LAST element is cut rather than wrapped or
+       shrunk, and at 1440 the creator link ran 9px past the viewport with no
+       scroll to recover it: "by Biz", the X icon gone. The middle of the bar
+       is the part that can afford to give — so the status cluster shrinks and
+       the two right-hand links never do. Below 1500 the words go and the
+       marks stay. */
+    body > header > *:not(.brand):not(.creator-link):not(.icon-btn):not(.phosphene-x-link) {
+      min-width: 0;
+    }
+    body > header .creator-link,
+    body > header .phosphene-x-link,
+    body > header .icon-btn { flex: 0 0 auto; }
+    @media (max-width: 1500px) {
+      body > header .creator-link > span:not(.x-icon) { display: none; }
+      body > header .creator-link { padding-right: 8px; }
+    }
     body > header .brand {
       display: inline-flex;
       align-items: center;
@@ -32740,7 +38710,13 @@ HTML = r"""<!doctype html>
       border: 1px solid var(--ph-border-soft);
       border-radius: 7px;
       width: auto;
-      max-width: max-content;
+      /* IT MUST WRAP. `max-content` + nowrap ran the strip past the right
+         edge of a narrow form pane, and the pane clips — so the last tabs
+         were simply not there to click. That is how the Train tab went
+         missing once, and the Editor tab is the sixth. Capped at the
+         column, not at the content. */
+      flex-wrap: wrap;
+      max-width: calc(100% - 36px);
     }
     .workflow-tabs button {
       /* Override the global `button { width: 100% }` rule. Without
@@ -33215,6 +39191,7 @@ HTML = r"""<!doctype html>
 <symbol id="ph-download-simple" viewBox="0 0 256 256"><line x1="128" y1="144" x2="128" y2="32" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><polyline points="216 144 216 208 40 208 40 144" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><polyline points="168 104 128 144 88 104" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="ph-film-slate" viewBox="0 0 256 256"><path d="M216,112H40a8,8,0,0,0-8,8v88a8,8,0,0,0,8,8H216a8,8,0,0,0,8-8V120A8,8,0,0,0,216,112Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M32,112,50.6,44.7a8,8,0,0,1,9.8-5.6L213.3,80.4a8,8,0,0,1,5.6,9.8L213,112" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="110.1" y1="59.5" x2="83.2" y2="112" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="163.9" y1="74" x2="137" y2="112" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="ph-film-strip" viewBox="0 0 256 256"><rect x="32" y="48" width="192" height="160" rx="8" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="128" y1="48" x2="128" y2="208" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="32" y1="80" x2="224" y2="80" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="32" y1="176" x2="224" y2="176" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="80" y1="48" x2="80" y2="80" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="176" y1="48" x2="176" y2="80" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="80" y1="176" x2="80" y2="208" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="176" y1="176" x2="176" y2="208" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="ph-scissors" viewBox="0 0 256 256"><circle cx="76" cy="68" r="28" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><circle cx="76" cy="188" r="28" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="96.9" y1="86.6" x2="200" y2="200" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="96.9" y1="169.4" x2="200" y2="56" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="ph-gear-six" viewBox="0 0 256 256"><circle cx="128" cy="128" r="40" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M130.05,206.11c-1.34,0-2.69,0-4,0L94,224a104.61,104.61,0,0,1-34.11-19.2l-.12-36c-.71-1.12-1.38-2.25-2-3.41L25.9,147.24a99.15,99.15,0,0,1,0-38.46l31.84-18.1c.65-1.15,1.32-2.29,2-3.41l.16-36A104.58,104.58,0,0,1,94,32l32,17.89c1.34,0,2.69,0,4,0L162,32a104.61,104.61,0,0,1,34.11,19.2l.12,36c.71,1.12,1.38,2.25,2,3.41l31.85,18.14a99.15,99.15,0,0,1,0,38.46l-31.84,18.1c-.65,1.15-1.32,2.29-2,3.41l-.16,36A104.58,104.58,0,0,1,162,224Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="ph-image" viewBox="0 0 256 256"><rect x="32" y="48" width="192" height="160" rx="8" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><circle cx="156" cy="100" r="12"/><path d="M147.31,164,173,138.34a8,8,0,0,1,11.31,0L224,178.06" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M32,168.69l54.34-54.35a8,8,0,0,1,11.32,0L191.31,208" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="ph-info-fill" viewBox="0 0 256 256"><path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm-4,48a12,12,0,1,1-12,12A12,12,0,0,1,124,72Zm12,112a16,16,0,0,1-16-16V128a8,8,0,0,1,0-16,16,16,0,0,1,16,16v40a8,8,0,0,1,0,16Z"/></symbol>
@@ -33467,6 +39444,10 @@ HTML = r"""<!doctype html>
            yesterday, plus one calm word. The count span is filled only while
            a storyboard render is actually in flight. -->
       <button data-workflow="storyboard"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-film-slate"/></svg>Storyboard<span class="new-badge sb-live" id="sbTabCount" hidden></span></button>
+      <!-- The Editor is a PLACE, not a room inside the Storyboard. It opens
+           with no board, on clips from any engine, and it stays open while
+           you go and look at something else. -->
+      <button data-workflow="editor"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-scissors"/></svg>Editor</button>
       <button data-workflow="audio"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-music-notes"/></svg>Audio<span class="new-badge">NEW</span></button>
       <button data-workflow="train"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-user-plus"/></svg>Train Character</button>
     </nav>
@@ -35827,6 +41808,25 @@ HTML = r"""<!doctype html>
                   onclick="downloadSampleCharacter()">get a sample character (Bizarro)</button>.
         </div>
         <div class="chars-q4-note">__Q8_CHARACTER_INSTALL_COPY__</div>
+        <!-- Wardrobe rides with the CHARACTER, not the shot. "A man in a dark
+             suit" is a different suit every time it is re-rolled — measured:
+             four shots of one man came back in two suits and two different
+             period collars. -->
+        <input type="text" id="sbWardrobe" class="sb-input" style="margin-top:8px"
+               placeholder="what they wear in this film — e.g. a loud floral Hawaiian shirt, collar open">
+      </div>
+
+      <!-- LOCATIONS. A model re-invents everything the prompt does not pin, so
+           four shots that each said "dim room" came back as four different
+           rooms — one of them a vintage parlour with no monitors in it. Writing
+           the room ONCE and injecting it into every shot that claims it is the
+           only thing that survives shots being re-rendered one at a time. -->
+      <div class="cz-control" id="sbLocRow">
+        <div class="cz-label">Where it happens
+          <span class="cz-label-hint">one line per place — shots reuse them</span></div>
+        <textarea id="sbLocations" class="sb-textarea" rows="3" oninput="sbLocInput()"
+          placeholder="the study: dark oak panelling, three curved monitors glowing cold blue, a brass desk lamp&#10;the driveway: bright suburban driveway, red convertible, late afternoon sun"></textarea>
+        <div class="cz-meta" id="sbLocMeta">no locations — every shot invents its own</div>
       </div>
 
       <details class="customize-section" id="sbMustSection">
@@ -36008,6 +42008,65 @@ HTML = r"""<!doctype html>
       </div>
     </div>
 
+
+    <!-- ============== THE MEDIA POOL — the Editor's left column ==========
+         What replaced a window.prompt(). Until Wave 1 the only way to bring a
+         clip into a cut was a native text box asking the user to type the
+         NUMBER of a film from a numbered list — while the outputs gallery,
+         which holds every clip this panel has ever made, was display:none for
+         the whole surface. The owner's ask was one sentence: "pick from the
+         generations whatever you want."
+
+         Three sources, one verb. Clicking a row puts the clip on the END of
+         the track, builds its proxy, saves, and leaves you exactly where you
+         were. Drag is Wave 2; click is the floor. -->
+    <div id="edSectionTab" style="display:none">
+      <header class="carousel-head ed-pool-head">
+        <h3>Media pool</h3>
+        <span class="ch-spacer"></span>
+        <!-- BRING YOUR OWN. A title card, a logo, a phone clip — the pool
+             showed everything the panel MADE and nothing the user already
+             had. The input is hidden because a bare file input cannot be
+             styled to look like anything else in this panel; the button is
+             the control. Shown on the Images source, which is where what it
+             uploads appears. -->
+        <input type="file" id="edPoolFile" multiple hidden
+               accept=".png,.jpg,.jpeg,.webp,.mp4,.mov,.m4v,.webm"
+               onchange="edPoolUpload(this.files); this.value = '';">
+        <button type="button" class="ghost-btn" id="edPoolUploadBtn" hidden
+                onclick="document.getElementById('edPoolFile').click()"
+                title="Add a picture or a clip from this Mac. Pictures land as stills, clips land as clips.">Upload</button>
+        <button type="button" class="ghost-btn" id="edPoolRefreshBtn"
+                onclick="edPoolRefresh(true)" title="Re-read the clips on disk">Refresh</button>
+      </header>
+      <div class="ed-pool-tabs" id="edPoolTabs">
+        <button type="button" class="pill-btn active" data-src="film">This __SEQCAP__</button>
+        <button type="button" class="pill-btn" data-src="other">Other __SEQS__</button>
+        <button type="button" class="pill-btn" data-src="gallery">Generations</button>
+        <!-- IMAGES. The gallery has always held them — the image queue drops
+             every render into panel_uploads/library/manual — and until a clip
+             could be a STILL there was nothing a timeline could do with one. -->
+        <button type="button" class="pill-btn" data-src="images">Images</button>
+      </div>
+      <!-- BLACK IS NOT SOMETHING YOU PICK FROM A LIST. It has no file, so it
+           has no row; it is made, with a length, which is its only property. -->
+      <div class="ed-pool-make">
+        <input type="number" class="sb-input" id="edSlugSecs" value="2.0"
+               min="0.2" max="60" step="0.5" aria-label="Seconds of black">
+        <button type="button" class="ghost-btn" id="edAddSlugBtn"
+                onclick="edAddSlug()"
+                title="Black, for as long as you say. No file, no proxy — it is drawn by the render.">Add black</button>
+      </div>
+      <select class="sb-input ed-pool-film" id="edPoolFilm" hidden
+              onchange="edPoolPickFilm(this.value)"
+              aria-label="Which __SEQ__ to take clips from"></select>
+      <input type="text" class="sb-input ed-pool-search" id="edPoolSearch"
+             spellcheck="false" placeholder="Filter by name"
+             oninput="edPoolPaint()">
+      <div class="ed-pool-list" id="edPoolList"></div>
+      <div class="ed-pool-note" id="edPoolNote"></div>
+    </div>
+
   </aside>
 
   <!-- ============== STAGE PANE: PLAYER + CAROUSEL ============== -->
@@ -36023,6 +42082,35 @@ HTML = r"""<!doctype html>
        (#filterAll/#filterHidden retired with the Visible/Hidden
        segmented control — orphan textContent/setFilter calls removed.) -->
   <section class="stage-pane">
+      <!-- ============== THE RAIL ==================================
+           Four steps, one place, every screen that has a board open —
+           ABOVE the player, first thing in the pane, because this is the
+           navigation and the video is the content. It lived inside
+           #sbStage (the slot BELOW the player) and the owner read that,
+           correctly, as the menu jumping underneath the example video.
+           Shown only while the storyboard workflow is active, so
+           "where am I / what is next / how do I get to the editor" has one
+           answer instead of none. Painted by sbRailPaint() from sbRailModel(),
+           which is pure and under test. -->
+      <nav class="sb-rail" id="sbRail" hidden aria-label="This film, step by step">
+        <button type="button" class="sb-rail-back" onclick="sbBackToList()"
+                title="Every storyboard on this Mac">All storyboards</button>
+        <button type="button" class="sb-rail-step" data-step="plan" onclick="sbGo('plan')">
+          <span class="sb-rail-n">1</span><span class="sb-rail-t">Plan</span>
+          <span class="sb-rail-sub" data-sub="plan"></span></button>
+        <span class="sb-rail-sep" aria-hidden="true"></span>
+        <button type="button" class="sb-rail-step" data-step="shots" onclick="sbGo('shots')">
+          <span class="sb-rail-n">2</span><span class="sb-rail-t">Shots</span>
+          <span class="sb-rail-sub" data-sub="shots"></span></button>
+        <span class="sb-rail-sep" aria-hidden="true"></span>
+        <button type="button" class="sb-rail-step" data-step="edit" onclick="sbGo('edit')">
+          <span class="sb-rail-n">3</span><span class="sb-rail-t">Edit</span>
+          <span class="sb-rail-sub" data-sub="edit"></span></button>
+        <span class="sb-rail-sep" aria-hidden="true"></span>
+        <button type="button" class="sb-rail-step" data-step="film" onclick="sbGo('film')">
+          <span class="sb-rail-n">4</span><span class="sb-rail-t">Film</span>
+          <span class="sb-rail-sub" data-sub="film"></span></button>
+      </nav>
     <!-- Ideogram Layout editor: the placement canvas (#ideoStageWrap) portals
          into #ideoCanvasHost here in the big right column, and the Edit/Result
          toggle flips between the canvas and the rendered output. Both are
@@ -36230,6 +42318,7 @@ HTML = r"""<!doctype html>
          and exactly one is visible at a time. -->
     <div id="sbStage">
 
+
       <!-- Empty: no board open, none on disk. -->
       <div class="sb-empty" id="sbEmpty" hidden>
         <div class="sb-empty-icon">
@@ -36290,7 +42379,9 @@ HTML = r"""<!doctype html>
             <button type="button" class="smt-btn active" data-sb-stage="list" onclick="sbSetStage('list')">Shot list</button>
             <button type="button" class="smt-btn" data-sb-stage="player" onclick="sbSetStage('player')">Player</button>
           </div>
-          <button type="button" class="ghost-btn" onclick="sbBackToList()">All storyboards</button>
+          <!-- "All storyboards" used to sit here. It lives on the rail now,
+               with the rest of the navigation, so there is one place to look
+               rather than a different one on every stage state. -->
         </header>
 
         <div class="sb-runbar engine-hint" id="sbRunBar" hidden>
@@ -36361,13 +42452,563 @@ HTML = r"""<!doctype html>
         <div class="sb-actionbar sb-tally" id="sbTally" hidden title="Focus a shot and press K, R or C">
           <span id="sbTallyText">nothing graded yet</span>
           <span class="sb-actionbar-spacer"></span>
+          <!-- The timeline used to be the fifth button in this row of five,
+               which is exactly why nobody found it. It is step 3 on the rail
+               now — always on screen, in the same place on every state — and
+               this bar is left to do its own job: grade, then finish. -->
           <button type="button" class="ghost-btn" id="sbExportBtn" onclick="sbExport()" hidden>Export</button>
           <button type="button" class="ghost-btn" id="sbRewriteBtn" onclick="sbRewrite()" hidden>Rewrite</button>
           <button type="button" class="ghost-btn" id="sbResumeBtn" onclick="sbRenderRemaining()" hidden>Render remaining</button>
           <button type="button" class="primary" id="sbFinishBtn" onclick="sbFinish()">Finish keepers</button>
         </div>
-        <div class="sb-export-note" id="sbExportNote" hidden>Assembling these into a single cut is a script for now — <code>scripts/</code> has the After Effects pass. One-click assembly is not in this version.</div>
+        <div class="sb-export-note" id="sbExportNote" hidden>Export writes a folder with every kept shot, a shot list, and <strong>one playable film</strong>. If you have cut this film in the Editor, that film IS your cut — same clips, same trims, same soundtrack, same filename the Editor's own Render writes. Otherwise it is the shots joined in order, mixed sizes normalised to the largest. The clips in the gallery are never touched.</div>
       </div>
+
+      <!-- ============== THE FILM — the point of the other six ===========
+           A render or an export writes an mp4 into mlx_outputs/storyboards/
+           and, until this screen existed, told nobody. The gallery could not
+           help: it globs OUTPUT/*.mp4 and never descends. So the one thing the
+           feature makes was the one thing it could not show you.
+
+           Everything here is painted by sbFilmPaint() from /storyboard/films,
+           which reads the folder the assemblers already write into. No new
+           storage, no second source of truth. -->
+      <div class="sb-plan sb-film" id="sbFilm" hidden>
+        <header class="carousel-head">
+          <h3>The film</h3>
+          <span class="sb-plan-status" id="sbFilmStatus"></span>
+          <span class="ch-spacer"></span>
+        </header>
+        <div id="sbFilmBody"></div>
+      </div>
+    </div>
+
+
+    <!-- ============== THE EDITOR — its own window ======================
+         Wave 1 of the Editor restructure (2026-08-17). The timeline used to
+         be the sixth state of #sbStage, which made it a room inside the
+         storyboard rather than a place of its own: it could not open without
+         a board, it died on a tab switch, and its picture was whatever the
+         shot list left over. It is a top-level workflow now — engine-
+         agnostic, always reachable, one document at a time.
+
+         #edStage is the editor's scroller, the exact counterpart of
+         #sbStage. The media pool lives in the form pane (#edSectionTab), so
+         this column is the viewer and the track and nothing else. -->
+    <div id="edStage">
+
+      <!-- No document open. Not an error state: the Editor is reachable
+           from a cold boot with nothing on disk, and this is what it says
+           then. The film list is painted by edPaintEmpty(). -->
+      <div class="sb-empty" id="edEmpty" hidden>
+        <div class="sb-empty-icon">
+          <svg width="56" height="56" viewBox="0 0 256 256" aria-hidden="true"><use href="#ph-film-strip"/></svg>
+        </div>
+        <div class="sb-empty-title">Pick a __SEQ__ to cut.</div>
+        <div class="sb-empty-sub">The Editor opens one timeline at a time. Choose a __SEQ__ below, or add clips from the media pool on the left — anything in your generations can go straight onto the track.</div>
+        <div class="ed-pick" id="edPick"></div>
+      </div>
+
+    <!-- ============== THE TIMELINE — arrangement, not intent ==========
+         The sixth stage state. The shot list above says WHAT the film
+         contains; this says what plays, from which second of which file, at
+         which second of the film. Two documents, side by side on disk
+         (storyboard.json / edit.json), for the reason storyboard_editor.py
+         gives at length: the moment one shot is used twice they are
+         different shapes forever.
+
+         Everything here is proxy-driven. A source clip is a single GOP —
+         235 ms to seek in Chrome, measured — and a timeline is a machine
+         for seeking. The proxies are all-intra and seek in 3.5 ms. -->
+    <div class="sb-plan sbe" id="sbTimeline" hidden>
+      <!-- THE COMMAND BAR. Identity on the left — what am I cutting, which
+           draft, is it saved — and four verbs on the right. It was eleven
+           controls in one row, all drawn identically, so the safest thing on
+           the screen and the one that LEAVES looked alike. Navigation nests
+           under the ⋯; the only filled control on the screen is Render. -->
+      <header class="carousel-head sbe-head">
+        <span class="sbe-title" id="sbeTitle">Editor</span>
+        <!-- WHICH DOCUMENT AM I CUTTING, and which of its drafts. Identity, so
+             it sits beside the name rather than among the verbs. -->
+        <button type="button" class="ghost-btn sbe-draftchip" id="sbeKeepBtn"
+                onclick="sbeVersionsOpen(true)"
+                title="New draft, duplicate, rename — and every draft this __SEQ__ has">
+          <span id="sbeDraftDot" class="sbe-draft-dot" hidden></span><span id="sbeDraftName">Draft</span><span class="sbe-car">▾</span>
+        </button>
+        <span class="sbe-state" id="sbeState"><i class="sbe-dot"></i><span id="sbeStateText">loading…</span></span>
+        <!-- WHEN THE NET LAST CAUGHT THIS TAB. A dead snapshot lane used to be
+             invisible: the only way to find out was to list a history folder
+             AFTER losing something. This says it in the one place a person
+             already looks to find out whether their work is safe. -->
+        <span class="sbe-protected" id="sbeProtected" hidden></span>
+        <span class="ch-spacer" style="flex:1 1 auto"></span>
+        <!-- One gesture, two directions: a segmented pair rather than two
+             free-standing buttons that happen to sit next to each other. -->
+        <span class="sbe-undogroup">
+          <button type="button" class="ghost-btn" id="sbeUndoBtn" onclick="sbeUndo()" title="Undo (⌘Z)" disabled>Undo</button>
+          <button type="button" class="ghost-btn" id="sbeRedoBtn" onclick="sbeRedo()" title="Redo (⇧⌘Z)" disabled>Redo</button>
+        </span>
+        <button type="button" class="ghost-btn" id="sbeSaveBtn" onclick="sbeSaveNow()"
+                title="Save now and say so. The editor also saves on its own, quietly, a second after every edit.">Save</button>
+        <!-- RENDER CAME UP, NOT OUT. It was the far corner of a sticky bar at
+             the bottom of the column, 54px of chrome under the timeline to
+             hold two buttons; it is the one thing this screen is FOR, so it is
+             the one filled control on it. Export nests under the caret, with
+             the render note, because it is the same verb pointed elsewhere. -->
+        <span class="sbe-split">
+          <button type="button" class="primary" id="sbeRenderBtn" onclick="sbeRenderFilm()"
+                  title="Render this timeline into one file (⌘R)">Render</button>
+          <button type="button" class="primary sbe-car-btn" id="sbeRenderMore"
+                  onclick="sbePopToggle('sbeRenderMenu', 'sbeRenderMore')"
+                  aria-haspopup="menu" title="Export, and what the render will do">▾</button>
+        </span>
+        <button type="button" class="ghost-btn sbe-kebab" id="sbeMoreBtn"
+                onclick="sbePopToggle('sbeMoreMenu', 'sbeMoreBtn')"
+                aria-haspopup="menu" title="Drafts, soundtrack, media pool, auto-edit, storyboard, close">⋯</button>
+      </header>
+
+      <!-- THE FOUR POPOVERS. Their contents are the REAL controls, moved
+           rather than rebuilt: every id the client already writes to is still
+           here, so nothing that pokes at a button has to learn a new home.
+           They are `position: fixed` and hidden, so an open menu cannot push
+           the workspace around — the same rule the notice surface follows. -->
+      <div class="sbe-pop" id="sbeRenderMenu" hidden>
+        <button type="button" class="ghost-btn" id="sbeNleBtn" onclick="sbeExportNle()"
+                title="A folder with an FCP7 XML (Premiere + Resolve), an After Effects script, and hardlinked media. Audio comes out as stems, not the ducked mix.">Export for Premiere / Resolve / AE</button>
+        <span class="sbe-pop-note" id="sbeRenderNote"></span>
+      </div>
+
+      <div class="sbe-pop" id="sbeMoreMenu" hidden>
+        <button type="button" class="ghost-btn" id="sbeVersBtn" onclick="sbeVersionsOpen(false)"
+                title="Every draft this __SEQ__ has, and every past save of this one">Drafts and versions…</button>
+        <button type="button" class="ghost-btn" id="sbeImportBtn" onclick="edPoolFocus()"
+                title="This __SEQ__'s shots, other __SEQS__' clips, and everything in your generations.">Media pool</button>
+        <button type="button" class="ghost-btn" id="sbeAutoBtn" onclick="sbeAuto()"
+                title="Re-cuts the __SEQ__ from scratch. Throws away this arrangement.">Auto-edit…</button>
+        <span class="sbe-pop-sep"></span>
+        <button type="button" class="ghost-btn" id="sbeBoardBtn" onclick="sbeGoToBoard()"
+                title="Open this __SEQ__'s shot list in the Storyboard tab" hidden>Storyboard</button>
+        <button type="button" class="ghost-btn" id="sbeCloseBtn" onclick="sbeClose()"
+                title="Close this timeline (Esc). Nothing is deleted.">Close</button>
+      </div>
+
+      <div class="sbe-pop sbe-pop-wide" id="sbeKeysPop" hidden>
+        <span class="sbe-note sbe-keys" id="sbeKeys"></span>
+      </div>
+      <div class="sbe-pop sbe-pop-wide" id="sbeMusicMenu" hidden>
+        <span class="sbe-pop-note" id="sbePrepText">The soundtrack drives the waveform and the beat grid.</span>
+        <input type="text" class="sb-input" id="sbeMusic" spellcheck="false"
+               onblur="sbeMusicEditPath(false)"
+               placeholder="/path/to/the/soundtrack.wav">
+        <span class="sbe-pop-row">
+          <button type="button" class="ghost-btn" id="sbeMusicChange"
+                  onclick="sbeMusicEditPath(true)"
+                  title="Point at a different audio file">Change…</button>
+          <button type="button" class="ghost-btn" id="sbePrepBtn" onclick="sbePrepare()">Prepare</button>
+          <button type="button" class="ghost-btn" id="sbePrepCancel" onclick="sbePrepareCancel()" hidden>Cancel</button>
+        </span>
+        <span class="sbe-bar" id="sbePrepBar" hidden><i style="width:0%"></i></span>
+        <span class="sbe-music-warn" id="sbeMusicWarn" hidden></span>
+      </div>
+
+
+      <!-- ONE SURFACE, NOT FOUR. Conflict, save-alarm, recovery and the
+           validation list are four full-width blocks stacked in the same
+           column, and they are not mutually exclusive — the day the overlap
+           rule refused a J-cut the owner had three of them on screen at once,
+           the timeline pushed off the bottom, and the sentence that mattered
+           was the third one down. They still exist as themselves; the
+           container shows the most urgent OPEN and folds the rest to a chip
+           you click to read. -->
+      <div class="sbe-notices" id="sbeNotices"
+           onclick="sbeNoticeClick(event)" hidden>
+      <div class="sbe-conflict" id="sbeConflict" data-short="Version conflict" hidden>
+        <span id="sbeConflictText"></span>
+        <span style="flex:1 1 auto"></span>
+        <button type="button" class="ghost-btn" onclick="sbeTakeTheirs()">Load theirs</button>
+        <button type="button" class="ghost-btn" onclick="sbeForceSave()">Keep mine</button>
+      </div>
+
+      <!-- SAVING IS FAILING. Not a status — an emergency, and the loudest
+           thing this screen can say. The owner cut for twenty minutes against
+           a timeline that was not being written, and the only thing that knew
+           was a small grey chip reading "not saved". This says it in words
+           nobody can read past, names the reason, and does not go away until a
+           save actually lands. -->
+      <div class="sbe-alarm" id="sbeAlarm" data-short="Saving is failing" hidden>
+        <b>SAVING IS FAILING — your changes are not being stored.</b>
+        <span id="sbeAlarmWhy"></span>
+        <span style="flex:1 1 auto"></span>
+        <button type="button" class="ghost-btn" onclick="sbeSaveNow()">Try again</button>
+      </div>
+
+      <!-- THE RECOVERY OFFER. A backup newer than the saved draft is a
+           question, never an action: the autosave the owner asked us to
+           remove would be exactly this, applied without asking. It says what
+           is in the backup so the choice can be made on facts. -->
+      <!-- NO RECOVERY WALL. This was a full-width bar with a primary button,
+           asking a question that had to be answered before the film could be
+           worked on — and asking it over a document that had loaded correctly,
+           because the comparison behind it counted a rewritten `proxy`
+           pointer as a difference. It is now the quietest thing on the
+           screen: a chip that says a snapshot exists and offers to open the
+           place where snapshots live. Content-equal shows nothing at all.
+           See docs/EDITOR_SAVE_MODEL.md §4. -->
+      <div class="sbe-recover" id="sbeRecover" data-short="Unsaved snapshot"
+           data-quiet="1" hidden>
+        <b>Unsaved snapshot</b>
+        <span id="sbeRecoverWhat"></span>
+        <span style="flex:1 1 auto"></span>
+        <button type="button" class="ghost-btn" onclick="sbeVersionsOpen()">Open Versions</button>
+        <button type="button" class="ghost-btn" onclick="sbeRecover()">Restore it</button>
+        <button type="button" class="ghost-btn" onclick="sbeDiscardBackup()">Discard</button>
+        <!-- DISMISSIBLE WITHOUT ANSWERING. Discard DELETES the backup, so it
+             is not the button for "not now" — and with no third option the
+             bar sat across the top of the film for the rest of the session
+             over a question the user was not ready to answer. This one hides
+             it and touches nothing; it is back on the next read. -->
+        <button type="button" class="ghost-btn" onclick="sbeNoticeLater()">Later</button>
+      </div>
+
+      <div class="sbe-errs" id="sbeErrors" data-short="Not saved" hidden></div>
+
+      <!-- THE AUTO-KEY RECEIPT. "If the picture comes in a format that doesn't
+           work, automatically make it work" — and then say so. A card whose
+           alpha channel declared a black backdrop opaque was keyed on its way
+           to the overlay lane; the original file was NOT touched, and this is
+           the one click back to it. Quiet, because nothing here went wrong,
+           and because a receipt that took the width would push the timeline
+           down the screen for a change the user is going to keep. -->
+      <div class="sbe-recover" id="sbeKeyed" data-short="Black background removed"
+           data-quiet="1" hidden>
+        <b>Black background removed</b>
+        <span id="sbeKeyedWhat"></span>
+        <span style="flex:1 1 auto"></span>
+        <button type="button" class="ghost-btn" onclick="sbeKeyedKeepOriginal()">Keep original</button>
+        <button type="button" class="ghost-btn" onclick="sbeKeyedDismiss()">Dismiss</button>
+      </div>
+      </div>
+
+      <!-- THE DRAFTS PANEL. Declared here so it is real markup a gate can
+           read, and PORTALLED TO <body> the first time it opens: the editor
+           header and the stage column both carry overflow, and a panel
+           rendered inside either is sliced at its edge — the same clipping
+           that cut the avatar off the header and the drag ghost off the pool.
+           Positioned fixed, under the button that opened it. -->
+      <div class="sbe-vers" id="sbeVersions" hidden>
+        <header>
+          <b>Drafts</b>
+          <span style="flex:1 1 auto"></span>
+          <button type="button" class="ghost-btn" onclick="sbeVersionsClose()">Close</button>
+        </header>
+        <!-- NEW DRAFT. Two doors on purpose: an empty timeline to start an
+             idea from nothing, and a copy of what is on screen to try a
+             variation without risking the cut it came from. "He should be
+             able to start a new draft and work on it, as well as copy and
+             paste drafts." -->
+        <div class="sbe-vers-new">
+          <input type="text" class="sb-input" id="sbeVersName" maxlength="60"
+                 spellcheck="false" placeholder="Name a draft, or this save…"
+                 onkeydown="if (event.key === 'Enter') { event.preventDefault(); sbeNameEnter(); }">
+          <button type="button" class="primary" id="sbeVersKeep"
+                  onclick="sbeNameEnter()"
+                  title="A new draft holding a copy of the timeline on screen">Copy</button>
+          <button type="button" class="ghost-btn" id="sbeDraftEmpty"
+                  onclick="sbeDraftNew(false)"
+                  title="A new draft with an empty timeline (the soundtrack comes with it)">Empty</button>
+          <!-- NAMING A SAVE IS NOT SAVING ONE, and it is not making a draft
+               either — it marks the save already on disk so the fifty-save
+               prune can never take it. The route has been alive and
+               documented the whole time; the drafts rewrite left the panel
+               with no way to reach it, while the history went on rendering
+               named saves in their own accent because the owner's film
+               already contains one. -->
+          <button type="button" class="ghost-btn" id="sbeKeepSaveBtn"
+                  onclick="sbeKeepVersion()"
+                  title="Give the save on disk a name, so it is never pruned">Keep</button>
+        </div>
+        <div class="sbe-vers-list" id="sbeDraftList"></div>
+        <div class="sbe-vers-note" id="sbeVersNote"></div>
+        <div class="sbe-vers-list" id="sbeVersList"></div>
+      </div>
+
+      <!-- DRAFT → DELIVERY. "Finish keepers" renders full-size files, and
+           until Wave 1 the timeline went on pointing at the drafts it was cut
+           from — so the delivery pass produced files the film never used, and
+           the next Prepare pruned their proxies. Detected on the server (see
+           _sbe_relinks), never applied without this button: the arrangement is
+           the human's. -->
+      <div class="sbe-relink" id="sbeRelink" hidden>
+        <span id="sbeRelinkText"></span>
+        <span class="sbe-relink-why">Same cuts, same timings — only the files change.</span>
+        <span style="flex:1 1 auto"></span>
+        <button type="button" class="ghost-btn" id="sbeRelinkBtn"
+                onclick="sbeRelink()">Use the finished versions</button>
+      </div>
+
+
+      <!-- ============== THE TWO MONITORS =========================
+           Source on the left, program on the right, which is the layout
+           every NLE has had since tape: one screen for the thing you are
+           considering, one for the thing you have built. Asked for in
+           those words — "a split screen with the left screen showing you
+           when you click on the clips … you can watch the clips before you
+           add them".
+
+           The source is a PLAYER, not a second editor. It has no timeline,
+           no trim, no scrub: clicking a pool row loads the clip and plays
+           it, and the only verb under it is the one that puts it on the
+           track. The + on the pool row still adds without previewing, so
+           nobody who already knows what a clip is has to watch it first.
+
+           Sound is the program's switch, for both: sbeSetMute owns the
+           mute state of every element on this row, and only one of the two
+           ever plays. -->
+      <div class="sbe-monitors" id="sbeMonitors">
+        <div class="sbe-mon sbe-mon-src">
+          <div class="sbe-stage" id="sbeSrcStage">
+            <!-- Same opacity rule as the program monitor, for the same
+                 WebKit reason: a display:none <video> is never loaded. -->
+            <video id="sbeSrcVideo" playsinline preload="auto"></video>
+            <img id="sbeSrcStill" class="sbe-still" alt="">
+            <div class="sbe-stage-badge" id="sbeSrcBadge" hidden></div>
+            <div class="sbe-stage-empty" id="sbeSrcEmpty">Click a clip to preview it.</div>
+          </div>
+          <!-- ONE bar per monitor, and both the same height, because the row
+               is as tall as the taller column and the budget maths in
+               sbeFitMonitors reads its overhead off the program side. The
+               label lives IN the bar rather than above the picture: two
+               captions per column is 38px of a budget that is already the
+               tightest thing on this screen. -->
+          <div class="sbe-mon-bar">
+            <span class="sbe-mon-label">Source</span>
+            <button type="button" class="ghost-btn" id="sbeSrcPlayBtn"
+                    onclick="sbeSrcToggle()" disabled>Play</button>
+            <span class="sbe-mon-name" id="sbeSrcName">Nothing loaded</span>
+            <button type="button" class="ghost-btn" id="sbeSrcAddBtn"
+                    onclick="sbeSrcAdd()" disabled
+                    title="Puts this clip at the end of the __SEQ__ — exactly what the + on its row does.">Add to timeline</button>
+          </div>
+        </div>
+        <div class="sbe-mon sbe-mon-prog">
+      <div class="sbe-stage" id="sbeStage">
+        <!-- ONE video. Double-buffering measured no benefit against
+             all-intra proxies, and hiding it with display:none would stop
+             WebKit loading it at all — hence opacity. -->
+        <!-- No `muted` attribute. It was here as "belt and braces" for a
+             loader that hard-muted anyway, and it now contradicts the only
+             thing that owns this state: sbeSetMute. There is no `autoplay`
+             here, so nothing plays without sbePlay, and sbePlay sets muted
+             explicitly and falls back if the browser refuses. -->
+        <video id="sbeVideo" playsinline preload="auto"></video>
+        <!-- The still layer. A slug needs no element at all: hiding both of
+             these leaves the stage's own #000 background, which is exactly
+             what a slug renders. -->
+        <img id="sbeStill" class="sbe-still" alt="">
+        <!-- THE OVERLAY LANE ON THE STAGE. Over the picture and the still
+             both, carrying its own opacity so a card's fade is independent of
+             whatever is beneath it — which is what a second track means. -->
+        <img id="sbeOvLayer" class="sbe-ov-layer" alt="">
+        <div class="sbe-stage-badge" id="sbeBadge">idle</div>
+        <div class="sbe-stage-empty" id="sbeStageEmpty" hidden></div>
+      </div>
+          <div class="sbe-mon-bar">
+            <span class="sbe-mon-label">Program</span>
+            <span class="sbe-mon-name" id="sbeProgName"></span>
+          </div>
+        </div>
+
+        <!-- THE RAIL, and why it exists. Two 16:9 monitors need 2.96px of
+             width for every px of height. Measured in this column, at
+             1440x900, there are 307px of height to spare and 1110px of width
+             — the pair can span 886 of them. Something has to hold the other
+             224, and the choice is between black page background (the exact
+             thing the owner circled) and the two panels that were sitting
+             under the timeline eating 46px of the height that made the
+             picture small in the first place. Resolve and Premiere both put
+             the inspector beside the monitors; so does this. Its width is
+             whatever the pair leaves — see sbeFitMonitors — clamped so it can
+             be neither a slot nor a second sidebar. Below the stacking
+             breakpoint it goes back to being a row. -->
+        <div class="sbe-rail" id="sbeRail">
+          <div class="sbe-inspect" id="sbeInspect"></div>
+          <div class="sbe-unplaced" id="sbeUnplacedWrap" hidden>
+            <div class="sbe-unplaced-head">Rendered but not on the timeline</div>
+            <div class="sbe-chiprow" id="sbeUnplaced"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="sbe-transport">
+        <button type="button" class="ghost-btn" id="sbePlayBtn" onclick="sbeTogglePlay()">Play</button>
+        <button type="button" class="ghost-btn sbe-mute" id="sbeMuteBtn"
+                onclick="SBE.muted ? sbeUnmuteFromRefusal() : sbeSetMute(true)" title="Mute / unmute (M)">🔊</button>
+        <span class="sbe-time" id="sbeTime">0:00.00 <span>/ 0:00.00</span></span>
+        <label class="check" style="margin:0;font-size:11px">
+          <input type="checkbox" id="sbeSnapOn" checked onchange="sbePaint()"> Snap to beat
+        </label>
+        <!-- The two sliders an editor expects: the scrollbar on the track
+             below moves the view, this one changes the scale. All the way
+             left is the whole film in the window, whatever the window is. -->
+        <span class="sbe-zoom">
+          <button type="button" class="ghost-btn" onclick="sbeZoom(-1)"
+                  title="Zoom out (alt + wheel over the track does the same, around the pointer)">−</button>
+          <input type="range" id="sbeZoomRange" min="0" max="1000" step="1" value="500"
+                 aria-label="Timeline zoom"
+                 title="Zoom. Fully left fits the whole __SEQ__ in the window. Over the track: shift + wheel pans, alt + wheel zooms."
+                 oninput="sbeZoomSlide(this.value)">
+          <button type="button" class="ghost-btn" onclick="sbeZoom(1)" title="Zoom in">+</button>
+        </span>
+        <!-- PROSE DEMOTED TO AN AFFORDANCE. Two lines of explanation sat
+             across the middle of the transport for the life of the feature;
+             it is true, it is worth saying once, and it is not worth 220px of
+             the row every time. -->
+        <span class="sbe-info" id="sbeApprox" tabindex="0"
+              title="The preview is approximate: the browser lands within a few frames of each cut and freezes for about one there. The render is exact.">i</span>
+        <span style="flex:1 1 auto"></span>
+        <button type="button" class="ghost-btn" id="sbeKeysBtn"
+                onclick="sbePopToggle('sbeKeysPop', 'sbeKeysBtn')"
+                aria-haspopup="menu" title="Every gesture this timeline answers to">Keys</button>
+        <!-- THE TIMELINE'S TOP EDGE. It lives in the transport because the
+             transport is the element directly above the seam and an absolute
+             child costs the column nothing; what it drags is one number
+             (SBE.tlH), and the monitors are sized off whatever is left. Up is
+             more track, down is more picture, and neither element is resized
+             directly — see sbeFitMonitors. -->
+        <div class="sbe-tl-grab" id="sbeTlGrab" role="separator"
+             aria-orientation="horizontal"
+             aria-label="Resize the timeline — drag up for taller lanes"
+             tabindex="0"
+             title="Drag up to make the timeline taller — the sound strips take the biggest share. Double-click to reset. ↑ / ↓ when focused."
+             onpointerdown="sbeTlGrabDown(event)"
+             onpointermove="sbeTlGrabMove(event)"
+             onpointerup="sbeTlGrabUp(event)"
+             onpointercancel="sbeTlGrabUp(event)"
+             ondblclick="sbeTlReset()"
+             onkeydown="sbeTlGrabKey(event)"></div>
+      </div>
+
+      <!-- NAMED TRACKS. A timeline whose lanes are unlabelled asks you to
+           infer which one is which from what happens to be on it, and the
+           soundtrack's whole control row was a full-width strip at the top of
+           the column, four inches from the lane it acts on. The gutter is
+           124px that says V2 / V1 / A1 / A2 and gives A2 the file it is
+           playing, the way it sits under the clips, and a ▾ for the rest.
+           Every head's height is the SAME variable its lane reads, so the two
+           columns cannot drift apart. -->
+      <div class="sbe-tlwrap" id="sbeTlWrap">
+      <div class="sbe-gutter" id="sbeGutter">
+        <div class="sbe-gh sbe-gh-top"></div>
+        <div class="sbe-gh sbe-gh-ov">
+          <span class="sbe-gh-tag"><i>V2</i><b>Overlay</b></span>
+        </div>
+        <div class="sbe-gh sbe-gh-pic">
+          <span class="sbe-gh-tag"><i>V1</i><b>Picture</b></span>
+          <span class="sbe-gh-sub" id="sbeHeadPic"></span>
+        </div>
+        <div class="sbe-gh sbe-gh-aud">
+          <span class="sbe-gh-tag"><i>A1</i><b>Clip sound</b></span>
+          <span class="sbe-gh-sub" id="sbeHeadAud"></span>
+        </div>
+        <div class="sbe-gh sbe-gh-mus">
+          <span class="sbe-gh-tag"><i>A2</i><b>Music</b>
+            <button type="button" class="sbe-gh-more" id="sbeMusicMore"
+                    onclick="sbePopToggle('sbeMusicMenu', 'sbeMusicMore')"
+                    aria-haspopup="menu"
+                    title="The file, Change…, Prepare — the soundtrack's own controls">▾</button>
+          </span>
+          <span class="sbe-music-name" id="sbeMusicPath" title="">no soundtrack</span>
+          <select class="sb-input sbe-gh-mode" id="sbeMusicMode"
+                  onchange="sbeSetMusicMode(this.value)"
+                  title="Under: the clips keep their sound and the track plays beneath it. Replace: the track is the only sound.">
+            <option value="under">under the clips</option>
+            <option value="replace">replaces clip sound</option>
+          </select>
+          <!-- THE TWO NUMBERS THE RENDERER USED TO KEEP TO ITSELF. Until
+               today the ffmpeg graph held every `under` bed at 0.20 and
+               ducked it against the dialogue; neither decision was in any
+               document, on any screen, or in the preview. They are controls
+               now, and they live HERE because this head is already where the
+               soundtrack's other controls are — the file, Change…, Prepare
+               and the mode. -->
+          <div class="sbe-mix-row">
+            <label class="sbe-mix-lvl"
+                   title="How loud the soundtrack plays. 100% is the file's own level; the render applies exactly this and so does the preview.">
+              <span>Level</span>
+              <input type="range" id="sbeBedGain" min="0" max="100" step="1"
+                     value="100" aria-label="Music bed level"
+                     oninput="sbeBedGainSlide(this.value)"
+                     onchange="sbeBedGainCommit(this.value)">
+              <b id="sbeBedGainNum">100%</b>
+            </label>
+            <label class="check sbe-mix-duck"
+                   title="Steps the music back wherever a clip's own sound is playing, and lets it up again after. Off by default — an authored fade or level line on the bed switches it off, because two curves moving one level is nobody's mix.">
+              <input type="checkbox" id="sbeBedDuck"
+                     onchange="sbeSetBedDuck(this.checked)">
+              <span>Duck under dialogue</span>
+            </label>
+            <span class="sbe-mix-note" id="sbeBedDuckNote" hidden></span>
+          </div>
+        </div>
+        <div class="sbe-gh sbe-gh-foot"></div>
+      </div>
+      <div class="sbe-tl" id="sbeScroll">
+        <!-- TOP TO BOTTOM: ruler, picture, sound. Every NLE ever made stacks
+             it that way and the owner read the old order — music ABOVE the
+             clips — as the app not knowing the convention: "it is unusual
+             that the music is above the clips; it's not normal." The order
+             here IS the order on screen (the inner is a flex column), so the
+             fix is the markup, not a transform. -->
+        <div class="sbe-tl-inner" id="sbeInner">
+          <div class="sbe-ruler" id="sbeRuler"></div>
+          <!-- THE OVERLAY LANE, ABOVE THE PICTURE, because that is where it
+               is in the film: a second video track whose items composite over
+               the track below. -->
+          <div class="sbe-ovlane" id="sbeOverlayLane"
+               onpointerdown="sbeOnOvDown(event)"
+               onpointermove="sbeOnOvMove(event)"
+               onpointerup="sbeOnOvUp(event)"
+               onpointercancel="sbeOnOvUp(event)"></div>
+          <div class="sbe-track" id="sbeTrack"></div>
+          <!-- THREE LAYERS, TOP TO BOTTOM: video blocks, each clip's own
+               sound, the music. The owner's list exactly. A clip's strip sits
+               directly under its block and moves with it — until it is
+               unlinked, which is the whole of the J-cut and the L-cut. -->
+          <div class="sbe-alane" id="sbeAudioLane"></div>
+          <!-- The soundtrack lane. The canvas is the picture of the track and
+               the block over it is the OBJECT: drag it to place the music,
+               pull either end to trim it. Two elements rather than one canvas
+               because a grip has to be hit-tested, and hit-testing a painted
+               rectangle is a job the DOM already does. -->
+          <div class="sbe-lane" id="sbeMusicLane">
+            <canvas class="sbe-wave" id="sbeWave" height="72"></canvas>
+            <div class="sbe-wave-none" id="sbeWaveNone" hidden></div>
+            <!-- THE BED IS A STRIP NOW, not a rectangle you can only slide.
+                 "Fade the music out under the last shot" is the most ordinary
+                 request in editing and was, until this, impossible: the model
+                 read `audio.afx`, normalised it and could render it, and there
+                 was no markup anywhere that could produce one. Same three
+                 affordances the clip strips grew — two corner fade handles in
+                 the band, a level line you can hit, and points on it — built
+                 out of the SAME geometry (`.sbe-fade-band`, the grip skirt
+                 derivation, the 22px square, SBE_LVL_PAD) rather than a fourth
+                 set of numbers that could drift on its own. -->
+            <div class="sbe-music-clip" id="sbeMusicClip" hidden>
+              <div class="sbe-mc-name" id="sbeMusicName"></div>
+              <div class="sbe-mc-lvl" id="sbeMusicLevel"></div>
+              <div class="sbe-grip l"></div><div class="sbe-grip r"></div>
+              <div class="sbe-fade-band" id="sbeMusicFades">
+                <div class="sbe-fade-h in" data-bfade="in"></div>
+                <div class="sbe-fade-h out" data-bfade="out"></div>
+              </div>
+            </div>
+          </div>
+          <div class="sbe-head-line" id="sbeHead" style="left:0"></div>
+        </div>
+      </div>
+      </div>
+
+    </div>
     </div>
 
     <!-- Combined filter + title row. One row, three regions: title +
@@ -37036,6 +43677,41 @@ Third prompt."></textarea>
     <div class="modal-actions">
       <button class="small" onclick="sbCloseReplan()">Cancel</button>
       <button class="small primary" style="padding:6px 14px" onclick="sbReplan()">Re-plan</button>
+    </div>
+  </div>
+</div>
+
+<!-- Generate a shot INTO a hole in the timeline. Same reason the re-plan modal
+     exists — it needs a text field — and written here at column 0 so the
+     global _phosModalScaffold IIFE picks it up at boot (Esc, focus trap,
+     scroll lock). The shot lands on the BOARD, because a shot to be rendered
+     is intent; the timeline only learns about it when the clip exists. -->
+<div class="modal-bg" id="sbeGenModal" onclick="if(event.target===this)sbeGenClose()">
+  <div class="modal">
+    <h3>Fill this hole</h3>
+    <div class="hint" id="sbeGenWhere"></div>
+    <textarea class="batch" id="sbeGenPrompt" rows="4"
+      placeholder="A slow push in on the empty gym, dust in the light."></textarea>
+    <div class="cz-control" style="margin-top:12px">
+      <div class="cz-label">Length <span class="cz-label-hint">seconds of film</span></div>
+      <input type="number" class="sb-input" id="sbeGenDuration" min="0.5" max="60" step="0.5" value="5">
+    </div>
+    <div class="cz-control" style="margin-top:10px">
+      <div class="cz-label">Pass <span class="cz-label-hint">draft is cheap, delivery is what you keep</span></div>
+      <div class="pill-group cols-2" id="sbeGenPass">
+        <button type="button" class="pill-btn active" data-pass="draft">Draft</button>
+        <button type="button" class="pill-btn" data-pass="final">Delivery</button>
+      </div>
+    </div>
+    <!-- make_job SILENTLY DROPS any form field it does not name, so a control
+         can look perfectly wired and do nothing. The server reads the params
+         back off the queued job and hands them here: this is what will
+         actually render, not what we asked for. -->
+    <div class="sbe-params" id="sbeGenParams" hidden></div>
+    <div class="hint" style="margin-top:6px">The clip renders into the queue like any other shot. When it lands it appears under the timeline, and you place it — nothing moves your cuts on its own.</div>
+    <div class="modal-actions">
+      <button class="small" onclick="sbeGenClose()">Cancel</button>
+      <button class="small primary" style="padding:6px 14px" id="sbeGenGo" onclick="sbeGenSubmit()">Queue the shot</button>
     </div>
   </div>
 </div>
@@ -39789,12 +46465,25 @@ function audioStudioRenderSlots() {
 // So the budget is frames x AREA, and the old warning was simply wrong in the
 // case that matters most: it shouted at a 640x480 20 s render that works.
 //
-// A2V_PIXEL_BUDGET is the largest configuration anyone has reported working —
-// 640x480 x 481 = 147.7 Mpx — rounded to 150. It is a field observation from
-// one machine, not a measurement made here, and the copy says so. Anything
-// derived from it (the max frames for the chosen canvas) is presented as
-// guidance, never as a cap: the slider keeps its full range.
-const A2V_PIXEL_BUDGET = 150e6;
+// AND THEN THE REPORTER'S OWN FOUR DATAPOINTS REFUTED THAT. No frames x area
+// constant can separate them: 832x480 x 721 = 287.9 Mpx holds together, while
+// 1024x576 x 481 = 283.7 Mpx falls apart — a SMALLER product failing. A budget
+// that calls the working one worse than the failing one is not a budget, it is
+// a coin toss with a number on it.
+//
+// They separate cleanly on PER-FRAME AREA. Clean: 0.307 and 0.399 Mpx/frame,
+// at 721 and 481 frames. Failing: 0.590 and 0.922 Mpx/frame, both giving out
+// around frame 450. So the lever is the CANVAS, and length is nearly free
+// below the knee — which is the opposite of what the old warning told people,
+// and it told them so at exactly the 640x480 20 s render that works.
+//
+// The knee sits at ~0.45 Mpx a frame, between the highest clean reading and
+// the lowest failing one. Below it, nothing is warned about within the
+// slider's range; above it, the warning names the canvas as the lever and
+// ~450 frames as where the picture gives out. Still field reports from other
+// people's machines, not a limit measured here, and the copy still says so.
+const A2V_AREA_KNEE = 0.45e6;      // pixels per frame
+const A2V_KNEE_FRAMES = 450;       // where the reports say the picture goes
 function _a2vFramesForSeconds(sec) {
   const target = Math.max(1, Math.round(sec * 24));
   return ((target - 1 + 7) >> 3 << 3) + 1;   // round up to 8k+1
@@ -39813,20 +46502,23 @@ function audioStudioDurationChanged(val) {
   const w = parseInt((document.getElementById('audioStudioWidth') || {}).value || '1024', 10);
   const h = parseInt((document.getElementById('audioStudioHeight') || {}).value || '576', 10);
   const area = (w > 0 && h > 0) ? w * h : 1024 * 576;
-  if (frames * area > A2V_PIXEL_BUDGET) {
-    // The longest length that fits this canvas, on the 8k+1 grid, in seconds.
-    const maxFrames = Math.max(9, ((Math.floor(A2V_PIXEL_BUDGET / area) - 1) >> 3) * 8 + 1);
-    const maxSec = Math.max(1, Math.floor((maxFrames - 1) / 24));
+  // THE CANVAS IS THE LEVER, NOT THE LENGTH. Below the knee the reports run
+  // clean to 721 frames, so there is nothing to say; above it they give out
+  // around frame 450 whatever the length asked for.
+  if (area > A2V_AREA_KNEE && frames > A2V_KNEE_FRAMES) {
+    const kneeSec = Math.max(1, Math.floor((A2V_KNEE_FRAMES - 1) / 24));
     warn.style.display = '';
-    warn.innerHTML = '<b>' + frames + ' frames at ' + w + '\u00d7' + h + '</b> — bigger than any '
-      + 'Audio \u2192 Video render that has been reported holding together. What gives out is the '
-      + 'picture, not the sound: the audio plays to the end while anatomy drifts and the frame '
-      + 'washes out. It is <b>frames \u00d7 canvas</b>, not length alone \u2014 640\u00d7480 has been '
-      + 'reported fine at the full 20 s, while 1024\u00d7576 died around frame 454 on the same machine '
+    warn.innerHTML = '<b>' + w + '\u00d7' + h + '</b> is past the canvas where '
+      + 'long Audio \u2192 Video renders have been reported holding together. '
+      + 'What gives out is the picture, not the sound: the audio plays to the '
+      + 'end while anatomy drifts and the frame washes out, and the reports put '
+      + 'that around <b>frame ' + A2V_KNEE_FRAMES + '</b> (~' + kneeSec + ' s) '
+      + 'whatever length was asked for. It is the <b>canvas</b>, not the length: '
+      + '832\u00d7480 has been reported clean at 721 frames, while 1024\u00d7576 '
+      + 'died around frame 454 on the same machine '
       + '(<a href="https://github.com/mrbizarro/Phosphene/issues/46" target="_blank" rel="noopener">#46</a> '
       + '\u2014 field reports, not a limit measured here). '
-      + 'At this canvas, about <b>' + maxSec + ' s</b> (' + maxFrames + ' frames) is the last stop under it; '
-      + 'a smaller canvas buys length. Longer still renders.';
+      + 'Drop to about 832\u00d7480 or smaller and the length comes back. Longer still renders.';
   } else {
     warn.style.display = 'none';
     warn.textContent = '';
@@ -45632,10 +52324,19 @@ async function poll() {
     nowCard.querySelector('.ttl').textContent = snippet(s.current.params.label || s.current.params.prompt, 80);
     // Image jobs don't have width/height/frames; show n × aspect instead.
     // Falls through to the video shape when those fields ARE present.
+    //
+    // TRAINING has no frames either, and printed the literal string
+    // "undefinedf" for the whole run — reported in #61 as
+    // `train · 512×512 · undefinedf · 5m 39s`. A training job's shape is its
+    // canvas; the step count is already carried by phaseLabel underneath.
+    // Anything else missing frames drops the token rather than inventing one.
     const cur = s.current.params;
+    const shape = [cur.width && cur.height ? `${cur.width}×${cur.height}` : null,
+                   (cur.frames != null && cur.frames !== '') ? `${cur.frames}f` : null]
+                  .filter(Boolean).join(' · ');
     const baseMeta = (cur.mode === 'image')
       ? `image · ${cur.aspect || '?'} · n=${cur.n || '?'} · ${cur.engine_override || 'auto'} · ${timing}`
-      : `${cur.mode} · ${cur.width}×${cur.height} · ${cur.frames}f · ${timing}`;
+      : [cur.mode, shape, timing].filter(Boolean).join(' · ');
     nowCard.querySelector('.meta').innerHTML = phaseLabel
       ? `${baseMeta}<br><span style="color:var(--muted)">${escapeHtml(phaseLabel)}</span>`
       : baseMeta;
@@ -52173,6 +58874,14 @@ function _versionRemoteLabel(s) {
   return s.remote_version || s.remote_short || 'latest';
 }
 
+function _versionBuildLabel(version, short) {
+  // A build is named unambiguously only by BOTH halves: the VERSION label is
+  // what a user recognises, the SHA is what actually separates two builds
+  // carrying the same label.
+  if (version && short) return `${version} (${short})`;
+  return version || short || 'an unknown build';
+}
+
 function renderVersionPill() {
   const pill = document.getElementById('versionPill');
   if (!pill) return;
@@ -52208,10 +58917,13 @@ function renderVersionPill() {
   if (s.stale_process) {
     pill.classList.add('pill-restart');
     pill.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-arrow-clockwise-bold"/></svg>Restart to finish update';
-    const v = s.disk_version || s.disk_short || 'newer code';
-    pill.title = `Phosphene ${v} is on disk, but this panel process loaded `
-      + `${local} before the update landed. Click Stop → Start in Pinokio `
-      + `(or restart the panel) to load it.`;
+    // Name BOTH builds, each with its SHA. Most fixes land without a VERSION
+    // bump, so on dev the two labels read the same number and a tooltip built
+    // from labels alone said "Phosphene 4.6.0 is on disk, but this panel
+    // process loaded 4.6.0" — an alarm that names nothing.
+    pill.title = `Running ${_versionBuildLabel(s.local_version, s.local_short)}`
+      + ` — but ${_versionBuildLabel(s.disk_version, s.disk_short)} is on disk.`
+      + ` Click Stop → Start in Pinokio (or restart the panel) to load it.`;
     return;
   }
   // Suppressed (dev branch / dirty tree / no git).
@@ -52219,8 +58931,15 @@ function renderVersionPill() {
   // because the pill showed an old VERSION string (e.g. "2.0.5") while
   // they had pulled fresh code. Now we append the short SHA + commit
   // date so every dev build is uniquely identifiable. Lets us tell a
-  // user "you're on 3.0.0 · dev · c5dc04c (2026-05-21) — please pull
-  // again, latest is 1ea5f1d (2026-05-21)" instead of just shrugging.
+  // user "you're on 3.0.0 · dev · <your-sha> (2026-05-21) — please
+  // pull again, latest is <newer-sha>" instead of just shrugging.
+  //
+  // The placeholders are deliberate. This comment used to carry two REAL
+  // SHAs, formatted exactly like the stamp it describes, and it ships inside
+  // the served page — so grepping the page for the running build answered
+  // with a 2026-05-21 commit, in the stamp's own format, with total
+  // confidence. build_stamp_text() puts the true answer in the page now, as
+  // <meta name="phosphene-build">.
   if (s.suppress_reason) {
     pill.classList.add('pill-dev');
     const sha = s.local_short || '';
@@ -52585,6 +59304,35 @@ document.addEventListener('keydown', (ev) => {
 window.addEventListener('resize', closeHealthPop);
 
 // One click — does the right thing for the current state. Magic button.
+async function panelRestart() {
+  const pill = document.getElementById('versionPill');
+  const say = (t) => { if (pill) pill.textContent = t; };
+  try {
+    const r = await fetch('/restart', {method: 'POST'});
+    const d = await r.json().catch(() => ({}));
+    if (r.status === 409) {
+      phosToast(d.error || 'A render is running — stop it first.', 'warn');
+      return;
+    }
+    if (!d.ok) { phosToast(d.error || 'Restart failed.', 'error'); return; }
+  } catch (e) {
+    // The process may have exec'd before the response reached us. That is a
+    // SUCCESSFUL restart, not a failure — fall through to polling.
+  }
+  say('restarting…');
+  // Poll until the new image answers, then reload so the browser gets the
+  // new HTML too (the whole point: the old page is the stale code).
+  const deadline = Date.now() + 60000;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 700));
+    try {
+      const r = await fetch('/version', {cache: 'no-store'});
+      if (r.ok) { location.reload(); return; }
+    } catch (e) { /* still down */ }
+  }
+  phosToast('Panel did not come back within 60s — start it from Pinokio.', 'error');
+}
+
 async function versionPillClick() {
   if (_versionRestartPending) {
     // Educational click: tell the user what's needed.
@@ -52596,6 +59344,14 @@ async function versionPillClick() {
     return;
   }
   if ((_versionState || {}).stale_process) {
+    // Actually restart, rather than telling the user to go and do it. The
+    // panel re-execs itself: same pid, same port, code from disk. We poll
+    // until it answers again and then reload, so the click finishes the job
+    // the button's own label promised.
+    await panelRestart();
+    return;
+  }
+  if (false) {
     const s = _versionState || {};
     alert(`Phosphene ${s.disk_version || s.disk_short || '(newer)'} is on `
       + `disk, but this running panel loaded `
@@ -52616,7 +59372,11 @@ async function versionPillClick() {
       + `· ${s.local_branch || 'branch?'} `
       + `· ${s.local_short || 'sha?'}`
       + (s.local_commit_date ? ` (${s.local_commit_date})` : '')
-      + (s.local_dirty ? ' · dirty tree' : '');
+      + (s.local_dirty ? ' · dirty tree' : '')
+      // The whole point of this string is "which build produced the bug".
+      // If the tree has moved on, the panel is running neither what the
+      // header first suggested nor what a maintainer would check out.
+      + (s.stale_process ? ` · NOT RESTARTED, disk is at ${s.disk_short || '?'}` : '');
     try {
       await navigator.clipboard.writeText(debug);
       alert(`Update check is paused: ${s.suppress_reason}.\n\n`
@@ -52922,6 +59682,16 @@ let SB = {
   primed: false,          // brief defaults are read from BOOT once, not per entry
   boards: [],             // /status.storyboards, refreshed by poll()
   lastUndo: null,
+  // Which of the seven stage states is on screen. sbShow() is the only writer.
+  // The rail reads it to say where you are, and sbLoad() reads it so a 2 s poll
+  // cannot yank someone off the film screen back onto the shot list.
+  stage: '',
+  films: [],              // /storyboard/films for the open board, newest first
+  filmsFor: '',           // which board `films` belongs to — never another one
+  filmDir: '',
+  filmShort: '',
+  filmOpen: '',           // the film being played, by name
+  boardsSig: '',          // last painted board-row signature (see sbPollHook)
 };
 const SB_BOOT = (typeof BOOT !== 'undefined' && BOOT.storyboard) ? BOOT.storyboard : {};
 
@@ -52968,6 +59738,54 @@ function sbFmtRuntime(secs) {
 function sbShotEst(secs) {
   if (!secs) return '';
   return secs < 90 ? `~${Math.round(secs)} s` : `~${Math.round(secs / 60)} m`;
+}
+// A film's length is read off a player, so it is written the way a player
+// writes it — 0:31, 2:04 — not "31 s of film".
+function sbFmtClock(secs) {
+  const t = Math.max(0, Math.round(Number(secs) || 0));
+  const m = Math.floor(t / 60), s = t % 60;
+  return m + ':' + (s < 10 ? '0' : '') + s;
+}
+function sbFmtBytes(n) {
+  const b = Number(n) || 0;
+  if (b >= 1073741824) return (b / 1073741824).toFixed(1) + ' GB';
+  if (b >= 1048576) return Math.round(b / 1048576) + ' MB';
+  if (b >= 1024) return Math.round(b / 1024) + ' KB';
+  return b + ' B';
+}
+// "when was this made" in the only units that answer it without arithmetic.
+// `now` is a parameter so the gate can pin it.
+function sbFmtAgo(ts, now) {
+  const t = Number(ts) || 0;
+  if (!t) return '';
+  const secs = Math.max(0, ((now || Date.now()) / 1000) - t);
+  if (secs < 90) return 'just now';
+  const m = Math.round(secs / 60);
+  if (m < 60) return m + (m === 1 ? ' minute ago' : ' minutes ago');
+  const h = Math.round(m / 60);
+  if (h < 24) return h + (h === 1 ? ' hour ago' : ' hours ago');
+  const d = Math.round(h / 24);
+  if (d < 30) return d + (d === 1 ? ' day ago' : ' days ago');
+  try { return new Date(t * 1000).toLocaleDateString(); } catch (e) { return ''; }
+}
+// Which button made this file. Two mp4s in one folder otherwise look identical.
+function sbFilmKind(f) {
+  const k = (f || {}).kind;
+  if (k === 'timeline') return 'Timeline render';
+  if (k === 'export') return 'Export';
+  return 'Film';
+}
+// The film on screen: the one the caller asked for by name, else the newest.
+// Pure, because "which film am I looking at" is exactly the kind of thing that
+// silently picks the wrong one.
+function sbFilmPick(films, want) {
+  const list = films || [];
+  if (!list.length) return null;
+  if (want) {
+    const hit = list.filter(f => f.name === want || f.path === want)[0];
+    if (hit) return hit;
+  }
+  return list[0];
 }
 
 // ---- tab lifecycle ---------------------------------------------------------
@@ -53037,6 +59855,9 @@ function sbInit() {
 }
 
 function sbTeardown() {
+  // The board poller, and nothing else. It used to tear the EDITOR down too,
+  // back when the timeline was a state of this tab — so leaving the storyboard
+  // closed a document that had nothing to do with it.
   if (SB.timer) { clearInterval(SB.timer); SB.timer = null; }
 }
 
@@ -53084,6 +59905,10 @@ async function sbTick() {
   if (document.body.dataset.workflow !== 'storyboard') return;
   // The global poll skips hidden tabs; this one should too.
   if (document.hidden) return;
+  // The timeline has its own clock and its own document. Repainting the shot
+  // list under it would be work nobody can see, and sbLoad() reaches into the
+  // player — which the timeline is currently using.
+  if (typeof SBE !== 'undefined' && SBE.open) return;
   if (sbHoldingShots()) {
     // Don't fetch over someone's typing. The run bar is the one thing that
     // moves on its own, and it lives outside #sbShots, so keep it live.
@@ -53117,6 +59942,42 @@ function sbMustInput() {
   if (!meta) return;
   const n = ((box && box.value) || '').split('\n').filter(x => x.trim()).length;
   meta.textContent = n === 0 ? 'none' : (n === 1 ? '1 shot' : `${n} shots`);
+}
+
+// LOCATIONS. Free text, one per line, `name: description`. A list of objects
+// behind a form builder would be more correct and nobody would fill it in;
+// this is the shape people already type into the Look field.
+function sbParseLocations(text) {
+  const out = [];
+  const seen = {};
+  ((text || '').split('\n')).forEach(line => {
+    const raw = line.trim();
+    if (!raw) return;
+    const at = raw.indexOf(':');
+    // No colon = the whole line is the description and the name is derived.
+    // Refusing the line instead would lose what somebody just typed.
+    const name = (at > 0 ? raw.slice(0, at) : raw.split(/[,.]/)[0]).trim().slice(0, 60);
+    const desc = (at > 0 ? raw.slice(at + 1) : raw).trim();
+    if (!name || !desc) return;
+    let id = name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40);
+    if (!id) id = 'loc' + (out.length + 1);
+    if (!/^[a-z0-9]/.test(id)) id = 'l' + id;
+    while (seen[id]) id = id.replace(/\d*$/, m => String((parseInt(m || '1', 10) || 1) + 1));
+    seen[id] = 1;
+    out.push({ id: id, name: name, description: desc });
+  });
+  return out;
+}
+
+function sbLocInput() {
+  const meta = sbEl('sbLocMeta');
+  if (!meta) return;
+  const locs = sbParseLocations((sbEl('sbLocations') || {}).value);
+  meta.textContent = locs.length === 0
+    ? 'no locations — every shot invents its own'
+    : locs.map(l => l.name).join(' · ') +
+      (locs.length === 1 ? ' — 1 place, pinned on every shot that uses it'
+                         : ` — ${locs.length} places, pinned on every shot that uses them`);
 }
 
 let _sbShots = 12;
@@ -53334,6 +60195,8 @@ async function sbPlan() {
   fd.set('shots', String(sbShotsValue()));
   fd.set('style', (sbEl('sbStyle') || {}).value || '');
   fd.set('must', (sbEl('sbMust') || {}).value || '');
+  fd.set('locations', (sbEl('sbLocations') || {}).value || '');
+  fd.set('wardrobe', (sbEl('sbWardrobe') || {}).value || '');
   fd.set('engine', _sbEngineMode);
   if (_sbCastId) fd.set('character_id', _sbCastId);
   let r;
@@ -53451,16 +60314,127 @@ function sbShowRaw() {
 }
 
 // ---- board open / load -----------------------------------------------------
+// RETURNS THE LOAD. It used to swallow it, and `await sbOpen(id)` therefore
+// awaited `undefined` — so the row's "Edit" button opened the timeline and then
+// the load that was still in flight called sbShow('plan') and tore it straight
+// back down. Clicking Edit landed on the shot list. Handing the promise back is
+// the whole fix, and sbOpenAt() is the caller that needed it.
 function sbOpen(id) {
+  // Another board's films are not this board's. Without this the rail carried
+  // the last film you looked at onto the next storyboard's step 4.
+  if (id !== SB.id) { SB.films = []; SB.filmsFor = ''; SB.filmOpen = ''; }
   SB.id = id;
   try { localStorage.setItem('phos_sb_open', id); } catch (e) {}
-  sbLoad(id);
+  return sbLoad(id);
+}
+// Open a board AND land on a named step. The board list's rows use it, so a
+// film with a finished cut is one click from the cut, not four.
+async function sbOpenAt(id, step) {
+  await sbOpen(id);
+  if (step) sbGo(step);
 }
 function sbBackToList() {
   SB.id = '';
   SB.payload = null;
+  SB.films = [];
+  SB.filmsFor = '';
+  SB.filmOpen = '';
   try { localStorage.removeItem('phos_sb_open'); } catch (e) {}
   sbRefreshBoards().then(() => sbShow(SB.boards.length ? 'list' : 'empty'));
+}
+
+// ---- the rail: plan → shots → arrange → film -------------------------------
+// One model function, pure, so the thing that decides what is reachable is
+// testable without a browser. `snap` is {clips, film, stage, shots, done}.
+function sbRailModel(snap) {
+  const s = snap || {};
+  const clips = Number(s.clips || 0);
+  const stage = s.stage || '';
+  const film = s.film || null;
+  // A step is 'now' when you are standing in it, 'locked' when it cannot do
+  // anything yet (and says what would unlock it), 'done' when it has produced
+  // what it produces, 'ready' otherwise. Locked is never hidden: a path you
+  // cannot see the end of is not a path.
+  const shotsSub = !s.shots ? ''
+    : (clips ? clips + ' of ' + s.shots + ' rendered' : s.shots + ' planned');
+  const arrangeLocked = !clips;
+  return [
+    { key: 'plan', label: 'Plan', n: 1, state: 'done', sub: '',
+      hint: 'The brief this film was planned from — open it to re-plan.' },
+    { key: 'shots', label: 'Shots', n: 2,
+      state: stage === 'plan' ? 'now' : (clips ? 'done' : 'ready'),
+      sub: shotsSub,
+      hint: 'Read the shot list, fix a prompt, render, grade what came back.' },
+    // Step 3 is a DOOR now, not a room: it switches to the Editor tab
+    // carrying this film. The word is Editor everywhere — tab, header, this
+    // step, and the board row's button.
+    { key: 'edit', label: 'Edit', n: 3,
+      state: stage === 'editor' ? 'now'
+           : arrangeLocked ? 'locked' : (film ? 'done' : 'ready'),
+      sub: '',
+      hint: arrangeLocked
+        ? 'Render a shot first — there is nothing to edit yet.'
+        : 'Open this film in the Editor: trim, reorder, cut to the beat, then render the film.' },
+    { key: 'film', label: 'Film', n: 4,
+      state: stage === 'film' ? 'now'
+           : arrangeLocked ? 'locked' : (film ? 'done' : 'ready'),
+      sub: film && film.duration ? sbFmtClock(film.duration) : '',
+      hint: arrangeLocked ? 'Render a shot first.'
+          : film ? 'Watch the finished film.'
+          : 'Nothing rendered yet — arrange the shots and render the timeline.' },
+  ];
+}
+function sbRailPaint() {
+  const rail = sbEl('sbRail');
+  if (!rail) return;
+  const open = !!SB.id && ['plan', 'film'].indexOf(SB.stage) !== -1;
+  rail.hidden = !open;
+  if (!open) return;
+  const b = ((SB.payload || {}).board) || {};
+  const row = SB.boards.filter(x => x.id === SB.id)[0] || {};
+  const shots = (b.shots || []).length;
+  const clips = (b.shots || []).filter(s => s.draft_output || s.final_output).length;
+  // The open board's own film list wins over the poll's summary — after a
+  // render the screen must not still be saying "no film".
+  const mine = SB.filmsFor === SB.id ? (SB.films || []) : [];
+  const film = mine[0] || row.film || null;
+  // "You are here" survives the tab move: while the Editor holds THIS film,
+  // step 3 is the step you are standing in, wherever the body happens to be.
+  const inEditor = typeof SBE !== 'undefined' && SBE.open && SBE.id === SB.id;
+  const model = sbRailModel({ clips: clips, shots: shots, film: film,
+                              stage: inEditor ? 'editor' : SB.stage });
+  model.forEach(step => {
+    const el = rail.querySelector('.sb-rail-step[data-step="' + step.key + '"]');
+    if (!el) return;
+    el.classList.toggle('is-now', step.state === 'now');
+    el.classList.toggle('is-done', step.state === 'done');
+    el.classList.toggle('is-locked', step.state === 'locked');
+    el.disabled = step.state === 'locked';
+    el.title = step.hint;
+    const sub = el.querySelector('.sb-rail-sub');
+    if (sub) sub.textContent = step.sub ? '· ' + step.sub : '';
+  });
+}
+// Every door in one function, so "go to the editor" means the same thing
+// wherever it is asked from.
+function sbGo(step) {
+  if (!SB.id) return;
+  if (step === 'plan') {
+    sbOpenReplan();
+    return;
+  }
+  if (step === 'shots') {
+    sbShow('plan');
+    if (SB.payload) sbRenderPlan(SB.payload);
+    return;
+  }
+  if (step === 'edit') {
+    // Not a stage swap any more — a tab switch that carries the film. The
+    // Editor is its own window; this is the door into it from a board.
+    edOpenBoard(SB.id);
+    return;
+  }
+  if (step === 'film') sbFilmOpen();
 }
 
 async function sbLoad(id, quiet) {
@@ -53491,8 +60465,12 @@ async function sbLoad(id, quiet) {
     return;
   }
   sbPlanBtnReset();
-  sbShow('plan');
+  // A 2 s poll must not yank someone off the film screen and back onto the
+  // shot list. The shot list is still repainted underneath — it just isn't
+  // shoved in front of the film the user asked to watch.
+  sbShow(SB.stage === 'film' ? 'film' : 'plan');
   sbRenderPlan(r);
+  if (SB.stage === 'film') return;
   // The player keeps whatever was last selected globally, so opening a film
   // showed an unrelated Video-tab render under the film's own title. Put the
   // film's newest clip up — but only when the current one isn't already one of
@@ -53529,17 +60507,30 @@ function sbRenderPlanFail(p) {
 // is on while there is nothing for the player to show — the same trick the
 // Ideogram layout editor uses to take the whole column.
 function sbShow(which) {
+  // Five states now, not six: `timeline` moved out to the Editor tab, which
+  // owns its own visibility. A stage state was the wrong home for a document.
   const states = { empty: 'sbEmpty', list: 'sbList', planning: 'sbPlanning',
-                   planfail: 'sbPlanFail', plan: 'sbPlan' };
+                   planfail: 'sbPlanFail', plan: 'sbPlan',
+                   film: 'sbFilm' };
+  SB.stage = which;
   Object.keys(states).forEach(k => {
     const el = sbEl(states[k]);
     if (el) el.hidden = (k !== which);
   });
+  // A <video> left playing behind a hidden div is a decoder and a soundtrack
+  // nobody can see. Leaving the film screen stops it.
+  if (which !== 'film') {
+    const v = sbEl('sbFilmVideo');
+    if (v) { try { v.pause(); } catch (e) {} }
+  }
   // The brief's board list is a way BACK to another film while one is open.
   // While the stage is already showing the list, it would be the same list
   // twice in one screen — so it folds away.
   const boards = sbEl('sbBoards');
-  if (boards) boards.hidden = !SB.boards.length || which === 'list' || which === 'empty';
+  if (boards) {
+    boards.hidden = !SB.boards.length || which === 'list' || which === 'empty';
+  }
+  sbRailPaint();
   sbSyncStage();
 }
 
@@ -53551,6 +60542,16 @@ function sbHasClip() {
 function sbSyncStage() {
   const on = document.body.dataset.workflow === 'storyboard';
   const hasClip = on && sbHasClip();
+  // The editor no longer lives in this column, so this function no longer
+  // decides anything about it — `body.sbe-open` and the layout takeover it
+  // drove are both gone with the move to the Editor tab.
+  // The film screen IS a player, so it takes the column on those terms.
+  if (on && SB.stage === 'film') {
+    document.body.classList.add('sb-full');
+    const t = sbEl('sbStageToggle');
+    if (t) t.hidden = true;
+    return;
+  }
   let full;
   if (!on) full = false;
   else if (SB.stageMode === 'list') full = true;
@@ -53947,6 +60948,10 @@ function sbRenderTally(shots, r) {
   const canExport = shots.some(s => s.final_output);
   sbEl('sbExportBtn').hidden = !canExport;
   sbEl('sbExportNote').hidden = !canExport;
+  // The timeline works off ANY rendered clip — draft or delivery — because
+  // that is the same selection the exporter makes (_sbe_board_clips).
+  const tl = sbEl('sbTimelineBtn');
+  if (tl) tl.hidden = !shots.some(s => s.draft_output || s.final_output);
 }
 
 // The shots that never got a draft — after a Stop, or when a shot was added by
@@ -54321,7 +61326,7 @@ async function sbStopFilm() {
   const shots = (((SB.payload || {}).board) || {}).shots || [];
   const waiting = shots.filter(s => s.status === 'queued').length;
   if (!confirm('Stop this storyboard?\n\n' +
-      `The shot that's rendering will finish. The ${waiting} shot${waiting === 1 ? '' : 's'} still waiting ${waiting === 1 ? 'is' : 'are'} removed from the queue.\n` +
+      `The shot that's rendering is cancelled — its clip is lost. The ${waiting} shot${waiting === 1 ? '' : 's'} still waiting ${waiting === 1 ? 'is' : 'are'} removed from the queue.\n` +
       'Everything already rendered stays.')) return;
   const fd = new URLSearchParams(); fd.set('id', SB.id);
   try { await fetch('/storyboard/stop', { method: 'POST', body: fd }); } catch (e) {}
@@ -54329,18 +61334,148 @@ async function sbStopFilm() {
 }
 
 async function sbExport() {
+  // Export used to be a handful of file copies and came back instantly. It now
+  // ALSO encodes the whole film, which takes as long as an encode takes — so
+  // the button has to hold itself shut, or an impatient second click starts a
+  // second ffmpeg writing the same file as the first.
+  const btn = sbEl('sbExportBtn');
+  if (btn.dataset.busy === '1') return;
+  const prev = btn.textContent;
+  btn.dataset.busy = '1';
+  btn.disabled = true;
+  btn.textContent = 'Assembling…';
   const fd = new URLSearchParams(); fd.set('id', SB.id);
   let r;
   try { r = await (await fetch('/storyboard/export', { method: 'POST', body: fd })).json(); }
   catch (e) { r = { ok: false, error: String(e) }; }
+  finally { btn.dataset.busy = ''; btn.disabled = false; btn.textContent = prev; }
   if (!r.ok) { phosToast(r.error || 'Export failed.', { kind: 'danger' }); return; }
-  phosToast(`Exported ${r.files.length} clips + a shot list to ${r.dir}`,
-            { kind: 'success', duration: 6000 });
-  const btn = sbEl('sbExportBtn');
-  const prev = btn.textContent;
-  btn.textContent = 'Show in Finder';
-  btn.onclick = () => fetch('/storyboard/reveal', { method: 'POST', body: fd });
-  setTimeout(() => { btn.textContent = prev; btn.onclick = sbExport; }, 10000);
+  // The film is best-effort: the folder + shot list always land, so a failed
+  // assembly is a NOTE on a successful export, never a failed export.
+  if (r.film_name) {
+    phosToast(`Exported ${r.files.length} clips + ${r.film_name} `
+              + `(${Math.round(r.film_duration || 0)} s) to ${r.dir}`,
+              { kind: 'success', duration: 8000 });
+    // AND SHOW IT. A toast that fades is what made the finished film invisible:
+    // the panel wrote a film, said so for eight seconds, and then left the user
+    // on a list of individual shots. The export ends on the film it made.
+    sbFilmOpen({ focus: r.film_name });
+  } else {
+    phosToast(`Exported ${r.files.length} clips + a shot list to ${r.dir}. `
+              + `The single film could not be assembled: ${r.film_error || 'unknown reason'}`,
+              { duration: 9000 });
+  }
+}
+
+// ---- THE FILM SCREEN -------------------------------------------------------
+// The seventh stage state, and the one the other six are for. Reads
+// /storyboard/films — the folder both assemblers already write into — so this
+// screen invents no storage and can never disagree with what is on disk.
+async function sbFilmOpen(opts) {
+  if (!SB.id) return;
+  const o = opts || {};
+  if (o.focus) SB.filmOpen = String(o.focus).split('/').pop();
+  // Never show the LAST board's film while this board's list is in flight.
+  if (SB.filmsFor !== SB.id) { SB.films = []; sbEl('sbFilmBody').innerHTML = ''; }
+  sbShow('film');
+  const stage = sbEl('sbStage');
+  if (stage) stage.scrollTop = 0;
+  sbEl('sbFilmStatus').textContent = 'looking…';
+  await sbFilmLoad();
+}
+async function sbFilmLoad() {
+  let r;
+  try {
+    r = await (await fetch('/storyboard/films?id=' + encodeURIComponent(SB.id))).json();
+  } catch (e) { r = null; }
+  if (!r || !r.ok) {
+    SB.films = [];
+    sbEl('sbFilmStatus').textContent = '';
+    sbEl('sbFilmBody').innerHTML =
+      '<div class="sb-empty"><div class="sb-empty-title">Could not read the films folder.</div>'
+      + '<div class="sb-empty-sub">' + escapeHtml((r && r.error) || 'the panel did not answer')
+      + '</div></div>';
+    return;
+  }
+  SB.films = r.films || [];
+  SB.filmsFor = SB.id;
+  SB.filmDir = r.dir || '';
+  SB.filmShort = r.dir_short || r.dir || '';
+  sbFilmPaint();
+  sbRailPaint();
+}
+function sbFilmPaint() {
+  const body = sbEl('sbFilmBody');
+  const status = sbEl('sbFilmStatus');
+  if (!body) return;
+  const film = sbFilmPick(SB.films, SB.filmOpen);
+  if (!film) {
+    // Honest, and it names the button that would fix it. The old behaviour was
+    // to show nothing at all and let the user conclude the film didn't exist.
+    const shots = ((((SB.payload || {}).board) || {}).shots) || [];
+    const clips = shots.filter(s => s.draft_output || s.final_output).length;
+    status.textContent = 'nothing rendered yet';
+    body.innerHTML = `
+      <div class="sb-empty">
+        <div class="sb-empty-icon"><svg width="56" height="56" viewBox="0 0 256 256" aria-hidden="true"><use href="#ph-film-slate"/></svg></div>
+        <div class="sb-empty-title">No film yet.</div>
+        <div class="sb-empty-sub">${clips
+          ? 'Arrange the ' + clips + ' clip' + (clips === 1 ? '' : 's') + ' you have on the timeline and render. The finished film lands in <code>' + escapeHtml(SB.filmShort || 'mlx_outputs/storyboards/') + '</code> and appears here.'
+          : 'Render some shots first — a film is the shots, joined. Nothing to arrange yet.'}</div>
+        ${clips ? '<div class="sb-film-actions"><button type="button" class="primary" onclick="sbGo(\'arrange\')">Open the timeline</button></div>' : ''}
+      </div>`;
+    return;
+  }
+  SB.filmOpen = film.name;
+  const dims = (film.width && film.height) ? `${film.width}×${film.height}` : '';
+  // The header stays quiet once there is a film on screen — the facts row below
+  // says all of it, and saying it twice is how a screen starts feeling padded.
+  status.textContent = '';
+  const others = (SB.films || []).filter(f => f.name !== film.name);
+  body.innerHTML = `
+    <div class="sb-film-stage">
+      <video id="sbFilmVideo" controls playsinline preload="metadata"
+             src="${escapeHtml(film.url)}"></video>
+    </div>
+    <div class="sb-film-name">
+      <span class="sb-film-kind">${escapeHtml(sbFilmKind(film))}</span>
+      <code>${escapeHtml(film.name)}</code>
+    </div>
+    <div class="sb-summary">
+      <div class="sb-sum-cell"><b>${film.duration ? escapeHtml(sbFmtClock(film.duration)) : '—'}</b><span>${film.clips ? film.clips + ' shots joined' : 'runtime'}</span></div>
+      <div class="sb-sum-cell"><b>${escapeHtml(dims || '—')}</b><span>${escapeHtml(sbFmtBytes(film.bytes))} on disk</span></div>
+      <div class="sb-sum-cell"><b>${escapeHtml(sbFmtAgo(film.at) || '—')}</b><span>${escapeHtml(sbFilmKind(film).toLowerCase())}</span></div>
+    </div>
+    <div class="sb-film-where">Lives in <code>${escapeHtml(SB.filmShort || SB.filmDir)}</code></div>
+    <div class="sb-film-actions">
+      <button type="button" class="ghost-btn" onclick="sbFilmReveal()">
+        <svg class="ph" aria-hidden="true"><use href="#ph-folder-simple"/></svg>Show in Finder</button>
+      <button type="button" class="ghost-btn" onclick="sbGo('edit')"
+              title="Back to the cut this was assembled from — re-cut it in the Editor and render again.">Re-cut in the Editor</button>
+    </div>
+    ${others.length ? `
+    <header class="carousel-head" style="margin-top:6px"><h3>Earlier films</h3></header>
+    <ul class="row-list sb-filmlist">
+      ${others.map(f => `
+      <li onclick="sbFilmSelect('${escapeHtml(f.name)}')">
+        <span class="ttl">${escapeHtml(f.name)}</span>
+        <span class="params">${f.duration ? escapeHtml(sbFmtClock(f.duration)) + ' · ' : ''}${escapeHtml(sbFmtBytes(f.bytes))}</span>
+        <span class="badge">${escapeHtml(sbFmtAgo(f.at))}</span>
+      </li>`).join('')}
+    </ul>` : ''}`;
+}
+function sbFilmSelect(name) {
+  SB.filmOpen = name;
+  sbFilmPaint();
+}
+async function sbFilmReveal() {
+  const fd = new URLSearchParams();
+  fd.set('id', SB.id);
+  if (SB.filmOpen) fd.set('name', SB.filmOpen);
+  let r;
+  try { r = await (await fetch('/storyboard/reveal', { method: 'POST', body: fd })).json(); }
+  catch (e) { r = { ok: false, error: String(e) }; }
+  if (!r.ok) phosToast(r.error || 'Could not open the folder.', { kind: 'danger' });
 }
 
 // ---- board lists -----------------------------------------------------------
@@ -54348,11 +61483,37 @@ function sbBoardChip(b) {
   if (b.planning) return 'planning';
   if (b.running) return 'rendering';
   if (b.failed) return `${b.failed} failed`;
-  if (!b.done) return 'plan only';
+  // `done` counts shots THIS PANEL rendered as jobs; `clips` counts what is on
+  // disk. A board of imported or restored clips has done === 0, and the chip
+  // called it "plan only" while seven finished shots sat in the folder.
+  if (!b.done) return b.clips ? `${b.clips} clips` : 'plan only';
   if (b.done >= b.shots) return 'drafts done';
   // Partway and idle — stopped, or one shot retried. Saying "rendering" here
   // would be the chip claiming something the machine isn't doing.
   return `${b.done} of ${b.shots}`;
+}
+// The row's trailing slot names the FURTHEST place this board has got to, and
+// goes there. One slot, never two.
+//
+// The owner could not find the editor ("it doesn't even have a button") and
+// could not find his film ("where is the finalized clip?"). Both answers are
+// the same answer: from the list of films, the next thing you want is one
+// click away, and the row says which thing that is.
+function sbRowAction(b) {
+  if (b.film) {
+    const len = b.film.duration ? ' · ' + sbFmtClock(b.film.duration) : '';
+    return `<button class="sb-row-go" title="Watch the finished film"
+        onclick="event.stopPropagation();sbOpenAt('${escapeHtml(b.id)}','film')">
+        <svg class="ph" aria-hidden="true"><use href="#ph-film-slate"/></svg>Film${escapeHtml(len)}</button>`;
+  }
+  // `clips` is what is on disk; `done` is only what this panel rendered as a
+  // job. A board of imported clips is editable and must show the way in.
+  if (b.clips || b.done) {
+    return `<button class="sb-row-go" title="Open this film in the Editor"
+        onclick="event.stopPropagation();sbOpenAt('${escapeHtml(b.id)}','edit')">
+        <svg class="ph" aria-hidden="true"><use href="#ph-scissors"/></svg>Open in Editor</button>`;
+  }
+  return '';
 }
 function sbRenderBoardLists() {
   const rows = SB.boards.map(b => `
@@ -54361,6 +61522,7 @@ function sbRenderBoardLists() {
       <span class="ttl">${escapeHtml(b.title || 'Untitled film')}</span>
       <span class="params">${b.shots} shots · ${b.done} rendered</span>
       <span class="badge">${escapeHtml(sbBoardChip(b))}</span>
+      ${sbRowAction(b)}
       <button title="Delete this storyboard" onclick="event.stopPropagation();sbDeleteBoard('${escapeHtml(b.id)}','${escapeHtml((b.title || '').replace(/'/g, ''))}')"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>
     </li>`).join('');
   const full = sbEl('sbBoardList');
@@ -54412,6 +61574,17 @@ function sbOpenFromClip(id) {
 // ---- the one cross-tab hook, called at the end of poll() -------------------
 function sbPollHook(s) {
   SB.boards = s.storyboards || [];
+  // Repaint the rows only when the rows changed. /status carries the film
+  // summary now, so "this board has a film" lights up the moment ffmpeg
+  // finishes — without rebuilding a list under the cursor twice a second.
+  const sig = JSON.stringify(SB.boards.map(b => [b.id, b.title, b.shots, b.done,
+    b.clips, b.failed, b.running, b.planning,
+    b.film ? [b.film.name, b.film.at, b.film.count] : 0]));
+  if (sig !== SB.boardsSig) {
+    SB.boardsSig = sig;
+    sbRenderBoardLists();
+    if (SB.id) sbRailPaint();
+  }
   const live = SB.boards.filter(b => b.running);
   const count = sbEl('sbTabCount');
   if (count) {
@@ -54573,6 +61746,7727 @@ document.addEventListener('dragend', () => {
   document.querySelectorAll('.sb-shot').forEach(el =>
     el.classList.remove('is-dragging', 'sb-drop-before', 'sb-drop-after'));
 });
+// ===========================================================================
+// THE TIMELINE — the client half of /storyboard/edit
+// ===========================================================================
+//
+// The shot list is INTENT: what the film should contain, one card per thing to
+// render. This is ARRANGEMENT: what plays, from which second of which file, at
+// which second of the film. Two documents on disk for the reason
+// storyboard_editor.py gives — the moment one shot is used twice, or one is
+// split in half, they are different shapes forever.
+//
+// THREE MEASURED FACTS SHAPE EVERY DECISION BELOW.
+//
+//  1. A source clip is a single GOP: 235 ms median to seek in Chrome, 1266 ms
+//     p90. The all-intra proxy seeks in 3.5 ms. So the preview NEVER points at
+//     clip.path when clip.proxy exists, and the one place it may (no proxy yet)
+//     says so on the badge instead of pretending.
+//
+//  2. Two <video> elements measured NO benefit over one once proxies are in
+//     play — the swap costs what the seek costs, and two decoders is two
+//     decoders. There is one video element here, deliberately.
+//
+//  3. The preview freezes 50-67 ms at each cut (1.2-1.6 frames at 24 fps) and
+//     Safari's seeking is accurate to 3-6 frames. That is stated once, quietly,
+//     under the transport, and never papered over: the render is exact, the
+//     preview is an approximation of it.
+//
+// Two traps this feature already paid for, both load-bearing: `muted` is set
+// BEFORE the first play() or Chrome silently refuses autoplay, and elements are
+// hidden with opacity, never display:none, or WebKit will not load them.
+
+// ---- HOW TALL THE TIMELINE IS, AND WHERE THE HEIGHT GOES ----------------
+// Declared HERE rather than with the other SBE_* constants below, because
+// SBE's own initialiser reads the stored preference through them and a `const`
+// three hundred lines further down is a temporal dead zone, not a value.
+//
+// The timeline box is a ruler, four lanes, a scrollbar gutter and two borders.
+// Only the lanes grow.
+const SBE_TL_CHROME = 32;        // 18 ruler + 12 scrollbar gutter + 2 border
+// THE LANES, in the order they are on screen. `base` is the floor each one has
+// always had, `cap` is the point past which more height stops buying anything,
+// and `share` is what fraction of every dragged pixel it takes.
+//
+// DISTRIBUTED BY SHARE, NOT PROPORTIONAL TO WHAT IS THERE. Proportional
+// scaling would hand the picture track 41% of the drag (78 of the 188px of
+// lane) and the sound strip 14% — the exact opposite of the reason the handle
+// was asked for. 70% of every pixel goes to the two SOUND lanes instead, so
+// 100px of drag turns a 26px strip into ~68px: the level line's usable band
+// more than triples and a keyframe becomes a target rather than a rumour. The
+// ruler takes none of it — a ruler is not more legible for being taller.
+//
+// REBALANCED 2026-08-20, after the owner used it: "the squares for the video
+// design, like the video in the timeline, are expanded too much; they are too
+// big. They don't need to be this big." A picture block is a LABEL WITH A
+// THUMBNAIL HINT — a name, a timecode, and enough of the frame behind them to
+// tell two shots apart. It is not a poster: the frame it stands for is already
+// on the program monitor, full size, two inches above. So the picture lane's
+// base drops 78 -> 64 (a 52px block: name row, meta row, and a band of picture)
+// and its ceiling 240 -> 120, which is the tallest a block can be and still
+// read as a block. Both ends were checked on screen.
+//
+// The height it gave up went to the sound, and so does the drag: the picture's
+// share falls 0.22 -> 0.14 and the two sound lanes rise to 0.78 of every
+// dragged pixel. The bases rise too — 26 -> 44 on the clip strip and 54 -> 72
+// on the soundtrack — because the level line has to be legible AT REST, not
+// only after somebody has discovered the handle and pulled it.
+const SBE_LANES = [
+  { key: 'ov',    base: 32, cap:  56, share: 0.08 },   // overlay: a card is placed, not performed
+  { key: 'track', base: 64, cap: 120, share: 0.14 },   // the picture: a labelled block, not a poster
+  { key: 'alane', base: 44, cap: 190, share: 0.44 },   // per-clip sound: waveform, level line, points
+  // The soundtrack. Its base rose 72 -> 108 when the bed stopped being a
+  // rectangle you can only slide: it now carries a waveform, a level line,
+  // draggable points and two corner fade handles, exactly like the strip lane
+  // above it — and that lane's base rose 26 -> 44 for the same reason, which
+  // is that a control has to be legible AT REST and not only after somebody
+  // has discovered it. The HEAD grew with it (the level and the duck now live
+  // there), and head and lane read the same variable on purpose.
+  { key: 'wave',  base: 108, cap: 240, share: 0.34 },  // the soundtrack
+];
+// Both ends are the SUM of the parts, never a hand-picked round number — the
+// floor is every lane at its base (which is what the box needs to draw itself
+// without clipping) and the ceiling is every lane at its cap (past which the
+// drag would be buying dead band). `test_the_height_floor_is_the_sum_of_its
+// _lanes` asserts exactly that, because the 190 this replaced was itemised in
+// a comment and the overlay lane was added without moving it: the box has
+// been 30px short of its own contents, with `overflow-y: hidden` over the
+// difference, since that lane shipped.
+const SBE_TL_MIN_H = 280;
+const SBE_TL_MAX_H = 638;
+// How far one arrow key moves the edge, and one arrow key with Shift.
+const SBE_TL_STEP = 12;
+const SBE_TL_STEP_BIG = 40;
+
+// ---- THE CORNER HANDLES' FOOTPRINT, as the SVG has to know it -----------
+// These MIRROR `--sbe-grip-w`, `--sbe-grip-skirt` and `--sbe-fade-hit` in the
+// stylesheet, and they are here because the level line is drawn, not styled:
+// its target is a path this file emits, so the only way to keep that path off
+// the fade handles' pixels is to know in JS where those pixels are.
+//
+// A MIRROR IS A THING THAT DRIFTS, so the browser is what catches it, not a
+// grep: `scripts/measure_editor_layout.py` measures the three rectangles in a
+// laid-out page and fails if any two of them intersect. If somebody changes
+// the CSS and forgets these, the gate goes red with both numbers in it.
+const SBE_AGRIP_W = 7;      // a strip's grip is thinner than a block's
+const SBE_GRIP_SKIRT = 3;   // ...and can be hit this far past what it draws
+const SBE_FADE_HIT = 22;    // the fade handle's square target
+// The first x on a strip that no corner handle stands on, and the last.
+// THE +1 IS THE SVG'S OWN ROUNDING. The strip's <svg> carries an integer
+// `width` attribute over a viewBox of the same integer, but the element is
+// laid out at the strip's REAL fractional width — so one user unit is
+// px/round(px) CSS pixels and the clip lands up to half a pixel off. Measured
+// without it: the target's left edge came back at 471.84 against a handle
+// ending at 472.00, which is a 0.16px overlap and a red gate. A pixel of
+// margin costs nothing and is not a number anybody has to maintain.
+const SBE_LVL_CLEAR = SBE_AGRIP_W + SBE_GRIP_SKIRT + SBE_FADE_HIT + 1;
+// Below this there is no line left to aim at, so none is offered.
+const SBE_LVL_MIN_SPAN = 12;
+
+// ---- THE LEVEL LINE'S GEOMETRY, in ONE place ----------------------------
+// "I still don't understand how to add keyframes, to be honest." — said after
+// using it, which makes it a discoverability defect and not a user one. The
+// gesture was double-click-to-add, drag-to-set, shift-click-to-remove: three
+// things knowable only by being told.
+//
+// Everything that reads or writes a level now goes through this pair, because
+// three gestures were each carrying their own copy of the arithmetic and two
+// of them had already drifted onto a hard-coded 20px band. `sbeStripY` and
+// `sbeStripGain` are exact inverses at every strip height — there is a test
+// that round-trips them at five of them.
+// HEADROOM, AND IT IS THE WHOLE OF WHY THE LINE IS DRAGGABLE. "You are able to
+// drag the sound thingy, but it's not super user-friendly. Maybe you should put
+// the orange line a little lower so it feels more draggable." At 1px, unity was
+// drawn ON the strip's own top edge: the target is a 14px stroke centred on the
+// line, so six of its seven upper pixels fell outside the strip and were
+// clipped away by the SVG viewport, leaving a one-sided sliver to aim at that
+// also competed with the lane's border.
+//
+// EIGHT IS DERIVED, NOT PICKED: half of `.sbe-lvl-hit`'s 14px stroke, plus one,
+// so the entire target lies inside the strip at every height the share table
+// can produce — 37px at the floor included. Unity still means "the top of the
+// scale", which was built deliberately and is not what he asked to change; it
+// simply no longer means "the top pixel of the box".
+const SBE_LVL_PAD = 8;      // the line never touches the strip's own edge
+// How near the pointer has to be for the LINE to answer rather than the strip
+// under it. Twelve pixels is the same order as the dot's own target, and it is
+// what makes "click the line" a gesture instead of a bullseye.
+const SBE_LVL_GRAB = 12;
+function sbeStripY(gain, H) {
+  const h = Math.max(2 * SBE_LVL_PAD + 1, sbeNum(H));
+  return (1 - Math.max(0, Math.min(1, sbeNum(gain)))) * (h - 2 * SBE_LVL_PAD)
+         + SBE_LVL_PAD;
+}
+function sbeStripGain(y, top, H) {
+  const h = Math.max(2 * SBE_LVL_PAD + 1, sbeNum(H));
+  return Math.max(0, Math.min(1,
+    1 - (sbeNum(y) - sbeNum(top) - SBE_LVL_PAD) / (h - 2 * SBE_LVL_PAD)));
+}
+
+window.SBE = {
+  open: false, id: '', title: '',
+  edit: null, clips: [], audio: null, beats: null,
+  peaks: null, peaksFor: '', unplaced: [], pool: [], relink: [], prepare: {},
+  onMissing: null,
+  proxyUrl: '', revision: 0, dirty: false, saving: false, conflict: 0,
+  // THE SAVE'S OWN BOOKKEEPING. `savePending` is the save that arrived while
+  // another was in flight and used to be thrown away; `dirtyAt` is when the
+  // oldest unwritten change was made, which is what lets the tick notice that
+  // nothing has reached the disk for too long; `saveFailed` is the reason the
+  // alarm is up, and it is a string precisely so it can be shown.
+  savePending: false, dirtyAt: 0, saveFailed: '',
+  // The quiet lane's own two facts, and the drafts this film has.
+  backingUp: false, backedUpAt: 0,
+  drafts: [], activeDraft: '', backup: null,
+  // Which row the name field is currently editing, '' when it is making a new
+  // draft. One field with two verbs and no mode is a field that picks the
+  // wrong one every time Enter is pressed.
+  renaming: '',
+  sel: '', playhead: 0, playing: false, curId: '', pps: 42,
+  undo: [], redo: [], errors: {}, sentOrder: [],
+  // THE ONE NOTICE SURFACE. `noticeLead` is the chip the user clicked open,
+  // `backupHidden` is "Later" on the recovery offer (this session, this
+  // offer), `errsOpen` is the validation list unfolded past its first line.
+  noticeLead: '', backupHidden: false, errsOpen: false,
+  // THE OVERLAY LANE — a second video track, above the picture. Its own list
+  // for the same reason the server keeps one: the picture lane may not
+  // overlap itself, and an overlay's whole job is to sit ON a picture.
+  overlays: [], ovSel: '', ovDrag: null,
+  // The last card whose black backdrop was keyed on the way in: which overlay
+  // it became, and the untouched file it came from. This is what "Keep
+  // original" undoes, and it is null whenever that receipt is not on screen.
+  keyed: null,
+  // One waveform per SOURCE, not per clip: the same take used twice draws the
+  // same picture and each strip slices its own window out of it.
+  clipPeaks: null, kfDrag: null,
+  // THIS TAB'S IDENTITY, for the life of the tab. Whoever loaded last owns
+  // the snapshot lane; a tab that finds another editor is TOLD, and goes on
+  // read-only rather than writing its stale state over the live one every
+  // debounce. See docs/EDITOR_SAVE_MODEL.md §5.
+  session: 'ss' + Math.random().toString(16).slice(2, 10) +
+           (Date.now() % 1048576).toString(16),
+  // WHO ELSE IS EDITING, and when this tab was last actually protected.
+  // There is deliberately no flag here that can stop the writer: the one that
+  // used to exist (`superseded`) was set by a passive page load in another
+  // browser and switched this tab's safety net off for seven hours.
+  otherEditor: '', protectedAt: 0,
+  timer: null, saveTimer: null, raf: 0, drag: null, awaitingClip: 0,
+  // The soundtrack's own drag. Separate from `drag` because the two lanes are
+  // separate objects and a pointer is only ever on one of them.
+  musicDrag: null, audioDrag: null,
+  music: '', musicEl: null, musicOk: true, rendering: false, muteToasted: false,
+  // `dropAt` is where the insertion line is painted while something is being
+  // dragged onto the track — null when nothing is. `lastTs` is the wall clock
+  // the transport falls back on for the clips that carry no <video> to read a
+  // currentTime off (a still, a slug, a hole).
+  dropAt: null, lastTs: 0,
+  // THE SOURCE MONITOR. `source` is the pool row on the left screen (null
+  // when nothing has been clicked yet) and `srcIndex` is where it sat in the
+  // painted pool, which is what "Add to timeline" hands back to edPoolAdd so
+  // the two doors take exactly the same path. Never both monitors at once:
+  // sbeSrcPlay stops the program and sbePlay stops the source.
+  source: null, srcIndex: -1, srcPlaying: false,
+  // Sound is ON. It survives a reload because a muted editor is indistinguishable
+  // from a broken one, and that is the bug this default is paying off.
+  muted: (localStorage.getItem('sbeMuted') === '1'),
+  // HOW TALL THE TIMELINE IS, and who decides. `tlH` is the user's preference
+  // — restored from this browser, never from the document — `tlNow` is what
+  // the layout could actually give it once the window had its say, and
+  // `tlMax` is what the window has left before the monitors stop being
+  // monitors. The handle drags `tlH`; sbeFitMonitors writes the other two.
+  // `laneAt` is the height the two SOUND lanes were last DRAWN at, which is
+  // not always the height they are currently given — see the end of
+  // sbeFitMonitors for the one pass where those two disagree.
+  tlH: sbeTlPrefRead(), tlNow: 0, tlMax: 0, tlDrag: null, laneAt: -1,
+  // THE GHOST POINT. Where a click on the level line would put one — null
+  // whenever the pointer is not near a line it could edit. It is the whole of
+  // "hover teaches": the control answers before it is used.
+  kfGhost: null,
+};
+
+const SBE_MIN_CLIP = 0.2;        // shorter than this is not a shot, it is a blink
+const SBE_UNDO_MAX = 80;
+const SBE_SNAP_PX = 9;           // how near the pointer must be to catch a beat
+const SBE_GUESS_CONFIDENCE = 0.4; // below this the grid is drawn as a guess
+// The same clamp `storyboard_editor.BRIGHTNESS_LIMIT` enforces on the way in.
+// Half of ffmpeg's additive range is already past "unusable" in both
+// directions, and a slider that can ask for a value the server will refuse is
+// a slider that produces a red error box instead of a picture.
+const SBE_BRIGHT_MAX = 0.5;
+// How long a still holds when it lands. Long enough to read a title card,
+// short enough that nobody has to trim it DOWN before the film is watchable —
+// and it is the trim handles' job from there.
+const SBE_STILL_SECONDS = 3.0;
+// ---- the two sliders, and the two monitors ------------------------------
+// sbePaint pads the inner by this much past the last frame, so "the whole
+// film fits" means (viewport - SBE_TL_PAD) / span, not viewport / span.
+const SBE_TL_PAD = 24;
+// THE TIMELINE DOES NOT END WHERE THE CLIPS END. "The film's length and the
+// audio's placement are independent facts and the UI must treat them that
+// way" — so the scroller runs past the last frame by this much, and the music
+// can be dragged out there instead of stopping dead against the final cut.
+// Proportional with both ends pinned: 3 s is enough room to grab an edge on a
+// short cut, 15 s stops a ten-minute film from opening on two minutes of
+// nothing.
+const SBE_SLACK_MIN = 3;
+const SBE_SLACK_MAX = 15;
+const SBE_SLACK_RATIO = 0.15;
+// An EMPTY timeline is still a timeline: a ruler you can read and a lane the
+// music can be dropped into. Without a floor the span is one second, the
+// ruler is a single tick, and the first thing the Editor shows a new film is
+// a box that looks broken.
+const SBE_SPAN_MIN = 10;
+// The shortest the soundtrack can be trimmed to. Same reason SBE_MIN_CLIP
+// exists: a zero-length window is one ffmpeg refuses and one no pointer can
+// grab back.
+const SBE_MIN_MUSIC = 0.5;
+// HALF A FRAME AT 24 fps, and the same number the server's TOUCH_TOLERANCE
+// uses to decide whether two clips touch. Below it a sound is in sync: every
+// window on the timeline is rounded to a microsecond, so an exact-zero test
+// would flag a strip that is one float away from where it started.
+const SBE_SYNC_TOL = 1 / 48;
+// The timeline's floor, its ceiling and the lanes between them are declared
+// with SBE itself, up where its initialiser can read them.
+const SBE_PPS_MAX = 200;         // the old zoom ladder's top step
+const SBE_PPS_FLOOR = 0.5;       // below this a cut is thinner than a pixel
+const SBE_ZOOM_TICKS = 1000;     // the range input's resolution
+// The gap between the monitors, and the smallest picture worth calling one.
+const SBE_MON_GAP = 12;
+const SBE_MON_MIN_H = 120;
+// Source height / program height. 2/3 is the 40/60 split by width that was
+// asked for; sbeMonitorFit widens it toward 1 (equal monitors) when the
+// window is too short to fill the row at 40/60, because a symmetric black
+// gutter either side of the pair is the thing this whole pass is removing.
+const SBE_MON_RATIO = 2 / 3;
+const SBE_MON_RATIO_MAX = 1;
+// The inspector rail beside the monitors. Narrower than this it is a slot,
+// wider than this it is a second sidebar — and either way it is the width the
+// monitors could not use, not a width of its own choosing.
+const SBE_RAIL_MIN = 200;
+const SBE_RAIL_MAX = 380;
+
+function sbeEl(id) { return document.getElementById(id); }
+function sbeNum(v, d) { const n = Number(v); return (n === n && isFinite(n)) ? n : (d || 0); }
+function sbeRound(v) { return Math.round(sbeNum(v) * 1e6) / 1e6; }
+function sbeFps() { return (typeof FPS === 'number' && FPS > 0) ? FPS : 24; }
+
+// ---------------------------------------------------------------------------
+// THE MODEL. Everything in this section is pure: arrays in, arrays out, no DOM,
+// no fetch. That is what makes the drag maths, the snap, the ripple and the
+// save payload testable in node rather than by eye — see
+// test_storyboard_editor_ui.py, which runs these exact functions.
+// ---------------------------------------------------------------------------
+function sbeLen(c) { return Math.max(SBE_MIN_CLIP, sbeNum(c.end) - sbeNum(c.start)); }
+
+// Each clip owns the gap that PRECEDES it. That single choice is what makes
+// every operation below a one-liner: a move is "change which gap you own", a
+// ripple delete is "take your gap with you", and the film position of every
+// clip is a running total that cannot drift from its own source window.
+// A LEAD GAP LIVES ON THE FRAME GRID. Under one frame is NO gap.
+//
+// The owner's report was "a black frame that flashes for a microsecond... I
+// tried to drag them close and whatever" — and the second half is the defect.
+// The holes were 0.503, 0.380 and 0.096 of a frame: too small to see at any
+// zoom, too small for any pixel to address, and the stage paints black
+// wherever no clip is playing. Rounding to the NEAREST frame would have turned
+// the 0.503 into a whole frame of black, which is the same bug one frame
+// louder; anything under a frame is float noise from a drag and a JSON round
+// trip, and zero is its only honest reading. See the block above `film_fps` in
+// storyboard_editor.py for why the grid is enforced on gaps and not on
+// absolute film positions.
+function sbeGridGap(gap) {
+  const f = 1 / sbeFps();
+  const g = Math.max(0, sbeNum(gap));
+  // A LARGER GAP IS LEFT EXACTLY AS AUTHORED. Snapping a 43.2-frame slug to
+  // 43 frames would rewrite a number the user chose to buy a property nothing
+  // reads: the cuts either side of a gap are already exact once the gap is a
+  // fixed quantity. See `quantise_gap` in storyboard_editor.py.
+  return (g < f - 1e-9) ? 0 : sbeRound(g);
+}
+
+function sbeAdoptGaps(clips) {
+  let cursor = 0;
+  // A HEAL CARRIES THE SOUND; A GESTURE DOES NOT. Closing a sub-frame hole is
+  // not the user sliding a picture, so an unlinked strip travels with it by
+  // the same delta and the J-cut's offset is exactly what it was. Dragging is
+  // the opposite by design — the picture moves and the strip stays, which is
+  // how a J-cut is made in the first place — so `sbeLayout` never does this.
+  for (const c of clips) {
+    const raw = Math.max(0, sbeNum(c.film_start) - cursor);
+    const gap = sbeGridGap(raw);
+    const shift = raw - gap;
+    if (shift > 1e-9 && c.audio && c.audio.film_start !== undefined
+        && c.audio.film_start !== null) {
+      c.audio = Object.assign({}, c.audio,
+                              { film_start: sbeRound(sbeNum(c.audio.film_start) - shift) });
+    }
+    c._gap = gap;
+    if (c.locked) c._pin = sbeNum(c.film_start);
+    cursor = sbeNum(c.film_end) || (sbeNum(c.film_start) + sbeLen(c));
+  }
+  return clips;
+}
+
+// Re-derive film_start / film_end from the lead gaps. film_end is NEVER an
+// independent number — nothing plays at anything but 1x, and the server refuses
+// an edit whose slot and window disagree by more than a millisecond.
+function sbeLayout(clips) {
+  const locks = [];
+  for (const c of clips) {
+    if (c.locked) {
+      const s = (c._pin === undefined || c._pin === null) ? sbeNum(c.film_start) : sbeNum(c._pin);
+      locks.push([s, s + sbeLen(c)]);
+    }
+  }
+  locks.sort((a, b) => a[0] - b[0]);
+  let cursor = 0;
+  for (const c of clips) {
+    const len = sbeLen(c);
+    if (c.locked) {
+      const s = (c._pin === undefined || c._pin === null) ? sbeNum(c.film_start) : sbeNum(c._pin);
+      c._pin = s;
+      c.film_start = sbeRound(s);
+      c.film_end = sbeRound(s + len);
+      cursor = Math.max(cursor, c.film_end);
+      continue;
+    }
+    // ON THE GRID AT THE LAST POSSIBLE MOMENT. Adopting quantises what came
+    // off disk; this quantises what a DRAG just produced, so a gesture cannot
+    // reopen the hole a load closed. Both call the same function, so there is
+    // one definition of "a gap" and not two that agree today.
+    let s = cursor + sbeGridGap(c._gap);
+    // A locked clip is an anchor, so a free one flows AROUND it rather than
+    // through it. Bounded restart: every push moves s strictly forward.
+    for (let pass = 0; pass < locks.length + 1; pass++) {
+      let moved = false;
+      for (const L of locks) {
+        if (s < L[1] - 1e-9 && s + len > L[0] + 1e-9) { s = L[1]; moved = true; }
+      }
+      if (!moved) break;
+    }
+    c.film_start = sbeRound(s);
+    c.film_end = sbeRound(s + len);
+    cursor = c.film_end;
+  }
+  clips.sort((a, b) => sbeNum(a.film_start) - sbeNum(b.film_start));
+  return clips;
+}
+
+// ONE LANGUAGE ON THE TRACK. Adjacent blocks were labelled in two: one said
+// what the shot IS, the next was a model filename complete with resolution,
+// an extension tag and a timestamp — "bizarrotrn_the_man_in_the_loud_4_
+// dn768x416_ext6_20260818_215…" — and at fit zoom both truncate, so the track
+// read as a row of half-words. The exact filename stays on the block's title.
+function sbeNiceName(s) {
+  let t = String(s || '').trim();
+  if (!t) return '';
+  if (t.indexOf('/') >= 0) t = t.split('/').pop();
+  t = t.replace(/\.[a-z0-9]{2,5}$/i, '');
+  t = t.replace(/_\d{8}_\d{6}$/, '')
+       .replace(/_dn\d+x\d+/gi, '')
+       .replace(/_ext\d+/gi, '')
+       .replace(/_\d+p\b/gi, '')
+       .replace(/_seed_\d+$/i, '')
+       .replace(/_\d+$/, '');
+  t = t.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!t) return String(s || '');
+  return t.charAt(0).toUpperCase() + t.slice(1);
+}
+
+function sbeFilmDuration(clips) {
+  let m = 0;
+  for (const c of clips || []) m = Math.max(m, sbeNum(c.film_end));
+  return sbeRound(m);
+}
+
+// THE SOUNDTRACK IS AN OBJECT, and this is its geometry. The mirror of
+// `music_window()` in storyboard_editor.py — the same three fields turned into
+// the same numbers, so what the strip shows and what the render builds cannot
+// come apart.
+//   offset      the TRACK second that plays at film 0. Negative means the
+//               music starts that many seconds INTO the film.
+//   trim_start  the in-point inside the track. Absent means 0.
+//   trim_end    the out-point inside the track. Absent means "to the end".
+// Returns the block's film span and the window it plays from the track.
+function sbeMusicWindow(audio, dur) {
+  const a = audio || {};
+  const off = sbeNum(a.offset);
+  const total = Math.max(0, sbeNum(dur, 0) || sbeNum(a.duration, 0));
+  const ts = Math.max(0, sbeNum(a.trim_start));
+  let te = (a.trim_end === null || a.trim_end === undefined)
+    ? null : sbeNum(a.trim_end);
+  // A handle dragged back out to the end of the track is not a trim — the
+  // same rule the server's `music_window` and `normalise_edit` follow, so the
+  // strip stops calling itself trimmed the moment the field stops being saved.
+  if (te !== null && total > 0) te = (te >= total - 1e-6) ? null : Math.min(te, total);
+  if (te !== null && te <= ts) te = null;
+  const head = Math.max(0, ts, off);
+  let tail = (te !== null) ? te : (total > 0 ? total : null);
+  if (tail !== null && tail <= head) tail = null;
+  // Where the block sits on the FILM. A head trim does not slide the rest of
+  // the track earlier — music does not ripple — so the seconds it removes come
+  // back as silence in front, which is exactly `head - offset`.
+  const filmStart = sbeRound(Math.max(0, head - off));
+  const filmEnd = (tail !== null) ? sbeRound(tail - off) : null;
+  return { offset: off, duration: total, head: sbeRound(head),
+           tail: (tail === null ? null : sbeRound(tail)),
+           trimmed: (ts > 0) || (te !== null),
+           film_start: filmStart,
+           film_end: (filmEnd === null ? null : Math.max(filmStart, filmEnd)) };
+}
+
+// One gesture on the music, as pure arithmetic. `mode` is 'move' | 'trimL' |
+// 'trimR' and `want` the film second the pointer landed on; the return is the
+// three fields to write back, never a mutation — the same contract every clip
+// edit above follows, and the reason a drag can be tested in node.
+function sbeMusicEdit(audio, mode, want, dur) {
+  const w = sbeMusicWindow(audio, dur);
+  const total = w.duration;
+  const ts = Math.max(0, sbeNum((audio || {}).trim_start));
+  const te = (w.tail === null) ? (total > 0 ? total : null) : w.tail;
+  const out = { offset: w.offset, trim_start: ts,
+                trim_end: ((audio || {}).trim_end === null
+                           || (audio || {}).trim_end === undefined)
+                  ? null : sbeNum((audio || {}).trim_end) };
+  if (mode === 'move') {
+    // Dragging the block moves the whole object: the window into the track is
+    // untouched, only where it lands on the film changes.
+    //
+    // SOLVED FOR THE OFFSET, NOT ROUTED THROUGH THE HEAD. `w.head` is
+    // max(0, trim_start, offset), so on a document whose offset is positive —
+    // a documented, supported state; `music_window`'s own docstring calls it a
+    // head trim — writing `head - want` fed the PREVIOUS offset back into the
+    // answer. A pointermove stream re-reads the already-mutated object every
+    // event, so the same six-second drag landed at film 6 when it arrived as
+    // six events and did not move the block at all when it arrived as one: a
+    // gesture whose result depended on how fast the mouse was going. Worse,
+    // `offset` changed even when the block visibly did not, so the drag
+    // marked the film dirty, burned an undo step and queued a write.
+    // Both branches below give film_start === t under sbeMusicWindow and
+    // neither reads the offset, so N events converge on what one event does.
+    const t = Math.max(0, sbeNum(want));
+    out.offset = sbeRound(ts > 0 ? (ts - t) : -t);
+    return out;
+  }
+  if (mode === 'trimL') {
+    // The left edge chooses a new in-point. Bounded by the head of the track
+    // one way and by the out-point (less the floor) the other.
+    const filmEnd = (w.film_end === null) ? null : w.film_end;
+    let t = Math.max(0, sbeNum(want));
+    if (filmEnd !== null) t = Math.min(t, filmEnd - SBE_MIN_MUSIC);
+    let inPoint = sbeRound(t + w.offset);
+    inPoint = Math.max(0, inPoint);
+    if (te !== null) inPoint = Math.min(inPoint, sbeRound(te - SBE_MIN_MUSIC));
+    out.trim_start = Math.max(0, sbeRound(inPoint));
+    return out;
+  }
+  // trimR — the out-point, bounded by the in-point and by the track's own end.
+  let t = Math.max(0, sbeNum(want));
+  let outPoint = sbeRound(t + w.offset);
+  outPoint = Math.max(sbeRound(Math.max(ts, w.head) + SBE_MIN_MUSIC), outPoint);
+  if (total > 0) outPoint = Math.min(outPoint, sbeRound(total));
+  out.trim_end = sbeRound(outPoint);
+  return out;
+}
+
+// The times a music edge is allowed to click onto: the start of the film and
+// every cut in it. NOT the beat grid — the grid is derived from this very
+// track at this very offset, so snapping the music to it would be snapping a
+// ruler to marks the ruler drew.
+function sbeMusicSnaps(clips) {
+  const out = [0];
+  for (const c of clips || []) {
+    out.push(sbeRound(sbeNum(c.film_start)));
+    out.push(sbeRound(sbeNum(c.film_end)));
+  }
+  return out;
+}
+
+function sbeSnapToList(t, marks, tol, enabled) {
+  if (!enabled) return sbeRound(t);
+  let best = null, dist = Infinity;
+  for (const m of marks || []) {
+    const d = Math.abs(m - t);
+    if (d > tol || d >= dist - 1e-9) continue;
+    dist = d; best = m;
+  }
+  return best === null ? sbeRound(t) : sbeRound(best);
+}
+
+// THE CLIP'S OWN SOUND, and the mirror of `clip_audio()` on the server.
+// ABSENT MEANS LINKED — the field appears only once somebody has pulled the
+// picture and the sound apart, so every clip on every disk is already valid.
+function sbeClipAudio(c) {
+  const vs = sbeNum((c || {}).start), ve = sbeNum((c || {}).end);
+  const fs = sbeNum((c || {}).film_start);
+  const a = (c || {}).audio;
+  if (!a || typeof a !== 'object' || sbeKind(c) !== 'video') {
+    return { start: vs, end: ve, film_start: fs, linked: true,
+             coupled: false, split: false, len: Math.max(0, ve - vs) };
+  }
+  // THE PRESENCE OF THE FIELD IS THE SWITCH, not the values in it. Unlinking
+  // writes the window the clip already has, so an equality test read a
+  // just-unlinked clip as linked and refused to drag it.
+  //
+  // ...AND `audio.linked` IS THE THIRD STATE: split, but travelling with its
+  // picture at the offset the user chose. `linked` still means "this strip
+  // cannot be dragged on its own", which is true of both; `split` means "the
+  // sound is described separately", which is what the assembler needs.
+  const s2 = sbeNum(a.start, vs), e2 = sbeNum(a.end, ve);
+  const f2 = sbeNum(a.film_start, fs);
+  const coupled = a.linked === true;
+  return { start: sbeRound(s2), end: sbeRound(e2), film_start: sbeRound(f2),
+           linked: coupled, coupled: coupled, split: true,
+           len: Math.max(0, sbeRound(e2 - s2)) };
+}
+
+// Rebuild the stored object from a window, keeping the coupling flag out of
+// the document unless it is true — a free strip must be byte-identical to the
+// one every edit.json on disk already carries.
+function sbeAudioField(w, coupled) {
+  const o = { start: sbeRound(w.start), end: sbeRound(w.end),
+              film_start: Math.max(0, sbeRound(w.film_start)) };
+  if (coupled) o.linked = true;
+  return o;
+}
+
+// UNLINKING IS NOT AN EDIT TO THE SOUND. It writes the window the clip
+// already had, which is what makes the toggle safe to press: nothing moves
+// until you move it.
+//
+// AND NEITHER IS RE-LINKING, ANY MORE. It used to DELETE the field, which
+// snapped the sound back under the picture — so the moment the owner had
+// built the J-cut he wanted, the one button that said "link" threw it away,
+// and he reached for LOCK instead (which makes a clip refuse every drag with
+// a forbidden cursor, and looked like the editor had broken). Re-linking now
+// FREEZES the relationship: the window stays exactly where he put it and the
+// pair travels as one from then on. "You just drag it, and the sound below
+// stays, and then you can lock it and move it, and then the sound starts
+// before the clip starts."
+//
+// An IN-SYNC re-link still deletes the field outright, so a split somebody
+// tried and undid leaves a document identical to one that never had it.
+function sbeSetAudioLink(clips, id, linked) {
+  const c = sbeById(clips, id);
+  if (!c) return { clips: clips, ok: false, why: 'gone' };
+  if (sbeKind(c) !== 'video') {
+    return { clips: clips, ok: false, why: 'only a video clip has sound of its own' };
+  }
+  const out = clips.map(x => Object.assign({}, x));
+  const t = sbeById(out, id);
+  const w = sbeClipAudio(c);
+  if (linked) {
+    if (sbeAudioIsThePicture(c)) delete t.audio;
+    else t.audio = sbeAudioField(w, true);
+  } else {
+    t.audio = sbeAudioField(w, false);
+  }
+  t.source = 'human';
+  return { clips: out, ok: true, coupled: linked && !!t.audio };
+}
+
+// One gesture on one clip's sound. `mode` is 'move' | 'trimL' | 'trimR', and
+// none of them touches the picture — that is the entire point of the feature.
+// A LINKED clip refuses: a strip that moved without being unlinked would be
+// the accident the default exists to prevent.
+function sbeAudioEdit(clips, id, mode, want) {
+  const c = sbeById(clips, id);
+  if (!c) return { clips: clips, ok: false, why: 'gone' };
+  const w = sbeClipAudio(c);
+  if (w.coupled) {
+    return { clips: clips, ok: false,
+             why: 'this sound travels with its picture at the offset you set — unlink it to move it on its own' };
+  }
+  if (w.linked) return { clips: clips, ok: false, why: 'unlink the sound first' };
+  if (c.locked) return { clips: clips, ok: false, why: 'locked' };
+  const src = sbeNum(c.duration, 0);
+  const out = clips.map(x => Object.assign({}, x));
+  const t = sbeById(out, id);
+  let start = w.start, end = w.end, film = w.film_start;
+  const t0 = Math.max(0, sbeNum(want));
+  if (mode === 'move') {
+    film = sbeRound(t0);
+  } else if (mode === 'trimL') {
+    // The left edge picks a new IN-POINT and leaves the rest where it is —
+    // the same rule the music's head trim follows, and the reason an L-cut
+    // does not drag the next line early with it.
+    //
+    // THE CLAMP IS FOLDED BACK INTO BOTH FIELDS OR IT IS NOT A CLAMP. `start`
+    // used to stop at the head of the source while `film` kept sliding, so
+    // asking for more head than the take has moved the strip's OUT-point
+    // left — the one thing a left-edge trim must never do. That is the L-cut
+    // case exactly: you pull his line back under the previous shot and the
+    // tail silently loses the same seconds off the end of the line you were
+    // keeping.
+    const room = Math.min(t0, sbeRound(film + (end - start) - SBE_MIN_CLIP));
+    let delta = sbeRound(room - film);
+    if (start + delta < 0) delta = sbeRound(-start);
+    start = sbeRound(start + delta);
+    film = sbeRound(film + delta);
+  } else {
+    let e = sbeRound(start + Math.max(SBE_MIN_CLIP, t0 - film));
+    if (src > 0) e = Math.min(e, sbeRound(src));
+    end = Math.max(sbeRound(start + SBE_MIN_CLIP), e);
+  }
+  t.audio = { start: sbeRound(start), end: sbeRound(end),
+              film_start: Math.max(0, sbeRound(film)) };
+  t.source = 'human';
+  return { clips: out, ok: true };
+}
+
+// ---- the pair, and how far it has come apart -------------------------------
+// THE MIRROR OF `clip_audio_drift()`. Both halves map film time to source time
+// with one constant each — the picture's `film_start - start`, the strip's
+// `audio.film_start - audio.start` — so the difference between the two is the
+// number an NLE prints on its sync flag. POSITIVE means the sound plays LATE
+// against the frame it was recorded with. A linked clip cannot drift.
+function sbeAudioDrift(c) {
+  const w = sbeClipAudio(c);
+  if (!w.split) return 0;
+  return sbeRound((w.film_start - w.start)
+                  - (sbeNum((c || {}).film_start) - sbeNum((c || {}).start)));
+}
+
+function sbeAudioInSync(c) { return Math.abs(sbeAudioDrift(c)) <= SBE_SYNC_TOL; }
+
+// IN SYNC IS NOT THE SAME AS "NOTHING TO SAY". A head trim moves the picture's
+// in-point and its slot together, so the strip is left reaching a second back
+// under the shot before it — the J-cut he described, "you start hearing the
+// character before you see it" — and its DRIFT is zero, because the same
+// source second still plays at the same film second. Only a strip that is
+// literally the picture's own window can be dropped; deciding on drift alone
+// deleted the field and took that extra second of sound with it.
+// THE CLIP'S OWN SOUND, SWITCHED OFF. The mirror of `clip_muted()`.
+// "We should have an option to mute the clip sound." An H3 shot arrives with
+// baked-in wind and ambience under the line, and on a music cut that is not a
+// performance to be balanced — it is noise to be removed so the track can
+// carry the moment.
+//
+// NOT `has_audio === false`, which says the FILE has no audio track and is a
+// fact about the source. This is a decision about the edit, and the two are
+// painted differently for that reason. It composes with unlinking in both
+// directions: `mute` describes the sound wherever its strip happens to be.
+function sbeClipMuted(c) {
+  return !!(c && c.mute === true) && sbeKind(c) === 'video';
+}
+
+// ABSENT IS AUDIBLE, the same rule `adjust` and `audio` follow: an unmuted
+// clip is byte-identical to one written before mute existed.
+function sbeSetClipMute(clips, id, on) {
+  const c = sbeById(clips, id);
+  if (!c) return { clips: clips, ok: false, why: 'gone' };
+  if (sbeKind(c) !== 'video') {
+    return { clips: clips, ok: false, why: 'only a video clip has sound to mute' };
+  }
+  if (c.has_audio === false) {
+    return { clips: clips, ok: false,
+             why: 'this clip has no sound of its own to mute' };
+  }
+  if (!!c.mute === !!on) return { clips: clips, ok: false, why: 'no change' };
+  const out = clips.map(x => Object.assign({}, x));
+  const t = sbeById(out, id);
+  if (on) t.mute = true; else delete t.mute;
+  t.source = 'human';
+  return { clips: out, ok: true };
+}
+
+function sbeAudioIsThePicture(c) {
+  const w = sbeClipAudio(c);
+  if (!w.split) return true;
+  return Math.abs(w.start - sbeNum((c || {}).start)) < 1e-9
+      && Math.abs(w.end - sbeNum((c || {}).end)) < 1e-9
+      && Math.abs(w.film_start - sbeNum((c || {}).film_start)) < 1e-9;
+}
+
+function sbeDriftLabel(d) {
+  const v = sbeNum(d);
+  return (v > 0 ? '+' : '-') + Math.abs(v).toFixed(2) + 's';
+}
+
+// ---- carrying the sound through a RIPPLE ----------------------------------
+// THE BUG THIS EXISTS FOR. `audio.film_start` is an absolute film anchor, and
+// `sbeLayout` re-derives the film position of every clip from the running
+// total of the lead gaps — the PICTURE's position and nothing else. So a right
+// trim, a move, a ripple delete, an insert or a reorder slid every clip after
+// it while every unlinked strip stood still, and a J-cut the user had placed
+// three shots earlier silently came apart:
+//
+//   "instead of allowing me to remove or move what video is visible while
+//    leaving the sound intact and then rematching it, it is actually getting
+//    the audio out of sync."
+//
+// A ripple is a RIGID TRANSLATION of everything downstream, so the sound rides
+// with it — that is what keeps a pair in sync through an edit made somewhere
+// else. The clip the gesture is actually ON is exempt: moving a picture off
+// its own sound is the whole point of the feature, and `sbeAudioEdit` is the
+// only other thing allowed to write the strip's position.
+// WHAT IS RECORDED IS THE ANCHOR, not the film position: `film_start - start`
+// is the film second at which this take's source zero would play, and it is
+// the only number a sound has to follow. A ripple changes it by the whole
+// translation; a head trim moves the slot and the in-point together and does
+// not change it at all, which is exactly why a trim must leave the strip
+// alone while a ripple must not.
+function sbeSyncMark(clips) {
+  const m = {};
+  for (const c of clips || []) {
+    if (!c || c.id === undefined || c.id === null) continue;
+    if (sbeClipAudio(c).split) {
+      m[c.id] = sbeRound(sbeNum(c.film_start) - sbeNum(c.start));
+    }
+  }
+  return m;
+}
+
+function sbeSyncCarry(clips, mark, exempt) {
+  const skip = {};
+  for (const id of (exempt || [])) skip[String(id)] = true;
+  for (const c of clips || []) {
+    if (!c) continue;
+    const a = c.audio;
+    if (!a || typeof a !== 'object') continue;
+    // THE EXEMPTION IS FOR A FREE STRIP ONLY. A COUPLED pair travels with its
+    // picture by definition — that is what the user froze when he re-linked
+    // it — so the gesture that moves the picture moves it too, including the
+    // deliberate drag the free strip is exempt from.
+    if (a.linked !== true && skip[String(c.id)]) continue;
+    const was = mark ? mark[c.id] : undefined;
+    if (was === undefined) continue;
+    const d = sbeRound((sbeNum(c.film_start) - sbeNum(c.start)) - was);
+    if (Math.abs(d) < 1e-9) continue;
+    c.audio = sbeAudioField(
+      { start: sbeNum(a.start), end: sbeNum(a.end),
+        film_start: sbeNum(a.film_start) + d }, a.linked === true);
+  }
+  return clips;
+}
+
+// THE REMATCH the owner asked for by name. One click puts the sound back under
+// the frame it came from: the strip keeps its own in-point — re-matching is not
+// un-trimming, an L-cut's tail stays as long as it was made — and moves to the
+// film second where that source second now plays.
+function sbeResyncAudio(clips, id) {
+  const c = sbeById(clips, id);
+  if (!c) return { clips: clips, ok: false, why: 'gone' };
+  const w = sbeClipAudio(c);
+  if (!w.split) {
+    return { clips: clips, ok: false,
+             why: 'this clip\'s sound is already under its own picture' };
+  }
+  if (c.locked) return { clips: clips, ok: false, why: 'locked' };
+  const want = sbeRound(sbeNum(c.film_start) + (w.start - sbeNum(c.start)));
+  if (want < 0) {
+    return { clips: clips, ok: false,
+             why: 'the sound would have to start before the __SEQ__ does — move the picture later first' };
+  }
+  if (Math.abs(want - w.film_start) < 1e-9) {
+    return { clips: clips, ok: false, why: 'that sound is already in sync' };
+  }
+  const out = clips.map(x => Object.assign({}, x));
+  const t = sbeById(out, id);
+  // A COUPLED pair rematched is a pair with nothing left to say, so the field
+  // goes rather than persisting as a coupling at zero offset.
+  t.audio = sbeAudioField({ start: w.start, end: w.end, film_start: want },
+                          w.coupled);
+  // A COUPLED pair rematched onto its own window is exactly a plain linked
+  // clip, so the field goes. A FREE strip keeps its field even when the
+  // numbers now match the picture: the user unlinked it on purpose and
+  // stripping it here would silently re-link a strip he still means to drag —
+  // the same rule `normalise_edit` follows on the way to disk.
+  if (w.coupled && sbeAudioIsThePicture(t)) delete t.audio;
+  t.source = 'human';
+  return { clips: out, ok: true };
+}
+
+// ---- THE STRIP PLAYER'S MODEL -------------------------------------------
+// THE PREVIEW MUST PLAY WHAT THE DOCUMENT SAYS. Until now it could not: the
+// transport plays ONE <video> at a time and enters each clip at its picture
+// boundary, so a clip's sound always landed with its picture no matter where
+// its strip sat. The whole J/L-cut feature was inaudible — correct on disk,
+// correct in the render's concat lanes, correct in the NLE export, and
+// missing from the one place the user checks his work:
+//
+//   "I wanted it a little before her showing up, and I cut it that way. But
+//    no matter what I do, this is always out."
+//
+// WHO OWNS A CLIP'S SOUND. Exactly one of the two, never both, or the same
+// seconds play twice. The picture element keeps it when the strip IS the
+// picture — that is every ordinary clip, and it costs nothing. The moment a
+// strip exists in its own right, the player takes it.
+// ---- THE EFFECTS MODEL, client side -------------------------------------
+// The mirror of `clip_effects()`. ONE ACCESSOR, whatever the storage: `fx` is
+// the home for effects, and brightness stays where history put it because a
+// label is not worth a data migration. See docs/EDITOR_EFFECTS_MODEL.md.
+function sbeClipLen(c) {
+  const n = sbeNum((c || {}).film_end) - sbeNum((c || {}).film_start);
+  return Math.max(0, n > 0 ? n : (sbeNum((c || {}).end) - sbeNum((c || {}).start)));
+}
+
+function sbeFx(c) {
+  const fx = ((c || {}).fx && typeof c.fx === 'object') ? c.fx : {};
+  const n = sbeClipLen(c);
+  let fin = Math.max(0, sbeNum(fx.fade_in));
+  let fout = Math.max(0, sbeNum(fx.fade_out));
+  if (n > 0) {
+    fin = Math.min(fin, n); fout = Math.min(fout, n);
+    // THE SAME CLAMP THE SERVER APPLIES, and it is here for the same reason:
+    // two fades that crossed would ask for an opacity that is two things at
+    // once. Proportional, because "two long fades" means mostly-ramp and
+    // zeroing one of them is not that.
+    const over = fin + fout - n;
+    if (over > 0) {
+      const total = fin + fout;
+      fin -= over * (fin / total); fout -= over * (fout / total);
+    }
+  }
+  return { fade_in: sbeRound(fin), fade_out: sbeRound(fout),
+           brightness: sbeBright(c) };
+}
+
+// THE OPACITY AT A FILM SECOND, and the preview's whole honesty about fades:
+// a value per frame rather than a CSS transition, so scrubbing shows what is
+// true at that second instead of an animation that started when you arrived.
+function sbeFadeOpacityAt(c, t) {
+  const e = sbeFx(c);
+  if (e.fade_in <= 1e-9 && e.fade_out <= 1e-9) return 1;
+  const fs = sbeNum((c || {}).film_start), fe = sbeNum((c || {}).film_end);
+  const now = sbeNum(t);
+  let o = 1;
+  if (e.fade_in > 1e-9 && now < fs + e.fade_in) {
+    o = Math.min(o, Math.max(0, (now - fs) / e.fade_in));
+  }
+  if (e.fade_out > 1e-9 && now > fe - e.fade_out) {
+    o = Math.min(o, Math.max(0, (fe - now) / e.fade_out));
+  }
+  return Math.max(0, Math.min(1, sbeRound(o)));
+}
+
+// One fade, set in seconds. Clamped by `sbeFx` on the way back out, so the UI
+// can hand this a drag distance without doing the arithmetic itself.
+function sbeSetFade(clips, id, edge, seconds) {
+  const c = sbeById(clips, id);
+  if (!c) return { clips: clips, ok: false, why: 'gone' };
+  if (c.locked) return { clips: clips, ok: false, why: 'locked' };
+  const key = (edge === 'out') ? 'fade_out' : 'fade_in';
+  const want = Math.max(0, Math.min(sbeClipLen(c), sbeNum(seconds)));
+  const now = sbeFx(c);
+  if (Math.abs(now[key] - want) < 1e-6 && !(want === 0 && c.fx && c.fx[key])) {
+    return { clips: clips, ok: false, why: 'no change' };
+  }
+  const out = clips.map(x => Object.assign({}, x));
+  const t = sbeById(out, id);
+  const fx = Object.assign({}, t.fx || {});
+  if (want > 1e-9) fx[key] = sbeRound(want); else delete fx[key];
+  // NEUTRAL IS ABSENT: a clip whose fades are both zero carries no `fx` at
+  // all, so it is byte-identical to one from before effects existed.
+  if (fx.fade_in > 1e-9 || fx.fade_out > 1e-9) t.fx = fx; else delete t.fx;
+  t.source = 'human';
+  return { clips: out, ok: true };
+}
+
+// ---- PER-SOURCE WAVEFORMS -----------------------------------------------
+// THE STRIP'S OWN SOURCE WINDOW, never the picture's. A strip trimmed to
+// 1.2–3.4 draws those seconds of the take; a J-cut that slides its sound half
+// a second earlier still draws the seconds it PLAYS, because the window is a
+// fact about the sound and the film position is not.
+function sbeWaveSlice(peaks, from, to, cols) {
+  if (!peaks || !peaks.peaks || !peaks.count) return [];
+  const bps = sbeNum(peaks.buckets_per_second, 100) || 100;
+  const scale = sbeNum(peaks.scale, 127) || 127;
+  const n = Math.max(1, Math.floor(sbeNum(cols)));
+  const b0 = Math.max(0, Math.floor(sbeNum(from) * bps));
+  const b1 = Math.min(sbeNum(peaks.count), Math.ceil(sbeNum(to) * bps));
+  const span = Math.max(1, b1 - b0);
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    // One column may cover many buckets when the strip is zoomed out; take
+    // the extremes across them, or a quiet frame in the middle of a loud
+    // second draws a hole that is not there.
+    const s0 = b0 + Math.floor((i / n) * span);
+    const s1 = Math.max(s0 + 1, b0 + Math.floor(((i + 1) / n) * span));
+    let lo = 0, hi = 0;
+    for (let b = s0; b < s1 && b < b1; b++) {
+      const mn = peaks.peaks[b * 2], mx = peaks.peaks[b * 2 + 1];
+      if (mn < lo) lo = mn;
+      if (mx > hi) hi = mx;
+    }
+    out.push([lo / scale, hi / scale]);
+  }
+  return out;
+}
+
+// Lazily, once per source, and never twice for the same take.
+function sbeWaveWant(path) {
+  const key = String(path || '');
+  if (!key || !SBE.open) return null;
+  if (!SBE.clipPeaks) SBE.clipPeaks = {};
+  if (Object.prototype.hasOwnProperty.call(SBE.clipPeaks, key)) {
+    return SBE.clipPeaks[key];
+  }
+  SBE.clipPeaks[key] = null;                      // in flight: ask once
+  fetch('/storyboard/edit/clip-peaks?id=' + encodeURIComponent(SBE.id)
+        + '&path=' + encodeURIComponent(key))
+    .then(r => r.json())
+    .then(d => {
+      // A take with no audio is a FACT, and `false` is how the lane
+      // remembers it so it never asks again.
+      SBE.clipPeaks[key] = (d && d.peaks) ? d : false;
+      sbePaintAudioLane();
+    })
+    .catch(() => { SBE.clipPeaks[key] = false; });
+  return null;
+}
+
+// ---- THE SOUND'S OWN ENVELOPE -------------------------------------------
+// The mirror of `audio_gain_points()`. ONE CURVE, fades and keyframes folded
+// together, read by the preview exactly as the render and the export read the
+// server's copy — so the simple case never has to discover keyframes and a
+// keyframed envelope never has to be re-expressed. `t` is STRIP-RELATIVE, so
+// sliding a J-cut does not drag every point with it.
+function sbeAfx(item, len) {
+  const a = ((item || {}).afx && typeof item.afx === 'object') ? item.afx : {};
+  const n = Math.max(0, sbeNum(len));
+  let fin = Math.max(0, sbeNum(a.fade_in));
+  let fout = Math.max(0, sbeNum(a.fade_out));
+  if (n > 0) {
+    fin = Math.min(fin, n); fout = Math.min(fout, n);
+    const over = fin + fout - n;
+    if (over > 0) {
+      const total = fin + fout;
+      fin -= over * (fin / total); fout -= over * (fout / total);
+    }
+  }
+  const pts = [];
+  for (const row of (a.points || [])) {
+    if (!row || row.length !== 2) continue;
+    let t = sbeNum(row[0]);
+    if (n > 0) t = Math.max(0, Math.min(n, t));
+    pts.push([sbeRound(t), sbeRound(Math.max(0, Math.min(1, sbeNum(row[1]))))]);
+  }
+  pts.sort((x, y) => x[0] - y[0]);
+  return { fade_in: sbeRound(fin), fade_out: sbeRound(fout), points: pts };
+}
+
+function sbeLerpGain(pts, t) {
+  if (!pts || !pts.length) return 1;
+  if (t <= pts[0][0]) return pts[0][1];
+  if (t >= pts[pts.length - 1][0]) return pts[pts.length - 1][1];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i], b = pts[i + 1];
+    if (t >= a[0] && t <= b[0]) {
+      if (b[0] - a[0] <= 1e-9) return b[1];
+      return a[1] + (b[1] - a[1]) * ((t - a[0]) / (b[0] - a[0]));
+    }
+  }
+  return pts[pts.length - 1][1];
+}
+
+function sbeGainPoints(item, len) {
+  const n = Math.max(0, sbeNum(len));
+  if (n <= 0) return [];
+  const e = sbeAfx(item, n);
+  const marks = { 0: true };
+  marks[n] = true;
+  for (const p of e.points) marks[Math.min(n, Math.max(0, p[0]))] = true;
+  if (e.fade_in > 1e-9) marks[e.fade_in] = true;
+  if (e.fade_out > 1e-9) marks[Math.max(0, n - e.fade_out)] = true;
+  const out = [];
+  for (const k of Object.keys(marks).map(Number).sort((a, b) => a - b)) {
+    let g = sbeLerpGain(e.points, k);
+    if (e.fade_in > 1e-9 && k < e.fade_in) g *= k / e.fade_in;
+    if (e.fade_out > 1e-9 && k > n - e.fade_out) {
+      g *= Math.max(0, (n - k) / e.fade_out);
+    }
+    out.push([sbeRound(k), sbeRound(Math.max(0, Math.min(1, g)))]);
+  }
+  // A FLAT UNITY CURVE IS NO CURVE, the same rule the server follows.
+  return out.every(p => Math.abs(p[1] - 1) < 1e-9) ? [] : out;
+}
+
+function sbeGainAt(item, len, t) {
+  const curve = sbeGainPoints(item, len);
+  if (!curve.length) return 1;
+  return sbeRound(sbeLerpGain(curve, Math.max(0, sbeNum(t))));
+}
+
+// ---- THE MIX: the bed's level, and what happens to it under a line -------
+// The browser half of `storyboard_editor.audio_mix` and everything under it.
+// Every function here is a mirror of a Python one of the same shape, and that
+// is the entire point of the feature: the render used to hold the bed at a
+// hard-coded 0.20 and duck it through a compressor keyed on the dialogue,
+// while the preview applied neither — so the one surface the user checks his
+// work on played a mix the file never had. A gain that only one of the three
+// outputs can express is not in the model.
+//
+// KEEP THESE EQUAL TO THE SERVER'S. A drifted constant here is a preview that
+// plays a different film from the render, quietly, which is the exact defect
+// this block exists to close. `test_the_client_and_the_server_agree_about_the
+// _mix_constants` reads both out and refuses a difference.
+const SBE_MIX_BED_GAIN = 1.0;
+const SBE_MIX_DUCK = false;
+const SBE_MIX_DUCK_GAIN = 0.269;      // the measured 11.4 dB, in linear
+const SBE_MIX_DUCK_ATTACK = 0.005;
+const SBE_MIX_DUCK_RELEASE = 0.4;
+
+function sbeAudioMix(audio) {
+  const a = audio || {};
+  const m = (a.mix && typeof a.mix === 'object') ? a.mix : {};
+  const g = (m.bed_gain === null || m.bed_gain === undefined)
+    ? SBE_MIX_BED_GAIN : Math.max(0, Math.min(1, sbeNum(m.bed_gain)));
+  const d = (m.duck === null || m.duck === undefined) ? SBE_MIX_DUCK : !!m.duck;
+  return { bed_gain: sbeRound(g), duck: d };
+}
+
+// THE BED'S ENVELOPE IS ON THE PLAYED WINDOW, not on the track — zero is the
+// first second you hear, exactly as a clip strip's envelope is on the strip
+// and not on the source file. That is what makes the corner handles mean the
+// corner they were dragged onto after the music has been trimmed or moved.
+//
+// THE DOCUMENT ONLY, AND THEN THE FILM. `filmLen` is `sbeFilmDuration(clips)`
+// and the peaks probe is deliberately NOT in this chain, which is the second
+// half of the fix the film-clock fallback belongs to. The renderer cannot see
+// peaks.json — it reads edit.json — so a bed length taken from the probe is a
+// number only one of the two sides can compute, and a gain only one side can
+// compute is exactly the invisible-second-author defect this whole block
+// exists to remove. `storyboard_editor.bed_length(audio, film_len)` is this
+// function, term for term, and `test_editor_mix` runs the two side by side
+// over a TABLE of documents so a divergence turns a suite red instead of
+// turning the preview into a liar.
+function sbeBedLen(audio, filmLen) {
+  const a = audio || {};
+  const w = sbeMusicWindow(a, 0);          // 0 => the document's own duration
+  if (w.film_end === null) {
+    // No stated length. The bed plays under the FILM — what remains of it
+    // after the block starts — because that is where the render stops the mix
+    // anyway. Returning 0 here is what used to empty the curve, and an empty
+    // curve means NO FILTER, which is the bed at full level over the dialogue.
+    return Math.max(0, sbeRound(Math.max(0, sbeNum(filmLen)) - w.film_start));
+  }
+  return Math.max(0, sbeRound(w.film_end - w.film_start));
+}
+
+// The film seconds where a clip's OWN sound plays. What the duck is keyed on,
+// and the reason it can be a document value at all: a compressor asks "are
+// these samples loud", this asks "is there a sound strip here" — a question
+// the document answers and the browser can answer identically.
+function sbeAudibleStrips(clips) {
+  const wins = [];
+  for (const c of (clips || [])) {
+    if (sbeKind(c) !== 'video') continue;
+    if (c.has_audio === false || sbeClipMuted(c)) continue;
+    const w = sbeClipAudio(c);
+    if (w.len > 1e-9) wins.push([sbeRound(w.film_start), sbeRound(w.film_start + w.len)]);
+  }
+  wins.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const out = [];
+  for (const [s, e] of wins) {
+    // Merged when they sit closer than one release: a bed that recovered
+    // fully in the eighth of a second between two lines would pump, and
+    // merging is also what keeps every knot of the curve below on a mark.
+    if (out.length && s - out[out.length - 1][1] < SBE_MIX_DUCK_RELEASE - 1e-9) {
+      out[out.length - 1][1] = Math.max(out[out.length - 1][1], e);
+    } else out.push([s, e]);
+  }
+  return out;
+}
+
+function sbeDuckGainAt(wins, t) {
+  let g = 1;
+  for (const [s, e] of wins) {
+    if (t < s - 1e-9) continue;
+    let v;
+    if (t <= e + 1e-9) {
+      const k = SBE_MIX_DUCK_ATTACK <= 0 ? 1
+        : Math.min(1, (t - s) / SBE_MIX_DUCK_ATTACK);
+      v = 1 - (1 - SBE_MIX_DUCK_GAIN) * Math.max(0, k);
+    } else {
+      const k = SBE_MIX_DUCK_RELEASE <= 0 ? 1 : (t - e) / SBE_MIX_DUCK_RELEASE;
+      if (k >= 1) continue;
+      v = SBE_MIX_DUCK_GAIN + (1 - SBE_MIX_DUCK_GAIN) * k;
+    }
+    g = Math.min(g, v);
+  }
+  return Math.max(0, Math.min(1, g));
+}
+
+function sbeBedDuckPoints(clips, len, delay) {
+  const n = Math.max(0, sbeNum(len));
+  if (n <= 0) return [];
+  const d = sbeNum(delay);
+  const wins = sbeAudibleStrips(clips)
+    .map(([s, e]) => [s - d, e - d]).filter(([s, e]) => e > 0 && s < n);
+  if (!wins.length) return [];
+  const marks = new Set([0, sbeRound(n)]);
+  for (const [s, e] of wins) {
+    for (const m of [s, s + SBE_MIX_DUCK_ATTACK, e, e + SBE_MIX_DUCK_RELEASE]) {
+      if (m >= -1e-9 && m <= n + 1e-9) marks.add(sbeRound(Math.max(0, Math.min(n, m))));
+    }
+  }
+  const out = Array.from(marks).sort((a, b) => a - b)
+    .map(t => [t, sbeRound(sbeDuckGainAt(wins, t))]);
+  return out.every(p => Math.abs(p[1] - 1) < 1e-9) ? [] : out;
+}
+
+// THE PRECEDENCE, ASKED ONCE. A person who has drawn the bed's level has said
+// what the bed does; an automatic curve that then moved it would be the
+// renderer disagreeing with them again — the invisible second author, one
+// layer up. So the authored envelope WINS and the duck stands down, and the
+// track head says so rather than leaving two controls quietly fighting.
+function sbeBedDuckSuppressed(audio, filmLen) {
+  if (!sbeAudioMix(audio).duck) return false;
+  return sbeGainPoints(audio || {}, sbeBedLen(audio, filmLen)).length > 0;
+}
+
+// THE ONE BED CURVE. Preview, render and export read this and nothing else.
+// Three terms: the static fader (always), the authored envelope (always, when
+// it exists), the auto-duck (only when nothing was authored). Never two
+// curves at once.
+function sbeBedGainPoints(audio, clips, filmLen) {
+  const a = audio || {};
+  if (!a.path) return [];
+  const n = sbeBedLen(a, filmLen);
+  if (n <= 0) return [];
+  const mix = sbeAudioMix(a);
+  let curve = sbeGainPoints(a, n);
+  if (!curve.length && mix.duck) {
+    curve = sbeBedDuckPoints(clips, n, sbeMusicWindow(a, 0).film_start);
+  }
+  const g0 = mix.bed_gain;
+  if (!curve.length) {
+    if (Math.abs(g0 - 1) < 1e-9) return [];
+    return [[0, sbeRound(g0)], [sbeRound(n), sbeRound(g0)]];
+  }
+  return curve.map(p => [p[0], sbeRound(Math.max(0, Math.min(1, p[1] * g0)))]);
+}
+
+function sbeBedGainAt(audio, clips, filmLen, t) {
+  const curve = sbeBedGainPoints(audio, clips, filmLen);
+  if (!curve.length) return 1;
+  return sbeRound(sbeLerpGain(curve, Math.max(0, sbeNum(t))));
+}
+
+// ---- writing the mix back ----------------------------------------------
+// Same shape as `sbeAfxWrite`: a new object out, neutral fields deleted, so a
+// bed nobody has mixed is byte-identical to one from before the mix existed.
+function sbeMixWrite(audio, patch) {
+  const a = Object.assign({}, audio || {});
+  const mix = Object.assign({}, sbeAudioMix(a), patch || {});
+  const out = {};
+  if (Math.abs(mix.bed_gain - SBE_MIX_BED_GAIN) > 1e-9) out.bed_gain = sbeRound(mix.bed_gain);
+  if (!!mix.duck !== SBE_MIX_DUCK) out.duck = !!mix.duck;
+  if (Object.keys(out).length) a.mix = out; else delete a.mix;
+  return a;
+}
+
+function sbeBedAfxWrite(audio, afx) {
+  const a = Object.assign({}, audio || {});
+  const has = afx && (afx.fade_in > 1e-9 || afx.fade_out > 1e-9
+                      || (afx.points && afx.points.length));
+  if (has) a.afx = afx; else delete a.afx;
+  return a;
+}
+
+function sbeSetBedFade(audio, edge, seconds, filmLen) {
+  const n = Math.max(0, sbeBedLen(audio, filmLen));
+  const key = (edge === 'out') ? 'fade_out' : 'fade_in';
+  const afx = Object.assign({}, (audio || {}).afx || {});
+  const want = Math.max(0, Math.min(n, sbeNum(seconds)));
+  if (want > 1e-9) afx[key] = sbeRound(want); else delete afx[key];
+  return sbeBedAfxWrite(audio, afx);
+}
+
+function sbeBedPointsWrite(audio, pts, filmLen) {
+  const n = Math.max(0, sbeBedLen(audio, filmLen));
+  const afx = Object.assign({}, (audio || {}).afx || {});
+  const kept = (pts || []).slice().sort((x, y) => x[0] - y[0])
+    .map(pr => [sbeRound(Math.max(0, Math.min(n, pr[0]))),
+                sbeRound(Math.max(0, Math.min(1, pr[1])))]);
+  if (kept.length) afx.points = kept; else delete afx.points;
+  return sbeBedAfxWrite(audio, afx);
+}
+
+function sbeBedAddKeyframe(audio, t, gain, filmLen) {
+  const n = Math.max(0, sbeBedLen(audio, filmLen));
+  const at = Math.max(0, Math.min(n, sbeNum(t)));
+  const pts = sbeAfx(audio || {}, n).points.slice();
+  // A SECOND POINT ON THE SAME SECOND IS NOT A POINT — the same rule the
+  // strips follow, and for the same reason: the envelope cannot express a
+  // discontinuity and the NLEs would import the keyframes out of order.
+  for (const pr of pts) if (Math.abs(pr[0] - at) < 1e-3) return null;
+  pts.push([at, Math.max(0, Math.min(1, sbeNum(gain, 1)))]);
+  return sbeBedPointsWrite(audio, pts, filmLen);
+}
+
+function sbeBedMoveKeyframe(audio, index, t, gain, filmLen) {
+  const n = Math.max(0, sbeBedLen(audio, filmLen));
+  const pts = sbeAfx(audio || {}, n).points.slice();
+  if (!pts.length) return null;
+  const i = Math.max(0, Math.min(pts.length - 1, sbeNum(index)));
+  pts[i] = [Math.max(0, Math.min(n, sbeNum(t))),
+            Math.max(0, Math.min(1, sbeNum(gain)))];
+  return sbeBedPointsWrite(audio, pts, filmLen);
+}
+
+function sbeBedDeleteKeyframe(audio, index, filmLen) {
+  const n = Math.max(0, sbeBedLen(audio, filmLen));
+  const pts = sbeAfx(audio || {}, n).points.slice();
+  const i = sbeNum(index);
+  if (i < 0 || i >= pts.length) return null;
+  pts.splice(i, 1);
+  return sbeBedPointsWrite(audio, pts, filmLen);
+}
+
+// ---- KEYFRAMES: the control case ---------------------------------------
+// Points are STRIP-RELATIVE seconds and a linear 0..1 gain, exactly as the
+// server stores them. Adding, dragging and deleting are three ops on one
+// list, and all three go through `sbeAfx` on the way out so what the UI holds
+// is always what the three outputs will read.
+function sbeAfxWrite(clips, id, pts) {
+  const out = clips.map(x => Object.assign({}, x));
+  const t = sbeById(out, id);
+  const afx = Object.assign({}, t.afx || {});
+  const kept = (pts || []).slice().sort((a, b) => a[0] - b[0])
+    .map(pr => [sbeRound(pr[0]), sbeRound(Math.max(0, Math.min(1, pr[1])))]);
+  if (kept.length) afx.points = kept; else delete afx.points;
+  const has = afx.fade_in > 1e-9 || afx.fade_out > 1e-9
+              || (afx.points && afx.points.length);
+  if (has) t.afx = afx; else delete t.afx;
+  t.source = 'human';
+  return { clips: out, ok: true };
+}
+
+function sbeAddKeyframe(clips, id, t, gain) {
+  const c = sbeById(clips, id);
+  if (!c) return { clips: clips, ok: false, why: 'gone' };
+  if (c.locked) return { clips: clips, ok: false, why: 'locked' };
+  const w = sbeClipAudio(c);
+  const at = Math.max(0, Math.min(w.len, sbeNum(t)));
+  const pts = sbeAfx(c, w.len).points.slice();
+  // A SECOND POINT ON THE SAME SECOND IS NOT A POINT, it is a discontinuity
+  // the envelope cannot express and the NLEs would import out of order.
+  for (const pr of pts) {
+    if (Math.abs(pr[0] - at) < 1e-3) {
+      return { clips: clips, ok: false, why: 'there is already a point here' };
+    }
+  }
+  pts.push([at, Math.max(0, Math.min(1, sbeNum(gain, 1)))]);
+  return sbeAfxWrite(clips, id, pts);
+}
+
+function sbeMoveKeyframe(clips, id, index, t, gain) {
+  const c = sbeById(clips, id);
+  if (!c) return { clips: clips, ok: false, why: 'gone' };
+  if (c.locked) return { clips: clips, ok: false, why: 'locked' };
+  const w = sbeClipAudio(c);
+  const pts = sbeAfx(c, w.len).points.slice();
+  const i = Math.max(0, Math.min(pts.length - 1, sbeNum(index)));
+  if (!pts.length) return { clips: clips, ok: false, why: 'gone' };
+  pts[i] = [Math.max(0, Math.min(w.len, sbeNum(t))),
+            Math.max(0, Math.min(1, sbeNum(gain)))];
+  return sbeAfxWrite(clips, id, pts);
+}
+
+function sbeDeleteKeyframe(clips, id, index) {
+  const c = sbeById(clips, id);
+  if (!c) return { clips: clips, ok: false, why: 'gone' };
+  if (c.locked) return { clips: clips, ok: false, why: 'locked' };
+  const w = sbeClipAudio(c);
+  const pts = sbeAfx(c, w.len).points.slice();
+  const i = sbeNum(index);
+  if (i < 0 || i >= pts.length) return { clips: clips, ok: false, why: 'gone' };
+  pts.splice(i, 1);
+  return sbeAfxWrite(clips, id, pts);
+}
+
+// AFTER UNLINK, BOTH HALVES ARE FIRST-CLASS. "You can unlock the clips, but
+// you cannot unlock the clip and delete the upper part, nor delete the lower
+// part of the sound."
+//
+// DELETING THE STRIP leaves the picture playing SILENT, and that state is
+// exactly expressible today: drop the window and mute the clip. Absent
+// `audio` alone would mean LINKED, which plays the clip's own sound again —
+// the opposite of what was asked for — so the mute is what makes the silence
+// real, in the preview, the render and the export alike.
+//
+// NOT A RIPPLE. Removing a sound must not move the picture it was under, nor
+// anything after it: this is one clip's own field, and nothing reflows.
+function sbeDeleteStrip(clips, id) {
+  const c = sbeById(clips, id);
+  if (!c) return { clips: clips, ok: false, why: 'gone' };
+  if (c.locked) return { clips: clips, ok: false, why: 'locked' };
+  if (sbeKind(c) !== 'video') {
+    return { clips: clips, ok: false, why: 'only a video clip has sound' };
+  }
+  if (sbeClipMuted(c) && !sbeClipAudio(c).split) {
+    return { clips: clips, ok: false, why: 'this clip is already silent' };
+  }
+  const out = clips.map(x => Object.assign({}, x));
+  const t = sbeById(out, id);
+  delete t.audio;
+  delete t.afx;                 // an envelope with nothing to shape
+  t.mute = true;
+  t.source = 'human';
+  return { clips: out, ok: true };
+}
+
+// One audio fade, in seconds, on a clip's strip. Mirrors `sbeSetFade` so the
+// muscle memory from the picture's corner handle transfers exactly.
+function sbeSetAudioFade(clips, id, edge, seconds) {
+  const c = sbeById(clips, id);
+  if (!c) return { clips: clips, ok: false, why: 'gone' };
+  if (c.locked) return { clips: clips, ok: false, why: 'locked' };
+  const w = sbeClipAudio(c);
+  const len = Math.max(0, w.len);
+  const key = (edge === 'out') ? 'fade_out' : 'fade_in';
+  const want = Math.max(0, Math.min(len, sbeNum(seconds)));
+  const out = clips.map(x => Object.assign({}, x));
+  const t = sbeById(out, id);
+  const afx = Object.assign({}, t.afx || {});
+  if (want > 1e-9) afx[key] = sbeRound(want); else delete afx[key];
+  const has = afx.fade_in > 1e-9 || afx.fade_out > 1e-9
+              || (afx.points && afx.points.length);
+  if (has) t.afx = afx; else delete t.afx;
+  t.source = 'human';
+  return { clips: out, ok: true };
+}
+
+// ---- THE OVERLAY LANE'S MODEL -------------------------------------------
+// Overlays do NOT ripple. A card is placed where somebody wants it in the
+// finished film, so moving one moves one, and trimming one changes only its
+// own window — the picture underneath is not consulted and does not shift.
+function sbeOvKind(o) {
+  const k = String((o || {}).kind || '').toLowerCase();
+  if (k === 'still' || k === 'video') return k;
+  return /\.(png|webp|tiff?)$/i.test(String((o || {}).path || ''))
+    ? 'still' : 'video';
+}
+
+function sbeOvAt(overlays, t) {
+  const now = sbeNum(t);
+  for (const o of overlays || []) {
+    if (now >= sbeNum(o.film_start) - 1e-6 && now < sbeNum(o.film_end)) return o;
+  }
+  return null;
+}
+
+function sbeOvById(overlays, id) {
+  for (const o of overlays || []) if (o.id === id) return o;
+  return null;
+}
+
+// ONE LANE, so a move that would land on top of another card is refused
+// rather than silently stacked — the same rule the picture lane lives by.
+function sbeOvFits(overlays, id, fs, fe) {
+  for (const o of overlays || []) {
+    if (o.id === id) continue;
+    if (fs < sbeNum(o.film_end) - 1e-6 && fe > sbeNum(o.film_start) + 1e-6) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function sbeOvMove(overlays, id, filmStart) {
+  const o = sbeOvById(overlays, id);
+  if (!o) return { overlays: overlays, ok: false, why: 'gone' };
+  if (o.locked) return { overlays: overlays, ok: false, why: 'locked' };
+  const len = Math.max(SBE_MIN_CLIP, sbeNum(o.film_end) - sbeNum(o.film_start));
+  const fs = Math.max(0, sbeNum(filmStart));
+  if (!sbeOvFits(overlays, id, fs, fs + len)) {
+    return { overlays: overlays, ok: false,
+             why: 'another overlay is already there' };
+  }
+  const out = overlays.map(x => Object.assign({}, x));
+  const t = sbeOvById(out, id);
+  t.film_start = sbeRound(fs);
+  t.film_end = sbeRound(fs + len);
+  if (sbeOvKind(t) === 'still') { t.start = 0; t.end = sbeRound(len); }
+  t.source = 'human';
+  return { overlays: out, ok: true };
+}
+
+function sbeOvTrim(overlays, id, edge, filmTime) {
+  const o = sbeOvById(overlays, id);
+  if (!o) return { overlays: overlays, ok: false, why: 'gone' };
+  if (o.locked) return { overlays: overlays, ok: false, why: 'locked' };
+  let fs = sbeNum(o.film_start), fe = sbeNum(o.film_end);
+  if (edge === 'l') fs = Math.min(fe - SBE_MIN_CLIP, Math.max(0, sbeNum(filmTime)));
+  else fe = Math.max(fs + SBE_MIN_CLIP, sbeNum(filmTime));
+  if (!sbeOvFits(overlays, id, fs, fe)) {
+    return { overlays: overlays, ok: false, why: 'another overlay is there' };
+  }
+  const out = overlays.map(x => Object.assign({}, x));
+  const t = sbeOvById(out, id);
+  t.film_start = sbeRound(fs);
+  t.film_end = sbeRound(fe);
+  // A STILL IS ITS SLOT, the same synthesis a still clip gets — which is why
+  // a card is resized by dragging its edges and nothing else.
+  if (sbeOvKind(t) === 'still') { t.start = 0; t.end = sbeRound(fe - fs); }
+  t.source = 'human';
+  return { overlays: out, ok: true };
+}
+
+function sbeOvAdd(overlays, item, filmStart) {
+  const dur = Math.max(SBE_MIN_CLIP, sbeNum(item.duration_s, 0) || 3);
+  let fs = Math.max(0, sbeNum(filmStart));
+  // Land somewhere free rather than refusing: the lane is one track, and a
+  // card dropped onto another card means "after it".
+  for (let i = 0; i < (overlays || []).length + 1; i++) {
+    if (sbeOvFits(overlays, null, fs, fs + dur)) break;
+    let push = fs;
+    for (const o of overlays) {
+      if (fs < sbeNum(o.film_end) - 1e-6 && fs + dur > sbeNum(o.film_start) + 1e-6) {
+        push = Math.max(push, sbeNum(o.film_end));
+      }
+    }
+    fs = push;
+  }
+  const o = {
+    id: sbeNewId(), kind: /\.(png|webp|tiff?)$/i.test(String(item.path || ''))
+      ? 'still' : 'video',
+    path: item.path, title: item.title || '',
+    start: 0, end: sbeRound(dur),
+    film_start: sbeRound(fs), film_end: sbeRound(fs + dur),
+    source: 'human', locked: false,
+  };
+  return { overlays: (overlays || []).concat([o]), ok: true, added: o };
+}
+
+function sbeOvDelete(overlays, id) {
+  const o = sbeOvById(overlays, id);
+  if (!o) return { overlays: overlays, ok: false, why: 'gone' };
+  if (o.locked) return { overlays: overlays, ok: false, why: 'locked' };
+  // NOT A RIPPLE. Removing a card must not move the picture under it, nor the
+  // next card: the lane is a set of placements, not a queue.
+  return { overlays: (overlays || []).filter(x => x.id !== id), ok: true };
+}
+
+function sbeStripOwned(c) {
+  if (sbeKind(c) !== 'video') return false;
+  if (sbeClipMuted(c)) return false;            // muted plays from nowhere
+  return !!sbeClipAudio(c).split;
+}
+
+function sbePictureCarriesSound(c) {
+  return sbeKind(c) === 'video' && !sbeClipMuted(c) && !sbeClipAudio(c).split;
+}
+
+// EVERY STRIP AUDIBLE AT FILM SECOND `t`, and the SOURCE second each one is
+// at. More than one is the normal case across a split edit — a J-cut is two
+// sounds overlapping by construction — so this returns a list and the player
+// gives each a voice of its own. The render's concat lane resolves the same
+// overlap by trimming the outgoing tail; here they simply sum, which is what
+// the person cutting needs to hear.
+function sbeStripsAt(clips, t) {
+  const now = sbeNum(t);
+  const out = [];
+  for (const c of clips || []) {
+    if (!sbeStripOwned(c)) continue;
+    const w = sbeClipAudio(c);
+    const from = w.film_start, to = sbeRound(w.film_start + w.len);
+    if (now < from - 1e-6 || now >= to) continue;
+    out.push({ id: c.id, path: c.path || '',
+               at: sbeRound(w.start + (now - from)),
+               from: from, to: to });
+  }
+  out.sort((a, b) => (a.from - b.from) || String(a.id).localeCompare(String(b.id)));
+  return out;
+}
+
+function sbeClipAt(clips, t) {
+  for (const c of clips || []) {
+    if (t >= sbeNum(c.film_start) && t < sbeNum(c.film_end)) return c;
+  }
+  return null;
+}
+
+// The holes, recomputed locally while dragging. The server reports the same
+// list on every read (edit_gaps); this is the live copy so the track does not
+// have to round-trip to draw a hole the user just opened.
+// HALF A FRAME AT THIS SEQUENCE'S RATE, and it used to be the literal 1/48 —
+// which is half a frame at 24 fps and the wrong number at any other. It is
+// also why the header said "1 hole · 0.02s" over a film with three holes in
+// it: two were under half a frame, so this list did not contain them and
+// nothing else was counting. Sub-frame holes cannot exist any more (they are
+// closed on load and unreachable by a drag), so what this threshold means now
+// is "shorter than half a frame is float noise" — which is the only thing it
+// can honestly mean once every hole is a whole number of frames.
+function sbeHoles(clips, tolerance) {
+  const tol = (tolerance === undefined) ? 0.5 / sbeFps() : tolerance;
+  const spans = (clips || []).filter(c => sbeNum(c.film_end) > sbeNum(c.film_start))
+    .map(c => [sbeNum(c.film_start), sbeNum(c.film_end)])
+    .sort((a, b) => a[0] - b[0]);
+  const out = [];
+  let cursor = 0;
+  for (const s of spans) {
+    if (s[0] - cursor > tol) {
+      out.push({ film_start: sbeRound(cursor), film_end: sbeRound(s[0]),
+                 duration: sbeRound(s[0] - cursor) });
+    }
+    cursor = Math.max(cursor, s[1]);
+  }
+  return out;
+}
+
+// THE BEAT GRID, AND THE PROMISE NOT TO EXTRAPOLATE IT.
+//
+// beat_map() fits ONE constant tempo across a SPAN, because real tracks drift
+// and a grid fitted over eight minutes is wrong at both ends. Beats outside
+// that span do not exist — asking for one gets "no beat here" from the server,
+// and inventing one here would put a confident wrong line under someone's cut.
+function sbeBeatGrid(beats, from, to, offset) {
+  if (!beats) return [];
+  const off = sbeNum(offset);
+  const span = Array.isArray(beats.span) ? beats.span : null;
+  const lo = span ? sbeNum(span[0]) : -Infinity;
+  const hi = span ? sbeNum(span[1]) : Infinity;
+  const downs = {};
+  for (const d of (beats.downbeats || [])) downs[sbeRound(d)] = true;
+  const out = [];
+  for (const b of (beats.beats || [])) {
+    const t = sbeNum(b);
+    if (t < lo - 1e-6 || t > hi + 1e-6) continue;       // never past the fit
+    const film = sbeRound(t - off);
+    if (film < from - 1e-6 || film > to + 1e-6) continue;
+    out.push({ t: film, down: !!downs[sbeRound(t)] });
+  }
+  // A downbeat the beat list does not carry is still a downbeat.
+  for (const d of (beats.downbeats || [])) {
+    const t = sbeNum(d);
+    if (t < lo - 1e-6 || t > hi + 1e-6) continue;
+    const film = sbeRound(t - off);
+    if (film < from - 1e-6 || film > to + 1e-6) continue;
+    if (!out.some(x => Math.abs(x.t - film) < 1e-6)) out.push({ t: film, down: true });
+  }
+  out.sort((a, b) => a.t - b.t);
+  return out;
+}
+
+function sbeGridIsAGuess(beats) {
+  return !!beats && sbeNum(beats.confidence, 1) < SBE_GUESS_CONFIDENCE;
+}
+
+// Nearest beat within `tol` seconds, downbeats winning ties. `enabled` false
+// (the checkbox off, or Alt held) returns t untouched — the override has to be
+// a straight bypass or it is not an override.
+function sbeSnapTime(t, beats, tol, enabled, offset) {
+  if (!enabled || !beats) return sbeRound(t);
+  const grid = sbeBeatGrid(beats, t - tol, t + tol, offset);
+  if (!grid.length) return sbeRound(t);
+  let best = null, dist = Infinity;
+  for (const g of grid) {
+    const d = Math.abs(g.t - t);
+    if (d > tol) continue;
+    if (d < dist - 1e-9 || (Math.abs(d - dist) < 1e-9 && g.down && (!best || !best.down))) {
+      dist = d; best = g;
+    }
+  }
+  return best ? sbeRound(best.t) : sbeRound(t);
+}
+
+// ---- the four edits -------------------------------------------------------
+// Each takes the clip array and returns {clips, ok, why}. None of them touches
+// a locked clip, and every one of them stamps source:'human' — a promise the
+// server keeps in the other direction: a later re-plan can leave a human's cut
+// alone precisely because it is labelled.
+function sbeById(clips, id) {
+  for (const c of clips || []) if (c.id === id) return c;
+  return null;
+}
+
+function sbeMoveTo(clips, id, filmStart) {
+  const c = sbeById(clips, id);
+  if (!c) return { clips: clips, ok: false, why: 'gone' };
+  if (c.locked) return { clips: clips, ok: false, why: 'locked' };
+  const len = sbeLen(c);
+  const want = Math.max(0, sbeNum(filmStart));
+  const centre = want + len / 2;
+  const mark = sbeSyncMark(clips);
+  const rest = clips.filter(x => x !== c);
+  let idx = 0;
+  for (const x of rest) {
+    if (sbeNum(x.film_start) + sbeLen(x) / 2 < centre) idx++; else break;
+  }
+  rest.splice(idx, 0, c);
+  c._gap = 0;
+  sbeLayout(rest);                       // where would it land packed tight?
+  const prev = rest[rest.indexOf(c) - 1];
+  const floor = prev ? sbeNum(prev.film_end) : 0;
+  c._gap = Math.max(0, sbeRound(want - floor));
+  sbeLayout(rest);
+  // The clip being dragged is exempt: its sound stays exactly where it is,
+  // which is the J-cut. Everything the reflow pushed takes its sound along.
+  sbeSyncCarry(rest, mark, [id]);
+  c.source = 'human';
+  return { clips: rest, ok: true };
+}
+
+// Both handles follow the pointer, which is the property that makes a timeline
+// feel like a timeline. The left one moves the clip's in-point AND its slot, so
+// the tail does not move and a hole opens behind it (holes are legal here —
+// they are what the generate control fills). The right one changes the length,
+// so everything after it ripples.
+function sbeTrim(clips, id, edge, filmTime) {
+  const c = sbeById(clips, id);
+  if (!c) return { clips: clips, ok: false, why: 'gone' };
+  if (c.locked) return { clips: clips, ok: false, why: 'locked' };
+  const mark = sbeSyncMark(clips);
+  if (edge === 'l') {
+    const d = sbeNum(filmTime) - sbeNum(c.film_start);
+    let s = sbeNum(c.start) + d;
+    s = Math.max(0, Math.min(sbeNum(c.end) - SBE_MIN_CLIP, s));
+    // A HEAD TRIM MOVES THE SLOT WITH THE IN-POINT OR IT IS NOT A TRIM. The
+    // lead gap used to clamp at zero on its own, so pulling the head of a
+    // butt-joined clip further open moved `start` while `film_start` stood
+    // still: the picture SLIPPED inside its slot, the clip grew to the right
+    // instead of the left (against this function's own contract, "the tail
+    // does not move"), and an unlinked sound was left describing a frame that
+    // no longer plays under it. Trimming may not change the film→source
+    // mapping of the frames it keeps; that invariant is what makes "the sound
+    // stays put" correct rather than lucky.
+    const room = Math.max(0, sbeNum(c._gap));
+    if (s < sbeNum(c.start) - room) s = sbeRound(sbeNum(c.start) - room);
+    const applied = s - sbeNum(c.start);
+    if (Math.abs(applied) < 1e-9) return { clips: clips, ok: false, why: 'edge' };
+    c.start = sbeRound(s);
+    c._gap = Math.max(0, sbeRound(sbeNum(c._gap) + applied));
+  } else {
+    const d = sbeNum(filmTime) - sbeNum(c.film_end);
+    let e = sbeNum(c.end) + d;
+    const srcDur = sbeNum(c.duration, 0);
+    if (srcDur > 0) e = Math.min(srcDur, e);
+    e = Math.max(sbeNum(c.start) + SBE_MIN_CLIP, e);
+    if (Math.abs(e - sbeNum(c.end)) < 1e-9) return { clips: clips, ok: false, why: 'edge' };
+    c.end = sbeRound(e);
+  }
+  c.source = 'human';
+  sbeLayout(clips);
+  // The trimmed clip keeps its own mapping by construction (the head moves the
+  // slot with the in-point, the tail moves neither), so its sound must NOT be
+  // touched. A tail trim ripples everything after it, and those take theirs.
+  sbeSyncCarry(clips, mark, [id]);
+  return { clips: clips, ok: true };
+}
+
+function sbeRippleDelete(clips, id) {
+  const c = sbeById(clips, id);
+  if (!c) return { clips: clips, ok: false, why: 'gone' };
+  if (c.locked) return { clips: clips, ok: false, why: 'locked' };
+  const mark = sbeSyncMark(clips);
+  const out = clips.filter(x => x !== c);   // its lead gap leaves with it
+  sbeLayout(out);
+  sbeSyncCarry(out, mark, []);              // nothing here is a deliberate slide
+  return { clips: out, ok: true, removed: c };
+}
+
+function sbeSplitAt(clips, t, newId) {
+  const c = sbeClipAt(clips, t);
+  if (!c) return { clips: clips, ok: false, why: 'nothing there' };
+  if (c.locked) return { clips: clips, ok: false, why: 'locked' };
+  const off = sbeNum(t) - sbeNum(c.film_start);
+  if (off < SBE_MIN_CLIP || sbeLen(c) - off < SBE_MIN_CLIP) {
+    return { clips: clips, ok: false, why: 'too close to an edge' };
+  }
+  // THE SOUND IS CUT WHERE THE PICTURE IS, NOT COPIED TWICE. The deep copy
+  // below used to carry `audio` into the new half verbatim, so one strip became
+  // two claiming the same seconds of the same take — which the server refuses
+  // as `clips_audio_overlap`, and which would have played the line twice if it
+  // had not. The cut is expressed in the SOURCE clock both halves share, so
+  // each half comes out of the split at the drift it went in with.
+  const w = sbeClipAudio(c);
+  let cutA = null, cutB = null;
+  if (w.split) {
+    const sp = sbeRound(sbeNum(c.start) + off);
+    if (sp < w.start + SBE_MIN_CLIP || sp > w.end - SBE_MIN_CLIP) {
+      // The strip has been trimmed to a window this cut falls outside, so one
+      // half would end up with no sound at all — a state the document cannot
+      // express (an absent `audio` means LINKED, which would invent sound the
+      // film does not have). Say so instead of guessing.
+      return { clips: clips, ok: false,
+               why: 'the unlinked sound does not reach this cut — move the '
+                    + 'strip back or re-link it first' };
+    }
+    cutA = sbeAudioField({ start: w.start, end: sp,
+                           film_start: w.film_start }, w.coupled);
+    cutB = sbeAudioField({ start: sp, end: w.end,
+                           film_start: w.film_start + (sp - w.start) },
+                         w.coupled);
+  }
+  const mark = sbeSyncMark(clips);
+  const b = JSON.parse(JSON.stringify(c));
+  b.id = newId || sbeNewId();
+  b.start = sbeRound(sbeNum(c.start) + off);
+  b._gap = 0;
+  b.source = 'human';
+  c.end = b.start;
+  c.source = 'human';
+  if (cutA) { c.audio = cutA; b.audio = cutB; } else { delete b.audio; }
+  const out = clips.slice();
+  out.splice(out.indexOf(c) + 1, 0, b);
+  sbeLayout(out);
+  // Both halves were just given the position they are meant to have; the
+  // reflow only ever moves what is AFTER them.
+  sbeSyncCarry(out, mark, [c.id, b.id]);
+  return { clips: out, ok: true, added: b };
+}
+
+function sbeNewId() {
+  return 'k' + Math.random().toString(16).slice(2, 10) +
+         (Date.now() % 65536).toString(16);
+}
+
+// A clip the board has rendered but the timeline has never seen. `slot` is
+// where the person who ordered it wanted it — carried on the board by
+// edit/generate — so a shot generated for a hole lands in that hole rather than
+// at the end of the film.
+function sbePlaceUnplaced(clips, item, filmStart) {
+  const dur = Math.max(SBE_MIN_CLIP, sbeNum(item.duration_s, 0)
+                       || sbeNum((item.slot || {}).duration, 0) || 5);
+  const c = {
+    id: sbeNewId(), path: item.path, proxy: item.proxy || null,
+    start: 0, end: sbeRound(dur), film_start: 0, film_end: 0,
+    source: 'human', locked: false, n: item.n,
+    title: item.title || '', duration: sbeNum(item.duration_s, 0) || null,
+  };
+  const want = Math.max(0, sbeNum(filmStart));
+  const mark = sbeSyncMark(clips);
+  const out = clips.slice();
+  let idx = out.length;
+  for (let i = 0; i < out.length; i++) {
+    if (sbeNum(out[i].film_start) >= want - 1e-6) { idx = i; break; }
+  }
+  // Where the clip AFTER the hole is standing, before any of this. Filling a
+  // hole must not move the rest of the film: a shot was generated for this
+  // slot precisely so the cuts around it would stay on their beats. Every
+  // other operation here ripples; this one does not, and that is the whole
+  // difference between "fill the hole" and "insert a clip".
+  const follower = out[idx] || null;
+  const pinned = follower ? sbeNum(follower.film_start) : null;
+  out.splice(idx, 0, c);
+  c._gap = 0;
+  sbeLayout(out);
+  const prev = out[out.indexOf(c) - 1];
+  c._gap = Math.max(0, sbeRound(want - (prev ? sbeNum(prev.film_end) : 0)));
+  sbeLayout(out);
+  if (follower && pinned !== null) {
+    // If the new clip overruns where the follower stood there is no room to
+    // keep the promise, and the tail rides along rather than overlapping.
+    follower._gap = Math.max(0, sbeRound(pinned - sbeNum(c.film_end)));
+    sbeLayout(out);
+  }
+  sbeSyncCarry(out, mark, []);
+  return { clips: out, ok: true, added: c };
+}
+
+// ---------------------------------------------------------------------------
+// THE THREE KINDS
+// ---------------------------------------------------------------------------
+// ABSENT IS VIDEO, on the client for the same reason it is on the server: every
+// clip in every edit.json written before today has no `kind`, and every one of
+// them is a video. Reading the default rather than stamping it means nothing
+// has to be rewritten and a v1 document is correct the moment it loads.
+function sbeKind(c) {
+  const k = String((c && c.kind) || '').toLowerCase();
+  if (k === 'still' || k === 'slug' || k === 'video') return k;
+  // ABSENT NO LONGER MEANS VIDEO ON ITS OWN — see clip_kind() in
+  // storyboard_editor.py. A pool image can reach the picture lane unstamped,
+  // and answering "video" for a .png handed a still to a <video> element:
+  // format error, black stage, and the same mistake in the render. The
+  // overlay lane has always read the suffix here; both lanes now agree.
+  return /\.(png|jpe?g|webp|tiff?)$/i.test(String((c && c.path) || ''))
+    ? 'still' : 'video';
+}
+
+function sbeBright(c) {
+  const a = (c && c.adjust) || {};
+  return Math.max(-SBE_BRIGHT_MAX, Math.min(SBE_BRIGHT_MAX, sbeNum(a.brightness, 0)));
+}
+
+// THE PREVIEW IS AN APPROXIMATION AND SAYS SO. ffmpeg's `eq=brightness` is an
+// ADDITIVE offset; CSS `filter: brightness()` is MULTIPLICATIVE, and CSS has no
+// additive form. So the two are matched where a viewer judges exposure — at
+// mid-grey, where `0.5 + b` and `0.5 * (1 + 2b)` are the same number. The ends
+// drift, the badge says approximate, and the render is the exact one.
+function sbeBrightnessCss(b) {
+  return Math.max(0, sbeRound(1 + 2 * sbeNum(b)));
+}
+
+function sbeSetBrightness(clips, id, v) {
+  const c = sbeById(clips, id);
+  if (!c) return { clips: clips, ok: false, why: 'gone' };
+  const b = Math.max(-SBE_BRIGHT_MAX, Math.min(SBE_BRIGHT_MAX, sbeNum(v)));
+  if (Math.abs(b - sbeBright(c)) < 1e-6) return { clips: clips, ok: false, why: 'unchanged' };
+  // NEUTRAL IS ABSENT, exactly as the server normalises it: dragging back to
+  // zero must leave a clip identical to one nobody ever touched, or every clip
+  // anybody ever selected carries a dead field for the rest of its life.
+  if (Math.abs(b) < 1e-6) delete c.adjust;
+  else c.adjust = Object.assign({}, c.adjust || {}, { brightness: sbeRound(b) });
+  c.source = 'human';
+  return { clips: clips, ok: true };
+}
+
+// WHERE A DROP LANDS. The midpoint rule every NLE uses: on the left half of a
+// clip means before it, on the right half means after it — which is the only
+// reading that makes a drop exactly on a boundary unambiguous.
+function sbeDropIndex(clips, filmTime) {
+  const want = Math.max(0, sbeNum(filmTime));
+  for (let i = 0; i < (clips || []).length; i++) {
+    if (want < sbeNum(clips[i].film_start) + sbeLen(clips[i]) / 2) return i;
+  }
+  return (clips || []).length;
+}
+
+// INSERT WITH RIPPLE — the opposite of sbePlaceUnplaced, and both are right.
+// Filling a hole must NOT move the film: a shot was generated for that slot
+// precisely so the cuts around it stayed on their beats. Dropping a NEW clip
+// between two others must move it, or the drop silently overwrites whatever it
+// landed on.
+function sbeInsertAt(clips, item, filmTime) {
+  const kind = String(item.kind || 'video');
+  const dur = Math.max(SBE_MIN_CLIP,
+                       sbeNum(item.duration_s, 0) || sbeNum(item.duration, 0) || 5);
+  const c = {
+    id: sbeNewId(),
+    path: (kind === 'slug') ? null : (item.path || ''),
+    proxy: item.proxy || null,
+    start: 0, end: sbeRound(dur), film_start: 0, film_end: 0,
+    source: 'human', locked: false,
+    title: item.title || '',
+    // A still and a slug have no source clock, so they have no source
+    // duration — and a `duration` left over from a video would clamp the trim
+    // that is the only way to change how long they hold.
+    duration: (kind === 'video') ? (sbeNum(item.duration_s, 0) || null) : null,
+  };
+  if (kind !== 'video') c.kind = kind;
+  if (item.n !== undefined && item.n !== null) c.n = item.n;
+  const mark = sbeSyncMark(clips);
+  const out = clips.slice();
+  const idx = sbeDropIndex(out, filmTime);
+  out.splice(idx, 0, c);
+  c._gap = 0;                       // hard against its new neighbour
+  sbeLayout(out);                   // everything after it rides along
+  sbeSyncCarry(out, mark, []);      // ...sound included
+  return { clips: out, ok: true, added: c, index: idx };
+}
+
+// REORDER: a ripple delete and an insert, in one gesture. sbeMoveTo puts a clip
+// at a TIME and leaves a hole where it was; this puts it at a POSITION and
+// closes the hole behind it, which is what "drag to reorder" means everywhere
+// else. Both are on the same drag, told apart by Shift, because both are things
+// people want and neither can be inferred from the pointer.
+function sbeReorderTo(clips, id, filmTime) {
+  const c = sbeById(clips, id);
+  if (!c) return { clips: clips, ok: false, why: 'gone' };
+  if (c.locked) return { clips: clips, ok: false, why: 'locked' };
+  const mark = sbeSyncMark(clips);
+  const rest = clips.filter(x => x !== c);
+  const idx = sbeDropIndex(rest, filmTime);
+  rest.splice(idx, 0, c);
+  c._gap = 0;
+  sbeLayout(rest);
+  sbeSyncCarry(rest, mark, [id]);   // the clip being dragged keeps its J-cut
+  c.source = 'human';
+  return { clips: rest, ok: true, index: idx };
+}
+
+// ---- the save payload -----------------------------------------------------
+// Transient client bookkeeping (`_gap`, `_pin`) is stripped: it is derivable
+// from what is saved, and a field the server does not know is a field that
+// outlives the reason it existed.
+function sbeCleanClip(c) {
+  const out = {};
+  for (const k of Object.keys(c)) {
+    if (k.charAt(0) === '_') continue;
+    out[k] = c[k];
+  }
+  out.start = sbeRound(out.start);
+  out.end = sbeRound(out.end);
+  out.film_start = sbeRound(out.film_start);
+  out.film_end = sbeRound(out.film_end);
+  out.locked = !!out.locked;
+  out.source = (out.source === 'human') ? 'human' : 'auto';
+  const kind = sbeKind(c);
+  if (kind === 'video') {
+    delete out.kind;
+  } else {
+    out.kind = kind;
+    // SYNTHESISED, the same way normalise_edit synthesises them, so the
+    // document the client sends and the document the server writes back are
+    // the same document. Trimming a still moves its slot; the window follows.
+    out.start = 0;
+    out.end = sbeRound(Math.max(0, out.film_end - out.film_start));
+    out.duration = null;
+    if (kind === 'slug') { out.path = null; out.proxy = null; }
+  }
+  const b = sbeBright(out);
+  if (Math.abs(b) < 1e-6) delete out.adjust;
+  else out.adjust = { brightness: sbeRound(b) };
+  return out;
+}
+
+function sbeSaveBody(state) {
+  const edit = Object.assign({}, state.edit || {});
+  edit.clips = (state.clips || []).map(sbeCleanClip);
+  // The lane travels with the document. Client-only bookkeeping is stripped
+  // the same way a clip's is.
+  edit.overlays = (state.overlays || []).map(o => {
+    const out = {};
+    for (const k of Object.keys(o)) if (k.charAt(0) !== '_') out[k] = o[k];
+    return out;
+  });
+  edit.board_id = state.id;
+  const body = { id: state.id, edit: edit };
+  if (state.expect !== null && state.expect !== undefined) body.expect_revision = state.expect;
+  return body;
+}
+
+// The server answers a bad save with EVERY error at once and writes nothing, so
+// the client can light up every offending clip in one pass instead of playing
+// whack-a-mole. `where` is the index in the array we sent.
+function sbeErrorsByClip(errors, order) {
+  const out = { doc: [], byId: {} };
+  for (const e of errors || []) {
+    const w = e.where;
+    if (w === null || w === undefined || !order || !order.length || !order[w]) {
+      out.doc.push(e);
+      continue;
+    }
+    const id = order[w];
+    (out.byId[id] = out.byId[id] || []).push(e);
+  }
+  return out;
+}
+
+// Interleaved int16 over `scale`, which is how a five-minute track arrives as
+// 326 KB instead of 85 MB of Float32Array. The client draws; it never decodes.
+function sbeDecodePeaks(doc) {
+  if (!doc || !Array.isArray(doc.peaks)) return null;
+  const scale = sbeNum(doc.scale, 127) || 127;
+  const n = Math.min(sbeNum(doc.count, 0) || (doc.peaks.length >> 1),
+                     doc.peaks.length >> 1);
+  const lo = new Array(n), hi = new Array(n);
+  for (let i = 0; i < n; i++) {
+    lo[i] = sbeNum(doc.peaks[i * 2]) / scale;
+    hi[i] = sbeNum(doc.peaks[i * 2 + 1]) / scale;
+  }
+  return { count: n, lo: lo, hi: hi,
+           rate: sbeNum(doc.buckets_per_second, 100) || 100,
+           duration: sbeNum(doc.duration, 0) };
+}
+
+function sbeFmtTime(t) {
+  t = Math.max(0, sbeNum(t));
+  const m = Math.floor(t / 60);
+  const s = t - m * 60;
+  return m + ':' + (s < 10 ? '0' : '') + s.toFixed(2);
+}
+
+// ---------------------------------------------------------------------------
+// PAN AND ZOOM — the two sliders, as arithmetic
+// ---------------------------------------------------------------------------
+// Everything here is pure: seconds and pixels in, pixels out. The DOM callers
+// are sbeZoomTo / sbeZoomSlide / sbePaintHead, and the reason these are
+// separate is that "zooming keeps the playhead where it was" is the one part
+// of a timeline nobody can check by eye and everybody notices when it is
+// wrong — so it is checked in node instead. See test_storyboard_editor_ui.py.
+
+// The scale at which the WHOLE film is inside the window. This is the
+// minimum of the zoom slider, which is why a 71.6s film can never again be
+// longer than the box it is drawn in.
+function sbeZoomFitPps(span, viewport) {
+  const w = Math.max(80, sbeNum(viewport) - SBE_TL_PAD);
+  const s = Math.max(0.1, sbeNum(span));
+  return Math.max(SBE_PPS_FLOOR, w / s);
+}
+
+// The slider is logarithmic. Linear px/sec spends four fifths of its travel
+// between 100 and 200 px/sec, where nothing changes, and crosses the useful
+// range — a whole film to a single cut — in the first inch.
+function sbeZoomFromSlider(v, minPps, maxPps) {
+  const lo = Math.max(SBE_PPS_FLOOR, sbeNum(minPps, 1));
+  const hi = Math.max(lo * 1.0001, sbeNum(maxPps, SBE_PPS_MAX));
+  const f = Math.max(0, Math.min(1, sbeNum(v) / SBE_ZOOM_TICKS));
+  return lo * Math.pow(hi / lo, f);
+}
+
+function sbeZoomToSlider(pps, minPps, maxPps) {
+  const lo = Math.max(SBE_PPS_FLOOR, sbeNum(minPps, 1));
+  const hi = Math.max(lo * 1.0001, sbeNum(maxPps, SBE_PPS_MAX));
+  const p = Math.max(lo, Math.min(hi, sbeNum(pps, lo)));
+  return Math.round(Math.log(p / lo) / Math.log(hi / lo) * SBE_ZOOM_TICKS);
+}
+
+// WHAT THE VIEW HOLDS STILL WHILE THE SCALE CHANGES. The playhead if it is on
+// screen — that is the frame you are looking at and the one an NLE anchors on
+// — and the middle of the view if it is not.
+function sbeZoomAnchor(playhead, scrollLeft, viewport, pps, at) {
+  if (at !== undefined && at !== null) {
+    return { t: Math.max(0, sbeNum(at)), px: sbeNum(at) * sbeNum(pps) - sbeNum(scrollLeft) };
+  }
+  const px = sbeNum(playhead) * sbeNum(pps) - sbeNum(scrollLeft);
+  if (px >= 0 && px <= sbeNum(viewport)) return { t: Math.max(0, sbeNum(playhead)), px: px };
+  const mid = sbeNum(viewport) / 2;
+  return { t: Math.max(0, (sbeNum(scrollLeft) + mid) / Math.max(1e-6, sbeNum(pps))), px: mid };
+}
+
+// Where the scroller has to sit for `anchor.t` to land back under
+// `anchor.px` at the new scale, clamped to what there is to scroll.
+function sbeZoomScroll(anchor, pps, maxScroll) {
+  const want = sbeNum(anchor.t) * sbeNum(pps) - sbeNum(anchor.px);
+  return Math.max(0, Math.min(Math.max(0, sbeNum(maxScroll)), want));
+}
+
+// PAGE, DO NOT CHASE. A view that re-centres on every frame fights the user's
+// own panning and makes the track feel like it is sliding out from under the
+// pointer; Resolve pages when the head crosses the edge, so this does too —
+// one jump, then the head walks across a fresh screenful. Returns the CURRENT
+// scroll unchanged while the head is still on screen, which is how the caller
+// knows to leave the DOM alone.
+function sbeFollowScroll(headPx, scrollLeft, viewport, maxScroll) {
+  const sl = Math.max(0, sbeNum(scrollLeft));
+  const w = Math.max(1, sbeNum(viewport));
+  const x = sbeNum(headPx);
+  if (x >= sl && x <= sl + w - 2) return sl;
+  const lead = w * 0.12;
+  return Math.max(0, Math.min(Math.max(0, sbeNum(maxScroll)), x - lead));
+}
+
+// ---------------------------------------------------------------------------
+// THE MONITOR ROW — how two 16:9 pictures fill one strip
+// ---------------------------------------------------------------------------
+// A 16:9 pair at the asked-for 40/60 needs 2.96 px of width for every px of
+// height. No window this panel runs in has that much of both: measured at
+// 1440x900, the cut column is 1110px wide and has ~307px of height to spare,
+// and 307px of height buys a pair 886px wide. The other 224px is the rail —
+// the inspector and the unplaced strip, moved out of the vertical stack and
+// into the space the monitors cannot reach. That is what makes "fill the
+// width" true instead of aspirational.
+//
+//   * Height first: the monitors get the whole vertical budget, because
+//     height is the scarce thing and a bigger picture is what was asked for.
+//   * Then the rail gets what the pair leaves, clamped. If the leftover is
+//     wider than the clamp, the SOURCE widens toward the program — up to
+//     equal monitors and no further, since the program is the one being cut.
+//   * If the width runs out first (a tall, narrow window), the pair takes the
+//     width-derived height at exactly 40/60 and the leftover HEIGHT goes to
+//     the timeline, which is the row that grows.
+function sbeMonitorFit(width, budget, opts) {
+  const o = opts || {};
+  const gap = sbeNum(o.gap, SBE_MON_GAP);
+  const minH = sbeNum(o.minH, SBE_MON_MIN_H);
+  const pref = sbeNum(o.ratio, SBE_MON_RATIO);
+  const maxR = sbeNum(o.maxRatio, SBE_MON_RATIO_MAX);
+  const railMin = sbeNum(o.railMin, SBE_RAIL_MIN);
+  const railMax = sbeNum(o.railMax, SBE_RAIL_MAX);
+  const A = 16 / 9;
+  const total = Math.max(2 * minH * A + railMin + 2 * gap, sbeNum(width));
+  const cap = Math.max(minH, sbeNum(budget));
+  // The most the pair may ever take, and the height at which 40/60 fills it.
+  const pairMax = total - railMin - 2 * gap;
+  const wide = (pairMax - gap) / (A * (1 + pref));
+  let h, r;
+  if (wide <= cap) { h = wide; r = pref; }
+  else {
+    h = cap;
+    // Widen the source only as far as the rail's own maximum allows: past
+    // that the rail stops being leftover and starts being a panel.
+    const room = total - railMax - 2 * gap - gap;
+    r = Math.max(pref, Math.min(maxR, room / (A * h) - 1));
+  }
+  const progW = h * A;
+  const srcW = h * r * A;
+  const rail = Math.max(railMin, Math.min(railMax, total - progW - srcW - 2 * gap));
+  return { progH: h, progW: progW, srcH: h * r, srcW: srcW, ratio: r,
+           rail: rail, gap: gap, total: progW + srcW + rail + 2 * gap };
+}
+
+// ---------------------------------------------------------------------------
+// THE TIMELINE'S HEIGHT — one number, dragged from its top edge
+// ---------------------------------------------------------------------------
+// "The timeline is too constricted and cannot be expanded vertically. It needs
+// to allow you to drag the upper side of the timeline, which will change the
+// layout a little bit, enabling expansion in case you have some sound editing
+// in there."
+//
+// Nothing here resizes an element. The drag moves ONE number — how much of the
+// cut column the timeline is entitled to — and sbeFitMonitors sizes the
+// monitors off whatever is left, which is the arithmetic that was already
+// there. So up is "more track, smaller picture", down is its exact inverse,
+// and no two boxes can ever overlap or leave a gutter between them.
+
+// What the layout will allow, given what the window has left. Both ends are
+// hard: the timeline may never be shorter than its own contents, and it may
+// never take so much that the monitors stop being monitors — `max` is
+// sbeFitMonitors' measurement of that, and it is clamped again here so a
+// caller that has not measured yet cannot ask for a screenful.
+function sbeTlClamp(want, max) {
+  const hi = Math.max(SBE_TL_MIN_H,
+                      Math.min(SBE_TL_MAX_H, sbeNum(max, SBE_TL_MAX_H)));
+  return Math.round(Math.max(SBE_TL_MIN_H,
+                             Math.min(hi, sbeNum(want, SBE_TL_MIN_H))));
+}
+
+// WHERE A DRAGGED PIXEL LANDS. Every lane starts at the height it has always
+// had and takes its share of what the drag added, up to its own cap; whatever
+// a capped lane cannot take is offered again to the ones still growing, so the
+// height is spent rather than lost. Pure: px in, px out, no DOM — the
+// distribution is the whole feature and it is not checkable by eye.
+function sbeLaneHeights(tlH) {
+  const out = { ruler: 18 };
+  for (const L of SBE_LANES) out[L.key] = L.base;
+  let left = Math.max(0, Math.round(sbeNum(tlH, SBE_TL_MIN_H)) - SBE_TL_MIN_H);
+  // Four passes is one more than the number of lanes that can cap while
+  // another still has room, so this terminates with the height spent or every
+  // lane full. A `while` here would be a loop whose bound is an argument.
+  for (let pass = 0; pass < 4 && left > 0.5; pass++) {
+    let share = 0;
+    for (const L of SBE_LANES) if (out[L.key] < L.cap) share += L.share;
+    if (share <= 0) break;
+    const pool = left;
+    for (const L of SBE_LANES) {
+      if (out[L.key] >= L.cap) continue;
+      const take = Math.min(pool * (L.share / share), L.cap - out[L.key]);
+      out[L.key] += take;
+      left -= take;
+    }
+  }
+  for (const L of SBE_LANES) out[L.key] = Math.round(out[L.key]);
+  return out;
+}
+
+// THE PREFERENCE IS THIS BROWSER'S, NOT THE FILM'S. It never goes near
+// edit.json: a window height is not sequence data, writing it there would bump
+// the document's revision every time somebody dragged an edge, put one
+// machine's screen into a file two other surfaces render, and race the
+// snapshot lane for a number no renderer will ever read. localStorage is where
+// every other view preference in this panel already lives — `sbeMuted`, the
+// open document, the workflow tab.
+function sbeTlPrefRead() {
+  let v = NaN;
+  try { v = parseInt(localStorage.getItem('phos_sbe_tl_h') || '', 10); } catch (e) {}
+  return (v === v) ? sbeTlClamp(v, SBE_TL_MAX_H) : SBE_TL_MIN_H;
+}
+function sbeTlPrefWrite(px) {
+  try {
+    localStorage.setItem('phos_sbe_tl_h',
+                         String(sbeTlClamp(px, SBE_TL_MAX_H)));
+  } catch (e) {}
+}
+
+// ---------------------------------------------------------------------------
+// LOADING AND SAVING
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// THE EDITOR TAB — the surface, and which document is in it
+// ---------------------------------------------------------------------------
+// The document id is NOT the open board's id any more. It is remembered, it
+// survives a tab switch and a reload, and it can be nothing at all: an Editor
+// that only exists inside an open storyboard is an editor most clips can never
+// reach. `edDoc()` and `edRemember()` are the whole of that memory.
+function edDoc() {
+  try { return localStorage.getItem('phos_ed_doc') || ''; } catch (e) { return ''; }
+}
+function edRemember(id) {
+  try {
+    if (id) localStorage.setItem('phos_ed_doc', id);
+    else localStorage.removeItem('phos_ed_doc');
+  } catch (e) {}
+}
+
+// Exactly one of the two states is on screen: a document, or the invitation
+// to pick one. `hidden` alone, no classes — #edStage is a plain flex column.
+function edShow(which) {
+  const doc = document.getElementById('sbTimeline');
+  const empty = document.getElementById('edEmpty');
+  if (doc) doc.hidden = (which !== 'doc');
+  if (empty) empty.hidden = (which !== 'empty');
+  const stage = document.getElementById('edStage');
+  if (stage) stage.scrollTop = 0;
+}
+
+// Entering the tab. Re-entry is not re-opening: if the document is already
+// loaded it is resumed, because a tab switch is not a close.
+function edInit() {
+  if (SBE.open && SBE.id) { sbeResume(); return; }
+  const last = edDoc();
+  if (last) {
+    // A remembered id can point at a film that was deleted while the Editor
+    // was closed. Opening it must fail into the picker, not into a red box —
+    // the silent-failure restore the review flagged.
+    sbeOpen(last, { onMissing: () => { edRemember(''); edShowPicker(); } });
+    return;
+  }
+  edShowPicker();
+}
+
+// The empty state, painted from the board list. This is "pick a film / start
+// from clips": every film with something on disk, plus the pool on the left.
+async function edShowPicker() {
+  edShow('empty');
+  // With no document open "this film" has nothing in it, so the pool opens
+  // on the generations — which is the source that always has something.
+  if (ED.src === 'film') edPoolSrc('gallery'); else edPoolRefresh();
+  const box = document.getElementById('edPick');
+  if (box) box.innerHTML = '<span class="sbe-note">reading your __SEQS__…</span>';
+  let boards = [];
+  try {
+    const r = await (await fetch('/storyboard/list')).json();
+    boards = ((r && r.boards) || []).filter(b => (b.clips || 0) > 0);
+  } catch (e) { boards = []; }
+  if (!box) return;
+  if (!boards.length) {
+    box.innerHTML = '<span class="sbe-note">Nothing has been rendered yet. ' +
+      'Anything you generate — on any engine — shows up in the media pool ' +
+      'on the left, and one click puts it on the track.</span>';
+    return;
+  }
+  box.innerHTML = boards.map(b =>
+    '<button type="button" onclick="edOpenBoard(\'' + escapeHtml(b.id) + '\')">' +
+    '<svg class="ph" aria-hidden="true"><use href="#ph-film-strip"/></svg>' +
+    escapeHtml(b.title || b.id) +
+    '<span class="sub">' + (b.clips || 0) + ' clip' + ((b.clips === 1) ? '' : 's') +
+    '</span></button>').join('');
+}
+
+// The one door, from anywhere: the rail's step 3, a board row, the picker.
+function edOpenBoard(id) {
+  if (!id) return;
+  if (typeof workflowSwitch === 'function') workflowSwitch('editor');
+  sbeOpen(id);
+}
+
+function sbeOpen(id, opts) {
+  const want = String(id || SBE.id || edDoc() || '');
+  if (!want) { edShowPicker(); return; }
+  if (SBE.open && SBE.id && SBE.id !== want) sbeCloseDoc({ quiet: true });
+  SBE.open = true;
+  SBE.id = want;
+  SBE.onMissing = (opts && opts.onMissing) || null;
+  edRemember(want);
+  // The title comes off the edit payload (it always carried one). Reading it
+  // off the open board tied the Editor's header to the Storyboard's state.
+  SBE.title = (SBE.id === SB.id
+    ? ((((SB.payload || {}).board) || {}).title || '') : '') || SBE.title || 'Editor';
+  sbeEl('sbeTitle').textContent = SBE.title;
+  edShow('doc');
+  sbeSetState('loading…', '');
+  sbeLoad();
+  if (SBE.timer) clearInterval(SBE.timer);
+  SBE.timer = setInterval(sbeTick, 1500);
+  window.addEventListener('resize', sbePaint);
+  if (typeof edPoolRefresh === 'function') edPoolRefresh();
+}
+
+// Leaving the TAB. The document stays open — clips, undo stack, playhead and
+// all — and only the things that cost something while nobody is looking stop.
+function sbeSuspend() {
+  if (!SBE.open) return;
+  sbeStop();
+  sbeSrcStop();          // both screens, or the left one plays on in a tab nobody is looking at
+  if (SBE.dirty && !SBE.conflict) sbeSave(true);
+  if (SBE.timer) { clearInterval(SBE.timer); SBE.timer = null; }
+  window.removeEventListener('resize', sbePaint);
+}
+
+function sbeResume() {
+  if (!SBE.open) return;
+  edShow('doc');
+  if (SBE.timer) clearInterval(SBE.timer);
+  SBE.timer = setInterval(sbeTick, 1500);
+  window.removeEventListener('resize', sbePaint);
+  window.addEventListener('resize', sbePaint);
+  sbePaint();
+  sbeLoad(true);
+  if (typeof edPoolRefresh === 'function') edPoolRefresh();
+}
+
+// Closing the DOCUMENT. This is the only thing that drops SBE.open, and it is
+// reached from Esc, from the header's Close, and from opening another film.
+function sbeCloseDoc(opts) {
+  sbeStop();
+  sbeVersionsClose();     // a picker for a document that is gone is a lie
+  // NOT A SAVE. Leaving the tab is not the user asking for his draft to be
+  // rewritten; the backup is what catches the work, and the offer on the way
+  // back in is what returns it.
+  if (SBE.open && SBE.dirty && !SBE.conflict) {
+    // Fire-and-forget, because leaving is not a thing to be refused — but
+    // SAID OUT LOUD if it did not land, since after this the only copy of
+    // those minutes was the one that was not written.
+    const was = SBE.title || 'this draft';
+    sbeBackup(true).then(kept => {
+      if (!kept) {
+        phosToast('The unsaved changes in "' + was + '" could not be backed ' +
+                  'up before it closed. Open it again and press Save if it ' +
+                  'still has them.', { kind: 'danger', duration: 9000 });
+      }
+    });
+  }
+  if (SBE.timer) { clearInterval(SBE.timer); SBE.timer = null; }
+  if (SBE.saveTimer) { clearTimeout(SBE.saveTimer); SBE.saveTimer = null; }
+  SBE.open = false;
+  SBE.id = '';
+  SBE.clips = [];
+  SBE.undo.length = 0; SBE.redo.length = 0;
+  window.removeEventListener('resize', sbePaint);
+  if (!(opts && opts.quiet)) { edRemember(''); edShowPicker(); }
+}
+
+// Kept under its old name because it is the door Esc and the header use.
+function sbeClose() { sbeCloseDoc(); }
+
+// The film this cut belongs to, in the tab that owns films. One direction of
+// the door the rail's step 3 opens the other way.
+function sbeGoToBoard() {
+  if (!SBE.id) return;
+  if (typeof workflowSwitch === 'function') workflowSwitch('storyboard');
+  if (typeof sbOpenAt === 'function') sbOpenAt(SBE.id, 'shots');
+}
+
+// The document is gone and nothing about it is worth keeping.
+function sbeTeardown() { sbeCloseDoc({ quiet: true }); }
+
+async function sbeLoad(quiet) {
+  let r;
+  try {
+    r = await (await fetch('/storyboard/edit?id=' + encodeURIComponent(SBE.id)
+              + '&session=' + encodeURIComponent(SBE.session))).json();
+  } catch (e) {
+    if (!quiet) sbeSetState('the panel did not answer', 'dirty');
+    return;
+  }
+  if (!r || !r.ok) {
+    // THE DOCUMENT IS GONE, not broken. A remembered id whose film was
+    // deleted has to land on the picker — the Editor's own empty state — and
+    // not on an error box for a film the user never asked to open.
+    if (SBE.onMissing && r && !r.corrupt) {
+      const fn = SBE.onMissing;
+      SBE.onMissing = null;
+      SBE.open = false; SBE.id = '';
+      if (SBE.timer) { clearInterval(SBE.timer); SBE.timer = null; }
+      fn();
+      return;
+    }
+    // A corrupt edit.json is NEVER silently replaced — the server says so and
+    // the only honest thing to do is repeat it.
+    sbeShowDocError(r && r.corrupt
+      ? (r.error || 'edit.json is corrupt') + ' — nothing was overwritten. Fix or delete the file beside the board.'
+      : ((r && r.error) || 'could not read this timeline'));
+    return;
+  }
+  sbeAdopt(r, quiet);
+}
+
+function sbeAdopt(r, quiet) {
+  SBE.onMissing = null;
+  // The payload has always carried the title; the Editor now uses it, so the
+  // header names the film it is cutting rather than whatever board is open.
+  if (r.title) {
+    SBE.title = r.title;
+    const t = sbeEl('sbeTitle');
+    if (t) t.textContent = SBE.title;
+  }
+  SBE.edit = r.edit || {};
+  SBE.audio = SBE.edit.audio || null;
+  SBE.beats = SBE.edit.beats || null;
+  SBE.revision = sbeNum(SBE.edit.revision, 0);
+  SBE.proxyUrl = r.proxy_url || '';
+  SBE.unplaced = r.unplaced || [];
+  SBE.pool = r.clips || [];
+  SBE.relink = r.relink || [];
+  SBE.prepare = r.prepare || {};
+  if (r.drafts) SBE.drafts = r.drafts;
+  if (r.active_draft !== undefined) SBE.activeDraft = r.active_draft || '';
+  SBE.backup = r.backup || null;
+  SBE.backupHidden = false;          // a NEW offer is not the one dismissed
+  SBE.overlays = (SBE.edit.overlays || []).map(o => Object.assign({}, o));
+  SBE.ovSel = '';
+  SBE.clips = sbeAdoptGaps((SBE.edit.clips || []).map(c => Object.assign({}, c)));
+  sbeLayout(SBE.clips);
+  SBE.dirty = false;
+  SBE.conflict = 0;
+  SBE.errors = {};
+  sbeEl('sbeConflict').hidden = true;
+  // The auto-key receipt is about ONE placement on the timeline that was just
+  // replaced. Carrying it across a load would leave an "undo" pointing at an
+  // overlay id that is no longer in the document.
+  if (typeof sbeKeyedDismiss === 'function') sbeKeyedDismiss();
+  sbePaintNotices();
+  if (SBE.audio && SBE.audio.path && !sbeEl('sbeMusic').value) {
+    sbeEl('sbeMusic').value = SBE.audio.path;
+  }
+  sbePaintMusicName();
+  // The saved mode wins over the control's default, or reopening a film would
+  // silently re-arm `replace` on a timeline that was mixed `under`.
+  sbeSetMusicMode((SBE.audio && SBE.audio.mode) || 'under');
+  sbeSetState(r.generated ? 'cut by the auto-editor' : 'saved · revision ' + SBE.revision,
+              'saved');
+  sbeSyncMusic();
+  sbePaintDraft();
+  sbePaintRecovery();
+  sbePaintRelink();
+  if (ED.src === 'film') edPoolRefresh();
+  sbeFetchPeaks();
+  sbePaint();
+  // Land on a picture, not on black. A timeline that opens dark reads as
+  // broken for the second and a half before the first click.
+  if (!SBE.playing && !SBE.drag) sbeShowFrameAt(SBE.playhead);
+  if (!quiet && r.generated) {
+    phosToast('No timeline existed, so the auto-editor cut one — every shot at its best window, on the beat.',
+              { duration: 7000 });
+  }
+}
+
+async function sbeFetchPeaks() {
+  try {
+    const res = await fetch('/storyboard/edit/peaks?id=' + encodeURIComponent(SBE.id));
+    if (!res.ok) { SBE.peaks = null; SBE.peaksFor = ''; sbePaint(); return; }
+    const doc = await res.json();
+    SBE.peaks = sbeDecodePeaks(doc);
+    SBE.peaksFor = String(doc.path || '');
+    // THE WAVEFORM EXISTS BEFORE THE EDIT KNOWS ABOUT IT. `prepare` writes
+    // peaks.json beside the board; only an auto-edit writes the soundtrack
+    // INTO edit.json. Showing an empty strip over a track that is right there
+    // would be the UI lying about the server's own state — so the axis comes
+    // off the peaks document, which carries its own path and duration. This
+    // does NOT touch SBE.edit, so nothing here can be saved as if the
+    // arrangement had a soundtrack it was never cut to.
+    if (!SBE.audio && doc && doc.path) {
+      SBE.audio = { path: String(doc.path), offset: 0, peaks: 'peaks.json',
+                    duration: sbeNum(doc.duration) };
+      if (!sbeEl('sbeMusic').value) {
+        sbeEl('sbeMusic').value = String(doc.path);
+        sbePaintMusicName();
+      }
+    }
+  } catch (e) { SBE.peaks = null; SBE.peaksFor = ''; }
+  sbePaint();
+}
+
+// The soundtrack row, as a name. `sbeMusic` is still the input every other
+// caller reads and writes — this only decides which of the two is on screen.
+function sbeMusicEditPath(on) {
+  const row = sbeEl('sbePrepare');
+  if (row && row.classList) row.classList.toggle('is-editing', !!on);
+  if (on) { const b = sbeEl('sbeMusic'); if (b && b.focus) { try { b.focus(); b.select(); } catch (e) {} } }
+  else sbePaintMusicName();
+}
+
+function sbePaintMusicName() {
+  // `sbeMusicPath`, NOT `sbeMusicName` — the latter is the label painted onto
+  // the music BLOCK down on the timeline, and two elements answering to one
+  // id is one element and one bug.
+  const el = sbeEl('sbeMusicPath');
+  if (!el) return;
+  const full = String((sbeEl('sbeMusic') || {}).value || '');
+  const base = full.split('/').pop() || '';
+  el.textContent = base || 'no soundtrack';
+  el.title = full || 'No soundtrack yet — press Change… to point at one';
+}
+
+// "PROTECTED 4s AGO", or the truth when it is not. Painted from the tick, so
+// the number is the real age and not the age it had when something last
+// happened to call a setter.
+function sbePaintProtected() {
+  const el = sbeEl('sbeProtected');
+  if (!el) return;
+  if (!SBE.open || !SBE.id) { el.hidden = true; return; }
+  const age = SBE.backedUpAt ? Math.round((Date.now() - SBE.backedUpAt) / 1000) : null;
+  // COLD IS "THERE IS UNSAVED WORK AND THE NET HAS NOT CAUGHT THIS TAB", and
+  // it is deliberately the SAME threshold the watchdog alarms on, so the chip
+  // and the banner can never disagree. Stated against `backedUpAt` rather than
+  // against `dirtyAt`: the outage this exists for froze `dirtyAt` in the past
+  // while `backedUpAt` stayed ahead of it, and every test written in terms of
+  // that pair read "protected" for seven hours. How long ago the net actually
+  // caught this tab cannot be faked by a stuck flag.
+  const cold = SBE.dirty && (!SBE.backedUpAt
+            || (Date.now() - SBE.backedUpAt) > SBE_SAVE_GRACE_MS);
+  let text;
+  if (age === null) text = SBE.dirty ? 'not backed up yet' : '';
+  else if (age < 60) text = 'protected ' + age + 's ago';
+  else text = 'protected ' + Math.round(age / 60) + 'm ago';
+  if (cold) text = 'NOT PROTECTED — ' + text;
+  // A SECOND EDITOR IS INFORMATION, NEVER A REASON TO STOP. It used to be the
+  // reason this tab stopped writing entirely.
+  if (SBE.otherEditor) text = (text ? text + ' · ' : '') + 'also open elsewhere';
+  el.textContent = text;
+  el.hidden = !text;
+  el.classList.toggle('is-cold', !!cold);
+}
+
+function sbeSetState(text, kind) {
+  const el = sbeEl('sbeState');
+  if (!el) return;
+  sbeEl('sbeStateText').textContent = text;
+  el.classList.toggle('is-dirty', kind === 'dirty');
+  el.classList.toggle('is-saved', kind === 'saved');
+  el.classList.toggle('is-alarm', kind === 'alarm');
+  // The dot beside the draft's name agrees with the chip, always — two
+  // indicators that can disagree are one indicator and one bug.
+  if (typeof sbePaintDraft === 'function') sbePaintDraft();
+  if (typeof sbePaintProtected === 'function') sbePaintProtected();
+}
+
+function sbeShowDocError(msg) {
+  const box = sbeEl('sbeErrors');
+  box.hidden = false;
+  box.innerHTML = '<b>' + escapeHtml(String(msg)) + '</b>';
+  sbeSetState('not saved', 'dirty');
+}
+
+// Every mutation goes through here: one undo snapshot, one layout, one repaint,
+// one debounced save. Nothing else is allowed to touch SBE.clips, which is why
+// undo can be a straight array of snapshots rather than a command log.
+// ONE UNDO STEP, WHATEVER MOVED. The stack used to hold a bare array of
+// clips, which was true for exactly as long as the arrangement was only
+// clips: the soundtrack is an object on the timeline now, and an object you
+// cannot ⌘Z is half an object. A snapshot carries both. The array form is
+// still accepted on the way back in, because a clip drag takes its own
+// snapshot at pointerdown and there is no reason to make it carry audio it
+// cannot change.
+// THE SNAPSHOT IS OF THE TIMELINE, NOT OF THE DOCUMENT. It used to read
+// `SBE.edit.audio`, and `sbeFetchPeaks` deliberately fills `SBE.audio`
+// WITHOUT touching the document — a soundtrack discovered from peaks.json is
+// on the timeline before the arrangement was ever cut to it. So on a film
+// that was Prepared but never auto-edited, the snapshot carried `audio: null`
+// and one ⌘Z of any clip edit deleted the track: the block vanished, the
+// preview bed went silent, and redo could not bring it back because the redo
+// stack had been handed the same null. Only a reload restored it.
+function sbeSnapshot(audio) {
+  return JSON.stringify({
+    clips: SBE.clips,
+    // THE LANE IS PART OF THE ARRANGEMENT, so undo and redo cover it. Without
+    // this a card placed and then undone would stay on screen while the
+    // pictures walked back without it.
+    overlays: SBE.overlays || [],
+    audio: (audio === undefined)
+      ? (SBE.audio || (SBE.edit && SBE.edit.audio) || null) : audio,
+  });
+}
+
+function sbeRestore(json) {
+  const s = JSON.parse(json);
+  if (Array.isArray(s)) { SBE.clips = s; return; }
+  SBE.clips = s.clips || [];
+  // An older snapshot (one taken before the lane existed) carries no
+  // `overlays`, and restoring `undefined` over a live lane would delete a
+  // card nobody asked to remove — absent means "unchanged", not "empty".
+  if (s.overlays !== undefined) SBE.overlays = s.overlays || [];
+  SBE.edit = SBE.edit || {};
+  // ...and a restore never COMMITS a discovered track into the document. The
+  // arrangement owns a soundtrack only once somebody has placed it (see
+  // sbeApplyMusic); undoing a trim must not be what saves one.
+  if (SBE.edit.audio) SBE.edit.audio = s.audio || null;
+  SBE.audio = s.audio || null;
+}
+
+// The overlay lane's own door, and it is the same door: one undo step, one
+// dirty flag, one queued snapshot. `sbeMutate` works on clips; this works on
+// the lane, and both push the SAME snapshot shape so undo walks either.
+function sbeOvMutate(fn) {
+  const before = sbeSnapshot();
+  const res = fn(SBE.overlays || []);
+  if (!res || res.ok === false) {
+    if (res && res.why) phosToast(res.why, {});
+    return false;
+  }
+  SBE.undo.push(before);
+  if (SBE.undo.length > SBE_UNDO_MAX) SBE.undo.shift();
+  SBE.redo.length = 0;
+  SBE.overlays = res.overlays;
+  SBE.dirty = true;
+  sbeSetState('unsaved changes', 'dirty');
+  sbePaint();
+  sbeQueueSave();
+  // The mutation's own result, so a caller that needs to talk ABOUT what it
+  // added — the auto-key notice needs the id to be able to undo it — does not
+  // have to guess which row is new.
+  return res;
+}
+
+function sbeOvAddAt(item, at) {
+  const res = sbeOvMutate(os => sbeOvAdd(os, item, at));
+  if (!res) return null;
+  phosToast('Overlay added — it composites over the picture. Drag it along '
+            + 'the lane, pull either end for its length, and fade it in from '
+            + 'Effects.', { duration: 7000 });
+  return res.added || null;
+}
+
+// THE ONE PLACE A KEYED OVERLAY GOES BACK TO THE FILE IT CAME FROM.
+// "Keep original" is a normal edit — one undo step, one dirty flag — because
+// it is a decision the user made, and every other decision in this editor is
+// undoable. The original was never modified, so this is a pointer swap.
+function sbeOvSetPath(overlays, id, path) {
+  const o = sbeOvById(overlays, id);
+  if (!o) return { overlays: overlays, ok: false, why: 'gone' };
+  const out = overlays.map(x => Object.assign({}, x));
+  sbeOvById(out, id).path = path;
+  return { overlays: out, ok: true };
+}
+
+function sbeOvDeleteSel() {
+  if (!SBE.ovSel) return;
+  const id = SBE.ovSel;
+  const ok = sbeOvMutate(os => sbeOvDelete(os, id));
+  if (ok) { SBE.ovSel = ''; sbePaint(); }
+}
+
+function sbeMutate(fn) {
+  const before = sbeSnapshot();
+  const res = fn(SBE.clips);
+  if (!res || res.ok === false) {
+    if (res && res.why === 'locked') phosToast('That shot is locked.', {});
+    else if (res && res.why) phosToast(res.why, {});
+    return false;
+  }
+  SBE.undo.push(before);
+  if (SBE.undo.length > SBE_UNDO_MAX) SBE.undo.shift();
+  SBE.redo.length = 0;
+  SBE.clips = res.clips;
+  SBE.dirty = true;
+  sbeSetState('unsaved changes', 'dirty');
+  sbePaint();
+  sbeQueueSave();
+  return true;
+}
+
+function sbeUndo() {
+  if (!SBE.undo.length) return;
+  SBE.redo.push(sbeSnapshot());
+  sbeRestore(SBE.undo.pop());
+  SBE.dirty = true;
+  sbeSetState('unsaved changes', 'dirty');
+  sbePaint();
+  sbeQueueSave();
+}
+
+function sbeRedo() {
+  if (!SBE.redo.length) return;
+  SBE.undo.push(sbeSnapshot());
+  sbeRestore(SBE.redo.pop());
+  SBE.dirty = true;
+  sbeSetState('unsaved changes', 'dirty');
+  sbePaint();
+  sbeQueueSave();
+}
+
+// NOTHING WRITES THE USER'S DRAFT BUT THE USER. The owner, after losing an
+// afternoon to a save he could not see: "it's better that the user has the
+// power to manage this feature... he should have control over the saving, and
+// only he should have that control. You can keep a backup in case it's
+// needed."
+//
+// So this — the lane every mutation calls — no longer saves. It writes a
+// CRASH BACKUP to a file beside the draft, which never lands on edit.json and
+// never moves a revision. The Save button is the only thing that writes the
+// document he named, and the only thing that can change what he gets back.
+function sbeQueueSave() {
+  // THE WATCHDOG'S CLOCK IS ARMED FIRST, BEFORE ANY EARLY RETURN CAN SKIP IT.
+  // This line used to sit UNDER `if (SBE.superseded) return`, and that one
+  // line's position is the whole of a seven-hour outage: once a tab was
+  // superseded, `dirtyAt` froze at its last pre-supersede value while
+  // `backedUpAt` stayed AHEAD of it, so the 12-second watchdog's
+  // `backedUpAt < dirtyAt` test read "this work is backed up" forever and the
+  // alarm it exists to raise could never fire. Nothing may be allowed to
+  // return from this function without first recording that there is unwritten
+  // work and when it appeared.
+  if (!SBE.dirtyAt) SBE.dirtyAt = Date.now();
+  if (SBE.saveTimer) clearTimeout(SBE.saveTimer);
+  SBE.saveTimer = setTimeout(() => { SBE.saveTimer = null; sbeBackup(); }, 1400);
+}
+
+// The backup. Same payload the save sends, a different door, and it answers
+// to nobody: no expect_revision (it cannot conflict with anything), no adopt
+// (it changes nothing on screen), no toast when it works.
+// TRUE MEANS "WHAT IS ON SCREEN IS ALSO SOMEWHERE ELSE" — and it is the
+// answer callers act on, so every path that does NOT write says false. Three
+// of them used to return `undefined`, which `sbeDraftOp` read as fine and
+// then cleared `dirty` on.
+async function sbeBackup(quiet) {
+  if (!SBE.open || !SBE.id) return false;
+  // A POST already in flight carries the state it was built from, not the
+  // edit that arrived since — so it is not this call landing.
+  if (SBE.backingUp) return false;
+  // THE LANE NEVER STOPS. It used to refuse while an offer was unanswered —
+  // there was exactly ONE backup file per draft, so writing a new one would
+  // have destroyed the work the offer was holding. The cure was worse than
+  // the disease: a chip nobody dismissed switched the safety net off for the
+  // rest of the session, silently. The lane is versioned now (one file per
+  // snapshot, pruned), so a new snapshot cannot eat an old one and there is
+  // nothing left to guard. See docs/EDITOR_SAVE_MODEL.md §2.
+  if (SBE.saveTimer) { clearTimeout(SBE.saveTimer); SBE.saveTimer = null; }
+  SBE.backingUp = true;
+  let r;
+  try {
+    const body = sbeSaveBody({ id: SBE.id, edit: SBE.edit, clips: SBE.clips,
+                               overlays: SBE.overlays, expect: null });
+    // WHICH DRAFT THIS WAS COMPOSED FROM. The server files the backup under
+    // the draft that is active when the write LANDS, and this one is
+    // debounced — so without the name in the body, a backup of the draft you
+    // just left is offered back as the unsaved work of the one you opened.
+    body.draft = SBE.activeDraft || '';
+    body.session = SBE.session;
+    const res = await fetch('/storyboard/edit/backup', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body) });
+    r = await res.json();
+  } catch (e) {
+    r = { ok: false, error: String(e) };
+  } finally {
+    SBE.backingUp = false;
+  }
+  if (r && r.ok) {
+    SBE.backedUpAt = Date.now();
+    // Somebody else is editing this film too. Worth saying; never worth
+    // stopping for.
+    const cur = (r.session || {}).token || '';
+    SBE.otherEditor = (cur && cur !== SBE.session) ? cur : '';
+    sbeSaveAlarmClear();
+    sbePaintProtected();
+    return true;
+  }
+  // A REFUSED SNAPSHOT IS THE SAFETY NET OFF, whatever the reason given.
+  // `stale_session` used to be handled HERE as a special non-failure: the tab
+  // set a flag, cleared the alarm, showed one 9-second toast and never wrote
+  // again. The state line it set was overwritten by the very next edit, so a
+  // tab that had stopped protecting its user looked completely normal — the
+  // same class as the `if (SBE.backup) return false` this file already had to
+  // delete. The server no longer refuses on session; if some future build
+  // does, it falls through to the alarm below like every other failure, and
+  // the alarm does not go away until a write lands.
+  // A BACKUP THAT IS NOT BEING WRITTEN IS THE SAFETY NET GONE, and the user
+  // cannot tell by looking. It is the same alarm because it is the same
+  // sentence: what is on screen is not anywhere else.
+  sbeSaveAlarm('the crash backup is not being written (' +
+               ((r && r.error) || 'the panel did not answer') +
+               ') — press Save');
+  return false;
+}
+
+// THE OUTER HALF OF SAVING, AND IT EXISTS BECAUSE OF A REAL LOSS. The owner
+// cut for twenty minutes and nothing reached the disk: edit.json sat frozen
+// while he kept working, and the only thing on screen that knew was a small
+// grey chip. Two defects made that possible and both are closed here.
+//
+// ONE — `if (SBE.saving) return` DROPPED THE SAVE. A debounced save that
+// arrived while another was in flight simply vanished: `SBE.dirty` stayed
+// true, no timer was left pending, and that edit was never written again
+// unless the user happened to touch the film once more. Now it is remembered
+// and re-queued the moment the one in flight lands.
+//
+// TWO — THE FLAG COULD STICK. `SBE.saving = false` sat on the happy path,
+// after code that can throw (the payload is built before the fetch). One
+// throw and the editor stops saving FOREVER, silently, for the rest of the
+// session. `finally` is the whole fix, and it is the difference between an
+// error and a lost afternoon.
+async function sbeSave(quiet, force) {
+  if (!SBE.open) return;
+  // WHAT KIND OF WRITE IS PENDING, not just that one is. `sbeQueueSave` no
+  // longer saves — it schedules a crash BACKUP — so remembering a dropped
+  // save as a bare `true` and re-queuing through that lane turned the second
+  // of two rapid Save presses into a backup write, leaving edit.json at the
+  // older revision with the alarm reading clear.
+  if (SBE.saving) { SBE.savePending = quiet ? 'backup' : 'save'; return 'busy'; }
+  if (SBE.saveTimer) { clearTimeout(SBE.saveTimer); SBE.saveTimer = null; }
+  SBE.saving = true;
+  let ok = false;
+  try {
+    ok = await sbeSaveInner(quiet, force);
+  } catch (e) {
+    // A throw here is the case that used to wedge the flag. It is also the
+    // one nothing on screen could have told you about.
+    sbeSaveAlarm('the editor could not build the save (' +
+                 ((e && e.message) || String(e)) + ')');
+  } finally {
+    SBE.saving = false;
+    const again = SBE.savePending;
+    SBE.savePending = false;
+    if (again && SBE.dirty && !SBE.conflict) {
+      if (again === 'save') sbeSave(quiet, force);
+      else sbeQueueSave();
+    }
+  }
+  return ok;
+}
+
+// THE ALARM. A save that is not happening is not a status, it is an
+// emergency: everything on screen is about to be lost and only this says so.
+// It survives until a save actually lands — no timeout, no fade — because the
+// failure it reports survives too.
+function sbeSaveAlarm(why) {
+  SBE.saveFailed = why || 'the panel did not store your changes';
+  const box = sbeEl('sbeAlarm');
+  if (box) {
+    box.hidden = false;
+    sbeEl('sbeAlarmWhy').textContent = SBE.saveFailed;
+  }
+  sbePaintNotices();
+  sbeSetState('NOT SAVED', 'alarm');
+}
+
+function sbeSaveAlarmClear() {
+  if (!SBE.saveFailed) return;
+  SBE.saveFailed = '';
+  const box = sbeEl('sbeAlarm');
+  if (box) box.hidden = true;
+  if (SBE.noticeLead === 'sbeAlarm') SBE.noticeLead = '';
+  sbePaintNotices();
+}
+
+async function sbeSaveInner(quiet, force) {
+  const order = SBE.clips.map(c => c.id);
+  SBE.sentOrder = order;
+  const body = sbeSaveBody({ id: SBE.id, edit: SBE.edit, clips: SBE.clips,
+                             overlays: SBE.overlays,
+                             expect: force ? null : SBE.revision });
+  let r;
+  try {
+    const res = await fetch('/storyboard/edit/save', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body) });
+    r = await res.json();
+    r._status = res.status;
+  } catch (e) {
+    r = { ok: false, error: String(e), _status: 0 };
+  }
+  if (r.ok) {
+    SBE.errors = {};
+    sbeEl('sbeErrors').hidden = true;
+    // Adopt the server's copy of the document, but NOT its clip array — the
+    // user may have moved something in the milliseconds the save was in
+    // flight, and throwing that away is the one thing an editor must never do.
+    SBE.edit = Object.assign({}, r.edit || {}, { clips: SBE.edit.clips || [] });
+    SBE.revision = sbeNum((r.edit || {}).revision, SBE.revision + 1);
+    SBE.unplaced = r.unplaced || [];
+    SBE.prepare = r.prepare || SBE.prepare;
+    SBE.dirty = false;
+    SBE.conflict = 0;
+    sbeEl('sbeConflict').hidden = true;
+  sbePaintNotices();
+    SBE.dirtyAt = 0;
+    // A SAVE IS THE USER ANSWERING THE OFFER. The server deletes the backup
+    // on a successful save, so this follows it rather than deciding on its
+    // own — and clearing it is what brings the crash lane back to life:
+    // sbeBackup refuses to write while an offer is unanswered, so a film that
+    // opened with one used to lose its safety net for the whole session and
+    // then be told, every twelve seconds, that saving was failing.
+    SBE.backup = r.backup || null;
+  SBE.backupHidden = false;          // a NEW offer is not the one dismissed
+    sbePaintRecovery();
+    // The drafts rows carry clip counts and "saved N min ago" — the first
+    // thing a user checks after saving is the panel that reports on saving.
+    if (r.drafts) { SBE.drafts = r.drafts; sbePaintDraft(); }
+    sbeSaveAlarmClear();
+    sbeSetState('saved · revision ' + SBE.revision, 'saved');
+    sbePaint();
+    return true;
+  }
+  if (r._status === 409 && r.conflict) {
+    // Honest, and it does not choose for you: another tab is ahead, your
+    // arrangement is still on this screen, and both ways out are one click.
+    SBE.conflict = sbeNum(r.revision, 0);
+    sbeEl('sbeConflict').hidden = false;
+    sbePaintNotices();
+    sbeEl('sbeConflictText').textContent =
+      'Another tab saved this timeline (it is at revision ' + SBE.conflict +
+      ', you started from ' + SBE.revision + '). Nothing here has been lost.';
+    sbeSaveAlarm('another tab is at revision ' + SBE.conflict +
+                 ' and this one is not being stored — choose which arrangement wins');
+    return false;
+  }
+  if (Array.isArray(r.errors) && r.errors.length) {
+    SBE.errors = sbeErrorsByClip(r.errors, order);
+    SBE.errors.all = r.errors || [];
+    sbeRenderErrors(r.errors);
+    sbeSaveAlarm(r.errors.length + ' problem' + (r.errors.length === 1 ? '' : 's') +
+                 ' in the timeline — nothing was written');
+    sbePaint();
+    return false;
+  }
+  // LOUD WHETHER OR NOT ANYBODY ASKED. This branch used to be silent for the
+  // autosave — `if (!quiet)` — which is precisely the path that runs while
+  // somebody is working and precisely the path that lost twenty minutes.
+  sbeSaveAlarm(r.error || 'the panel did not answer the save');
+  if (!quiet) phosToast(r.error || 'Could not save the timeline.', { kind: 'danger' });
+  return false;
+}
+
+function sbeRenderErrors(errors) {
+  const box = sbeEl('sbeErrors');
+  if (!errors || !errors.length) {
+    box.hidden = true; box.innerHTML = '';
+    if (SBE.noticeLead === 'sbeErrors') SBE.noticeLead = '';
+    sbePaintNotices();
+    return;
+  }
+  box.hidden = false;
+  // THE FIRST SENTENCE, THEN THE REST ON REQUEST. Nine clips failing the same
+  // rule printed nine lines of the same sentence and pushed the timeline off
+  // the screen; the one thing the reader needs is what is wrong and how many
+  // are wrong with it.
+  const rest = errors.length - 1;
+  box.innerHTML = '<b>The timeline was not saved.</b><ul>' +
+    errors.map((e, i) => '<li' + (i && !SBE.errsOpen ? ' hidden' : '') + '>' +
+      escapeHtml(e.message || e.code || '') + '</li>').join('') +
+    '</ul>' +
+    (rest > 0
+      ? '<button type="button" class="ghost-btn" onclick="sbeErrsToggle()">'
+        + (SBE.errsOpen ? 'Show less' : escapeHtml('and ' + rest + ' more'))
+        + '</button>'
+      : '');
+  sbePaintNotices();
+}
+
+function sbeErrsToggle() {
+  SBE.errsOpen = !SBE.errsOpen;
+  sbeRenderErrors(SBE.errors && SBE.errors.all);
+}
+
+async function sbeTakeTheirs() {
+  SBE.conflict = 0;
+  SBE.dirty = false;
+  sbeEl('sbeConflict').hidden = true;
+  sbePaintNotices();
+  await sbeLoad();
+  phosToast('Loaded the other tab\'s arrangement.', {});
+}
+
+async function sbeForceSave() {
+  const ok = await sbeSave(false, true);
+  if (ok) phosToast('Saved over the other tab\'s version.', { kind: 'success' });
+}
+
+// ---------------------------------------------------------------------------
+// SAVE, SAID OUT LOUD — and the versions behind it
+// ---------------------------------------------------------------------------
+// The autosave stays SILENT: it fires a second after every drag, and a toast
+// on each one would be a notification storm that teaches you to ignore
+// notifications. The button is the opposite — it is pressed by somebody who
+// wants to be told it worked, so it says which revision they now have.
+async function sbeSaveNow() {
+  const ok = await sbeSave(false);
+  if (ok) {
+    phosToast('Saved — revision ' + SBE.revision, { kind: 'success' });
+  } else if (ok === 'busy') {
+    // Two very different reasons used to arrive as the same `undefined`, and
+    // this is the one where telling somebody their work needed no saving is
+    // exactly wrong: it is unwritten and a save is on its way.
+    phosToast('A save is already on its way — this one will follow it.', {});
+  } else if (ok === undefined) {
+    phosToast('Nothing to save yet.', {});
+  }
+}
+
+// "4 minutes ago", in the smallest unit that still reads as a duration. Pure,
+// and `now` is a parameter so the gate is not a clock race.
+function sbeAgo(when, now) {
+  const t = sbeNum(when, 0);
+  if (!t) return '';
+  const d = Math.max(0, sbeNum(now, Date.now() / 1000) - t);
+  if (d < 45) return 'just now';
+  if (d < 5400) return Math.round(d / 60) + ' min ago';
+  if (d < 172800) return Math.round(d / 3600) + ' h ago';
+  return Math.round(d / 86400) + ' d ago';
+}
+
+// One row of the picker, as the two strings it shows. Pure so the wording is
+// a gate rather than something to squint at in a screenshot.
+function sbeVersionLine(v, now) {
+  const row = v || {};
+  // THE FALLBACK FOLLOWS THE LANE. The split exists to separate the user's
+  // decisions from the machine's, and then labelled his decisions with the
+  // machine's word: the lane headed YOUR SAVES OF THIS DRAFT listed rows
+  // called "autosave", which is the one word that means "not yours".
+  const name = row.label ? String(row.label)
+    : (row.readable === false ? 'unreadable'
+       : (row.manual ? 'Save' : 'autosave'));
+  const bits = [];
+  if (row.revision !== null && row.revision !== undefined) {
+    bits.push('revision ' + sbeNum(row.revision, 0));
+  }
+  if (row.clips !== null && row.clips !== undefined) {
+    bits.push(sbeNum(row.clips, 0) + (sbeNum(row.clips, 0) === 1 ? ' clip' : ' clips'));
+  }
+  if (sbeNum(row.duration, 0) > 0) bits.push(sbeFmtTime(row.duration));
+  const ago = sbeAgo(row.archived_at || row.saved_at, now);
+  if (ago) bits.push(ago);
+  return { name: name, meta: bits.join(' · '),
+           kept: !!row.kept, bad: row.readable === false };
+}
+
+function sbeVersionsEl() {
+  const el = sbeEl('sbeVersions');
+  // PORTAL, on first open. The header and the stage column both carry
+  // overflow, so a panel left where it was declared is sliced at their edge.
+  if (el && el.parentElement !== document.body) document.body.appendChild(el);
+  return el;
+}
+
+function sbeVersionsClose() {
+  const el = sbeEl('sbeVersions');
+  if (el) el.hidden = true;
+}
+
+async function sbeVersionsOpen(focusName) {
+  if (!SBE.open || !SBE.id) {
+    phosToast('Open a __SEQ__ first — versions belong to a timeline.', {});
+    return;
+  }
+  const el = sbeVersionsEl();
+  if (!el) return;
+  // A SECOND PRESS CLOSES IT. Every other popover in this panel toggles;
+  // this one re-positioned itself and fired another /versions fetch.
+  const from = focusName ? 'keep' : 'vers';
+  if (!el.hidden && el.dataset.from === from) { sbeVersionsClose(); return; }
+  el.dataset.from = from;
+  const trig = sbeEl(focusName ? 'sbeKeepBtn' : 'sbeVersBtn');
+  const r = trig ? trig.getBoundingClientRect() : { bottom: 60, right: 400 };
+  el.hidden = false;
+  el.style.top = (r.bottom + 6) + 'px';
+  el.style.left = Math.max(8, Math.min(window.innerWidth - 408,
+                                       r.right - 400)) + 'px';
+  if (focusName) {
+    const q = sbeEl('sbeVersName');
+    if (q && q.focus) { try { q.focus(); q.select(); } catch (e) {} }
+  }
+  await sbeVersionsLoad();
+}
+
+async function sbeVersionsLoad() {
+  const list = sbeEl('sbeVersList');
+  if (list) list.innerHTML = '<div class="sbe-vers-empty">Reading the history…</div>';
+  let r;
+  try {
+    r = await (await fetch('/storyboard/edit/versions?id=' +
+                           encodeURIComponent(SBE.id))).json();
+  } catch (e) { r = { ok: false, error: String(e) }; }
+  if (!r || !r.ok) {
+    if (list) {
+      list.innerHTML = '<div class="sbe-vers-empty">' +
+        escapeHtml((r && r.error) || 'could not read this __SEQ__\'s history') +
+        '</div>';
+    }
+    return;
+  }
+  sbeVersionsPaint(r.versions || [], sbeNum(r.keep, 50));
+}
+
+function sbeDraftsPaint() {
+  const list = sbeEl('sbeDraftList');
+  if (!list) return;
+  const rows = SBE.drafts || [];
+  list.innerHTML = '<div class="sbe-vers-head">This __SEQCAP__\'s drafts</div>' +
+    rows.map(d => {
+      const meta = [sbeNum(d.clips, 0) + ' clip' + (sbeNum(d.clips, 0) === 1 ? '' : 's')];
+      if (sbeNum(d.duration, 0) > 0) meta.push(sbeFmtTime(d.duration));
+      if (d.saved_at) meta.push('saved ' + sbeAgo(d.saved_at));
+      else meta.push('never saved');
+      return '<div class="sbe-vers-row' + (d.active ? ' is-active' : '') + '">' +
+        '<span class="sbe-vr-main">' +
+        '<span class="sbe-vr-name">' + escapeHtml(d.name) +
+        (d.active ? ' · open' : '') + '</span>' +
+        '<div class="sbe-vr-meta">' + escapeHtml(meta.join(' · ')) + '</div>' +
+        '</span>' +
+        (d.active ? '' : '<button type="button" class="ghost-btn" data-op="open" data-slug="' +
+          escapeHtml(d.slug) + '" data-name="' + escapeHtml(d.name) + '">Open</button>') +
+        '<button type="button" class="ghost-btn" data-op="dup" data-slug="' +
+          escapeHtml(d.slug) + '" data-name="' + escapeHtml(d.name) + '">Copy</button>' +
+        '<button type="button" class="ghost-btn" data-op="rename" data-slug="' +
+          escapeHtml(d.slug) + '" data-name="' + escapeHtml(d.name) + '">Rename</button>' +
+        (rows.length > 1 ? '<button type="button" class="ghost-btn" data-op="del" data-slug="' +
+          escapeHtml(d.slug) + '" data-name="' + escapeHtml(d.name) + '">Delete</button>' : '') +
+        '</div>';
+    }).join('');
+  list.querySelectorAll('button[data-op]').forEach(b => {
+    b.addEventListener('click', () => {
+      const slug = b.dataset.slug, name = b.dataset.name;
+      if (b.dataset.op === 'open') sbeDraftOpen(slug, name);
+      else if (b.dataset.op === 'dup') sbeDraftDuplicate(slug, name);
+      else if (b.dataset.op === 'rename') sbeDraftRename(slug, name);
+      else sbeDraftDelete(slug, name, b);
+    });
+  });
+}
+
+function sbeVersionsPaint(rows, keep) {
+  const list = sbeEl('sbeVersList');
+  const note = sbeEl('sbeVersNote');
+  sbeDraftsPaint();
+  if (note) {
+    note.textContent = 'Save writes the draft — nothing else does. Below are ' +
+      'this draft\'s past saves: every Save keeps the one before it, the last ' +
+      keep + ' of them, and Restore keeps what it replaces.';
+  }
+  if (!list) return;
+  if (!rows.length) {
+    list.innerHTML = '<div class="sbe-vers-head">Past saves of this draft</div>' +
+      '<div class="sbe-vers-empty">None yet — the second Save writes the ' +
+      'first one.</div>';
+    return;
+  }
+  const now = Date.now() / 1000;
+  // HIS DECISIONS FIRST. "The auto saves should be saved separately from the
+  // manual saves, at least, so the user can go back and see the manual
+  // saves." The automatic lane is real history and stays reachable — it is
+  // just not what somebody walking back through their own work is looking
+  // for, and a wall of debounce noise buries the four saves that matter.
+  const mine = rows.filter(v => v.manual !== false);
+  const auto = rows.filter(v => v.manual === false);
+  const draw = (v) => {
+    const line = sbeVersionLine(v, now);
+    return '<div class="sbe-vers-row' + (line.kept ? ' is-kept' : '') +
+      (line.bad ? ' is-bad' : '') + '">' +
+      '<span class="sbe-vr-main">' +
+      '<span class="sbe-vr-name">' + escapeHtml(line.name) + '</span>' +
+      '<div class="sbe-vr-meta">' + escapeHtml(line.meta) + '</div>' +
+      '</span>' +
+      (line.bad ? '' :
+        '<button type="button" class="ghost-btn" data-file="' +
+        escapeHtml(v.file) + '">Restore</button>') +
+      '</div>';
+  };
+  list.innerHTML =
+    '<div class="sbe-vers-head">Your saves of this draft ' +
+    '<span>type a name above and press Keep to mark one</span></div>' +
+    (mine.length ? mine.map(draw).join('')
+                 : '<div class="sbe-vers-empty">None yet — press Save.</div>') +
+    (auto.length
+      ? '<details class="sbe-vers-auto"><summary>' + auto.length +
+        ' automatic snapshot' + (auto.length === 1 ? '' : 's') + '</summary>' +
+        auto.map(draw).join('') + '</details>'
+      : '');
+  list.querySelectorAll('button[data-file]').forEach(b => {
+    b.addEventListener('click', () => sbeRestoreVersion(b.dataset.file));
+  });
+}
+
+// ---- the drafts, as verbs -------------------------------------------------
+// Every one of these lands through the SAME door — POST edit/draft — because
+// they are five edits to one index, and five routes would be five places for
+// the active pointer to end up wrong. Each answers with the whole read
+// payload, so the client adopts a document rather than reasoning about one.
+async function sbeDraftOp(op, extra, note) {
+  const fd = new URLSearchParams();
+  fd.set('id', SBE.id);
+  fd.set('op', op);
+  for (const k in (extra || {})) fd.set(k, String(extra[k]));
+  // The draft on screen is about to stop being the active one. Its unsaved
+  // work goes to its backup first — the server moves the SAVED file, and
+  // without this the last few minutes would be left pointing at a draft
+  // nobody is looking at any more.
+  //
+  // AND THE ANSWER IS CHECKED. The invariant this call exists for is the one
+  // line above; ignoring its result meant the switch went ahead anyway, then
+  // cleared `dirty` and adopted the server's document — while `activate_draft`
+  // stashes the last SAVED file, so the work on screen went with no offer, no
+  // toast and nothing to click.
+  if (SBE.dirty && !SBE.conflict && !(await sbeBackup(true))) {
+    phosToast('This draft has unsaved changes that could not be snapshotted. ' +
+              'Press Save first — switching now would leave them behind.',
+              { kind: 'danger', duration: 8000 });
+    return false;
+  }
+  let r;
+  try { r = await (await fetch('/storyboard/edit/draft', { method: 'POST', body: fd })).json(); }
+  catch (e) { r = { ok: false, error: String(e) }; }
+  if (!r || !r.ok) {
+    phosToast((r && r.error) || 'That draft action did not work.', { kind: 'danger' });
+    return false;
+  }
+  sbeNameMode('');
+  if (op !== 'rename') {
+    SBE.undo.length = 0; SBE.redo.length = 0;
+    SBE.dirty = false; SBE.dirtyAt = 0;
+    sbeAdopt(r, true);
+  } else {
+    SBE.drafts = r.drafts || SBE.drafts;
+    sbePaintDraft();
+  }
+  await sbeVersionsLoad();
+  if (note) phosToast(note(r), { kind: 'success', duration: 5000 });
+  return true;
+}
+
+// ONE FIELD, AND IT KNOWS WHICH VERB IT IS. Enter used to be hard-wired to
+// "new draft", so pressing Rename on a row, typing, and pressing Enter — the
+// obvious gesture — created a duplicate draft carrying the half-edited name
+// instead of renaming anything.
+function sbeNameEnter() {
+  if (SBE.renaming) return sbeDraftRename(SBE.renaming, '');
+  return sbeDraftNew(true);
+}
+
+function sbeNameMode(slug) {
+  SBE.renaming = slug || '';
+  const btn = sbeEl('sbeVersKeep');
+  if (btn) {
+    btn.textContent = SBE.renaming ? 'Rename' : 'Copy';
+    btn.title = SBE.renaming
+      ? 'Rename the draft — the timeline is not touched'
+      : 'A new draft holding a copy of the timeline on screen';
+  }
+}
+
+function sbeDraftNew(fromCurrent) {
+  const box = sbeEl('sbeVersName');
+  const name = String((box && box.value) || '').trim();
+  if (!name) {
+    phosToast('Give the draft a name — that is how you get back to it.', {});
+    if (box && box.focus) { try { box.focus(); } catch (e) {} }
+    return;
+  }
+  sbeNameMode('');
+  if (box) box.value = '';
+  return sbeDraftOp('new', { name: name, from: fromCurrent ? 'current' : 'empty' },
+                    () => 'Working on "' + name + '" now. ' +
+                          (fromCurrent ? 'It holds a copy of the cut you were on.'
+                                       : 'Empty timeline, same soundtrack.'));
+}
+
+function sbeDraftDuplicate(slug, name) {
+  return sbeDraftOp('duplicate', { slug: slug },
+                    r => 'Copied "' + name + '" — you are on the copy now.');
+}
+
+function sbeDraftOpen(slug, name) {
+  return sbeDraftOp('activate', { slug: slug },
+                    () => 'Opened "' + name + '".');
+}
+
+function sbeDraftRename(slug, was) {
+  // The panel's own input, reused: a rename is a name, and names in this app
+  // are typed into panel controls, never into a browser dialog.
+  const box = sbeEl('sbeVersName');
+  const name = String((box && box.value) || '').trim();
+  if (!name) {
+    // ARMED, NOT JUST ASKED. The field is prefilled and SELECTED, and the
+    // panel remembers which row it belongs to — the old order focused first
+    // and wrote the value after, so the caret sat behind the old name and
+    // typing appended to it.
+    phosToast('Edit the name above, then press Rename.', {});
+    sbeNameMode(slug);
+    if (box) {
+      box.value = was || '';
+      try { box.focus(); box.select(); } catch (e) {}
+    }
+    return;
+  }
+  sbeNameMode('');
+  if (box) box.value = '';
+  return sbeDraftOp('rename', { slug: slug, name: name },
+                    () => 'Renamed to "' + name + '".');
+}
+
+// The verb the drafts rewrite dropped. It names the save ALREADY ON DISK —
+// no revision bump, no write to edit.json, nothing about the timeline
+// changes, which is exactly why it is safe to press at any moment.
+async function sbeKeepVersion() {
+  const box = sbeEl('sbeVersName');
+  const label = String((box && box.value) || '').trim();
+  if (!label) {
+    phosToast('Type a name for this save first — that is what makes it one ' +
+              'you can find again.', {});
+    if (box && box.focus) { try { box.focus(); } catch (e) {} }
+    return;
+  }
+  const fd = new URLSearchParams();
+  fd.set('id', SBE.id);
+  fd.set('label', label);
+  let r;
+  try { r = await (await fetch('/storyboard/edit/version', { method: 'POST', body: fd })).json(); }
+  catch (e) { r = { ok: false, error: String(e) }; }
+  if (!r || !r.ok) {
+    phosToast((r && r.error) || 'That save could not be named.', { kind: 'danger' });
+    return;
+  }
+  sbeNameMode('');
+  if (box) box.value = '';
+  if (r.already) {
+    phosToast('That save already has a name — nothing was changed.', {});
+  } else {
+    phosToast('Kept "' + label + '" — revision ' + sbeNum(r.revision, 0) +
+              '. The fifty-save prune will never take it.',
+              { kind: 'success', duration: 5000 });
+  }
+  await sbeVersionsLoad();
+}
+
+// A DESTRUCTIVE ACTION ASKS IN THE PANEL'S OWN VOICE. This used to be a
+// `window.confirm` — a Chrome-chrome modal in the middle of a claude.ai-grade
+// surface, and the only piece of UI in this feature that was not the app's
+// own. Its sibling `sbeDraftRename` carries the comment saying so, and the
+// test enforcing it named only `window.prompt`, which is how the confirm
+// walked past. Two clicks, four seconds to change your mind.
+function sbeDraftDelete(slug, name, btn) {
+  if (btn && btn.dataset && btn.dataset.armed !== '1') {
+    btn.dataset.armed = '1';
+    btn.dataset.was = btn.textContent;
+    btn.textContent = 'Delete?';
+    btn.title = 'Press again to delete "' + name + '". Its past saves go with '
+              + 'it; the other drafts are untouched.';
+    btn.classList.add('is-danger');
+    setTimeout(() => {
+      if (!btn.dataset || btn.dataset.armed !== '1') return;
+      btn.dataset.armed = '';
+      btn.textContent = btn.dataset.was || 'Delete';
+      btn.classList.remove('is-danger');
+    }, 4000);
+    return;
+  }
+  return sbeDraftOp('delete', { slug: slug }, () => 'Deleted "' + name + '".');
+}
+
+// The draft's name IS the button, so which document is being cut is on screen
+// without asking; the dot is the whole of "not saved yet".
+function sbePaintDraft() {
+  const row = (SBE.drafts || []).filter(d => d.active)[0];
+  const el = sbeEl('sbeDraftName');
+  // "Draft 2 of 3", not "Draft 2": the chip is the ONE place this __SEQ__ says
+  // how many drafts it has, now that the Drafts button is inside the ⋯ menu.
+  // Without the count the chip reads as a label rather than as a door.
+  const n = (SBE.drafts || []).length;
+  if (el) {
+    el.textContent = ((row && row.name) || 'Draft')
+      + (n > 1 ? ' of ' + n : '');
+  }
+  const dot = sbeEl('sbeDraftDot');
+  if (dot) dot.hidden = !SBE.dirty;
+  const btn = sbeEl('sbeKeepBtn');
+  if (btn) {
+    btn.title = SBE.dirty
+      ? 'Unsaved changes in "' + ((row && row.name) || 'this draft') +
+        '" — press Save to store them'
+      : 'Draft "' + ((row && row.name) || '') + '" — saved';
+  }
+}
+
+// The offer, never the action.
+// WHICH ONE IS OPEN. Urgency order, and it is not the DOM order: a conflict
+// means two tabs are fighting over the file and every other message is about
+// the file you are about to lose; the alarm means nothing is being stored at
+// all; the validation list means this particular save did not land; the
+// recovery offer is a question about last session and can wait behind all
+// three. `SBE.noticeLead` is the user overriding that — clicking a chip opens
+// it — and it is cleared the moment that notice goes away.
+// `sbeKeyed` sits last on purpose: it reports something that ALREADY WORKED —
+// a card was made usable — so it is the one notice on this screen that is never
+// a question, and it must not out-rank a save that is failing.
+const SBE_NOTICE_ORDER = ['sbeConflict', 'sbeAlarm', 'sbeErrors', 'sbeRecover',
+                          'sbeKeyed'];
+
+function sbePaintNotices() {
+  const wrap = sbeEl('sbeNotices');
+  if (!wrap || !wrap.classList) return;
+  const open = SBE_NOTICE_ORDER.filter(id => {
+    const el = sbeEl(id);
+    return el && el.hidden === false;
+  });
+  wrap.hidden = !open.length;
+  // A QUIET NOTICE IS A CHIP EVEN WHEN IT IS ALONE. The snapshot offer is an
+  // invitation to go and look, not a question that must be answered before the
+  // film can be worked on — so it never takes the width, and it never becomes
+  // the lead unless the user clicks it open.
+  const loud = open.filter(id => !((sbeEl(id).dataset || {}).quiet));
+  let lead = open.indexOf(SBE.noticeLead) >= 0 ? SBE.noticeLead : loud[0];
+  for (const id of SBE_NOTICE_ORDER) {
+    const el = sbeEl(id);
+    if (!el || !el.classList) continue;
+    // A LONE NOTICE IS NEVER A CHIP. Folding the only thing on screen would
+    // hide the sentence to save room nothing else is asking for — and a
+    // notice that is not up at all is not a chip either, or the class outlives
+    // the message and the next one to open arrives already folded.
+    const fold = open.indexOf(id) >= 0 && id !== lead
+              && (open.length > 1 || !!((el.dataset || {}).quiet));
+    el.classList.toggle('is-folded', fold);
+  }
+  return lead;
+}
+
+// Clicking a folded chip promotes it. Bound on the CONTAINER, so it survives
+// every repaint of the children and needs no rebinding anywhere.
+function sbeNoticeOpen(id) {
+  SBE.noticeLead = id;
+  sbePaintNotices();
+}
+
+function sbeNoticeClick(ev) {
+  const chip = ev.target.closest ? ev.target.closest('.is-folded') : null;
+  if (!chip || !chip.id) return;
+  ev.preventDefault();
+  sbeNoticeOpen(chip.id);
+}
+
+// "Later" — hide the recovery offer for this session without answering it.
+// Discard DELETES the backup, so it was never the button for "not now".
+function sbeNoticeLater() {
+  SBE.backupHidden = true;
+  sbePaintRecovery();
+}
+
+function sbePaintRecovery() {
+  const bar = sbeEl('sbeRecover');
+  if (!bar) return;
+  const b = SBE.backup;
+  bar.hidden = !b || !!SBE.backupHidden;
+  if (bar.hidden) { sbePaintNotices(); return; }
+  // WHAT IT IS, NOT WHAT TO DO ABOUT IT. The old sentence read out both clip
+  // counts and then declared that nothing had changed — a question about a
+  // difference it could not name, over a document that had loaded correctly.
+  // This says when, and how big, and leaves the decision where versions live.
+  sbeEl('sbeRecoverWhat').textContent =
+    'from ' + sbeAgo(b.at) + ' · ' + sbeNum(b.clips, 0) + ' clips · ' +
+    sbeFmtTime(b.duration) + ' — your saved draft is untouched.';
+  sbePaintNotices();
+}
+
+async function sbeRecover() {
+  const fd = new URLSearchParams();
+  fd.set('id', SBE.id);
+  let r;
+  try { r = await (await fetch('/storyboard/edit/recover', { method: 'POST', body: fd })).json(); }
+  catch (e) { r = { ok: false, error: String(e) }; }
+  if (!r || !r.ok) {
+    phosToast((r && r.error) || 'That backup could not be recovered.', { kind: 'danger' });
+    return;
+  }
+  SBE.undo.length = 0; SBE.redo.length = 0;
+  SBE.dirty = false; SBE.dirtyAt = 0;
+  sbeAdopt(r, true);
+  phosToast('Recovered — ' + SBE.clips.length + ' clip(s). The draft it ' +
+            'replaced was kept in this draft\'s history.',
+            { kind: 'success', duration: 6000 });
+}
+
+async function sbeDiscardBackup() {
+  const fd = new URLSearchParams();
+  fd.set('id', SBE.id);
+  try { await fetch('/storyboard/edit/discard-backup', { method: 'POST', body: fd }); }
+  catch (e) {}
+  SBE.backup = null;
+  sbePaintRecovery();
+}
+
+async function sbeRestoreVersion(file) {
+  if (!file) return;
+  const fd = new URLSearchParams();
+  fd.set('id', SBE.id);
+  fd.set('file', file);
+  // The arrangement on screen is about to be replaced, so it goes to disk
+  // first — the server archives what it overwrites, and an unsaved drag would
+  // otherwise be the one thing in this feature that history could not keep.
+  // Checked, for the same reason `sbeDraftOp` checks its backup: if the save
+  // 409s or errors the server archives the OLD document, restore overwrites,
+  // and the work goes with the undo stack that could have brought it back.
+  if (SBE.dirty && !SBE.conflict && !(await sbeSave(true))) {
+    phosToast('Your current arrangement could not be saved, so restoring ' +
+              'would lose it. Fix the save first.',
+              { kind: 'danger', duration: 8000 });
+    return;
+  }
+  let r;
+  try { r = await (await fetch('/storyboard/edit/restore', { method: 'POST', body: fd })).json(); }
+  catch (e) { r = { ok: false, error: String(e) }; }
+  if (!r || !r.ok) {
+    phosToast((r && r.error) || 'That version could not be restored.', { kind: 'danger' });
+    return;
+  }
+  SBE.undo.length = 0; SBE.redo.length = 0;
+  sbeAdopt(r, true);
+  sbeVersionsPaint(r.versions || [], 50);
+  phosToast('Restored — ' + (SBE.clips.length) + ' clip(s), ' +
+            sbeFmtTime(sbeFilmDuration(SBE.clips)) +
+            '. The arrangement it replaced was kept.',
+            { kind: 'success', duration: 6000 });
+}
+
+// ---------------------------------------------------------------------------
+// PAINT
+// ---------------------------------------------------------------------------
+function sbeSpan() {
+  // THE SCROLLER RUNS PAST THE LAST FRAME. The ruler is drawn against the
+  // longer of the film and the soundtrack — and then past both, by the slack
+  // above, because "the film's length and the audio's placement are
+  // independent facts". Without the tail the music could not be dragged one
+  // second beyond the final cut: there was no timeline out there to drag it
+  // onto. The old `film + 120` ceiling is gone with it; it capped the RULER
+  // while the waveform kept going, so the far end of a long track was drawn
+  // and unreachable at the same time.
+  const film = sbeFilmDuration(SBE.clips);
+  const w = sbeMusicWindow(SBE.audio, SBE.peaks ? SBE.peaks.duration : 0);
+  const music = (w.film_end === null) ? w.film_start : w.film_end;
+  const base = Math.max(film, music, 0);
+  const slack = Math.min(SBE_SLACK_MAX,
+                         Math.max(SBE_SLACK_MIN, base * SBE_SLACK_RATIO));
+  return Math.max(SBE_SPAN_MIN, base + slack);
+}
+
+function sbePx(t) { return sbeNum(t) * SBE.pps; }
+
+function sbePaint() {
+  if (!SBE.open) return;
+  const span = sbeSpan();
+  // NEVER FURTHER OUT THAN "THE WHOLE FILM". The floor moves with the window
+  // and with the film's length, so widening the window re-fits instead of
+  // leaving a strip of empty track on the right, and the slider's left end
+  // keeps meaning what it says.
+  const floor = sbeZoomMin();
+  if (SBE.pps < floor) SBE.pps = floor;
+  const width = Math.max(320, Math.ceil(span * SBE.pps) + SBE_TL_PAD);
+  const inner = sbeEl('sbeInner');
+  if (!inner) return;
+  inner.style.width = width + 'px';
+  sbePaintRuler(span, width);
+  sbePaintWave(span, width);
+  sbePaintMusic(width);
+  sbePaintOverlays();
+  sbePaintTrack();
+  sbePaintAudioLane();
+  sbePaintHead();
+  sbePaintInspector();
+  sbePaintHeads();
+  sbePaintMix();
+  sbePaintKeys();
+  sbePaintChrome();
+  // AN EDIT MOVES THE GROUND. Every mutation, undo, redo and adopt lands
+  // here, so this is the one place that cannot be forgotten. Unforced: the
+  // slip tolerance keeps a drag from re-seeking sixty times a second.
+  sbeStripSync();
+  // LAST, and after the inspector: the row's budget is what the column has
+  // left once everything else has been laid out, and the inspector is the
+  // one that changes height when a clip is selected.
+  sbeFitMonitors();
+}
+
+// Measure, then size. Everything in the cut column except the monitor row and
+// the timeline is read off the DOM here; the timeline is counted at the height
+// it is ENTITLED to rather than at its live height, because it is the row that
+// absorbs whatever is left over — reading it would make this function its own
+// input and the two would oscillate. That entitlement used to be the CSS floor
+// and is now the user's own number, which is the whole of the resize handle:
+// nothing is resized, one term of this subtraction moved.
+function sbeFitMonitors() {
+  const row = sbeEl('sbeMonitors');
+  const col = sbeEl('edStage');
+  const plan = sbeEl('sbTimeline');
+  if (!row || !col || !plan || plan.hidden) return;
+  // Inside the stacking breakpoint the PAGE is the scroller and the column
+  // has no fixed height to budget against, so the CSS there is the answer.
+  if (window.matchMedia && window.matchMedia('(max-width: 900px)').matches) {
+    for (const p of ['--sbe-prog-h', '--sbe-src-h', '--sbe-rail-w', '--sbe-row-h']) {
+      row.style.removeProperty(p);
+    }
+    // The lanes go back to their CSS heights too — a stacked page has no
+    // column to take the height from, and the handle is display:none there.
+    for (const p of ['--sbe-tl-h', '--sbe-ov-h', '--sbe-track-h',
+                     '--sbe-alane-h', '--sbe-wave-h']) {
+      plan.style.removeProperty(p);
+    }
+    return;
+  }
+  const gap = parseFloat(getComputedStyle(plan).rowGap) || 8;
+  let used = 0, shown = 0;
+  for (const kid of plan.children) {
+    const h = kid.getBoundingClientRect().height;
+    if (!h && kid !== row) continue;
+    shown++;
+    if (kid === row) continue;
+    used += (kid.id === 'sbeTlWrap') ? 0 : h;
+  }
+  // A monitor column is taller than its picture by its own label bar and the
+  // gap above it. Read off the PROGRAM column, not the row: the row's height
+  // is the thing being solved for, and reading that would be a circle. The
+  // bar has a fixed min-height and does not wrap, so this is a constant.
+  const prog = sbeEl('sbeStage');
+  const col2 = prog ? prog.parentElement : null;
+  const chrome = (prog && col2)
+    ? Math.max(0, Math.round(col2.getBoundingClientRect().height -
+                             prog.getBoundingClientRect().height))
+    : 30;
+  // WHAT THE TWO OF THEM HAVE TO SHARE, and then the split. The ceiling on
+  // the timeline's share is the one clamp that keeps this honest: whatever the
+  // handle was dragged to, the monitors keep SBE_MON_MIN_H — a 120px picture
+  // is small but it is still a picture, and it is the same floor sbeMonitorFit
+  // has always refused to go under.
+  const avail = col.clientHeight - used - gap * Math.max(0, shown - 1) - chrome;
+  SBE.tlMax = Math.max(SBE_TL_MIN_H,
+                       Math.min(SBE_TL_MAX_H, Math.round(avail - SBE_MON_MIN_H)));
+  // The PREFERENCE is never overwritten by a window that cannot honour it —
+  // shrink the browser and the timeline gives the height back; widen it again
+  // and the drag the user made is still there.
+  const want = sbeTlClamp(SBE.tlH, SBE.tlMax);
+  const budget = avail - want;
+  const apply = (b) => {
+    const fit = sbeMonitorFit(row.clientWidth, b);
+    row.style.setProperty('--sbe-prog-h', Math.round(fit.progH) + 'px');
+    row.style.setProperty('--sbe-src-h', Math.round(fit.srcH) + 'px');
+    row.style.setProperty('--sbe-rail-w', Math.round(fit.rail) + 'px');
+    row.style.setProperty('--sbe-row-h', Math.round(fit.progH + chrome) + 'px');
+    // A 16:9 PAIR IS USUALLY WIDTH-LIMITED, so the monitors routinely decline
+    // part of the budget they were offered. That leftover has always gone to
+    // the timeline — it is the flex row — but it went entirely onto the
+    // picture track, which is capped at 240 and then wastes it. Handing it to
+    // the same distribution the drag uses means a tall window arrives with
+    // taller sound lanes instead of a dead band under them.
+    // THE TERM IS SIGNED, and that is what makes the correction below work at
+    // the top of the handle's range: there the monitors are already at their
+    // own floor and cannot give anything back, so whatever the column is
+    // overflowing by has to come off the TIMELINE or it does not come off
+    // anything. Floored, never negative — the box may not shrink into itself.
+    sbeApplyTl(Math.max(SBE_TL_MIN_H, want + Math.round(b - fit.progH)));
+  };
+  apply(budget);
+  // ONE CORRECTION, NEVER A LOOP. Rounding, a sticky bar's own padding and a
+  // row that came out a pixel taller than the sum of its parts all land here
+  // as a few pixels of column scroll — measured at 10px at 1900x1000. Reading
+  // the overflow back and taking it off the budget is exact where a guessed
+  // safety margin would be a permanent tax on the picture. Guarded so it can
+  // only ever shrink, and only once per paint.
+  const over = col.scrollHeight - col.clientHeight;
+  if (over > 1 && over < 200) apply(budget - over);
+  // THE TWO SOUND LANES ARE DRAWN, NOT STYLED, so a variable cannot resize
+  // them on its own: the soundtrack's canvas carries a backing store and a
+  // clip strip's waveform is emitted at its own height. Both were painted
+  // BEFORE this function ran — it is deliberately last, because the
+  // inspector's height is one of its inputs — so when this pass moves the
+  // height, they are one pass behind and a 54px bitmap is left stretched over
+  // a 122px lane. Redrawn here, and only when the number actually moved.
+  if (SBE.laneAt !== SBE.tlNow) {
+    SBE.laneAt = SBE.tlNow;
+    sbePaintAudioLane();
+    const inner = sbeEl('sbeInner');
+    if (inner) sbePaintWave(sbeSpan(), parseFloat(inner.style.width) || 0);
+  }
+}
+
+// The one writer of the timeline's height. Five variables on #sbTimeline: the
+// box, and the four lanes inside it. Everything downstream — the CSS, the
+// strip waveform's viewBox, the soundtrack canvas — reads the same numbers, so
+// the picture and the pointer maths cannot disagree about where a strip is.
+function sbeApplyTl(px) {
+  const tl = Math.max(SBE_TL_MIN_H, Math.round(sbeNum(px, SBE_TL_MIN_H)));
+  SBE.tlNow = tl;
+  const plan = sbeEl('sbTimeline');
+  if (!plan || !plan.style) return;
+  const L = sbeLaneHeights(tl);
+  plan.style.setProperty('--sbe-tl-h', tl + 'px');
+  plan.style.setProperty('--sbe-ov-h', L.ov + 'px');
+  plan.style.setProperty('--sbe-track-h', L.track + 'px');
+  plan.style.setProperty('--sbe-alane-h', L.alane + 'px');
+  plan.style.setProperty('--sbe-wave-h', L.wave + 'px');
+}
+
+// How tall one clip's sound strip is drawn, in the same pixels the lane was
+// given. Read from the number rather than from the DOM because the lane is
+// painted BEFORE sbeFitMonitors runs in any given paint, and a strip that
+// measured the live lane would be drawing last frame's height.
+function sbeStripH() {
+  // SEVEN, not six: the lane is border-box with a 1px top rule, and the strip
+  // inside it is inset 3px top and bottom. Off by that one pixel the viewBox
+  // and the box disagree and every waveform is drawn 4% tall.
+  return Math.max(14, sbeLaneHeights(SBE.tlNow || SBE.tlH).alane - 7);
+}
+
+// ---- the drag itself ----------------------------------------------------
+// Pointer capture, because a resize that stops working the moment the pointer
+// leaves the 10px strip it started on is a resize that fights you.
+function sbeTlGrabDown(ev) {
+  SBE.tlDrag = { y0: ev.clientY, h0: SBE.tlNow || SBE.tlH };
+  try { ev.currentTarget.setPointerCapture(ev.pointerId); } catch (e) {}
+  document.body.classList.add('sbe-resizing');
+  // NOT preventDefault: cancelling pointerdown suppresses the compatibility
+  // mouse events, and the double-click reset is one of them. The body class
+  // is what stops the drag selecting the transport's labels.
+}
+
+function sbeTlGrabMove(ev) {
+  const d = SBE.tlDrag;
+  if (!d) return;
+  // UP IS TALLER. clientY falls as the pointer rises, so the delta is
+  // subtracted and the edge follows the pointer exactly.
+  sbeTlSet(d.h0 - (ev.clientY - d.y0));
+  ev.preventDefault();
+}
+
+function sbeTlGrabUp(ev) {
+  if (!SBE.tlDrag) return;
+  SBE.tlDrag = null;
+  document.body.classList.remove('sbe-resizing');
+  try { ev.currentTarget.releasePointerCapture(ev.pointerId); } catch (e) {}
+  sbeTlPrefWrite(SBE.tlH);
+}
+
+// Set, lay out, repaint — in that order. sbeApplyTl runs FIRST so the lanes
+// already have their new heights when sbePaint draws into them, and
+// sbeFitMonitors (last inside sbePaint) gives the monitors what is left and
+// corrects tlNow for what the window could actually spare.
+function sbeTlSet(px) {
+  SBE.tlH = sbeTlClamp(px, SBE.tlMax);
+  sbeApplyTl(SBE.tlH);
+  sbePaint();
+}
+
+// DOUBLE-CLICK RESETS, the same gesture the fade corners and the level line
+// already answer to on this timeline.
+function sbeTlReset() {
+  sbeTlSet(SBE_TL_MIN_H);
+  sbeTlPrefWrite(SBE.tlH);
+}
+
+function sbeTlGrabKey(ev) {
+  const step = ev.shiftKey ? SBE_TL_STEP_BIG : SBE_TL_STEP;
+  const now = SBE.tlNow || SBE.tlH;
+  if (ev.key === 'ArrowUp') sbeTlSet(now + step);
+  else if (ev.key === 'ArrowDown') sbeTlSet(now - step);
+  else if (ev.key === 'Home') sbeTlSet(SBE_TL_MIN_H);
+  else return;
+  // The Editor's own shortcuts own the arrows (a frame at a time) and Home.
+  // A focused handle is not the timeline, so the event stops here.
+  ev.preventDefault();
+  ev.stopPropagation();
+  sbeTlPrefWrite(SBE.tlH);
+}
+
+function sbePaintRuler(span, width) {
+  const r = sbeEl('sbeRuler');
+  const steps = [0.5, 1, 2, 5, 10, 15, 30, 60, 120];
+  let step = steps[steps.length - 1];
+  for (const s of steps) { if (s * SBE.pps >= 54) { step = s; break; } }
+  // ONE FORMAT PER ZOOM, DECIDED FROM THE STEP. Stripping the fractional
+  // zeros per LABEL made neighbouring ticks different shapes — 0:00.50 beside
+  // 0:01 beside 0:01.50 — so the eye read a rhythm change where the time is
+  // perfectly regular, and tabular numerals cannot save a ruler whose labels
+  // have different lengths.
+  const decimals = step < 1;
+  let html = '';
+  for (let t = 0; t <= span + 1e-6; t += step) {
+    const x = sbePx(t);
+    const lab = decimals ? sbeFmtTime(t) : sbeFmtTime(t).replace(/\.00$/, '');
+    html += '<i style="left:' + x.toFixed(1) + 'px"></i>' +
+            '<b style="left:' + x.toFixed(1) + 'px">' + lab + '</b>';
+  }
+  r.innerHTML = html;
+  r.style.width = width + 'px';
+}
+
+function sbePaintWave(span, width) {
+  const cv = sbeEl('sbeWave');
+  const none = sbeEl('sbeWaveNone');
+  // The soundtrack's lane takes its share of a dragged edge too — it is the
+  // other surface you edit sound on. Read from the same distribution the CSS
+  // variable came from, so the canvas's backing store and its box agree.
+  const h = sbeLaneHeights(SBE.tlNow || SBE.tlH).wave;
+  if (!SBE.peaks) {
+    cv.hidden = true;
+    none.hidden = false;
+    none.style.width = width + 'px';
+    none.innerHTML = SBE.audio && SBE.audio.path
+      ? 'No waveform yet — press Prepare to build the proxies, the waveform and the beat grid.'
+      : 'No soundtrack on this timeline. Point one at it below and press Prepare.';
+    return;
+  }
+  none.hidden = true;
+  cv.hidden = false;
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = Math.ceil(width * dpr);
+  cv.height = Math.ceil(h * dpr);
+  cv.style.width = width + 'px';
+  cv.style.height = h + 'px';
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, width, h);
+  const css = getComputedStyle(document.body);
+  const mid = h / 2;
+
+  // Beats go UNDER the waveform — they are the reference, not the subject.
+  // Downbeats go OVER it, further down this function: a bar line you cannot
+  // find behind the loudest part of the track is not a grid, it is a texture.
+  const guess = sbeGridIsAGuess(SBE.beats);
+  const grid = sbeBeatGrid(SBE.beats, 0, sbeSpan(), (SBE.audio || {}).offset);
+  for (const b of grid) {
+    if (b.down) continue;
+    g.strokeStyle = guess ? 'rgba(182,191,209,0.16)' : 'rgba(88,166,255,0.30)';
+    g.lineWidth = 1;
+    const x = Math.round(sbePx(b.t)) + 0.5;
+    g.beginPath(); g.moveTo(x, 0); g.lineTo(x, h); g.stroke();
+  }
+
+  const off = sbeNum((SBE.audio || {}).offset);
+  const p = SBE.peaks;
+  const win = sbeMusicWindow(SBE.audio, p.duration);
+  const w = Math.max(1, SBE.pps / p.rate);
+  const strong = (css.getPropertyValue('--border-strong') || '#3d477a').trim();
+  // THE TRIMMED-AWAY PART IS STILL DRAWN, faintly. A trim you cannot see the
+  // other side of is a trim you cannot pull back — the seconds are not gone,
+  // they are outside the window, and the picture should say which.
+  for (let i = 0; i < p.count; i++) {
+    const tt = i / p.rate;                 // where this bucket is IN THE TRACK
+    const t = tt - off;                    // ...and where that lands on the film
+    if (t < 0) continue;
+    const x = sbePx(t);
+    if (x > width) break;
+    const live = tt >= win.head - 1e-9
+              && (win.tail === null || tt <= win.tail + 1e-9);
+    g.fillStyle = strong;
+    g.globalAlpha = live ? 1 : 0.28;
+    const y0 = mid - p.hi[i] * mid * 0.94;
+    const y1 = mid - p.lo[i] * mid * 0.94;
+    g.fillRect(x, y0, w, Math.max(1, y1 - y0));
+  }
+  g.globalAlpha = 1;
+  for (const b of grid) {
+    if (!b.down) continue;
+    g.strokeStyle = guess ? 'rgba(182,191,209,0.42)' : 'rgba(88,166,255,0.85)';
+    g.lineWidth = 1;
+    const x = Math.round(sbePx(b.t)) + 0.5;
+    g.beginPath(); g.moveTo(x, 0); g.lineTo(x, h); g.stroke();
+  }
+
+  // Where the music runs out. Past this line there is no grid and no waveform,
+  // and the film is on its own.
+  if (p.duration > 0) {
+    const x = Math.round(sbePx(p.duration - off)) + 0.5;
+    if (x < width) {
+      g.strokeStyle = 'rgba(210,153,34,0.6)';
+      g.lineWidth = 1;
+      g.beginPath(); g.moveTo(x, 0); g.lineTo(x, h); g.stroke();
+    }
+  }
+}
+
+// THE BLOCK, over the picture of the track. It exists whenever there is a
+// soundtrack and a length to give it — the waveform is not a precondition,
+// because `audio.duration` is known before prepare has run and a strip you
+// cannot grab until you have pressed Prepare is a strip that looks broken.
+function sbePaintMusic(width) {
+  const el = sbeEl('sbeMusicClip');
+  if (!el) return;
+  const a = SBE.audio;
+  const w = sbeMusicWindow(a, SBE.peaks ? SBE.peaks.duration : 0);
+  if (!a || !a.path || w.duration <= 0 || w.tail === null) {
+    el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+  const left = sbePx(w.film_start);
+  const right = sbePx(w.film_end === null ? w.film_start : w.film_end);
+  el.style.left = left.toFixed(1) + 'px';
+  el.style.width = Math.max(3, right - left).toFixed(1) + 'px';
+  el.classList.toggle('is-sel', SBE.sel === '@music');
+  const name = String(a.path || '').split('/').pop();
+  const played = Math.max(0, (w.film_end === null ? 0 : w.film_end) - w.film_start);
+  const label = name + ' · ' + sbeFmtTime(w.film_start) + ' · ' +
+    played.toFixed(2) + 's' + (w.trimmed ? ' · trimmed' : '');
+  sbeEl('sbeMusicName').textContent = (right - left > 120) ? label : '';
+  el.title = name + '\nStarts at ' + sbeFmtTime(w.film_start) +
+    ' of the __SEQ__, from ' + sbeFmtTime(w.head) + ' of the track.' +
+    '\nDrag to place it · pull either end to trim · hold Alt to ignore the cuts.' +
+    '\nCorners fade it · double-click the level line to add a point.';
+  sbePaintBedLevel(el, Math.max(3, right - left));
+}
+
+// THE BED'S LEVEL LINE, POINTS AND FADE RAMPS. Everything here is the strip
+// painter's arithmetic with one substitution — the bed's curve instead of a
+// clip's — because a second copy of it is a second thing to drift. The
+// waveform is NOT redrawn: `#sbeWave` already paints the whole track under
+// this block, and drawing it twice would be two pictures of one sound.
+function sbePaintBedLevel(el, px) {
+  const layer = el.querySelector('.sbe-mc-lvl');
+  const band = el.querySelector('.sbe-fade-band');
+  if (!layer) return;
+  const a = SBE.audio || {};
+  // THE FILM, NOT THE PROBE. The bed's clock is the document's own length and
+  // the film's when the document is silent — the render reads edit.json and
+  // has never seen peaks.json, so anything the probe contributed here would be
+  // a level only the browser could compute. See `sbeBedLen`.
+  const dur = sbeFilmDuration(SBE.clips);
+  const n = sbeBedLen(a, dur);
+  const H = Math.max(14, Math.round(el.getBoundingClientRect().height)
+                     || (sbeLaneHeights(SBE.tlNow || SBE.tlH).wave - 8));
+  // WHAT THE RENDER WILL DO, not what was authored. The fader and the duck
+  // are in this line as well as the envelope, so the picture of the level is
+  // the level — which is the entire complaint this feature answers.
+  const curve = sbeBedGainPoints(a, SBE.clips, dur);
+  const pts = curve.length ? curve : [[0, 1], [n || 1, 1]];
+  const yOf = g => sbeStripY(g, H);
+  const xOf = t => (n > 0 ? (t / n) * px : 0);
+  let line = '';
+  for (let i = 0; i < pts.length; i++) {
+    line += (i ? 'L' : 'M') + xOf(pts[i][0]).toFixed(2) + ','
+          + yOf(pts[i][1]).toFixed(2);
+  }
+  let body = '<path class="sbe-lvl-u" d="' + line + '"/>'
+           + '<path class="sbe-lvl" d="' + line + '"/>';
+  // THE TARGET STOPS WHERE THE CORNER HANDLES START — the same clip the
+  // strips apply, for the same reason: two controls claiming one rectangle is
+  // how the fade handle got lost inside the trim grip in the first place.
+  const hit = sbeLvlHitPath(pts, xOf, yOf, SBE_LVL_CLEAR, px - SBE_LVL_CLEAR);
+  if (hit) body += '<path class="sbe-lvl-hit" d="' + hit + '"/>';
+  const gh = SBE.kfGhost;
+  if (gh && gh.id === '@music') {
+    body += '<circle class="sbe-kf-ghost" cx="' + xOf(gh.t).toFixed(2) + '" '
+          + 'cy="' + yOf(gh.g).toFixed(2) + '" r="'
+          + Math.max(3.6, Math.min(6.5, H / 5.5)).toFixed(2) + '"/>';
+  }
+  // Only the USER's points get a handle, exactly as on a strip: the fade
+  // corners are already a gesture of their own, and a dot on them would offer
+  // two ways to drag one number in opposite directions.
+  const own = sbeAfx(a, n).points;
+  const R = Math.max(3.2, Math.min(6, H / 6));
+  for (let i = 0; i < own.length; i++) {
+    body += '<circle class="sbe-kf" data-bkf="' + i + '" '
+          + 'cx="' + xOf(own[i][0]).toFixed(2) + '" '
+          + 'cy="' + yOf(sbeLerpGain(curve.length ? curve : own, own[i][0])).toFixed(2) + '" '
+          + 'style="--kf-r:' + R.toFixed(2) + 'px" '
+          + 'r="' + R.toFixed(2) + '"/>';
+  }
+  layer.innerHTML = '<svg width="' + Math.max(1, px).toFixed(0) + '" height="' + H
+    + '" viewBox="0 0 ' + Math.max(1, px).toFixed(0) + ' ' + H
+    + '" preserveAspectRatio="none">' + body + '</svg>';
+  // A BED TOO SHORT TO CARRY THEM OFFERS NEITHER. An 8px stub of a control is
+  // worse than none — the same rule the strips' handles follow.
+  if (band) band.hidden = !(px >= 2 * SBE_LVL_CLEAR + SBE_LVL_MIN_SPAN);
+}
+
+// ---- the music, dragged --------------------------------------------------
+// Same three modes as a clip, the same pointer-capture shape, and the same
+// rule about a gesture that moved the pointer without moving the film.
+// WHERE THE POINTER IS ON THE BED, in the coordinates a level cares about.
+// The strip lane's `sbeStripAt` for the soundtrack: how far along the played
+// window, and what gain that height means.
+function sbeBedAt(ev) {
+  const el = sbeEl('sbeMusicClip');
+  if (!el || el.hidden) return null;
+  const a = SBE.audio;
+  if (!a || !a.path) return null;
+  // NOT WHILE THE POINTER IS ON A CORNER HANDLE. The clipped hit path keeps
+  // the LINE off those pixels, but the proximity test below knows nothing
+  // about paths — and it is what the hover ghost asks, so without this a fade
+  // handle would sit under a ghost promising a point it could never place.
+  if (ev.target.closest('.sbe-fade-h')) return null;
+  const r = el.getBoundingClientRect();
+  const n = sbeBedLen(a, sbeFilmDuration(SBE.clips));
+  if (n <= 0) return null;
+  return {
+    rect: r, len: n,
+    t: n * Math.max(0, Math.min(1, (ev.clientX - r.left) / Math.max(1, r.width))),
+    g: sbeStripGain(ev.clientY, r.top, r.height),
+  };
+}
+
+// A click within SBE_LVL_GRAB of the bed's level places a point and starts
+// dragging it — one gesture, the same one the strips answer to.
+function sbeBedLevelClick(ev) {
+  const at = sbeBedAt(ev);
+  if (!at) return false;
+  const dur = sbeFilmDuration(SBE.clips);
+  const onLine = sbeStripY(sbeBedGainAt(SBE.audio, SBE.clips, dur, at.t),
+                           at.rect.height);
+  const near = Math.abs((ev.clientY - at.rect.top) - onLine) <= SBE_LVL_GRAB;
+  if (!near && !ev.target.closest('.sbe-lvl-hit')) return false;
+  const before = JSON.stringify(SBE.audio || {});
+  const next = sbeBedAddKeyframe(SBE.audio, at.t, at.g, dur);
+  if (!next) return false;
+  sbeSetAudio(next);
+  SBE.sel = '@music';
+  SBE.kfGhost = null;
+  const pts = sbeAfx(SBE.audio, at.len).points;
+  let idx = 0;
+  for (let i = 0; i < pts.length; i++) {
+    if (Math.abs(pts[i][0] - sbeRound(at.t)) < 1e-3) { idx = i; break; }
+  }
+  SBE.musicDrag = { mode: 'bkf', index: idx, rect: at.rect,
+                    before: before, moved: true };
+  try { sbeEl('sbeMusicLane').setPointerCapture(ev.pointerId); } catch (e) {}
+  SBE.dirty = true;
+  sbeSetState('unsaved changes', 'dirty');
+  sbePaint();
+  return true;
+}
+
+function sbeOnMusicDown(ev) {
+  const el = sbeEl('sbeMusicClip');
+  if (!el || el.hidden) return;
+  const a = SBE.audio;
+  if (!a || !a.path) return;
+  const lane = sbeEl('sbeMusicLane');
+  const w = sbeMusicWindow(a, SBE.peaks ? SBE.peaks.duration : 0);
+  // The BED's clock, which is not the block's picture: see `sbeBedLen`.
+  const dur = sbeFilmDuration(SBE.clips);
+  SBE.sel = '@music';
+  // GESTURE PRECEDENCE, MOST SPECIFIC FIRST, and it is deliberately the same
+  // list the clip-sound lane uses — one rule for both, or the soundtrack would
+  // behave differently from the strip above it for no reason a user could name.
+  //   1. a point on the level line
+  //   2. a corner fade handle  (sits over the grip's hit area)
+  //   3. the level line itself
+  //   4. the grips             (trim)
+  //   5. the block             (move)
+  const kf = ev.target.closest('.sbe-kf');
+  if (kf && kf.dataset.bkf !== undefined) {
+    const before = JSON.stringify(a);
+    // SHIFT-CLICK DELETES. A modifier rather than a second affordance drawn on
+    // a 6px target, which would be a delete nobody meant.
+    if (ev.shiftKey) {
+      const gone = sbeBedDeleteKeyframe(a, sbeNum(kf.dataset.bkf), dur);
+      if (gone) { sbeSetAudio(gone); sbeMusicCommit(before); }
+      ev.preventDefault();
+      return;
+    }
+    SBE.musicDrag = { mode: 'bkf', index: sbeNum(kf.dataset.bkf),
+                      rect: el.getBoundingClientRect(),
+                      before: before, moved: false };
+    try { lane.setPointerCapture(ev.pointerId); } catch (e) {}
+    ev.preventDefault();
+    sbePaint();
+    return;
+  }
+  const fh = ev.target.closest('.sbe-fade-h');
+  if (fh && fh.dataset.bfade !== undefined) {
+    const e0 = sbeAfx(a, sbeBedLen(a, dur));
+    SBE.musicDrag = {
+      mode: 'bfade', edge: fh.dataset.bfade, x0: ev.clientX,
+      f0: (fh.dataset.bfade === 'out') ? e0.fade_out : e0.fade_in,
+      before: JSON.stringify(a), moved: false,
+    };
+    try { lane.setPointerCapture(ev.pointerId); } catch (e) {}
+    ev.preventDefault();
+    sbePaint();
+    return;
+  }
+  if (!ev.target.closest('.sbe-grip') && sbeBedLevelClick(ev)) {
+    ev.preventDefault();
+    return;
+  }
+  const grip = ev.target.closest('.sbe-grip');
+  SBE.musicDrag = {
+    mode: grip ? (grip.classList.contains('r') ? 'trimR' : 'trimL') : 'move',
+    x0: ev.clientX,
+    t0: sbeTimeFromEvent(ev, lane),
+    fs0: w.film_start,
+    fe0: (w.film_end === null ? w.film_start : w.film_end),
+    before: JSON.stringify(a), moved: false,
+  };
+  el.classList.add('is-drag');
+  try { lane.setPointerCapture(ev.pointerId); } catch (e) {}
+  ev.preventDefault();
+  sbePaint();
+}
+
+// ONE WRITER for the soundtrack object, so every gesture that changes it —
+// drag, trim, fade, point, level, duck — marks the document dirty the same way
+// and none of them can forget the queued save.
+function sbeSetAudio(next) {
+  SBE.audio = next;
+  SBE.edit = SBE.edit || {};
+  SBE.edit.audio = next;
+}
+
+function sbeMusicCommit(beforeJson) {
+  // THE FINGERPRINT IS THE WHOLE OBJECT, not a list of three field names. The
+  // list was `offset`, `trim_start`, `trim_end` — written when those were all
+  // a soundtrack had — and a fade, a keyframe or a level change would have
+  // compared EQUAL and been silently discarded on pointerup. That defect has
+  // already shipped twice on this timeline under the name `sbeDragFingerprint`.
+  if (JSON.stringify(SBE.audio || {}) === beforeJson) { sbePaint(); return; }
+  SBE.undo.push(sbeSnapshot(JSON.parse(beforeJson)));
+  if (SBE.undo.length > SBE_UNDO_MAX) SBE.undo.shift();
+  SBE.redo.length = 0;
+  SBE.dirty = true;
+  sbeSetState('unsaved changes', 'dirty');
+  sbePaint();
+  sbeQueueSave();
+}
+
+function sbeOnMusicMove(ev) {
+  const d = SBE.musicDrag;
+  const dur = sbeFilmDuration(SBE.clips);   // the BED's clock — see sbeBedLen
+  // NOTHING BEING DRAGGED IS A HOVER, and a hover is where the level line
+  // teaches — the same answer the strip lane gives.
+  if (!d) { sbeBedGhost(ev); return; }
+  if (d.mode === 'bkf') {
+    const r = d.rect;
+    const n = sbeBedLen(SBE.audio, dur);
+    const t = n * Math.max(0, Math.min(1,
+      (ev.clientX - r.left) / Math.max(1, r.width)));
+    d.moved = true;
+    const next = sbeBedMoveKeyframe(SBE.audio, d.index, t,
+                                    sbeStripGain(ev.clientY, r.top, r.height), dur);
+    if (next) sbeSetAudio(next);
+    sbePaint();
+    return;
+  }
+  if (Math.abs(ev.clientX - d.x0) > 3) d.moved = true;
+  if (!d.moved) return;
+  if (d.mode === 'bfade') {
+    // The out-fade grows LEFTWARD from the block's right edge, so its pointer
+    // delta is negated — same as the strips'.
+    const adt = (d.edge === 'out') ? -(ev.clientX - d.x0) / SBE.pps
+                                   : (ev.clientX - d.x0) / SBE.pps;
+    sbeSetAudio(sbeSetBedFade(SBE.audio, d.edge, Math.max(0, d.f0 + adt), dur));
+    sbePaint();
+    return;
+  }
+  const dt = (ev.clientX - d.x0) / SBE.pps;
+  const tol = SBE_SNAP_PX / SBE.pps;
+  const snapOn = sbeSnapEnabled(ev);
+  const marks = sbeMusicSnaps(SBE.clips);
+  const anchor = (d.mode === 'trimR') ? d.fe0 : d.fs0;
+  const want = sbeSnapToList(Math.max(0, anchor + dt), marks, tol, snapOn);
+  const next = sbeMusicEdit(SBE.audio, d.mode, want,
+                            SBE.peaks ? SBE.peaks.duration : 0);
+  sbeApplyMusic(next);
+  sbePaint();
+}
+
+function sbeOnMusicUp(ev) {
+  const d = SBE.musicDrag;
+  SBE.musicDrag = null;
+  if (!d) return;
+  const el = sbeEl('sbeMusicClip');
+  if (el) el.classList.remove('is-drag');
+  if (!d.moved) {
+    // A press that never travelled is a scrub, exactly as it is anywhere else
+    // on this lane — the block covers most of the waveform, so swallowing the
+    // click would take the lane's scrubber away with it. A press that landed
+    // ON a control is not a scrub, though: a point tapped and released has
+    // selected itself, and jumping the playhead would be a surprise.
+    if (d.mode !== 'bkf' && d.mode !== 'bfade') {
+      sbeSeek(sbeTimeFromEvent(ev, sbeEl('sbeMusicLane')));
+      return;
+    }
+  }
+  sbeMusicCommit(d.before);
+}
+
+// HOVER TEACHES, on the bed as on the strips: near the line, a ghost point
+// follows the pointer so the gesture is visible before it is performed.
+function sbeBedGhost(ev) {
+  const at = sbeBedAt(ev);
+  if (at) {
+    const dur = sbeFilmDuration(SBE.clips);
+    const onLine = sbeStripY(sbeBedGainAt(SBE.audio, SBE.clips, dur, at.t),
+                             at.rect.height);
+    if (Math.abs((ev.clientY - at.rect.top) - onLine) <= SBE_LVL_GRAB) {
+      const g = SBE.kfGhost;
+      if (!g || g.id !== '@music' || Math.abs(g.t - at.t) > 0.01) {
+        SBE.kfGhost = { id: '@music', t: at.t, g: at.g };
+        sbePaint();
+      }
+      return;
+    }
+  }
+  if (SBE.kfGhost && SBE.kfGhost.id === '@music') {
+    SBE.kfGhost = null;
+    sbePaint();
+  }
+}
+
+// DOUBLE-CLICK ADDS A POINT on the bed's body, exactly as on a strip. Plain
+// drag stays "move the music" — the gesture this lane already had — so the
+// control case is opt-in and the simple case is untouched.
+function sbeOnMusicDbl(ev) {
+  const el = sbeEl('sbeMusicClip');
+  if (!el || el.hidden || !ev.target.closest('#sbeMusicClip')) return;
+  if (ev.target.closest('.sbe-kf') || ev.target.closest('.sbe-fade-h')) return;
+  const at = sbeBedAt(ev);
+  if (!at) return;
+  const before = JSON.stringify(SBE.audio || {});
+  const next = sbeBedAddKeyframe(SBE.audio, at.t, at.g,
+                                 sbeFilmDuration(SBE.clips));
+  if (!next) return;
+  SBE.sel = '@music';
+  sbeSetAudio(next);
+  sbeMusicCommit(before);
+  ev.preventDefault();
+}
+
+// Writing the three fields back, and the ONE place that commits a soundtrack
+// discovered from peaks.json into the document. `sbeFetchPeaks` deliberately
+// does not — a track the arrangement was never cut to must not be saved as if
+// it had been — but dragging its strip IS the user saying "this one, here",
+// so from that gesture on it belongs to the edit.
+function sbeApplyMusic(fields) {
+  const a = Object.assign({}, SBE.audio || {});
+  a.offset = sbeRound(sbeNum(fields.offset));
+  if (fields.trim_start > 0) a.trim_start = sbeRound(fields.trim_start);
+  else delete a.trim_start;
+  if (fields.trim_end !== null && fields.trim_end !== undefined
+      && sbeNum(fields.trim_end) > 0) a.trim_end = sbeRound(fields.trim_end);
+  else delete a.trim_end;
+  sbeSetAudio(a);
+}
+
+// ---- THE MIX CONTROLS, on the A2 head -----------------------------------
+// The two numbers the renderer used to keep to itself. `sbeBedGainSlide` is
+// the live one — the slider moves, the level line under it moves, the bed you
+// are hearing moves — and the commit is what enters the undo stack, so a drag
+// across the whole range is one undo and not sixty.
+function sbeBedGainSlide(v) {
+  if (!SBE.audio || !SBE.audio.path) return;
+  if (!SBE.bedGainBefore) SBE.bedGainBefore = JSON.stringify(SBE.audio);
+  sbeSetAudio(sbeMixWrite(SBE.audio, { bed_gain: Math.max(0, Math.min(1, sbeNum(v) / 100)) }));
+  sbePaintMix();
+  sbePaint();
+  sbeMusicSync();
+}
+
+function sbeBedGainCommit(v) {
+  if (!SBE.audio || !SBE.audio.path) return;
+  const before = SBE.bedGainBefore || JSON.stringify(SBE.audio);
+  SBE.bedGainBefore = null;
+  sbeSetAudio(sbeMixWrite(SBE.audio, { bed_gain: Math.max(0, Math.min(1, sbeNum(v) / 100)) }));
+  sbePaintMix();
+  sbeMusicCommit(before);
+  sbeMusicSync();
+}
+
+function sbeSetBedDuck(on) {
+  if (!SBE.audio || !SBE.audio.path) {
+    // Nothing to duck. Put the box back rather than recording a decision
+    // about a soundtrack that does not exist.
+    sbePaintMix();
+    return;
+  }
+  const before = JSON.stringify(SBE.audio);
+  sbeSetAudio(sbeMixWrite(SBE.audio, { duck: !!on }));
+  sbePaintMix();
+  sbeMusicCommit(before);
+}
+
+// The head, painted from the document — never the other way round, which is
+// the bug `sbeSetMusicMode`'s comment records: a control that writes on every
+// load turns every OPEN of a film into a save the user never made.
+function sbePaintMix() {
+  const a = SBE.audio || {};
+  const has = !!a.path;
+  const mix = sbeAudioMix(a);
+  const sl = sbeEl('sbeBedGain');
+  const num = sbeEl('sbeBedGainNum');
+  const dk = sbeEl('sbeBedDuck');
+  const note = sbeEl('sbeBedDuckNote');
+  const head = document.querySelector('.sbe-gh-mus');
+  const pct = Math.round(mix.bed_gain * 100);
+  if (sl) { sl.value = String(pct); sl.disabled = !has; }
+  if (num) num.textContent = pct + '%';
+  if (dk) { dk.checked = !!mix.duck; dk.disabled = !has; }
+  // A CONTROL THAT HAS STOPPED ACTING SAYS SO, LOUDLY. The duck stands down
+  // under an authored envelope — never two curves on one level — and a ticked
+  // box that was quietly doing nothing is the silent guard this editor has
+  // paid for more than once.
+  const off = has && sbeBedDuckSuppressed(a, sbeFilmDuration(SBE.clips));
+  if (note) {
+    note.hidden = !off;
+    note.textContent = off ? 'off — your own level line is driving the bed' : '';
+  }
+  if (head) head.classList.toggle('is-duck-off', off);
+}
+
+function sbePaintTrack() {
+  const track = sbeEl('sbeTrack');
+  const holes = sbeHoles(SBE.clips);
+  // THE MESSAGE BELONGS WHERE THE EMPTINESS IS. This sentence used to live in
+  // the inspector, which is a short auto-scrolled box in the corner — so on a
+  // brand-new draft the user read "…media pool to put it here, or Add black
+  // for a gap to fill", starting mid-word, while the track itself, the thing
+  // that was empty, rendered nothing at all.
+  let html = SBE.clips.length ? '' :
+    '<div class="sbe-track-empty">Nothing on the timeline yet — click a clip '
+    + 'in the media pool to put it here, or Add black for a gap to fill.</div>';
+  for (const g of holes) {
+    const w = sbePx(g.duration);
+    html += '<div class="sbe-gap" data-gap-start="' + g.film_start + '" ' +
+            'data-gap-dur="' + g.duration + '" ' +
+            'title="Nothing plays here. Click to generate a shot for it." ' +
+            'style="left:' + sbePx(g.film_start).toFixed(1) + 'px;width:' + w.toFixed(1) + 'px">' +
+            (w > 84 ? escapeHtml(g.duration.toFixed(2) + 's hole · fill it') : '+') +
+            '</div>';
+  }
+  for (const c of SBE.clips) {
+    const w = sbePx(sbeLen(c));
+    const kind = sbeKind(c);
+    const bright = sbeBright(c);
+    const bad = SBE.errors.byId && SBE.errors.byId[c.id];
+    const flag = c.locked ? 'lock'
+      : (Math.abs(bright) >= 1e-6
+          ? (bright > 0 ? '+' : '') + bright.toFixed(2)
+          // "slow" is a VIDEO's problem. A still has no proxy because it needs
+          // none and a slug has no file at all, so flagging either as
+          // un-scrubbable would be advice to run a Prepare that would do
+          // nothing.
+          : (kind === 'video' && !c.proxy ? 'slow' : ''));
+    const cls = 'sbe-clip is-' + kind + (c.id === SBE.sel ? ' is-sel' : '')
+              + (c.id === SBE.curId ? ' is-playing' : '')
+              + (bad ? ' is-bad' : '') + (c.locked ? ' is-locked' : '')
+              + (Math.abs(bright) >= 1e-6 ? ' is-graded' : '')
+              + (flag ? ' has-flag' : '');
+    // A still and a slug have no source window to report — their only number
+    // is the hold, and printing "0.00→3.00" of a clock they do not have reads
+    // as a trim somebody made.
+    const meta = (kind === 'video')
+      ? (sbeNum(c.start).toFixed(2) + '→' + sbeNum(c.end).toFixed(2) +
+         ' · ' + sbeLen(c).toFixed(2) + 's')
+      : (sbeLen(c).toFixed(2) + 's hold');
+    const label = (kind === 'slug')
+      ? 'black'
+      : (c.title || String(c.path || '').split('/').pop() || 'clip');
+    // The still paints its own picture behind its name. One <img> per still on
+    // the track, which is the same budget the pool already spends per row and
+    // nothing like the media-element cap a <video> would eat.
+    const thumb = (kind === 'still' && c.path)
+      ? '<img class="sbe-cl-thumb" alt="" src="/image?w=240&path=' +
+        encodeURIComponent(c.path) + '">'
+      : '';
+    html += '<div class="' + cls + '" data-id="' + escapeHtml(c.id) + '" '
+          + 'data-kind="' + escapeHtml(kind) + '" '
+          + 'data-source="' + escapeHtml(c.source || 'auto') + '" '
+          + 'title="' + escapeHtml(label + (bad ? '\n' + bad[0].message : '')) + '" '
+          + 'style="left:' + sbePx(c.film_start).toFixed(1) + 'px;width:' + w.toFixed(1) + 'px">'
+          + thumb
+          + '<div class="sbe-cl-name">' + escapeHtml(sbeNiceName(label)) + '</div>'
+          + (w > 96 ? '<div class="sbe-cl-meta">' + escapeHtml(meta) + '</div>' : '')
+          + (flag ? '<div class="sbe-cl-flag">' + escapeHtml(flag) + '</div>' : '')
+          + sbeSyncBadge(c)
+          + sbeFadeMarks(c)
+          + '<div class="sbe-grip l"></div><div class="sbe-grip r"></div>'
+          // THE TWO CORNER HANDLES, IN A BAND INSET FROM BOTH GRIPS. The
+          // wrapper is what keeps the fade gesture and the trim gesture off
+          // each other's pixels (see `.sbe-fade-band`) — they were stacked in
+          // the same corner and the trim won almost every aim.
+          + (c.locked ? ''
+             : '<div class="sbe-fade-band">'
+               + '<div class="sbe-fade-h in" data-fade="in"></div>'
+               + '<div class="sbe-fade-h out" data-fade="out"></div>'
+               + '</div>')
+          + '</div>';
+  }
+  track.innerHTML = html;
+  track.style.width = sbeEl('sbeInner').style.width;
+  if (SBE.dropAt !== null && SBE.dropAt !== undefined) {
+    const line = document.createElement('div');
+    line.className = 'sbe-drop-line';
+    line.style.left = sbePx(SBE.dropAt).toFixed(1) + 'px';
+    track.appendChild(line);
+  }
+}
+
+// The ramps, drawn to scale on the block: a fade you can see the length of
+// without selecting the clip.
+function sbeFadeMarks(c) {
+  const e = sbeFx(c);
+  let out = '';
+  if (e.fade_in > 1e-9) {
+    out += '<div class="sbe-cl-fade in" style="left:0;width:'
+        + sbePx(e.fade_in).toFixed(1) + 'px"></div>';
+  }
+  if (e.fade_out > 1e-9) {
+    out += '<div class="sbe-cl-fade out" style="right:0;width:'
+        + sbePx(e.fade_out).toFixed(1) + 'px"></div>';
+  }
+  return out;
+}
+
+// THE SYNC FLAG, and it goes on BOTH halves — the picture block and the sound
+// strip — because the pair is what has drifted and either one is where the eye
+// happens to be. It is a button: clicking it is the rematch.
+function sbeSyncBadge(c) {
+  if (sbeKind(c) !== 'video') return '';
+  const w = sbeClipAudio(c);
+  // A COUPLED pair is never flagged: its offset is the relationship the user
+  // froze and the two travel together, so it cannot come apart. Flagging it
+  // would put a permanent warning on every J-cut in the film.
+  if (!w.split || w.coupled || sbeAudioInSync(c)) return '';
+  const d = sbeAudioDrift(c);
+  return '<div class="sbe-sync" data-sync="' + escapeHtml(c.id) + '" '
+       + 'title="' + escapeHtml('The sound is ' + sbeDriftLabel(d) + ' out of sync '
+           + 'with its own picture (' + (d > 0 ? 'late' : 'early') + '). '
+           + 'Click to put it back under the frame it came from.') + '">'
+       + escapeHtml(sbeDriftLabel(d)) + '</div>';
+}
+
+// THE SOUND, UNDER THE PICTURE THAT MADE IT. One strip per video clip,
+// directly beneath its block: linked ones are dim and inert, unlinked ones
+// carry the same grips a clip does.
+function sbePaintAudioLane() {
+  const lane = sbeEl('sbeAudioLane');
+  if (!lane) return;
+  let html = '';
+  for (const c of SBE.clips) {
+    if (sbeKind(c) !== 'video') continue;
+    const w = sbeClipAudio(c);
+    const x = sbePx(w.film_start);
+    const px = sbePx(w.len);
+    // A CLIP WITH NO SOUND AT ALL SAYS SO. `has_audio` rides on the pool row
+    // and the clip (the probe already reads streams for `duration`), and it
+    // is absent on documents written before it existed — so only an explicit
+    // false is silence, and everything else draws as it always did. The rule
+    // that paints this state has shipped since the lane did; the flag that
+    // reaches it was hard-coded to false, so the lane claimed sound it did
+    // not have.
+    const mute = c.has_audio === false;
+    const off = sbeClipMuted(c);
+    const cls = 'sbe-aclip ' + (w.linked ? 'is-linked' : 'is-split')
+              + (w.coupled ? ' is-coupled' : '')
+              + (mute ? ' is-mute' : '')
+              + (off ? ' is-silenced' : '')
+              + (c.id === SBE.sel ? ' is-sel' : '');
+    // ONE WORD, EIGHT TIMES, IN A 26PX STRIP. The label is only news when the
+    // sound has been pulled off its picture — the lane's own fill says the
+    // rest, and a column of identical labels says nothing at all. A COUPLED
+    // strip is news of a different kind: it is offset ON PURPOSE and moving
+    // with its picture, so the label is the offset itself.
+    // MUTED SAYS MUTED, over everything else the strip might have said. The
+    // strip STAYS — it is still where the sound would be, and the decision has
+    // to be visible and reversible in the place it was made.
+    const label = mute ? 'no sound'
+                : (off ? ('MUTED · ' + w.len.toFixed(2) + 's')
+                : (w.coupled ? ('J-cut · ' + sbeDriftLabel(sbeAudioDrift(c)))
+                : (w.linked ? '' : ('sound · ' + w.len.toFixed(2) + 's'))));
+    html += '<div class="' + cls + '" data-id="' + escapeHtml(c.id) + '" '
+          + 'title="' + escapeHtml(off
+              ? 'Muted — this clip\'s own sound is switched off in the preview, the render and the export. Unmute it in the inspector.'
+              : w.coupled
+              ? 'Linked at ' + sbeDriftLabel(sbeAudioDrift(c)) + ' — the sound keeps this offset and travels with the picture. Unlink it to slide it on its own.'
+              : (w.linked
+              ? 'This clip\'s sound moves with its picture. Unlink it in the inspector to slide it under the neighbour (a J-cut or an L-cut).'
+              : 'Unlinked — drag to slide the sound, pull either end to trim it. The picture does not move.')) + '" '
+          + 'style="left:' + x.toFixed(1) + 'px;width:' + Math.max(2, px).toFixed(1) + 'px">'
+          + (mute ? '' : sbeStripWave(c, w, px))
+          + (px > 70 ? '<span class="sbe-aclip-t">' + escapeHtml(label) + '</span>' : '')
+          + (px > 46 ? sbeSyncBadge(c) : '')
+          + sbeAudioFadeMarks(c, w)
+          + (w.linked ? '' : '<div class="sbe-grip l"></div><div class="sbe-grip r"></div>')
+          // The same band the picture block uses, on a strip that can be
+          // shorter still — 37px at the lane's floor, which is why the handle
+          // is sized against that floor and not against the lane.
+          + (w.linked || c.locked ? ''
+             : '<div class="sbe-fade-band">'
+               + '<div class="sbe-fade-h in" data-afade="in"></div>'
+               + '<div class="sbe-fade-h out" data-afade="out"></div>'
+               + '</div>')
+          + '</div>';
+  }
+  lane.innerHTML = html;
+  lane.style.width = sbeEl('sbeInner').style.width;
+}
+
+async function edPoolOverlay(i) {
+  const rows = (document.getElementById('edPoolList') || {})._rows || [];
+  const r = rows[i];
+  if (!r || !SBE.open) {
+    phosToast('Open a __SEQ__ first — an overlay belongs to a timeline.', {});
+    return;
+  }
+  // A CARD THAT ARRIVES ON A BLACK PLATE IS FIXED ON THE WAY IN, and only on
+  // the way to THIS lane. The server measures the file and either hands back a
+  // keyed derivative or the path exactly as it came; either way the lane gets
+  // one path, and preview, render and export all read that same file.
+  const item = { path: r.path, title: r.title || '', duration_s: 3 };
+  let keyed = null;
+  try {
+    // URLSearchParams, like every other editor POST. A `FormData` here sends
+    // multipart, which `_storyboard_post` does not parse — the route answered
+    // "that image is not in this panel's outputs" for a file sitting in the
+    // outputs folder, and the card was placed plated with nothing on screen
+    // to say the fix had not run.
+    const fd = new URLSearchParams();
+    fd.set('path', r.path);
+    const res = await (await fetch('/storyboard/edit/overlay-key',
+                                   { method: 'POST', body: fd })).json();
+    if (res && res.ok && res.keyed && res.path) { item.path = res.path; keyed = res; }
+  } catch (e) {
+    // The lane still works with the file exactly as it arrived. A card that
+    // could not be measured is not a card that cannot be placed.
+  }
+  const added = sbeOvAddAt(item, SBE.playhead);
+  if (added && keyed) sbeKeyedNotice(added.id, keyed);
+}
+
+// SAY SO QUIETLY, AND ALLOW UNDO. Automatic is not the same as silent, and it
+// is certainly not the same as irreversible: the picture the user chose was
+// changed, so the change is named, and the file it came from is one click away.
+// It goes in the ONE notice surface, as a quiet chip, so it can never push the
+// timeline down the screen — the rule the four stacked banners broke.
+function sbeKeyedNotice(ovId, res) {
+  const bar = sbeEl('sbeKeyed');
+  if (!bar) return;
+  SBE.keyed = { id: ovId, original: res.original || '', path: res.path || '' };
+  const what = sbeEl('sbeKeyedWhat');
+  if (what) {
+    what.textContent = 'from ' + sbeNiceName(
+      res.name || String(res.original || '').split('/').pop() || 'that image');
+  }
+  bar.hidden = false;
+  sbePaintNotices();
+}
+
+function sbeKeyedKeepOriginal() {
+  const k = SBE.keyed;
+  sbeKeyedDismiss();
+  if (!k || !k.id || !k.original) return;
+  if (sbeOvMutate(os => sbeOvSetPath(os, k.id, k.original))) {
+    phosToast('Kept the original — the card is back on its black background.',
+              { duration: 5000 });
+  }
+}
+
+function sbeKeyedDismiss() {
+  SBE.keyed = null;
+  const bar = sbeEl('sbeKeyed');
+  if (bar) bar.hidden = true;
+  if (SBE.noticeLead === 'sbeKeyed') SBE.noticeLead = '';
+  sbePaintNotices();
+}
+
+function sbePaintOverlays() {
+  const lane = sbeEl('sbeOverlayLane');
+  if (!lane || !lane.classList) return;
+  let html = '';
+  for (const o of SBE.overlays || []) {
+    const x = sbePx(sbeNum(o.film_start));
+    const w = Math.max(2, sbePx(sbeNum(o.film_end) - sbeNum(o.film_start)));
+    const e = sbeFx(o);
+    const name = sbeNiceName(o.title || String(o.path || '').split('/').pop() || 'card');
+    html += '<div class="sbe-ov' + (o.id === SBE.ovSel ? ' is-sel' : '') + '" '
+          + 'data-id="' + escapeHtml(o.id) + '" '
+          + 'title="' + escapeHtml('Overlay — composited over the picture. '
+              + 'Drag to move, pull either end to change how long.') + '" '
+          + 'style="left:' + x.toFixed(1) + 'px;width:' + w.toFixed(1) + 'px">'
+          + (sbeOvKind(o) === 'still' && o.path
+              ? '<img class="sbe-ov-thumb" alt="" src="/image?w=240&path='
+                + encodeURIComponent(o.path) + '">'
+              : '')
+          + (w > 60 ? escapeHtml(name) : '')
+          + (e.fade_in > 1e-9 ? '<div class="sbe-cl-fade in" style="left:0;width:'
+              + sbePx(e.fade_in).toFixed(1) + 'px"></div>' : '')
+          + (e.fade_out > 1e-9 ? '<div class="sbe-cl-fade out" style="right:0;width:'
+              + sbePx(e.fade_out).toFixed(1) + 'px"></div>' : '')
+          + '<div class="sbe-grip l"></div><div class="sbe-grip r"></div>'
+          + '</div>';
+  }
+  // AN EMPTY LANE IS A SENTENCE, NOT A BLANK — the convention the track and
+  // the four pool sources already follow. Without it the overlay lane is a
+  // strip of nothing that teaches nobody it exists.
+  lane.innerHTML = html || '<div class="sbe-track-empty sbe-ovlane-empty">'
+    + 'Overlay lane — drop a still here, or press \u25a3 on an image in the '
+    + 'media pool to lay it over the picture at the playhead.</div>';
+  lane.style.width = sbeEl('sbeInner').style.width;
+}
+
+// THE STAGE'S CARD. Driven by the playhead like the strip player, because an
+// overlay is its own lane and does not care which picture is underneath.
+function sbeOvPaint(t) {
+  const el = sbeEl('sbeOvLayer');
+  if (!el || !el.classList) return;
+  const now = (t === undefined) ? SBE.playhead : sbeNum(t);
+  const o = sbeOvAt(SBE.overlays, now);
+  if (!o || !o.path) { el.classList.remove('is-on'); return; }
+  const url = '/image?w=1280&path=' + encodeURIComponent(o.path);
+  if (el.getAttribute('src') !== url) el.setAttribute('src', url);
+  el.style.opacity = String(sbeFadeOpacityAt(o, now));
+  el.classList.add('is-on');
+}
+
+function sbeOnOvDown(ev) {
+  const blk = ev.target.closest ? ev.target.closest('.sbe-ov') : null;
+  if (!blk) { SBE.ovSel = ''; sbePaint(); return; }
+  const id = blk.dataset.id;
+  SBE.ovSel = id;
+  SBE.sel = '';
+  const o = sbeOvById(SBE.overlays, id);
+  if (!o) return;
+  const grip = ev.target.closest('.sbe-grip');
+  SBE.ovDrag = { id: id, x0: ev.clientX,
+                 mode: grip ? (grip.classList.contains('r') ? 'trimR' : 'trimL') : 'move',
+                 fs0: sbeNum(o.film_start), fe0: sbeNum(o.film_end),
+                 moved: false, lane0: JSON.stringify(SBE.overlays),
+                 before: sbeSnapshot() };
+  try { sbeEl('sbeOverlayLane').setPointerCapture(ev.pointerId); } catch (e) {}
+  ev.preventDefault();
+  sbePaint();
+}
+
+function sbeOnOvMove(ev) {
+  const d = SBE.ovDrag;
+  if (!d) return;
+  if (Math.abs(ev.clientX - d.x0) > 3) d.moved = true;
+  if (!d.moved) return;
+  const dt = (ev.clientX - d.x0) / SBE.pps;
+  const tol = SBE_SNAP_PX / SBE.pps;
+  const marks = sbeMusicSnaps(SBE.clips);      // the CUTS: what a card aims at
+  let r;
+  if (d.mode === 'move') {
+    r = sbeOvMove(SBE.overlays, d.id,
+                  sbeSnapToList(Math.max(0, d.fs0 + dt), marks, tol,
+                                sbeSnapEnabled(ev)));
+  } else if (d.mode === 'trimL') {
+    r = sbeOvTrim(SBE.overlays, d.id, 'l',
+                  sbeSnapToList(Math.max(0, d.fs0 + dt), marks, tol,
+                                sbeSnapEnabled(ev)));
+  } else {
+    r = sbeOvTrim(SBE.overlays, d.id, 'r',
+                  sbeSnapToList(Math.max(0, d.fe0 + dt), marks, tol,
+                                sbeSnapEnabled(ev)));
+  }
+  if (r && r.ok) SBE.overlays = r.overlays;
+  sbePaint();
+}
+
+function sbeOnOvUp(ev) {
+  const d = SBE.ovDrag;
+  SBE.ovDrag = null;
+  if (!d) return;
+  if (!d.moved) { sbePaint(); return; }
+  if (d.lane0 === JSON.stringify(SBE.overlays)) { sbePaint(); return; }
+  SBE.undo.push(d.before);
+  if (SBE.undo.length > SBE_UNDO_MAX) SBE.undo.shift();
+  SBE.redo.length = 0;
+  SBE.dirty = true;
+  sbeSetState('unsaved changes', 'dirty');
+  sbePaint();
+  sbeQueueSave();
+}
+
+// The strip's own ramps, drawn to scale. The SAME triangle the picture uses,
+// because it is the same gesture and the muscle memory should transfer.
+// The waveform and the level line, as ONE inline SVG per strip. An <svg>
+// rather than a <canvas> because the lane is repainted on every drag and a
+// canvas would need its own size/DPR bookkeeping to stay crisp; the point
+// count here is a few hundred, which is nothing for the DOM.
+// THE LEVEL LINE'S TARGET, CUT TO THE SPAN NOBODY ELSE OWNS. Same polyline as
+// the one that is drawn, clipped to [x0, x1] with the y at each cut
+// interpolated along the segment it falls in — so the target sits exactly on
+// the line it belongs to rather than on a straight line between whole points.
+// Returns '' when there is not enough left to aim at, and the caller then
+// offers no target at all: an 8px stub of a control is worse than none, and
+// the inspector's Sound section is the route that never depends on width.
+function sbeLvlHitPath(pts, xOf, yOf, x0, x1) {
+  if (!pts || pts.length < 2 || !(x1 - x0 >= SBE_LVL_MIN_SPAN)) return '';
+  let d = '';
+  for (let i = 0; i < pts.length - 1; i++) {
+    const ax = xOf(pts[i][0]), bx = xOf(pts[i + 1][0]);
+    const ay = yOf(pts[i][1]), by = yOf(pts[i + 1][1]);
+    if (bx < x0 || ax > x1) continue;
+    const sx = Math.max(ax, x0), ex = Math.min(bx, x1);
+    const yAt = (x) => (bx - ax <= 1e-9) ? by : ay + (by - ay) * ((x - ax) / (bx - ax));
+    d += (d ? 'L' : 'M') + sx.toFixed(2) + ',' + yAt(sx).toFixed(2)
+       + 'L' + ex.toFixed(2) + ',' + yAt(ex).toFixed(2);
+  }
+  return d;
+}
+
+function sbeStripWave(c, w, px) {
+  const peaks = sbeWaveWant(c.path);
+  // THE STRIP IS AS TALL AS THE LANE WAS DRAGGED TO. Everything below is
+  // expressed in H, so a taller lane is not a stretched picture — it is more
+  // waveform, a longer level line and a point that is genuinely easier to hit.
+  const H = sbeStripH(), MID = H / 2;
+  const cols = Math.max(4, Math.floor(px));
+  let body = '';
+  if (peaks) {
+    const slice = sbeWaveSlice(peaks, w.start, w.end, cols);
+    let d = '';
+    for (let i = 0; i < slice.length; i++) {
+      const lo = Math.max(-1, slice[i][0]), hi = Math.min(1, slice[i][1]);
+      const x = (i / cols) * px;
+      d += 'M' + x.toFixed(2) + ',' + (MID - hi * MID).toFixed(2)
+         + 'L' + x.toFixed(2) + ',' + (MID - lo * MID).toFixed(2);
+    }
+    body += '<path class="sbe-wave-p" d="' + d + '"/>';
+  }
+  // THE LEVEL LINE, drawn ON the waveform because that is what it acts on.
+  // Unity sits at the top: a gain of 1 is "all of it", and a line that fell
+  // to the middle at unity would read as half.
+  const curve = sbeGainPoints(c, w.len);
+  const pts = curve.length ? curve : [[0, 1], [w.len, 1]];
+  const yOf = g => sbeStripY(g, H);
+  const xOf = t => (w.len > 0 ? (t / w.len) * px : 0);
+  let line = '';
+  for (let i = 0; i < pts.length; i++) {
+    line += (i ? 'L' : 'M') + xOf(pts[i][0]).toFixed(2) + ','
+          + yOf(pts[i][1]).toFixed(2);
+  }
+  // THREE PATHS, ONE LINE. A dark stroke underneath so the level reads over a
+  // loud passage instead of dissolving into it; the line itself; and a fat
+  // transparent one on top that is the TARGET — `pointer-events: stroke`, so
+  // the line is a thing you can hit rather than a thing you can see. Without
+  // it the only way to reach a level was to already know a gesture.
+  body += '<path class="sbe-lvl-u" d="' + line + '"/>';
+  body += '<path class="sbe-lvl" d="' + line + '"/>';
+  const shape = sbeStripEditable(c);
+  // THE TWO ENDS OF THE LINE BELONG TO THE FADE HANDLES. The line is DRAWN end
+  // to end, because that is the truth about the gain — but its TARGET stops
+  // where the corner handles start, so the third affordance in this corner
+  // cannot be ambiguous with the other two either. Without this the fat
+  // transparent stroke ran the full width, under both 22px handles: the
+  // handles win on z-index so nothing was actually stolen, but two controls
+  // claiming the same rectangle is how the fade handle got lost inside the
+  // trim grip in the first place, and "it happens to stack right" is not a
+  // property anybody can see or keep.
+  if (shape) {
+    // IN USER UNITS, WHICH ARE NOT CSS PIXELS HERE. The strip is border-box
+    // and 1px of border on each side, so its <svg> is laid out over `px - 2`
+    // CSS pixels while its viewBox is `px` units wide — every user unit is a
+    // hair narrower than a pixel, and the clip landed INSIDE the handle by
+    // that fraction. Small on a wide strip and not small on a narrow one
+    // (the error is 2/px of the span), so it is converted rather than padded.
+    const scale = px / Math.max(1, px - 2);
+    const clear = SBE_LVL_CLEAR * scale;
+    const hit = sbeLvlHitPath(pts, xOf, yOf, clear, px - clear);
+    if (hit) body += '<path class="sbe-lvl-hit" d="' + hit + '"/>';
+  }
+  // THE GHOST: where the click would land, drawn before it is clicked.
+  const gh = SBE.kfGhost;
+  if (shape && gh && gh.id === c.id) {
+    body += '<circle class="sbe-kf-ghost" cx="' + xOf(gh.t).toFixed(2) + '" '
+          + 'cy="' + yOf(gh.g).toFixed(2) + '" r="'
+          + Math.max(3.6, Math.min(6.5, H / 5.5)).toFixed(2) + '"/>';
+  }
+  // Only the USER's points get a handle. The fade corners are already a
+  // gesture of their own, and putting a dot on them would offer two ways to
+  // drag the same number in opposite directions.
+  const own = sbeAfx(c, w.len).points;
+  // The dot grows with the strip, within reason: 3.2 was the whole of the
+  // target in a 20px lane and is the floor here, and past ~6 a handle starts
+  // hiding the line it is on.
+  const R = Math.max(3.2, Math.min(6, H / 6));
+  for (let i = 0; i < own.length; i++) {
+    body += '<circle class="sbe-kf" data-kf="' + i + '" '
+          + 'cx="' + xOf(own[i][0]).toFixed(2) + '" '
+          + 'cy="' + yOf(sbeLerpGain(curve.length ? curve : own, own[i][0])).toFixed(2) + '" '
+          + 'style="--kf-r:' + R.toFixed(2) + 'px" '
+          + 'r="' + R.toFixed(2) + '"/>';
+  }
+  return '<svg class="sbe-wave-svg" width="' + Math.max(1, px).toFixed(0)
+       + '" height="' + H + '" viewBox="0 0 ' + Math.max(1, px).toFixed(0)
+       + ' ' + H + '" preserveAspectRatio="none">' + body + '</svg>';
+}
+
+// ONE RULE, ASKED ONCE. A level belongs to a strip you can shape: not locked,
+// and unlinked — the same rule the double-click has always enforced, now named
+// so the line, the ghost, the click and the inspector cannot disagree about it.
+function sbeStripEditable(c) {
+  if (!c || c.locked) return false;
+  if (c.has_audio === false) return false;
+  return !sbeClipAudio(c).linked;
+}
+
+// Where the pointer is, in the coordinates a level cares about: which strip,
+// how far along it, and what gain that height means. Null when the pointer is
+// not over a strip that could take a point.
+function sbeStripAt(ev) {
+  const blk = ev.target && ev.target.closest ? ev.target.closest('.sbe-aclip') : null;
+  if (!blk) return null;
+  // NOT WHILE THE POINTER IS ON A CORNER HANDLE. The clipped hit path already
+  // keeps the LINE off those pixels, but this pair also answers a proximity
+  // test that knows nothing about paths — and it is what the hover ghost asks,
+  // so without this a fade handle would sit under a ghost promising a
+  // keyframe it could never place. Asked of the real hit target rather than of
+  // a rectangle, so it stays exact at every lane height and every zoom.
+  if (ev.target.closest('.sbe-fade-h')) return null;
+  const c = sbeById(SBE.clips, blk.dataset.id);
+  if (!c || !sbeStripEditable(c)) return null;
+  const r = blk.getBoundingClientRect();
+  const w = sbeClipAudio(c);
+  return {
+    c: c, id: c.id, rect: r, len: w.len,
+    t: w.len * Math.max(0, Math.min(1, (ev.clientX - r.left) / Math.max(1, r.width))),
+    g: sbeStripGain(ev.clientY, r.top, r.height),
+  };
+}
+
+// HOVER TEACHES. Near the line, a ghost point follows the pointer and the
+// cursor turns into the one you use to change a level — so the answer to "how
+// do I add a keyframe" is visible before anything is clicked. Away from it the
+// strip is what it always was: a thing you drag.
+function sbeAudioGhost(ev) {
+  const at = sbeStripAt(ev);
+  let want = null;
+  if (at) {
+    const H = at.rect.height;
+    const onLine = sbeStripY(sbeGainAt(at.c, at.len, at.t), H);
+    if (Math.abs((ev.clientY - at.rect.top) - onLine) <= SBE_LVL_GRAB) {
+      want = { id: at.id, t: sbeRound(at.t), g: sbeRound(at.g) };
+    }
+  }
+  const now = SBE.kfGhost;
+  const same = (!want && !now) || (want && now && want.id === now.id
+    && Math.abs(want.t - now.t) < 1e-4 && Math.abs(want.g - now.g) < 2e-3);
+  if (same) return;
+  SBE.kfGhost = want;
+  // ONE LANE, NOT THE WHOLE TIMELINE. A ghost that repainted every clip block
+  // and both canvases on every mouse move would make the pointer feel heavy
+  // over the one lane this is meant to make inviting.
+  sbePaintAudioLane();
+}
+
+function sbeAudioGhostClear() {
+  if (!SBE.kfGhost) return;
+  SBE.kfGhost = null;
+  sbePaintAudioLane();
+}
+
+// A SINGLE CLICK ON THE LINE PLACES A POINT — and the same gesture goes on to
+// drag it, so "click, then set the level" is one movement. Double-click still
+// works, because muscle memory should not be taken away to teach somebody
+// else. Returns true when it claimed the gesture.
+function sbeLevelClick(ev) {
+  const at = sbeStripAt(ev);
+  if (!at) return false;
+  const H = at.rect.height;
+  const onLine = sbeStripY(sbeGainAt(at.c, at.len, at.t), H);
+  const near = Math.abs((ev.clientY - at.rect.top) - onLine) <= SBE_LVL_GRAB;
+  if (!near && !ev.target.closest('.sbe-lvl-hit')) return false;
+  const before = sbeSnapshot();
+  const r = sbeAddKeyframe(SBE.clips, at.id, at.t, at.g);
+  if (!r.ok) return false;
+  SBE.clips = r.clips;
+  SBE.sel = at.id;
+  SBE.kfGhost = null;
+  // The point it just made is the point the drag continues on, so a level is
+  // set in one gesture rather than two.
+  const pts = sbeAfx(sbeById(SBE.clips, at.id), at.len).points;
+  let idx = 0;
+  for (let i = 0; i < pts.length; i++) {
+    if (Math.abs(pts[i][0] - sbeRound(at.t)) < 1e-3) { idx = i; break; }
+  }
+  SBE.kfDrag = { id: at.id, index: idx, before: before, moved: true,
+                 rect: at.rect };
+  try { sbeEl('sbeAudioLane').setPointerCapture(ev.pointerId); } catch (e) {}
+  SBE.dirty = true;
+  sbeSetState('unsaved changes', 'dirty');
+  sbePaint();
+  return true;
+}
+
+// RIGHT-CLICK REMOVES. Shift-click still does too, but a modifier on a 6px
+// target is not a route anybody finds — and a context menu is where every
+// other application on this machine keeps "remove".
+function sbeOnAudioMenu(ev) {
+  const kf = ev.target && ev.target.closest ? ev.target.closest('.sbe-kf') : null;
+  if (!kf) return;
+  const blk = ev.target.closest('.sbe-aclip');
+  const c = blk ? sbeById(SBE.clips, blk.dataset.id) : null;
+  if (!c || c.locked) return;
+  ev.preventDefault();
+  SBE.sel = c.id;
+  sbeMutate(cs => sbeDeleteKeyframe(cs, c.id, sbeNum(kf.dataset.kf)));
+}
+
+// THE ROUTE THAT NEEDS NO GESTURE AT ALL. The inspector's Sound section can
+// put a point exactly where the playhead is, which is also the only way to
+// place one at a frame you have actually listened to.
+function sbeAddPointAtPlayhead() {
+  const c = sbeById(SBE.clips, SBE.sel);
+  if (!c) return;
+  if (!sbeStripEditable(c)) {
+    phosToast('Unlink this clip\'s sound first — a level line belongs to a '
+              + 'strip you can shape.', { duration: 6000 });
+    return;
+  }
+  const w = sbeClipAudio(c);
+  const t = sbeNum(SBE.playhead) - sbeNum(w.film_start);
+  if (t < -1e-6 || t > w.len + 1e-6) {
+    phosToast('Move the playhead over this clip\'s sound first — a point is '
+              + 'placed where you are listening.', { duration: 6000 });
+    return;
+  }
+  const at = Math.max(0, Math.min(w.len, t));
+  const r = sbeAddKeyframe(SBE.clips, c.id, at, sbeGainAt(c, w.len, at));
+  if (!r.ok) {
+    phosToast(r.why === 'there is already a point here'
+      ? 'There is already a point at the playhead — drag it, or right-click it '
+        + 'to remove it.' : 'That clip is locked.', { duration: 6000 });
+    return;
+  }
+  sbeMutate(() => ({ clips: r.clips, ok: true }));
+}
+
+function sbeClearPoints() {
+  const c = sbeById(SBE.clips, SBE.sel);
+  if (!c) return;
+  sbeMutate(cs => sbeAfxWrite(cs, c.id, []));
+}
+
+// THE LEGEND, in one function, because it is the only thing that tells a new
+// user what the gestures are and it has to be true. The Keys chip renders it.
+function sbeKeysLegend() {
+  const k = t => '<span class="sbe-kbd">' + t + '</span>';
+  return [
+    ['Drag', 'move a clip · handles to trim'],
+    [k('Space'), 'play / pause'],
+    [k('←') + k('→'), 'one frame'],
+    [k('S'), 'split at the playhead'],
+    [k('⌫'), 'ripple delete'],
+    [k('Alt'), 'held: ignore the beat grid'],
+    [k('Shift'), 'held: reorder instead of move'],
+    ['Levels', 'click the yellow line to add a point · drag it to set the '
+             + 'level · right-click it to remove · ' + k('Shift')
+             + '-click removes too'],
+    ['Sound', 'the music strip drags and trims like a clip'],
+    ['Timeline', 'drag its top edge for more height · double-click to reset'],
+  ].map(r => '<span class="sbe-key-row"><b>' + r[0] + '</b>' + r[1] + '</span>')
+   .join('');
+}
+
+function sbeAudioFadeMarks(c, w) {
+  const e = sbeAfx(c, w.len);
+  let out = '';
+  if (e.fade_in > 1e-9) {
+    out += '<div class="sbe-cl-fade in" style="left:0;width:'
+        + sbePx(e.fade_in).toFixed(1) + 'px"></div>';
+  }
+  if (e.fade_out > 1e-9) {
+    out += '<div class="sbe-cl-fade out" style="right:0;width:'
+        + sbePx(e.fade_out).toFixed(1) + 'px"></div>';
+  }
+  return out;
+}
+
+// DOUBLE-CLICK ADDS A POINT, on the strip body and nowhere else. Plain drag
+// stays "move the strip" — the gesture every lane on this timeline already
+// uses — so the control case is opt-in and the simple case is untouched.
+function sbeOnAudioDbl(ev) {
+  const blk = ev.target.closest ? ev.target.closest('.sbe-aclip') : null;
+  if (!blk) return;
+  if (ev.target.closest('.sbe-kf') || ev.target.closest('.sbe-fade-h')) return;
+  const c = sbeById(SBE.clips, blk.dataset.id);
+  if (!c) return;
+  const w = sbeClipAudio(c);
+  if (w.linked) {
+    phosToast('Unlink this clip\'s sound first — a level line belongs to a '
+              + 'strip you can shape.', { duration: 6000 });
+    return;
+  }
+  const r = blk.getBoundingClientRect();
+  const t = w.len * Math.max(0, Math.min(1, (ev.clientX - r.left) / Math.max(1, r.width)));
+  // THE STRIP'S OWN RECTANGLE, through the one pair every gesture shares. The
+  // `- 3` and `/ 20` this replaces were a lane that no longer has that inset
+  // and a height the top edge can now drag to four times over: on a tall strip
+  // every double-click past the first fourteen pixels landed a point at
+  // silence, whatever the pointer was actually pointing at.
+  const g = sbeStripGain(ev.clientY, r.top, r.height);
+  SBE.sel = c.id;
+  sbeMutate(cs => sbeAddKeyframe(cs, c.id, t, g));
+  ev.preventDefault();
+}
+
+function sbeAudioFadeCommit(edge, v) {
+  if (!SBE.sel) return;
+  sbeMutate(cs => sbeSetAudioFade(cs, SBE.sel, edge, v));
+}
+
+function sbeOnAudioDown(ev) {
+  // The sync flag is a BUTTON inside the strip, and pointerdown would start a
+  // drag before its click ever fired.
+  const badge = ev.target.closest('.sbe-sync');
+  if (badge) { ev.preventDefault(); sbeResyncSel(badge.dataset.sync); return; }
+  // THE SAME PRECEDENCE THE PICTURE LANE SET: the corner handle sits over the
+  // left grip's hit area, and a fade drag is the more specific gesture of the
+  // two, so it is tested first. One rule for both lanes or the strip would
+  // behave differently from the block above it for no reason a user could
+  // name.
+  // GESTURE PRECEDENCE ON THIS LANE, most specific first, and it is the same
+  // shape the picture lane already uses:
+  //   1. the sync flag      — a button
+  //   2. a keyframe dot     — 6px of target inside the strip body
+  //   3. the corner handle  — sits over the left grip's hit area
+  //   4. the grips          — trim
+  //   5. the strip body     — move  (and DOUBLE-CLICK there adds a point)
+  // The dot is smaller than the body and is tested before it, so grabbing a
+  // point can never be mistaken for moving the strip.
+  const kf = ev.target.closest('.sbe-kf');
+  if (kf) {
+    const blk1 = ev.target.closest('.sbe-aclip');
+    const c1 = blk1 ? sbeById(SBE.clips, blk1.dataset.id) : null;
+    if (c1 && !c1.locked) {
+      SBE.sel = c1.id;
+      // SHIFT-CLICK DELETES. A modifier rather than a second affordance
+      // drawn on a 6px target, which would be a delete nobody meant.
+      if (ev.shiftKey) {
+        sbeMutate(cs => sbeDeleteKeyframe(cs, c1.id, sbeNum(kf.dataset.kf)));
+        ev.preventDefault();
+        return;
+      }
+      SBE.kfDrag = { id: c1.id, index: sbeNum(kf.dataset.kf),
+                     before: sbeSnapshot(), moved: false,
+                     rect: blk1.getBoundingClientRect() };
+      try { sbeEl('sbeAudioLane').setPointerCapture(ev.pointerId); } catch (e) {}
+      ev.preventDefault();
+      sbePaint();
+    }
+    return;
+  }
+  const afh = ev.target.closest('.sbe-fade-h');
+  if (afh) {
+    const blk0 = ev.target.closest('.sbe-aclip');
+    const c0 = blk0 ? sbeById(SBE.clips, blk0.dataset.id) : null;
+    if (c0) {
+      SBE.sel = c0.id;
+      const w0 = sbeClipAudio(c0);
+      const e0 = sbeAfx(c0, w0.len);
+      SBE.audioDrag = {
+        id: c0.id, mode: 'afade', edge: afh.dataset.afade, x0: ev.clientX,
+        f0: (afh.dataset.afade === 'out') ? e0.fade_out : e0.fade_in,
+        before: sbeSnapshot(), moved: false,
+      };
+      try { sbeEl('sbeAudioLane').setPointerCapture(ev.pointerId); } catch (e) {}
+      ev.preventDefault();
+      sbePaint();
+    }
+    return;
+  }
+  // THE LINE ITSELF, after the two handles at the strip's corners and before
+  // the strip body: a click within SBE_LVL_GRAB of the level places a point
+  // and starts dragging it, which is the gesture the owner could not find. The
+  // grips are tested first — they are 7px of edge and the more specific target
+  // — so trimming a strip can never be mistaken for shaping it.
+  if (!ev.target.closest('.sbe-grip') && sbeLevelClick(ev)) {
+    ev.preventDefault();
+    return;
+  }
+  const blk = ev.target.closest('.sbe-aclip');
+  if (!blk) return;
+  const id = blk.dataset.id;
+  SBE.sel = id;
+  SBE.drag = null;          // a pointerup lost off the edge must not wedge a lane
+  const c = sbeById(SBE.clips, id);
+  if (!c) return;
+  const w = sbeClipAudio(c);
+  if (w.linked) {
+    // Not an error — an instruction. The toggle is one click away and the
+    // inspector is already showing this clip.
+    sbePaint();
+    phosToast(w.coupled
+      ? 'This sound is linked to its picture at ' + sbeDriftLabel(sbeAudioDrift(c))
+        + ' and moves with it. Unlink it in the inspector to slide it on its own.'
+      : 'That clip\'s sound is linked to its picture. Unlink it in the '
+        + 'inspector to slide it under the neighbour.', { duration: 6000 });
+    return;
+  }
+  if (c.locked) {
+    sbePaint();
+    phosToast('That shot is locked, so its sound is locked with it. Click '
+              + 'Unlock in the inspector.', { duration: 6000 });
+    return;
+  }
+  const lane = sbeEl('sbeAudioLane');
+  const grip = ev.target.closest('.sbe-grip');
+  SBE.audioDrag = {
+    id: id, mode: grip ? (grip.classList.contains('r') ? 'trimR' : 'trimL') : 'move',
+    x0: ev.clientX, fs0: w.film_start, fe0: w.film_start + w.len,
+    before: sbeSnapshot(), moved: false,
+  };
+  blk.classList.add('is-drag');
+  try { lane.setPointerCapture(ev.pointerId); } catch (e) {}
+  ev.preventDefault();
+  sbePaint();
+}
+
+function sbeOnAudioMove(ev) {
+  const k = SBE.kfDrag;
+  // NOTHING IS BEING DRAGGED: this is a hover, and a hover is where the level
+  // line teaches. Cheap and early — one rect read, and a repaint only when the
+  // ghost actually moves.
+  if (!k && !SBE.audioDrag) { sbeAudioGhost(ev); return; }
+  if (k) {
+    const c = sbeById(SBE.clips, k.id);
+    if (!c) return;
+    const w = sbeClipAudio(c);
+    const r = k.rect;
+    const t = w.len * Math.max(0, Math.min(1,
+      (ev.clientX - r.left) / Math.max(1, r.width)));
+    // THE BAND IS THE STRIP, measured. It used to be `- 3` and `/ 20`: a 3px
+    // inset the SVG no longer has and the height of a lane that can now be
+    // dragged to eight times that. `r` is the strip's own rectangle, so the
+    // maths follows the lane wherever the handle put it. UNITY IS THE TOP, so
+    // the gain falls as the pointer descends — which is what the line the user
+    // is looking at does.
+    const g = sbeStripGain(ev.clientY, r.top, r.height);
+    k.moved = true;
+    const res = sbeMoveKeyframe(SBE.clips, k.id, k.index, t, g);
+    if (res.ok) SBE.clips = res.clips;
+    sbePaint();
+    return;
+  }
+  const d = SBE.audioDrag;
+  if (!d) return;
+  if (Math.abs(ev.clientX - d.x0) > 3) d.moved = true;
+  if (!d.moved) return;
+  if (d.mode === 'afade') {
+    const adt = (d.edge === 'out') ? -(ev.clientX - d.x0) / SBE.pps
+                                   : (ev.clientX - d.x0) / SBE.pps;
+    const r2 = sbeSetAudioFade(SBE.clips, d.id, d.edge, Math.max(0, d.f0 + adt));
+    if (r2.ok) SBE.clips = r2.clips;
+    sbePaint();
+    return;
+  }
+  const dt = (ev.clientX - d.x0) / SBE.pps;
+  const tol = SBE_SNAP_PX / SBE.pps;
+  const marks = sbeMusicSnaps(SBE.clips);      // the CUTS: what a J-cut aims at
+  const anchor = (d.mode === 'trimR') ? d.fe0 : d.fs0;
+  const want = sbeSnapToList(Math.max(0, anchor + dt), marks, tol,
+                             sbeSnapEnabled(ev));
+  const r = sbeAudioEdit(SBE.clips, d.id, d.mode, want);
+  if (r.ok) SBE.clips = r.clips;
+  sbePaint();
+}
+
+function sbeOnAudioUp(ev) {
+  const k = SBE.kfDrag;
+  SBE.kfDrag = null;
+  if (k) {
+    if (k.moved) {
+      SBE.undo.push(k.before);
+      if (SBE.undo.length > SBE_UNDO_MAX) SBE.undo.shift();
+      SBE.redo.length = 0;
+      SBE.dirty = true;
+      sbeSetState('unsaved changes', 'dirty');
+      sbeQueueSave();
+    }
+    sbePaint();
+    return;
+  }
+  const d = SBE.audioDrag;
+  SBE.audioDrag = null;
+  if (!d) return;
+  document.querySelectorAll('.sbe-aclip.is-drag').forEach(el => el.classList.remove('is-drag'));
+  if (!d.moved) { sbePaint(); return; }
+  SBE.undo.push(d.before);
+  if (SBE.undo.length > SBE_UNDO_MAX) SBE.undo.shift();
+  SBE.redo.length = 0;
+  SBE.dirty = true;
+  sbeSetState('unsaved changes', 'dirty');
+  sbePaint();
+  sbeQueueSave();
+}
+
+function sbeToggleAudioLink() {
+  const c = sbeById(SBE.clips, SBE.sel);
+  if (!c) return;
+  const w = sbeClipAudio(c);
+  const drift = sbeAudioDrift(c);
+  const ok = sbeMutate(cs => sbeSetAudioLink(cs, c.id, !w.linked));
+  if (!ok) return;
+  phosToast(w.linked
+    ? 'Sound unlinked — drag the strip under this clip to slide it, or pull '
+      + 'either end. The picture stays where it is, and it stays draggable '
+      + 'from both edges.'
+    : (Math.abs(drift) > SBE_SYNC_TOL
+        ? 'Linked at ' + sbeDriftLabel(drift) + ' — the sound keeps that '
+          + 'offset and now travels with the picture. Resync puts it back '
+          + 'under its own frame.'
+        : 'Sound re-linked to the picture.'), { duration: 7000 });
+}
+
+function sbeDeleteStripSel() {
+  const c = sbeById(SBE.clips, SBE.sel);
+  if (!c) return;
+  const ok = sbeMutate(cs => sbeDeleteStrip(cs, c.id));
+  if (!ok) return;
+  phosToast('Sound removed — the picture plays silent and stays exactly where '
+            + 'it is. Unmute in Sound to bring it back.', { duration: 7000 });
+}
+
+function sbeToggleClipMute() {
+  const c = sbeById(SBE.clips, SBE.sel);
+  if (!c) return;
+  const on = !sbeClipMuted(c);
+  const ok = sbeMutate(cs => sbeSetClipMute(cs, c.id, on));
+  if (!ok) return;
+  phosToast(on
+    ? 'Clip sound muted — it is off in the preview, the render and the export. '
+      + 'The strip stays where it is, and unmuting puts it back.'
+    : 'Clip sound unmuted.', { duration: 6000 });
+}
+
+// THE REMATCH, from the flag on either half or from the inspector.
+function sbeResyncSel(id) {
+  const who = id || SBE.sel;
+  const c = sbeById(SBE.clips, who);
+  if (!c) return;
+  SBE.sel = who;
+  const was = sbeAudioDrift(c);
+  const ok = sbeMutate(cs => sbeResyncAudio(cs, who));
+  if (!ok) { sbePaint(); return; }
+  phosToast('Sound rematched to its picture — it was ' + sbeDriftLabel(was)
+            + ' out. It is still unlinked, so it can be moved again.',
+            { duration: 6000 });
+}
+
+function sbePaintHead() {
+  const el = sbeEl('sbeHead');
+  if (el) el.style.left = sbePx(SBE.playhead).toFixed(1) + 'px';
+  sbeFollow();
+  const t = sbeEl('sbeTime');
+  if (t) {
+    t.innerHTML = escapeHtml(sbeFmtTime(SBE.playhead)) +
+      ' <span>/ ' + escapeHtml(sbeFmtTime(sbeFilmDuration(SBE.clips))) + '</span>';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// THE POPOVER, once, for four menus
+// ---------------------------------------------------------------------------
+// Every menu on this screen holds the REAL controls — moved, not rebuilt — so
+// an id the client already writes to keeps working wherever it now lives. The
+// panel is `position: fixed` and measured against the anchor, which is the
+// whole reason it can exist at all: an open menu must not push the workspace
+// around, the same rule the notice surface has always followed.
+function sbePopToggle(id, anchorId) {
+  const el = sbeEl(id);
+  if (!el) return;
+  const open = el.hidden;
+  sbePopCloseAll(open ? id : '');
+  if (!open) return;
+  el.hidden = false;
+  const a = sbeEl(anchorId);
+  const r = a ? a.getBoundingClientRect() : null;
+  const box = el.getBoundingClientRect();
+  if (r) {
+    // Right-aligned to the anchor, flipped up when there is no room below,
+    // and clamped so a menu can never be opened off the edge of the window.
+    let left = Math.min(window.innerWidth - box.width - 8,
+                        Math.max(8, r.right - box.width));
+    let top = r.bottom + 6;
+    if (top + box.height > window.innerHeight - 8) {
+      top = Math.max(8, r.top - box.height - 6);
+    }
+    el.style.left = Math.round(left) + 'px';
+    el.style.top = Math.round(top) + 'px';
+  }
+  el.dataset.anchor = anchorId || '';
+}
+
+function sbePopCloseAll(except) {
+  for (const id of ['sbeRenderMenu', 'sbeMoreMenu', 'sbeKeysPop', 'sbeMusicMenu']) {
+    if (id === except) continue;
+    const el = sbeEl(id);
+    if (el && !el.hidden) el.hidden = true;
+  }
+}
+
+// A menu closes when you click away from it, and when you press Escape —
+// except that Escape already closes the DOCUMENT here, so an open menu eats
+// the first press and the second one leaves, which is the order every other
+// application uses.
+function sbePopGlobal(ev) {
+  if (ev.target && ev.target.closest
+      && (ev.target.closest('.sbe-pop') || ev.target.closest('[aria-haspopup]'))) return;
+  sbePopCloseAll('');
+}
+
+function sbePopAnyOpen() {
+  for (const id of ['sbeRenderMenu', 'sbeMoreMenu', 'sbeKeysPop', 'sbeMusicMenu']) {
+    const el = sbeEl(id);
+    if (el && !el.hidden) return true;
+  }
+  return false;
+}
+
+// The two lane heads that carry a fact rather than a label: how much picture
+// there is, and how much of the sound has been pulled off it.
+function sbePaintHeads() {
+  const pic = sbeEl('sbeHeadPic');
+  if (pic) {
+    const n = SBE.clips.length;
+    pic.textContent = n
+      ? n + ' clip' + (n === 1 ? '' : 's') + ' · ' + sbeFmtTime(sbeFilmDuration(SBE.clips))
+      : 'empty';
+  }
+  const aud = sbeEl('sbeHeadAud');
+  if (aud) {
+    let split = 0, muted = 0;
+    for (const c of SBE.clips) {
+      if (sbeKind(c) !== 'video') continue;
+      if (sbeClipAudio(c).split) split++;
+      if (sbeClipMuted(c)) muted++;
+    }
+    const bits = [];
+    if (split) bits.push(split + ' unlinked');
+    if (muted) bits.push(muted + ' muted');
+    aud.textContent = bits.length ? bits.join(' · ') : 'linked to the picture';
+    aud.classList.toggle('is-live', split > 0);
+  }
+}
+
+// The legend is painted rather than written into the markup so there is one
+// copy of it — see sbeKeysLegend.
+function sbePaintKeys() {
+  const el = sbeEl('sbeKeys');
+  if (el && !el._done) { el.innerHTML = sbeKeysLegend(); el._done = 1; }
+}
+
+function sbePaintInspector() {
+  const box = sbeEl('sbeInspect');
+  // A SELECTED CARD OWNS THE INSPECTOR. It is a lane of its own, so it gets
+  // the same two sections that mean anything for it — what it is, and its
+  // effects — and none of the Sound section, which it has no half of.
+  const ov = sbeOvById(SBE.overlays, SBE.ovSel);
+  if (ov && !SBE.sel) {
+    const oe = sbeFx(ov);
+    const orow = (edge, val) =>
+      '<span class="sbe-fade-row">' +
+      '<label for="sbeOvFade' + edge + '">Fade ' + edge + '</label>' +
+      '<input type="number" class="sb-input sbe-fade-num" id="sbeOvFade' + edge + '" ' +
+        'min="0" step="0.05" value="' + val.toFixed(2) + '" ' +
+        'onchange="sbeOvFadeCommit(\'' + edge + '\', this.value)">' +
+      '<span class="sbe-adj-val">s</span></span>';
+    box.innerHTML =
+      '<b>' + escapeHtml(sbeNiceName(ov.title
+          || String(ov.path || '').split('/').pop() || 'overlay')) + '</b>' +
+      '<span>overlay · ' + escapeHtml(sbeOvKind(ov)) + '</span>' +
+      '<span>' + sbeNum(ov.film_start).toFixed(2) + '–' +
+      sbeNum(ov.film_end).toFixed(2) + 's on the __SEQ__</span>' +
+      '<span class="sbe-why">Composited over the picture. Its transparency is '
+      + 'kept in the preview, the render and the export.</span>' +
+      '<div class="sbe-sect"><div class="sbe-sect-h">Effects</div>' +
+      '<div class="sbe-sect-b">' + orow('in', oe.fade_in)
+      + orow('out', oe.fade_out) + '</div></div>' +
+      '<div class="sbe-sect"><div class="sbe-sect-h">Overlay</div>' +
+      '<div class="sbe-sect-b">' +
+      '<button type="button" class="ghost-btn" onclick="sbeOvDeleteSel()">Remove overlay</button>' +
+      '</div></div>';
+    return;
+  }
+  const c = sbeById(SBE.clips, SBE.sel);
+  if (!c) {
+    const n = SBE.clips.length;
+    const holes = sbeHoles(SBE.clips);
+    const guess = sbeGridIsAGuess(SBE.beats);
+    let bits = [n + ' clip' + (n === 1 ? '' : 's'),
+                sbeFmtTime(sbeFilmDuration(SBE.clips)) + ' of the __SEQ__'];
+    if (holes.length) {
+      bits.push(holes.length + ' hole' + (holes.length === 1 ? '' : 's') + ' · ' +
+                holes.reduce((a, g) => a + g.duration, 0).toFixed(2) + 's');
+    }
+    if (SBE.beats && SBE.beats.bpm) {
+      bits.push(Math.round(SBE.beats.bpm) + ' bpm' +
+                (guess ? ' — a guess, confidence ' + sbeNum(SBE.beats.confidence).toFixed(2) : ''));
+    }
+    box.innerHTML = '<span class="sbe-why">' + escapeHtml(bits.join(' · ')) +
+      (n ? '. Click a clip to see why it was cut where it was.'
+         : '.') + '</span>';
+    return;
+  }
+  const a = c.analysis || {};
+  const kind = sbeKind(c);
+  const bright = sbeBright(c);
+  const errs = (SBE.errors.byId || {})[c.id] || [];
+  const why = [];
+  if (a.reason) why.push(a.reason);
+  if (a.snap && a.snap.kind && a.snap.kind !== 'none') {
+    why.push('snapped to the ' + a.snap.kind + ' (' + Math.round(sbeNum(a.snap.shift_ms)) + ' ms)');
+  }
+  if (a.usable === false) why.push('the auto-editor did not think this window was usable');
+  for (const note of (a.notes || [])) why.push(note);
+  const label = (kind === 'slug') ? 'Black'
+    : (c.title || String(c.path || '').split('/').pop() || 'clip');
+  // Only a video HAS a source window; the other two are their slot and nothing
+  // else, so the line that would report their in/out is the line that would
+  // invent one.
+  const src = (kind === 'video')
+    ? ('<span>source ' + sbeNum(c.start).toFixed(2) + '–' + sbeNum(c.end).toFixed(2) + 's' +
+       (c.duration ? ' of ' + sbeNum(c.duration).toFixed(2) + 's' : '') + '</span>')
+    : ('<span>' + escapeHtml(kind === 'slug'
+        ? 'black — no file, drawn by the render'
+        : 'a still, held for its slot') +
+       ' · drag a handle to change how long</span>');
+  // BRIGHTNESS, AND NOT A COLOUR PAGE. One constant-per-clip value, the flat
+  // Adjust panel CapCut ships, refused for a slug because a slug's colour is
+  // what a slug IS.
+  const adjust = (kind === 'slug') ? '' :
+    '<span class="sbe-adjust">Brightness' +
+    '<input type="range" id="sbeBright" min="-0.5" max="0.5" step="0.01" ' +
+      'value="' + bright.toFixed(2) + '" ' +
+      'oninput="sbeBrightPreview(this.value)" ' +
+      'onchange="sbeBrightCommit(this.value)" ' +
+      'title="Approximate on screen, exact in the render.">' +
+    '<span class="sbe-adj-val" id="sbeBrightVal">' +
+      (bright > 0 ? '+' : '') + bright.toFixed(2) + '</span>' +
+    (Math.abs(bright) >= 1e-6
+      ? '<button type="button" class="ghost-btn" onclick="sbeBrightCommit(0)">Reset</button>'
+      : '') +
+    '</span>';
+  // THREE SECTIONS, because the inspector grew one control at a time and had
+  // become a flat run of buttons with a brightness slider floating in the
+  // middle. Clip / Sound / Effects — and Effects is the home the ruling asked
+  // for, so the next one lands without a decision.
+  const sect = (name, body) => body
+    ? '<div class="sbe-sect"><div class="sbe-sect-h">' + name + '</div>' +
+      '<div class="sbe-sect-b">' + body + '</div></div>'
+    : '';
+  const e = sbeFx(c);
+  const fadeRow = (edge, val) =>
+    '<span class="sbe-fade-row">' +
+    '<label for="sbeFade' + edge + '">Fade ' + (edge === 'in' ? 'in' : 'out') + '</label>' +
+    '<input type="number" class="sb-input sbe-fade-num" id="sbeFade' + edge + '" ' +
+      'min="0" max="' + sbeClipLen(c).toFixed(2) + '" step="0.05" ' +
+      'value="' + val.toFixed(2) + '" ' +
+      'onchange="sbeFadeCommit(\'' + edge + '\', this.value)" ' +
+      'title="Seconds. Drag the corner of the clip for the same thing by eye.">' +
+    '<span class="sbe-adj-val">s</span>' +
+    (val > 1e-6
+      ? '<button type="button" class="ghost-btn" onclick="sbeFadeCommit(\'' + edge + '\', 0)">Clear</button>'
+      : '') +
+    '</span>';
+  box.innerHTML =
+    '<b>' + escapeHtml(label) + '</b>' + src +
+    '<span>film ' + sbeNum(c.film_start).toFixed(2) + '–' + sbeNum(c.film_end).toFixed(2) + 's</span>' +
+    '<span>' + escapeHtml(c.source === 'human' ? 'moved by hand' : 'placed by the auto-editor') + '</span>' +
+    // THE PAIR'S OWN LINE. An unlinked strip is either where the picture would
+    // have played it or it is not, and the number is the only way to tell at
+    // any zoom — this is the sentence the owner had no way to read.
+    ((kind === 'video' && sbeClipAudio(c).split)
+      ? '<span>' + escapeHtml(sbeClipAudio(c).coupled
+          ? 'sound linked at ' + sbeDriftLabel(sbeAudioDrift(c))
+            + ' — it travels with this picture'
+          : (sbeAudioInSync(c)
+             ? 'sound unlinked, in sync with its picture'
+             : 'sound unlinked, ' + sbeDriftLabel(sbeAudioDrift(c)) + ' out of sync ('
+               + (sbeAudioDrift(c) > 0 ? 'late' : 'early') + ')')) + '</span>'
+      : '') +
+    ((kind === 'video' && !c.proxy)
+      ? '<span>no proxy — scrubbing this one decodes from the top of the clip</span>' : '') +
+    adjust +
+    '<span class="sbe-why">' + escapeHtml(why.join(' · ')) + '</span>' +
+    (errs.length ? '<span style="color:var(--danger)">' + escapeHtml(errs[0].message) + '</span>' : '') +
+    sect('Clip',
+      '<button type="button" class="ghost-btn" onclick="sbeToggleLock()">' +
+      (c.locked ? 'Unlock' : 'Lock') + '</button>' +
+      '<button type="button" class="ghost-btn" onclick="sbeRippleSelected()">Ripple delete</button>') +
+    sect('Sound',
+    // THE J-CUT'S ONE SWITCH. Only a video clip has sound of its own, so
+    // only a video clip is offered it.
+    (kind === 'video'
+      ? '<button type="button" class="ghost-btn" onclick="sbeToggleAudioLink()" ' +
+        'title="' + escapeHtml(sbeClipAudio(c).linked
+          ? 'Let this clip\'s sound move and trim on its own — the J-cut and the L-cut. The picture stays draggable from both edges.'
+          : (sbeAudioInSync(c)
+             ? 'Put the sound back under its own picture'
+             : 'Keep the ' + sbeDriftLabel(sbeAudioDrift(c)) + ' offset you made '
+               + 'and travel together from here. Resync is the button that '
+               + 'puts it back under its own frame.')) + '">' +
+        (sbeClipAudio(c).linked ? 'Unlink sound'
+         : (sbeAudioIsThePicture(c) ? 'Re-link sound'
+            : 'Link sound' + (sbeAudioInSync(c) ? ''
+               : ' at ' + sbeDriftLabel(sbeAudioDrift(c))))) + '</button>'
+      : '') +
+    // MUTE, and it is offered whether the sound is linked, unlinked or
+    // travelling — muting silences the CLIP's sound wherever its strip is.
+    // Refused only for a clip whose file has no audio track at all, because
+    // there is nothing there to switch off.
+    ((kind === 'video' && c.has_audio !== false)
+      ? '<button type="button" class="ghost-btn" onclick="sbeToggleClipMute()" ' +
+        'title="' + escapeHtml(sbeClipMuted(c)
+          ? 'Let this clip\'s own sound play again'
+          : 'Switch this clip\'s own sound off — in the preview, in the render '
+            + 'and in the export. The soundtrack is not affected.') + '">' +
+        (sbeClipMuted(c) ? 'Unmute sound' : 'Mute sound') + '</button>'
+      : '') +
+    // DELETE THE STRIP, not the clip. Offered only once the two halves are
+    // actually separate — on a linked clip "delete the sound" and "mute" would
+    // be the same button twice.
+    ((kind === 'video' && sbeClipAudio(c).split)
+      ? '<button type="button" class="ghost-btn" onclick="sbeDeleteStripSel()" ' +
+        'title="' + escapeHtml('Remove this clip\'s sound. The picture keeps '
+          + 'playing, silent, and does not move.') + '">Delete sound</button>'
+      : '') +
+    // RESYNC IS NOT RE-LINK, and the two sit next to each other so the
+    // difference is legible: re-link puts the sound back UNDER the picture
+    // permanently, resync only slides it back into place and leaves it free.
+    ((kind === 'video' && sbeClipAudio(c).split && !sbeAudioInSync(c))
+      ? '<button type="button" class="ghost-btn" onclick="sbeResyncSel()" ' +
+        'title="' + escapeHtml('Slide the sound back to where its own picture '
+          + 'plays it. The trim you gave it is kept, and it stays unlinked.') +
+        '">Resync sound (' + escapeHtml(sbeDriftLabel(sbeAudioDrift(c))) + ')</button>'
+      : '') +
+    // THE SOUND'S OWN RAMPS LIVE HERE, not under a fourth heading. Three
+    // sections is what docs/EDITOR_EFFECTS_MODEL.md describes and what the
+    // rail has room for; a "Sound fades" heading of its own pushed the
+    // inspector past 460px and made two adjacent headings both say "sound".
+    ((kind === 'video' && c.has_audio !== false)
+      ? (() => {
+          const w2 = sbeClipAudio(c);
+          const ae = sbeAfx(c, w2.len);
+          const arow = (edge, val) =>
+            '<span class="sbe-fade-row">' +
+            '<label for="sbeAFade' + edge + '">Fade ' + edge + '</label>' +
+            '<input type="number" class="sb-input sbe-fade-num" ' +
+              'id="sbeAFade' + edge + '" min="0" max="' + w2.len.toFixed(2) + '" ' +
+              'step="0.05" value="' + val.toFixed(2) + '" ' +
+              'onchange="sbeAudioFadeCommit(\'' + edge + '\', this.value)" ' +
+              'title="Seconds. Drag the corner of the sound strip for the same thing by eye, or double-click the strip to add a level point.">' +
+            '<span class="sbe-adj-val">s</span></span>';
+          // LEVELS, SPELLED OUT. The line on the strip is the fast way and it
+          // now teaches itself; this is the way that needs no gesture at all,
+          // and it is also the only way to place a point at a frame you have
+          // actually listened to. On a linked strip it says what to do rather
+          // than offering a button that would refuse.
+          const shape = sbeStripEditable(c);
+          const n = ae.points.length;
+          const levels = '<span class="sbe-fade-row sbe-levels">'
+            + '<label>Levels</label>'
+            + (shape
+               ? '<button type="button" class="ghost-btn" '
+                 + 'onclick="sbeAddPointAtPlayhead()" '
+                 + 'title="Puts a level point where the playhead is. On the '
+                 + 'strip: click the yellow line to add one, drag it to set '
+                 + 'the level, right-click it to remove it.">'
+                 + 'Add point at playhead</button>'
+                 + (n ? '<button type="button" class="ghost-btn" '
+                        + 'onclick="sbeClearPoints()" '
+                        + 'title="Removes every level point on this strip. The '
+                        + 'fades stay.">Clear ' + n + '</button>'
+                      : '<span class="sbe-adj-val">click the yellow line</span>')
+               : '<span class="sbe-adj-val">unlink the sound to shape its '
+                 + 'level</span>')
+            + '</span>';
+          return arow('in', ae.fade_in) + arow('out', ae.fade_out) + levels;
+        })()
+      : '') +
+    '') +
+    // EFFECTS. Brightness is the one legacy citizen — it stays at
+    // `adjust.brightness` on disk, because a label is not worth a data
+    // migration — and it is PRESENTED here, beside the fades, because this is
+    // where a person looks for it.
+    sect('Effects', adjust + fadeRow('in', e.fade_in) + fadeRow('out', e.fade_out));
+}
+
+// The slider moves at pointer speed and the undo stack does not. `oninput`
+// paints the CSS filter and the number and touches NOTHING else; `onchange`,
+// which fires once when the drag ends, is the edit. Committing on every input
+// event would push eighty undo steps and eighty saves for one gesture.
+function sbeBrightPreview(v) {
+  const b = Math.max(-SBE_BRIGHT_MAX, Math.min(SBE_BRIGHT_MAX, sbeNum(v)));
+  const out = sbeEl('sbeBrightVal');
+  if (out) out.textContent = (b > 0 ? '+' : '') + b.toFixed(2);
+  sbeApplyPreviewFilter(b);
+}
+
+function sbeOvFadeCommit(edge, v) {
+  if (!SBE.ovSel) return;
+  const id = SBE.ovSel;
+  sbeOvMutate(os => {
+    const o = sbeOvById(os, id);
+    if (!o) return { overlays: os, ok: false, why: 'gone' };
+    const len = Math.max(0, sbeNum(o.film_end) - sbeNum(o.film_start));
+    const key = (edge === 'out') ? 'fade_out' : 'fade_in';
+    const want = Math.max(0, Math.min(len, sbeNum(v)));
+    const out = os.map(x => Object.assign({}, x));
+    const t = sbeOvById(out, id);
+    const fx = Object.assign({}, t.fx || {});
+    if (want > 1e-9) fx[key] = sbeRound(want); else delete fx[key];
+    if (fx.fade_in > 1e-9 || fx.fade_out > 1e-9) t.fx = fx; else delete t.fx;
+    t.source = 'human';
+    return { overlays: out, ok: true };
+  });
+}
+
+function sbeFadeCommit(edge, v) {
+  if (!SBE.sel) return;
+  const ok = sbeMutate(cs => sbeSetFade(cs, SBE.sel, edge, v));
+  if (!ok) { sbePaintInspector(); return; }
+}
+
+function sbeBrightCommit(v) {
+  if (!SBE.sel) return;
+  const ok = sbeMutate(cs => sbeSetBrightness(cs, SBE.sel, v));
+  if (!ok) { sbePaintInspector(); return; }
+  sbeQueueSave();
+}
+
+// One place decides what the stage looks like, so the video layer and the
+// still layer can never disagree about the grade.
+// THE PREVIEW'S OPACITY, a value per frame rather than a CSS transition: a
+// scrub has to show what is TRUE at that second, not an animation that
+// started when you arrived. The stage's black is what a fade to black fades
+// to, so this is the whole of it on the picture lane.
+function sbeFadePaint(t) {
+  const v = sbeEl('sbeVideo');
+  const img = sbeEl('sbeStill');
+  const now = (t === undefined) ? SBE.playhead : sbeNum(t);
+  // THE CLIP AT THE PLAYHEAD, not `curId`. `curId` is the transport's own
+  // bookkeeping and is only current while something is playing — reading it
+  // during a SCRUB gave the stale clip, or none at all, and the ramp a person
+  // is dragging is exactly the one they are scrubbing to look at.
+  const c = sbeClipAt(SBE.clips, now) || sbeById(SBE.clips, SBE.curId);
+  const o = c ? sbeFadeOpacityAt(c, now) : 1;
+  // OPACITY IS ALSO THE LAYER SWITCH. `.sbe-still` is opacity:0 until it wins
+  // `.is-on`, so writing the ramp onto BOTH layers turned the hidden one on --
+  // and the still, being last in the stage and backed with #000, painted a
+  // black rectangle over a perfectly loaded video. Grade the layer that is
+  // showing; hand the other one back to the stylesheet.
+  const paint = (el) => {
+    if (!el) return;
+    el.style.opacity = el.classList.contains('is-on') ? String(o) : '';
+  };
+  paint(v);
+  paint(img);
+}
+
+function sbeApplyPreviewFilter(b) {
+  const css = (Math.abs(sbeNum(b)) < 1e-6) ? '' : 'brightness(' + sbeBrightnessCss(b) + ')';
+  const v = sbeEl('sbeVideo');
+  const i = sbeEl('sbeStill');
+  if (v) v.style.filter = css;
+  if (i) i.style.filter = css;
+}
+
+function sbePaintChrome() {
+  const board = sbeEl('sbeBoardBtn');
+  if (board) board.hidden = !SBE.id;
+  sbeEl('sbeUndoBtn').disabled = !SBE.undo.length;
+  sbeEl('sbeRedoBtn').disabled = !SBE.redo.length;
+  const save = sbeEl('sbeSaveBtn');
+  save.disabled = !SBE.dirty || SBE.saving;
+  // THE ROW HAS A HIERARCHY WHILE THERE IS SOMETHING TO DO. Seven buttons at
+  // one fill made the safest action and the one that LEAVES look alike, and
+  // nothing in the row changed when the state chip went amber.
+  if (save.classList) {
+    save.classList.toggle('primary', !!SBE.dirty && !SBE.saving);
+    save.classList.toggle('ghost-btn', !(SBE.dirty && !SBE.saving));
+  }
+  sbeEl('sbePlayBtn').textContent = SBE.playing ? 'Pause' : 'Play';
+  // The zoom slider is a VIEW of SBE.pps, not a second copy of it: the − / +
+  // buttons, alt + wheel and a resize all move the handle by coming through
+  // here, so the control can never disagree with the track it is scaling.
+  const zr = sbeEl('sbeZoomRange');
+  if (zr) {
+    const lo = sbeZoomMin();
+    zr.value = String(sbeZoomToSlider(SBE.pps, lo, Math.max(lo, SBE_PPS_MAX)));
+  }
+  const pn = sbeEl('sbeProgName');
+  if (pn) {
+    const n = SBE.clips.length;
+    pn.textContent = n + ' clip' + (n === 1 ? '' : 's') + ' · ' +
+                     sbeFmtTime(sbeFilmDuration(SBE.clips));
+  }
+  // THE PROGRAM MONITOR'S EMPTY STATE WAS MARKUP NOBODY FILLED. The element
+  // and its style shipped with the two-monitor pass and nothing ever set its
+  // text, so the source monitor greeted an empty state with a sentence while
+  // the program monitor showed a black rectangle and a 10px chip — two
+  // monitors speaking two languages about the same condition.
+  const pe = sbeEl('sbeStageEmpty');
+  if (pe) {
+    if (SBE.clips.length) { pe.hidden = true; pe.textContent = ''; }
+    else {
+      pe.textContent = 'Nothing on the timeline yet — drag a clip from the '
+                     + 'media pool, or press + on one.';
+      pe.hidden = false;
+    }
+  }
+  // The source monitor's own chrome — same rule, one painter.
+  sbePaintSource();
+  // unplaced
+  const wrap = sbeEl('sbeUnplacedWrap');
+  const list = SBE.unplaced || [];
+  wrap.hidden = !list.length;
+  if (list.length) {
+    sbeEl('sbeUnplaced').innerHTML = list.map((u, i) => {
+      const at = (u.slot && u.slot.film_start !== undefined)
+        ? sbeNum(u.slot.film_start) : sbeFilmDuration(SBE.clips);
+      // The timecode is the same on every row, so it belongs on the button's
+      // title rather than repeated thirteen times down a 230px column.
+      return '<span class="sbe-chip" title="' +
+        escapeHtml((u.title || ('shot ' + u.n)) + ' — would land at ' +
+                   sbeFmtTime(at)) + '">' +
+        '<b>' + escapeHtml(sbeNiceName(u.title || ('shot ' + u.n))) + '</b>' +
+        '<span>' + escapeHtml(u.duration_s ? sbeNum(u.duration_s).toFixed(1) + 's' : (u.pass || '')) + '</span>' +
+        '<button type="button" class="ghost-btn" onclick="sbePlace(' + i + ')">Place</button></span>';
+    }).join('');
+  }
+  // prepare
+  const job = SBE.prepare || {};
+  const running = job.state === 'running';
+  sbeEl('sbePrepBtn').disabled = running;
+  sbeEl('sbePrepCancel').hidden = !running;
+  sbeEl('sbeAutoBtn').disabled = running;
+  const bar = sbeEl('sbePrepBar');
+  bar.hidden = !running;
+  if (running) {
+    const total = sbeNum(job.total, 0);
+    const pct = total ? Math.min(100, Math.round(sbeNum(job.done) / total * 100)) : 12;
+    bar.querySelector('i').style.width = pct + '%';
+    const stage = { proxies: 'building proxies', peaks: 'reading the waveform',
+                    beats: 'finding the beat', start: 'starting' }[job.stage] || job.stage || 'working';
+    sbeEl('sbePrepText').textContent = stage +
+      (total ? ' · ' + sbeNum(job.done) + ' of ' + total : '') +
+      (job.current ? ' · ' + job.current : '');
+  } else if (job.state === 'failed') {
+    sbeEl('sbePrepText').textContent = 'Prepare failed: ' + (job.error || 'unknown reason');
+  } else if (job.state === 'cancelled') {
+    sbeEl('sbePrepText').textContent = 'Prepare cancelled. Whatever it built is kept.';
+  } else if (job.state === 'done') {
+    const failed = (job.failed || []).length;
+    sbeEl('sbePrepText').textContent =
+      'Ready · ' + sbeNum(job.built) + ' proxy(s) built' +
+      (failed ? ', ' + failed + ' clip(s) could not be read' : '') +
+      (job.peaks_error ? ' · ' + job.peaks_error : '') +
+      (job.beats_error ? ' · ' + job.beats_error : '') +
+      // A grid the ARRANGEMENT has never seen. Prepare found the beat, but only
+      // the auto-editor writes it into edit.json — so say that plainly instead
+      // of drawing a timeline with no lines on it and letting the user wonder.
+      ((job.beats && !SBE.beats)
+        ? ' · found the beat at ' + Math.round(sbeNum(job.beats.bpm)) +
+          ' bpm — this arrangement was cut without it, so Auto-edit is what ' +
+          'puts the cuts on it'
+        : '');
+  } else {
+    sbeEl('sbePrepText').textContent =
+      'The soundtrack drives the waveform and the beat grid.';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// POINTER: scrub, drag, trim
+// ---------------------------------------------------------------------------
+function sbeTimeFromEvent(ev, el) {
+  const r = el.getBoundingClientRect();
+  return Math.max(0, (ev.clientX - r.left + el.scrollLeft * 0) / SBE.pps);
+}
+
+function sbeSnapEnabled(ev) {
+  const box = sbeEl('sbeSnapOn');
+  const on = !box || box.checked;
+  return on && !(ev && (ev.altKey || ev.metaKey));   // Alt is the override
+}
+
+function sbeOnTrackDown(ev) {
+  const track = sbeEl('sbeTrack');
+  // Same as the lane: the flag is a button, not part of the block.
+  const badge = ev.target.closest('.sbe-sync');
+  if (badge) { ev.preventDefault(); sbeResyncSel(badge.dataset.sync); return; }
+  const gap = ev.target.closest('.sbe-gap');
+  if (gap) {
+    sbeGenOpen(sbeNum(gap.dataset.gapStart), sbeNum(gap.dataset.gapDur));
+    return;
+  }
+  const blk = ev.target.closest('.sbe-clip');
+  if (!blk) { sbeSeek(sbeTimeFromEvent(ev, track)); return; }
+  const id = blk.dataset.id;
+  SBE.sel = id;
+  SBE.ovSel = '';           // one inspector, one subject
+  SBE.audioDrag = null;     // same insurance the lane takes against the other
+  const c = sbeById(SBE.clips, id);
+  if (!c) return;
+  // A LOCKED SHOT SAYS SO. Until now it refused every drag in silence: the CSS
+  // turned the cursor to `not-allowed`, hid both grips, and nothing on screen
+  // said why or what to press. The owner hit it while cutting — "trying to
+  // drag the video clip from EITHER edge shows a forbidden cursor" — because
+  // Lock was the only button that sounded like "keep these two together",
+  // which is what re-link now actually does.
+  if (c.locked) {
+    sbePaint();
+    // AND IT NAMES THE OTHER VERB. Lock pins a shot to its place on the film
+    // so everything else flows around it; it is NOT the button that makes a
+    // clip and its sound travel together, which is what he was reaching for
+    // when he pressed it. That one is Link sound.
+    phosToast('That shot is locked to its place on the __SEQ__, so it cannot be '
+              + 'moved or trimmed from either edge — click Unlock in the '
+              + 'inspector. To move a shot and its sound TOGETHER, unlink the '
+              + 'sound, put it where you want it, then press Link sound.',
+              { duration: 9000 });
+    return;
+  }
+  // THE CORNER HANDLE, before the grips: it sits on top of the left grip's
+  // hit area at the head of the block, and a fade drag is the more specific
+  // gesture of the two.
+  const fh = ev.target.closest('.sbe-fade-h');
+  if (fh) {
+    const e0 = sbeFx(c);
+    SBE.drag = { id: id, mode: 'fade', edge: fh.dataset.fade, x0: ev.clientX,
+                 f0: (fh.dataset.fade === 'out') ? e0.fade_out : e0.fade_in,
+                 moved: false, before: JSON.stringify(SBE.clips) };
+    try { track.setPointerCapture(ev.pointerId); } catch (e) {}
+    ev.preventDefault();
+    sbePaint();
+    return;
+  }
+  const grip = ev.target.closest('.sbe-grip');
+  // SHIFT IS REORDER. The hint strip already teaches "hold Alt to ignore the
+  // beat", so a second modifier on the same gesture is the idiom this timeline
+  // already has — and it is the only way to offer both verbs without a mode
+  // switch nobody would find. Free drag stays the default: it is what every
+  // arrangement on disk was made with, and it is the one that can open a hole
+  // for the generate control to fill.
+  const mode = grip ? (grip.classList.contains('r') ? 'trimR' : 'trimL')
+                    : (ev.shiftKey ? 'reorder' : 'move');
+  SBE.drag = { id: id, mode: mode, x0: ev.clientX, t0: sbeTimeFromEvent(ev, track),
+               fs0: sbeNum(c.film_start), fe0: sbeNum(c.film_end), moved: false,
+               before: JSON.stringify(SBE.clips) };
+  if (mode === 'move') blk.classList.add('is-drag');
+  try { track.setPointerCapture(ev.pointerId); } catch (e) {}
+  ev.preventDefault();
+  sbePaint();
+}
+
+function sbeOnTrackMove(ev) {
+  const d = SBE.drag;
+  if (!d) return;
+  const track = sbeEl('sbeTrack');
+  const dt = (ev.clientX - d.x0) / SBE.pps;
+  if (Math.abs(ev.clientX - d.x0) > 3) d.moved = true;
+  if (!d.moved) return;
+  const tol = SBE_SNAP_PX / SBE.pps;
+  const snapOn = sbeSnapEnabled(ev);
+  const off = (SBE.audio || {}).offset;
+  if (d.mode === 'fade') {
+    // Dragging INWARD lengthens the ramp, whichever end you grabbed — the
+    // gesture every NLE uses, and the only one that reads as "pull the fade
+    // out of the corner".
+    const dt = (d.edge === 'out') ? -(ev.clientX - d.x0) / SBE.pps
+                                  : (ev.clientX - d.x0) / SBE.pps;
+    const r = sbeSetFade(SBE.clips, d.id, d.edge, Math.max(0, d.f0 + dt));
+    if (r.ok) SBE.clips = r.clips;
+    sbePaint();
+    return;
+  }
+  if (d.mode === 'reorder') {
+    // No snap: a reorder does not choose a TIME, it chooses a neighbour, and
+    // pulling the drop index onto a beat would mean nothing.
+    const r = sbeReorderTo(SBE.clips, d.id, Math.max(0, d.t0 + dt));
+    if (r.ok) SBE.clips = r.clips;
+  } else if (d.mode === 'move') {
+    const want = sbeSnapTime(Math.max(0, d.fs0 + dt), SBE.beats, tol, snapOn, off);
+    const r = sbeMoveTo(SBE.clips, d.id, want);
+    if (r.ok) SBE.clips = r.clips;
+  } else if (d.mode === 'trimL') {
+    const want = sbeSnapTime(Math.max(0, d.fs0 + dt), SBE.beats, tol, snapOn, off);
+    sbeTrim(SBE.clips, d.id, 'l', want);
+  } else {
+    const want = sbeSnapTime(Math.max(0, d.fe0 + dt), SBE.beats, tol, snapOn, off);
+    sbeTrim(SBE.clips, d.id, 'r', want);
+  }
+  sbePaint();
+}
+
+// EVERYTHING A DRAG ON THE TRACK CAN MOVE, in one string. `sbeOnTrackUp` asks
+// "did the film actually change" and restores the pointerdown snapshot when it
+// did not — dragging a clip left when it is already hard against its neighbour
+// is the common case, and without this every such gesture would burn a
+// revision and push an undo step that undoes nothing.
+//
+// SO THE LIST HAS TO BE COMPLETE, and twice now it has not been: a gesture
+// whose only effect was on a strip compared equal and was discarded, and then
+// a fade did the same. The rule is that every field any `SBE.drag.mode` writes
+// belongs here — trimL and trimR move `start`/`end`, move and reorder move
+// `film_start`, a ripple moves `audio`, and fade moves `fx`. Named and pure so
+// a new mode can be checked against it instead of against a closure.
+function sbeDragFingerprint(cs) {
+  return (cs || []).map(c => [c.id, c.start, c.end, c.film_start,
+                              JSON.stringify(c.audio || null),
+                              JSON.stringify(c.fx || null)].join(':')).join('|');
+}
+
+function sbeOnTrackUp(ev) {
+  const d = SBE.drag;
+  SBE.drag = null;
+  if (!d) return;
+  document.querySelectorAll('.sbe-clip.is-drag').forEach(el => el.classList.remove('is-drag'));
+  if (!d.moved) { sbePaint(); return; }
+  // A DRAG THAT MOVED THE POINTER BUT NOT THE FILM IS NOT AN EDIT. Dragging a
+  // clip left when it is already hard against its neighbour is the common case
+  // — the maths clamps, nothing lands anywhere new, and without this the
+  // document would still come back dirty, stamped `human`, with a revision
+  // burned and an undo step that undoes nothing.
+  // ...AND THE SOUND IS PART OF THE GEOMETRY. The fingerprint listed four
+  // picture fields, so a gesture whose only effect was on a strip — a ripple
+  // carrying an unlinked sound, a coupled pair travelling with its picture —
+  // compared equal to the state it started from, and this line then RESTORED
+  // the snapshot: the edit was discarded, the document was never marked
+  // dirty, and the header went on saying "saved · revision N" over work that
+  // had just been thrown away.
+  // ...AND SO IS THE FADE, which is the SECOND HALF of "not sure that grabbing
+  // the top corner is working. I'm not being able to do it." The corner handle
+  // was too small to hit — that is the CSS — but on the times he DID hit it,
+  // this comparison then threw the result away: `mode: 'fade'` moves `fx` and
+  // nothing else, `fx` was not in the fingerprint, so the drag compared equal
+  // to the state it started from and the snapshot was restored on pointerup.
+  // The ramp followed the pointer the whole way and snapped back the moment he
+  // let go. Exactly the bug the paragraph above describes, one field along —
+  // which is why the fingerprint is a NAMED function now, listing every field
+  // a track drag can move, rather than a closure written to the needs of
+  // whichever gesture was being added at the time.
+  const before = JSON.parse(d.before);
+  if (sbeDragFingerprint(before) === sbeDragFingerprint(SBE.clips)) {
+    SBE.clips = before; sbePaint(); return;
+  }
+  // The drag mutated SBE.clips live so the block could follow the pointer;
+  // register the ONE undo step now, from the snapshot taken on pointerdown.
+  SBE.undo.push(d.before);
+  if (SBE.undo.length > SBE_UNDO_MAX) SBE.undo.shift();
+  SBE.redo.length = 0;
+  SBE.dirty = true;
+  sbeSetState('unsaved changes', 'dirty');
+  sbePaint();
+  sbeQueueSave();
+}
+
+function sbeSeek(t) {
+  const dur = Math.max(sbeFilmDuration(SBE.clips), 0);
+  SBE.playhead = Math.max(0, Math.min(dur, sbeNum(t)));
+  sbePaintHead();
+  // A SCRUB LANDS ON THE RIGHT SOURCE SECOND. Forced, because the ground has
+  // moved: the slip tolerance is for drift during playback, not for a seek.
+  sbeStripSync(true);
+  sbeShowFrameAt(SBE.playhead);
+}
+
+// ---------------------------------------------------------------------------
+// PREVIEW — one <video>, proxies, and no pretence of frame accuracy
+// ---------------------------------------------------------------------------
+function sbeClipUrl(c) {
+  // A STILL IS SERVED BY /image, NOT /file. `/file` is OUTPUT-bound and the
+  // image library lives under panel_uploads — so the obvious fallback here
+  // would 404 every still in the panel. `/image` already accepts OUTPUT,
+  // UPLOADS and the state dir, which is exactly the set the pool draws from.
+  if (sbeKind(c) === 'still') {
+    return '/image?path=' + encodeURIComponent(c.path);
+  }
+  if (c.proxy && SBE.proxyUrl) {
+    return SBE.proxyUrl + encodeURIComponent(String(c.proxy).split('/').pop());
+  }
+  return '/file?path=' + encodeURIComponent(c.path);
+}
+
+function sbeLoadInto(v, c, at) {
+  return new Promise(resolve => {
+    // The picture used to be hard-muted here, on the reasoning that sound comes
+    // from the soundtrack <audio> and Chrome refuses unmuted autoplay. Both
+    // halves were wrong once proxies carried an audio track: most timelines have
+    // no soundtrack at all, and their sound — dialogue, the thing you are
+    // cutting on — lives in the clips. Play is user-initiated, so there is
+    // activation to spend; sbePlay falls back to muted if Chrome disagrees.
+    // THE THIRD OUTPUT. The render drops the clip's lane and the export
+    // disables its audio track; the preview has to agree or the one place the
+    // user checks his work is the one place the decision does not exist.
+    //
+    // ...AND IT YIELDS TO THE STRIP PLAYER. A clip whose sound is described
+    // separately is played by `sbeStripSync` at the strip's own film position;
+    // leaving it on the picture element too would play those seconds twice,
+    // a beat apart.
+    v.muted = !!SBE.muted || !sbePictureCarriesSound(c);
+    v.volume = 1;
+    v.playsInline = true;
+    const url = sbeClipUrl(c);
+    const seek = () => {
+      const t = Math.max(0, Math.min(sbeNum(c.end) - 1e-3, sbeNum(at)));
+      const done = () => { v.removeEventListener('seeked', done); resolve(); };
+      v.addEventListener('seeked', done);
+      try { v.currentTime = t; } catch (e) { v.removeEventListener('seeked', done); resolve(); }
+      setTimeout(() => { v.removeEventListener('seeked', done); resolve(); }, 2500);
+    };
+    if (v.dataset.src === url && v.readyState >= 1) { seek(); return; }
+    v.dataset.src = url;
+    const meta = () => { v.removeEventListener('loadedmetadata', meta); seek(); };
+    v.addEventListener('loadedmetadata', meta);
+    const fail = () => { v.removeEventListener('error', fail); resolve(); };
+    v.addEventListener('error', fail);
+    v.src = url;
+    try { v.load(); } catch (e) {}
+  });
+}
+
+async function sbeShowFrameAt(t) {
+  const v = sbeEl('sbeVideo');
+  const img = sbeEl('sbeStill');
+  if (!v) return;
+  // THE OVERLAY LANE IS NOT THE PICTURE'S BUSINESS, so it is painted BEFORE
+  // any of the picture's early returns. A card may outlive the last shot —
+  // that is the whole reason the render pads the base with black — and this
+  // function bails out as soon as no clip covers the playhead, which left the
+  // card stuck on screen at full opacity past its own end. Caught on the test
+  // panel, not by a unit test.
+  sbeOvPaint(t);
+  const c = sbeClipAt(SBE.clips, t);
+  SBE.curId = c ? c.id : '';
+  if (!c) {
+    v.classList.remove('is-on');
+    if (img) img.classList.remove('is-on');
+    sbeEl('sbeBadge').textContent = SBE.clips.length ? 'nothing plays here' : 'no clips';
+    return;
+  }
+  const kind = sbeKind(c);
+  sbeApplyPreviewFilter(sbeBright(c));
+  if (kind === 'slug') {
+    // NO FILE, SO NOTHING TO LOAD. Both layers off leaves the stage's own
+    // black, which is the frame the render will write — the one case where the
+    // preview is not an approximation at all.
+    v.classList.remove('is-on');
+    if (img) img.classList.remove('is-on');
+    sbeEl('sbeBadge').textContent = 'black · ' + sbeLen(c).toFixed(2) + 's';
+    sbePaintTrack();
+    return;
+  }
+  if (kind === 'still') {
+    // An <img> cannot land on the wrong frame and cannot be slow to seek, so
+    // a still never reaches the missing-proxy path the badge exists to warn
+    // about. Swap the src only when it changed — reassigning it re-decodes.
+    v.classList.remove('is-on');
+    if (img) {
+      const url = sbeClipUrl(c);
+      if (img.getAttribute('src') !== url) img.src = url;
+      img.classList.add('is-on');
+    }
+    sbeEl('sbeBadge').textContent =
+      (c.title || String(c.path || '').split('/').pop()) + ' · still · ' +
+      sbeLen(c).toFixed(2) + 's';
+    sbePaintTrack();
+    return;
+  }
+  if (img) img.classList.remove('is-on');
+  await sbeLoadInto(v, c, sbeNum(c.start) + (t - sbeNum(c.film_start)));
+  v.classList.add('is-on');
+  sbeEl('sbeBadge').textContent =
+    (c.title || c.path.split('/').pop()) + ' · ' + sbeNum(c.start).toFixed(2) + '–' +
+    sbeNum(c.end).toFixed(2) + ' · ' + (c.proxy ? 'proxy' : 'SOURCE (slow — run Prepare)');
+  // A SCRUB SHOWS THE TRUE OPACITY at the second it landed on, which is the
+  // only way a fade can be judged without playing the whole clip.
+  sbeFadePaint(t);
+  sbePaintTrack();
+}
+
+// ---------------------------------------------------------------------------
+// THE SOURCE MONITOR — the left screen
+// ---------------------------------------------------------------------------
+// A pool row is a path and a title, not a clip: it has no proxy of its own
+// until it lands on the track, and a row from the Generations tab has never
+// been near this document. So the URL is the proxy of a clip already cut from
+// the same file when there is one, and the file itself when there is not.
+// That is fine here in a way it would not be on the timeline: a source
+// monitor plays forward from zero, it does not scrub, so the 235 ms seek that
+// makes source files useless under a playhead never happens.
+function sbeSrcUrl(row) {
+  if (!row || !row.path) return '';
+  if (row.kind === 'still') return '/image?path=' + encodeURIComponent(row.path);
+  const cut = (SBE.clips || []).find(c => c.path === row.path && c.proxy);
+  if (cut && SBE.proxyUrl) {
+    return SBE.proxyUrl + encodeURIComponent(String(cut.proxy).split('/').pop());
+  }
+  return '/file?path=' + encodeURIComponent(row.path);
+}
+
+// CLICKING A ROW WATCHES IT. It does not add it — that was the old verb for
+// the whole row and it is now the + at the row's right edge, which is the
+// swap the two-screen layout is for: "you can watch the clips before you add
+// them".
+function edPoolPreview(i) {
+  // A drag ends in a click event on the row it started from. edPoolAdd has
+  // carried this guard since drag-to-drop shipped; the preview needs it for
+  // the same reason, or every drop would also change the left screen.
+  if (ED.suppressClick) { ED.suppressClick = false; return; }
+  const list = document.getElementById('edPoolList');
+  const row = ((list || {})._rows || [])[i];
+  if (!row) return;
+  SBE.source = row;
+  SBE.srcIndex = i;
+  // Mark the row in place rather than repainting the list: a repaint drops
+  // and re-attaches every thumbnail's src, which is sixty decoders for a
+  // one-class change.
+  list.querySelectorAll('.ed-pool-row').forEach((el, k) =>
+    el.classList.toggle('is-source', k === i));
+  sbeSrcLoad(row);
+  sbePaintSource();
+}
+
+function sbeSrcLoad(row) {
+  const v = sbeEl('sbeSrcVideo');
+  const img = sbeEl('sbeSrcStill');
+  const empty = sbeEl('sbeSrcEmpty');
+  if (empty) empty.hidden = true;
+  const url = sbeSrcUrl(row);
+  if (row.kind === 'still') {
+    sbeSrcStop();
+    if (v) { try { v.pause(); } catch (e) {} v.classList.remove('is-on'); }
+    if (img) {
+      if (img.getAttribute('src') !== url) img.src = url;
+      img.classList.add('is-on');
+    }
+    return;
+  }
+  if (img) img.classList.remove('is-on');
+  if (!v) return;
+  if (v.getAttribute('src') !== url) { v.src = url; try { v.load(); } catch (e) {} }
+  v.classList.add('is-on');
+  // Clicking a clip means "let me see it", so it plays. The program stops
+  // first — one picture, one soundtrack, one thing to listen to.
+  sbeSrcPlay();
+}
+
+async function sbeSrcPlay() {
+  const v = sbeEl('sbeSrcVideo');
+  if (!v || !SBE.source || SBE.source.kind === 'still') return;
+  sbeStop();                      // the program yields; they never overlap
+  v.muted = !!SBE.muted;
+  v.volume = 1;
+  SBE.srcPlaying = true;
+  try { await v.play(); }
+  catch (e) {
+    // NOT EVERY REJECTED play() IS AN AUTOPLAY REFUSAL. Calling pause() while
+    // a play promise is pending rejects it with AbortError — and pressing
+    // Play on the program does exactly that, on purpose. The first version of
+    // this caught that abort, decided the browser had blocked sound, muted
+    // the editor and started the source playing again UNDER the program.
+    // Measured: source paused:false, readyState 0, and a muted timeline.
+    if (!SBE.srcPlaying) return;                 // stopped on purpose; stay stopped
+    if (e && e.name === 'AbortError') return;
+    // Same autoplay bargain the program makes: losing the sound beats losing
+    // the picture, and a Play button that visibly does nothing is worse still.
+    if (!v.muted) {
+      v.muted = true;
+      sbeSetMute(true, 'browser blocked sound — click 🔊 to unmute', false);
+      try { await v.play(); } catch (e2) {}
+    }
+  }
+  sbePaintSource();
+}
+
+function sbeSrcStop() {
+  const v = sbeEl('sbeSrcVideo');
+  SBE.srcPlaying = false;
+  if (v) { try { v.pause(); } catch (e) {} }
+  sbePaintSource();
+}
+
+function sbeSrcToggle() { SBE.srcPlaying ? sbeSrcStop() : sbeSrcPlay(); }
+
+// The button under the left screen. Exactly the + on the row, by construction:
+// same function, same index, same server call.
+function sbeSrcAdd() {
+  if (!SBE.source || SBE.srcIndex < 0) return;
+  edPoolAdd(SBE.srcIndex);
+}
+
+function sbePaintSource() {
+  const row = SBE.source;
+  const name = sbeEl('sbeSrcName');
+  const add = sbeEl('sbeSrcAddBtn');
+  const play = sbeEl('sbeSrcPlayBtn');
+  const badge = sbeEl('sbeSrcBadge');
+  const empty = sbeEl('sbeSrcEmpty');
+  if (!name) return;
+  if (!row) {
+    name.textContent = 'Nothing loaded';
+    if (add) add.disabled = true;
+    if (play) { play.disabled = true; play.textContent = 'Play'; }
+    if (badge) badge.hidden = true;
+    if (empty) empty.hidden = false;
+    return;
+  }
+  const secs = sbeNum(row.duration_s, 0);
+  name.textContent = (row.title || String(row.path || '').split('/').pop() || 'clip') +
+    (secs ? ' · ' + secs.toFixed(1) + 's' : '');
+  name.title = row.path || '';
+  // Disabled when the row is no longer in the painted pool — a search or a
+  // tab change can take it away, and an Add that pointed at whatever moved
+  // into that slot would put the wrong clip on the film.
+  if (add) add.disabled = !(SBE.open && SBE.id) || SBE.srcIndex < 0;
+  if (play) {
+    play.disabled = (row.kind === 'still');
+    play.textContent = SBE.srcPlaying ? 'Pause' : 'Play';
+  }
+  if (empty) empty.hidden = true;
+  if (badge) {
+    // The same honesty the program badge carries: say when the picture is the
+    // source file rather than a proxy, because that is the slow one.
+    const proxied = (SBE.clips || []).some(c => c.path === row.path && c.proxy);
+    badge.hidden = false;
+    badge.textContent = (row.kind === 'still') ? 'still'
+      : (proxied ? 'proxy' : 'source file');
+  }
+}
+
+// What the soundtrack does to the clips' own sound. Lives on the edit so it
+// survives a reload and so the render uses what the screen is showing.
+function sbeMusicMode() {
+  const el = sbeEl('sbeMusicMode');
+  return (el && el.value === 'replace') ? 'replace' : 'under';
+}
+
+// SETTING A CONTROL TO WHAT IT ALREADY SAYS IS NOT AN EDIT. `sbeAdopt` calls
+// this on every load to make the dropdown agree with the document — and it
+// was marking that document dirty and queueing a write, so EVERY OPEN of
+// every film produced a save the user never made. Under the old autosave that
+// was silent revision churn; under drafts it would have been worse, because
+// the backup lane would have overwritten an unanswered recovery offer with
+// the very arrangement the offer existed to replace.
+function sbeSetMusicMode(v) {
+  const mode = (v === 'replace') ? 'replace' : 'under';
+  const el = sbeEl('sbeMusicMode');
+  if (el) el.value = mode;
+  if (SBE.audio) {
+    if (String(SBE.audio.mode || 'under') === mode) return;
+    SBE.audio.mode = mode;
+    SBE.dirty = true;
+    sbeSetState('unsaved changes', 'dirty');
+    sbeQueueSave();
+  }
+  // Only `replace` needs saying: it is the one that destroys something.
+  const warn = sbeEl('sbeMusicWarn');
+  if (warn) {
+    warn.hidden = (mode !== 'replace');
+    warn.textContent = 'any dialogue in the clips is lost';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// THE MEDIA POOL — three sources, one verb
+// ---------------------------------------------------------------------------
+// `ED.src` is which source is showing, `ED.rows` is what it holds. Nothing is
+// cached across sources on purpose: the gallery changes while you cut, and a
+// pool that shows yesterday's list is worse than a pool that takes 40 ms.
+window.ED = { src: 'film', rows: [], films: [], film: '', loading: false,
+              limit: 60, io: null, drag: null, suppressClick: false,
+              // What THIS session uploaded, kept in front of the list. The
+              // server puts an image somewhere the gallery already walks and a
+              // clip somewhere the uploads route lists, so both come back on
+              // their own — but `list_outputs` holds a file back for two
+              // seconds while it decides nobody is still writing it, and "it
+              // appears in a moment" is not what "immediately" means.
+              uploaded: [] };
+
+function edPoolSrc(name) {
+  ED.src = name;
+  const tabs = document.getElementById('edPoolTabs');
+  if (tabs) tabs.querySelectorAll('.pill-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.src === name));
+  const pick = document.getElementById('edPoolFilm');
+  if (pick) pick.hidden = (name !== 'other');
+  // Upload belongs to the source that shows what was uploaded.
+  const up = document.getElementById('edPoolUploadBtn');
+  if (up) up.hidden = (name !== 'images');
+  ED.limit = 60;
+  edPoolRefresh();
+}
+
+// BRING YOUR OWN FILE. "You cannot upload your own images and insert them
+// into the timeline" — and a clip from a phone is the same feature, so both
+// are taken. One request per file so a rejected one names itself instead of
+// failing a batch, and the answers go straight to the front of the pool.
+async function edPoolUpload(files) {
+  const list = Array.from(files || []);
+  if (!list.length) return;
+  const btn = document.getElementById('edPoolUploadBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Uploading…'; }
+  const bad = [];
+  let done = 0;
+  for (const f of list) {
+    const fd = new FormData();
+    fd.append('file', f);
+    let r;
+    try {
+      r = await (await fetch('/storyboard/edit/upload',
+                             { method: 'POST', body: fd })).json();
+    } catch (e) { r = { ok: false, error: String(e) }; }
+    if (r && r.ok) {
+      done++;
+      ED.uploaded = [edPoolUploadRow(r)].concat(
+        (ED.uploaded || []).filter(x => x.path !== r.path));
+    } else {
+      bad.push((f.name || 'file') + ' — ' + ((r && r.error) || 'upload failed'));
+    }
+  }
+  if (btn) { btn.disabled = false; btn.textContent = 'Upload'; }
+  if (ED.src !== 'images') edPoolSrc('images'); else await edPoolRefresh(true);
+  if (done) {
+    phosToast(done + (done === 1 ? ' file is' : ' files are') +
+              ' in the pool — press + to put it at the end, or drag it onto '
+              + 'the track.',
+              { kind: 'success', duration: 5000 });
+  }
+  for (const msg of bad) phosToast(msg, { kind: 'danger', duration: 7000 });
+}
+
+// One upload's answer, as the row shape every pool source produces.
+function edPoolUploadRow(r) {
+  const still = String(r.kind || 'still') === 'still';
+  return {
+    path: r.path, title: r.title || String(r.path || '').split('/').pop(),
+    kind: still ? 'still' : undefined,
+    sub: 'uploaded · ' + (still ? 'still' : 'clip') +
+         (r.duration_s ? ' · ' + sbeNum(r.duration_s).toFixed(1) + 's' : ''),
+    duration_s: still ? SBE_STILL_SECONDS : r.duration_s,
+    uploaded: true,
+  };
+}
+
+// One row shape for all three sources, so the paint and the click do not have
+// to know where a clip came from: {path, title, sub, duration_s, from, only}.
+async function edPoolRefresh(force) {
+  const list = document.getElementById('edPoolList');
+  const note = document.getElementById('edPoolNote');
+  if (!list) return;
+  if (ED.loading) return;
+  ED.loading = true;
+  if (force) ED.limit = 60;
+  list.innerHTML = '<span class="ed-pool-note">reading…</span>';
+  if (note) note.textContent = '';
+  try {
+    if (ED.src === 'film') {
+      ED.rows = (SBE.pool || []).map(c => ({
+        path: c.path, title: c.title || ('shot ' + c.n),
+        sub: (c.pass || '') + (c.duration_s ? ' · ' + sbeNum(c.duration_s).toFixed(1) + 's' : '') +
+             (c.placed ? ' · on the track' : ''),
+        duration_s: c.duration_s, placed: !!c.placed, n: c.n,
+      }));
+    } else if (ED.src === 'other') {
+      await edPoolLoadFilms();
+      ED.rows = await edPoolLoadFilmShots(ED.film);
+    } else if (ED.src === 'images') {
+      // THE GALLERY ALWAYS HAD THESE. `/outputs` has carried `kind: 'image'`
+      // since the unified gallery shipped; what was missing was a clip that
+      // could BE one. A still lands with a default hold and is resized by the
+      // same trim handles every other block has.
+      const r = await (await fetch('/outputs?limit=400&offset=0')).json();
+      const gallery = ((r && r.outputs) || [])
+        .filter(o => o.kind === 'image' && !o.hidden)
+        .map(o => ({
+          path: o.path, title: o.name, kind: 'still',
+          sub: 'still · ' + (o.engine ? String(o.engine).toUpperCase() + ' · ' : '') +
+               (o.mtime || '').slice(0, 10),
+          duration_s: SBE_STILL_SECONDS,
+        }));
+      // The clips somebody brought with them. Deliberately NOT in OUTPUT —
+      // that folder means "the panel made this" — so they come from their own
+      // listing and sit at the front, with this session's uploads ahead of
+      // them so a file is in the list the instant it lands.
+      let mine = [];
+      try {
+        const u = await (await fetch('/storyboard/edit/uploads')).json();
+        mine = ((u && u.uploads) || []).map(o => ({
+          path: o.path, title: o.name, sub: 'uploaded · clip',
+          uploaded: true,
+        }));
+      } catch (e) { mine = []; }
+      const seen = {};
+      ED.rows = (ED.uploaded || []).concat(mine, gallery)
+        .filter(row => (row.path && !seen[row.path]) && (seen[row.path] = 1));
+    } else {
+      const r = await (await fetch('/outputs?limit=400&offset=0')).json();
+      ED.rows = ((r && r.outputs) || [])
+        .filter(o => o.kind === 'video' && !o.hidden)
+        .map(o => ({
+          path: o.path, title: o.name,
+          sub: (o.clip_sec ? sbeNum(o.clip_sec).toFixed(1) + 's · ' : '') +
+               (o.engine ? String(o.engine).toUpperCase() + ' · ' : '') +
+               (o.mtime || '').slice(0, 10),
+          duration_s: o.clip_sec,
+        }));
+    }
+  } catch (e) {
+    ED.rows = [];
+    if (note) note.textContent = 'The panel did not answer.';
+  }
+  ED.loading = false;
+  edPoolPaint();
+}
+
+async function edPoolLoadFilms() {
+  let boards = [];
+  try {
+    const r = await (await fetch('/storyboard/list')).json();
+    boards = ((r && r.boards) || []).filter(b => (b.clips || 0) > 0 && b.id !== SBE.id);
+  } catch (e) { boards = []; }
+  ED.films = boards;
+  if (!ED.film || !boards.some(b => b.id === ED.film)) {
+    ED.film = boards.length ? boards[0].id : '';
+  }
+  const pick = document.getElementById('edPoolFilm');
+  if (pick) {
+    pick.innerHTML = boards.map(b =>
+      '<option value="' + escapeHtml(b.id) + '"' + (b.id === ED.film ? ' selected' : '') +
+      '>' + escapeHtml(b.title || b.id) + ' · ' + (b.clips || 0) + ' clips</option>').join('');
+  }
+}
+
+function edPoolPickFilm(id) { ED.film = id; ED.limit = 60; edPoolRefresh(); }
+
+async function edPoolLoadFilmShots(id) {
+  if (!id) return [];
+  let r;
+  try { r = await (await fetch('/storyboard/get?id=' + encodeURIComponent(id))).json(); }
+  catch (e) { return []; }
+  const shots = (((r || {}).board) || {}).shots || [];
+  return shots.map(sh => {
+    const path = sh.final_output || sh.draft_output || '';
+    if (!path || sh.status === 'skipped') return null;
+    return { path: path, title: sh.title || sh.prompt || ('shot ' + sh.n),
+             sub: 'S' + String(sh.n).padStart(2, '0') + ' · ' +
+                  (sh.final_output ? 'delivery' : 'draft') +
+                  (sh.duration_s ? ' · ' + sbeNum(sh.duration_s).toFixed(1) + 's' : ''),
+             duration_s: sh.duration_s, from: id, only: sh.n };
+  }).filter(Boolean);
+}
+
+function edPoolPaint() {
+  const list = document.getElementById('edPoolList');
+  const note = document.getElementById('edPoolNote');
+  if (!list) return;
+  const q = ((document.getElementById('edPoolSearch') || {}).value || '')
+    .trim().toLowerCase();
+  const rows = (ED.rows || []).filter(r =>
+    !q || (r.title || '').toLowerCase().indexOf(q) !== -1 ||
+    (r.path || '').toLowerCase().indexOf(q) !== -1);
+  if (!rows.length) {
+    list.innerHTML = '<span class="ed-pool-note">' +
+      // AN EMPTY LIST IS A SENTENCE, NOT A BLANK. Each of these says what is
+      // true of THIS source and what the next move is — a pool that goes
+      // quiet reads as broken, and the four sources fail for four different
+      // reasons.
+      (q
+        ? 'Nothing here matches “' + escapeHtml(q) + '”. Clear the filter to see everything.'
+        : ED.src === 'gallery'
+          ? 'No generations yet. Render something in Video or Storyboard and it lands here.'
+        : ED.src === 'images'
+          ? 'No images yet — press Upload to bring one in from this Mac, or make one in the Image studio.'
+        : ED.src === 'other'
+          ? (ED.films && ED.films.length
+              ? 'That __SEQ__ has no rendered clips yet.'
+              : 'No other __SEQS__ yet. Every __SEQ__ you make shows up here to borrow clips from.')
+        : 'This __SEQ__ has no rendered clips yet. Render its shots in Storyboard, or take one from another source above.') + '</span>';
+    if (note) note.textContent = '';
+    return;
+  }
+  const show = rows.slice(0, ED.limit);
+  // `#t=0.1` is what makes a <video preload="metadata"> paint a frame instead
+  // of black — no thumbnail pipeline, no extra request, and it is the same
+  // /file route with ranges the gallery already uses.
+  //
+  // The src is NOT in the markup. Chrome caps how many media elements one
+  // document may have (the carousel alone already holds ~240 on a working
+  // install), and a pool that attached sixty more on paint would spend that
+  // budget on rows nobody has scrolled to. `data-src` + an observer means at
+  // most the visible dozen are ever loaded, and leaving a row unloads it.
+  // A ROW IS A DIV WITH A ROLE, NOT A BUTTON. It has to hold a button of its
+  // own now — the + that still adds without previewing — and a <button>
+  // inside a <button> is not markup any browser will keep.
+  const srcPath = (SBE.source || {}).path || '';
+  list.innerHTML = show.map((r, i) =>
+    '<div class="ed-pool-row' + ((srcPath && r.path === srcPath) ? ' is-source' : '') +
+    '" role="button" tabindex="0" onclick="edPoolPreview(' + i + ')" ' +
+    'onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();edPoolPreview(' + i + ');}" ' +
+    'onpointerdown="edPoolDragStart(event,' + i + ')" ' +
+    'title="' + escapeHtml(r.path) + '">' +
+    // An image has no frame to seek to, so it is an <img> — and the /image
+    // route's own `w=` resize is what keeps a 14 MB PNG from being decoded at
+    // full size for a 44 px thumbnail.
+    (r.kind === 'still'
+      ? '<img alt="" data-src="/image?w=180&path=' + encodeURIComponent(r.path) + '">'
+      : '<video preload="metadata" muted playsinline data-src="/file?path=' +
+        encodeURIComponent(r.path) + '#t=0.1"></video>') +
+    '<span class="ed-pool-meta">' +
+      '<span class="ed-pool-name">' + escapeHtml(sbeNiceName(r.title || '')) + '</span>' +
+      '<span class="ed-pool-sub">' + escapeHtml(r.sub || '') + '</span>' +
+    '</span>' +
+    '<button type="button" class="ed-pool-add" ' +
+    'title="Put this clip at the end of the __SEQ__" ' +
+    'onclick="event.stopPropagation();edPoolAdd(' + i + ')">+</button>' +
+    // AN IMAGE CAN BE A CARD. A transparent PNG belongs on the overlay lane,
+    // not at the end of the picture track, and this is the one click that
+    // says so — it lands at the playhead, where you are looking.
+    (r.kind === 'still'
+      ? '<button type="button" class="ed-pool-add ed-pool-ov" ' +
+        'title="Lay this over the picture at the playhead (overlay lane)" ' +
+        'onclick="event.stopPropagation();edPoolOverlay(' + i + ')">▣</button>'
+      : '') +
+    '</div>').join('');
+  list._rows = show;
+  edPoolObserve(list);
+  // The row the source monitor is showing may have moved, or be gone: a
+  // search, a tab change and a refresh all repaint this list, and the index
+  // "Add to timeline" hands back has to be the one in the list on screen.
+  if (SBE.source) {
+    SBE.srcIndex = show.findIndex(r => r.path === SBE.source.path);
+    sbePaintSource();
+  }
+  if (note) {
+    note.textContent = rows.length > show.length
+      ? (show.length + ' of ' + rows.length + ' shown.')
+      : (rows.length + ' clip' + (rows.length === 1 ? '' : 's') +
+         ' · click one to watch it, + to put it at the end, or drag it onto the track.');
+  }
+}
+
+// One observer for the pool's whole life, re-pointed at each repaint. It
+// attaches a thumbnail's src on the way in and takes it away on the way out,
+// so the number of live decoders is the number of rows you can see.
+function edPoolObserve(list) {
+  if (!('IntersectionObserver' in window)) {
+    list.querySelectorAll('[data-src]').forEach(v => {
+      v.src = v.dataset.src; });
+    return;
+  }
+  if (ED.io) ED.io.disconnect();
+  // The first screenful loads WITHOUT waiting for the observer. Intersection
+  // callbacks do not run while a tab is occluded, and a pool of black
+  // rectangles is indistinguishable from a pool of broken clips — so the rows
+  // that are on screen at paint time never depend on a callback at all.
+  [...list.querySelectorAll('[data-src]')].slice(0, 12).forEach(v => {
+    if (!v.getAttribute('src')) v.src = v.dataset.src;
+  });
+  ED.io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      const v = e.target;
+      if (e.isIntersecting) {
+        if (!v.getAttribute('src') && v.dataset.src) v.src = v.dataset.src;
+      } else if (v.getAttribute('src')) {
+        v.removeAttribute('src');
+        // Only a <video> holds a decoder to release; load() on an <img> is not
+        // a function, and calling it would throw once per row leaving the view.
+        if (v.tagName === 'VIDEO') { try { v.load(); } catch (err) {} }
+      }
+    }
+  }, { root: list, rootMargin: '150px' });
+  list.querySelectorAll('[data-src]').forEach(v => ED.io.observe(v));
+}
+
+// THE VERB. A clip joins the timeline, gets its proxy built before it lands,
+// and the user does not move: adding to a cut is not a reason to leave it.
+async function edPoolAdd(i, dropAt) {
+  const list = document.getElementById('edPoolList');
+  const row = ((list || {})._rows || [])[i];
+  if (!row) return;
+  // A DRAG ENDS IN A CLICK EVENT. The browser fires one after every pointerup
+  // on a <button>, so without this flag every drop would also add the clip a
+  // second time, at the end of the track.
+  if (ED.suppressClick && dropAt === undefined) { ED.suppressClick = false; return; }
+  if (!SBE.open || !SBE.id) {
+    phosToast('Open a __SEQ__ first — the Editor holds one timeline at a time.', {});
+    return;
+  }
+  // The row's own word first, then the file's. The server checks the suffix
+  // too — this is the half that keeps the CLIENT from asking /file for a
+  // picture, which is what painted a black frame.
+  const isStill = (row.kind === 'still')
+    || /\.(png|jpe?g|webp|bmp|tiff?)$/i.test(String(row.path || ''));
+  const note = document.getElementById('edPoolNote');
+  if (note) {
+    note.textContent = isStill
+      ? ('reading ' + (row.title || 'that image') + '…')
+      : ('building the proxy for ' + (row.title || 'that clip') + '…');
+  }
+  const fd = new URLSearchParams();
+  fd.set('id', SBE.id);
+  if (isStill) { fd.set('kind', 'still'); fd.set('path', row.path); }
+  else if (row.from) { fd.set('from', row.from); fd.set('only', String(row.only)); }
+  else fd.set('path', row.path);
+  if (row.title) fd.set('title', row.title);
+  let r;
+  try { r = await (await fetch('/storyboard/edit/add-clip', { method: 'POST', body: fd })).json(); }
+  catch (e) { r = { ok: false, error: String(e) }; }
+  if (!r.ok) {
+    if (note) note.textContent = '';
+    phosToast(r.error || 'That clip could not be added.', { kind: 'danger' });
+    return;
+  }
+  const c = r.clip || {};
+  const item = {
+    path: c.path || row.path, proxy: c.proxy || null,
+    kind: isStill ? 'still' : 'video',
+    duration_s: (isStill ? SBE_STILL_SECONDS
+                         : (c.duration_s || row.duration_s || null)),
+    title: c.title || row.title || '', n: c.n,
+  };
+  // A CLICK LANDS AT THE END; A DROP LANDS WHERE IT WAS DROPPED. The first
+  // cannot move anybody's cuts, which is why it is still the default verb; the
+  // second was ASKED for, and a drop that ignored where the pointer was would
+  // be a drag with no meaning.
+  let at;
+  const ok = sbeMutate(cs => {
+    if (dropAt === undefined || dropAt === null) {
+      at = sbeFilmDuration(cs);
+      return sbePlaceUnplaced(cs, item, at);
+    }
+    at = Math.max(0, sbeNum(dropAt));
+    return sbeInsertAt(cs, item, at);
+  });
+  if (!ok) { if (note) note.textContent = ''; return; }
+  await sbeSave(true);
+  if (note) note.textContent = '';
+  phosToast('Added at ' + sbeFmtTime(at) +
+            (isStill ? ' · still' : ' · proxy ready.'),
+            { kind: 'success', duration: 4000 });
+  // The board may have gained a shot (an import), and the payload's `unplaced`
+  // and `clips` are now stale. Re-read quietly; nothing on screen moves.
+  sbeLoad(true);
+}
+
+// ---------------------------------------------------------------------------
+// DRAG: a pool row onto the track
+// ---------------------------------------------------------------------------
+// POINTER EVENTS, NOT HTML5 DRAG-AND-DROP. The track's own move/trim gestures
+// are already pointerdown/move/up with pointer capture, and mixing the two
+// models means a dragstart that swallows the capture and a drop the track
+// never hears. This is the same substrate the track uses, so the two coexist
+// by construction rather than by luck. Click-to-add is untouched: a press that
+// never travels more than a few pixels is still a click.
+function edPoolDragStart(ev, i) {
+  const list = document.getElementById('edPoolList');
+  const row = ((list || {})._rows || [])[i];
+  if (!row || !SBE.open || !SBE.id) return;
+  if (ev.button !== undefined && ev.button !== 0) return;
+  // The ELEMENT the press started on, not just the data row — the guard at
+  // the end of the drag needs to know whether the click the browser is about
+  // to fire will land back here.
+  ED.drag = { row: row, index: i, x0: ev.clientX, y0: ev.clientY,
+              moved: false, ghost: null,
+              el: (ev.target && ev.target.closest)
+                ? ev.target.closest('.ed-pool-row') : null };
+  // The pool's drag is the one gesture in this panel that let the browser
+  // start a text selection underneath it, so every drop painted the entire
+  // editor — labels, times, hint bar, rail — in selection blue until the
+  // next click.
+  if (ev.preventDefault) ev.preventDefault();
+  window.addEventListener('pointermove', edPoolDragMove);
+  window.addEventListener('pointerup', edPoolDragEnd, { once: true });
+}
+
+function edPoolDragMove(ev) {
+  const d = ED.drag;
+  if (!d) return;
+  if (!d.moved) {
+    if (Math.abs(ev.clientX - d.x0) + Math.abs(ev.clientY - d.y0) < 5) return;
+    d.moved = true;
+    // PORTALLED TO <body>, because the pool list has its own overflow and a
+    // ghost parented inside it is clipped the instant it leaves the column —
+    // which is every drag, since the track is in the other column.
+    d.ghost = document.createElement('div');
+    d.ghost.className = 'ed-drag-ghost';
+    d.ghost.textContent = d.row.title || d.row.path || 'clip';
+    document.body.appendChild(d.ghost);
+  }
+  d.ghost.style.left = (ev.clientX + 12) + 'px';
+  d.ghost.style.top = (ev.clientY + 12) + 'px';
+  const track = sbeEl('sbeTrack');
+  const over = edPoolOverTrack(ev, track);
+  track.classList.toggle('is-dropping', over);
+  SBE.dropAt = over ? edPoolDropTime(ev, track) : null;
+  sbePaintTrack();
+}
+
+// The film time under the pointer, snapped to the boundary a drop would use —
+// so the line the user sees is the position the clip will take, not the pixel
+// their finger happens to be over.
+function edPoolDropTime(ev, track) {
+  const t = sbeTimeFromEvent(ev, track);
+  const idx = sbeDropIndex(SBE.clips, t);
+  const prev = SBE.clips[idx - 1];
+  return prev ? sbeNum(prev.film_end) : 0;
+}
+
+function edPoolOverTrack(ev, track) {
+  if (!track) return false;
+  const r = track.getBoundingClientRect();
+  // Generous vertically: a drop aimed at a 78px strip from another column
+  // should not fail because the pointer was four pixels high.
+  return ev.clientX >= r.left && ev.clientX <= r.right &&
+         ev.clientY >= r.top - 24 && ev.clientY <= r.bottom + 24;
+}
+
+async function edPoolDragEnd(ev) {
+  const d = ED.drag;
+  ED.drag = null;
+  window.removeEventListener('pointermove', edPoolDragMove);
+  if (!d) return;
+  if (d.ghost) d.ghost.remove();
+  const track = sbeEl('sbeTrack');
+  if (track) track.classList.remove('is-dropping');
+  const at = SBE.dropAt;
+  SBE.dropAt = null;
+  sbePaintTrack();
+  if (!d.moved) return;                       // a press that never travelled
+  // ARMED ONLY IF THE CLICK IS ACTUALLY COMING. "A drag ends in a click event
+  // on the row it started from" is true for a press that never left the row
+  // and false for every drag onto the track — which is all of them. So the
+  // flag outlived the gesture and ate the user's next genuine click: you drop
+  // a clip on the timeline, click another clip to preview it, and the source
+  // monitor does nothing until you click a second time.
+  ED.suppressClick = !!(d.el && ev.target && d.el.contains(ev.target));
+  if (at === null || at === undefined) return;   // dropped in open space
+  await edPoolAdd(d.index, at);
+}
+
+// ---------------------------------------------------------------------------
+// BLACK — the one clip with no file
+// ---------------------------------------------------------------------------
+// No server round trip, because there is nothing on disk to check, no
+// geometry to probe and no proxy to build. It is a length and a kind.
+function edAddSlug() {
+  if (!SBE.open || !SBE.id) {
+    phosToast('Open a __SEQ__ first — the Editor holds one timeline at a time.', {});
+    return;
+  }
+  const box = document.getElementById('edSlugSecs');
+  const secs = Math.max(SBE_MIN_CLIP, Math.min(60, sbeNum(box && box.value, 2) || 2));
+  const at = sbeFilmDuration(SBE.clips);
+  const ok = sbeMutate(cs => sbeInsertAt(cs, {
+    kind: 'slug', title: 'black', duration_s: secs,
+  }, at));
+  if (!ok) return;
+  sbeSave(true);
+  phosToast(secs.toFixed(1) + 's of black at ' + sbeFmtTime(at) + '.',
+            { kind: 'success', duration: 3500 });
+}
+
+// ---------------------------------------------------------------------------
+// RELINK — draft → delivery
+// ---------------------------------------------------------------------------
+function sbePaintRelink() {
+  const bar = sbeEl('sbeRelink');
+  if (!bar) return;
+  const rows = SBE.relink || [];
+  bar.hidden = !rows.length;
+  if (!rows.length) return;
+  sbeEl('sbeRelinkText').textContent = rows.length +
+    (rows.length === 1 ? ' shot was' : ' shots were') +
+    ' finished since this cut — use the finished versions.';
+}
+
+async function sbeRelink() {
+  const btn = sbeEl('sbeRelinkBtn');
+  if (btn) btn.disabled = true;
+  // Save first: the server rewrites the file on disk, and an unsaved
+  // arrangement would be rewritten out from under itself. CHECKED — a save
+  // that did not land means the server is holding an older cut, and relinking
+  // that one writes it back over what is on screen.
+  if (SBE.dirty && !SBE.conflict && !(await sbeSave(true))) {
+    if (btn) btn.disabled = false;
+    phosToast('Your arrangement could not be saved, and relinking works on ' +
+              'the saved file — fix the save first.',
+              { kind: 'danger', duration: 8000 });
+    return;
+  }
+  const fd = new URLSearchParams();
+  fd.set('id', SBE.id);
+  let r;
+  try { r = await (await fetch('/storyboard/edit/relink', { method: 'POST', body: fd })).json(); }
+  catch (e) { r = { ok: false, error: String(e) }; }
+  if (btn) btn.disabled = false;
+  if (!r || !r.ok) {
+    phosToast((r && r.error) || 'Those clips could not be relinked.', { kind: 'danger' });
+    return;
+  }
+  SBE.undo.length = 0; SBE.redo.length = 0;
+  sbeAdopt(r, true);
+  phosToast((r.relinked || 0) + ' clip(s) now play the finished files. ' +
+            'Same cuts, same timings.', { kind: 'success', duration: 6000 });
+}
+
+// ---------------------------------------------------------------------------
+// IMPORT — clips from another film, into this one
+// ---------------------------------------------------------------------------
+// The pool is a column away, and on a stacked window it is above the fold.
+// This is the way back to it from the prepare bar.
+function edPoolFocus() {
+  const pane = document.getElementById('edSectionTab');
+  if (pane && pane.scrollIntoView) pane.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  const q = document.getElementById('edPoolSearch');
+  if (q) { try { q.focus(); } catch (e) {} }
+}
+
+function sbeTogglePlay() { SBE.playing ? sbeStop() : sbePlay(); }
+
+// Sound. One switch drives the picture, the soundtrack bed and the button, so
+// they can never disagree about whether this timeline is audible.
+// A BROWSER REFUSING TO AUTOPLAY IS NOT A PREFERENCE, and this is the second
+// half of why the Editor could go permanently silent. When Chrome declines an
+// unmuted play() the editor mutes itself so the picture still runs — right
+// call — but it wrote that decision to localStorage, so ONE refusal silenced
+// every later session: clips AND soundtrack, across reloads, with a 34px
+// speaker button as the only way back. Reported as total preview audio loss,
+// which is exactly what it is.
+//
+// `remember` is FALSE for that path: the mute lasts as long as the tab, the
+// stored preference is left alone, and it says so out loud instead of
+// appending a sentence to a 10.5px line under the transport.
+function sbeSetMute(on, note, remember) {
+  SBE.muted = !!on;
+  if (remember !== false) {
+    try { localStorage.setItem('sbeMuted', SBE.muted ? '1' : '0'); } catch (e) {}
+  }
+  const v = sbeEl('sbeVideo');
+  if (v) { v.muted = SBE.muted; v.volume = 1; }
+  // ONE OPINION ABOUT SOUND, across both monitors. A source screen with its
+  // own mute would be a second source of truth for the exact state this
+  // switch exists to keep single.
+  const sv = sbeEl('sbeSrcVideo');
+  if (sv) { sv.muted = SBE.muted; sv.volume = 1; }
+  const a = SBE.musicEl;
+  if (a) { a.muted = SBE.muted; }
+  const b = sbeEl('sbeMuteBtn');
+  if (b) {
+    b.textContent = SBE.muted ? '🔇' : '🔊';
+    b.classList.toggle('is-off', SBE.muted);
+    b.title = note || (SBE.muted ? 'Sound off — click to unmute (M)' : 'Sound on (M)');
+  }
+  if (note) {
+    const el = sbeEl('sbeApprox');
+    if (el && el.dataset.muteNoted !== '1') {
+      el.dataset.muteNoted = '1';
+      el.textContent = note + ' ' + el.textContent;
+    }
+    if (typeof phosToast === 'function' && !SBE.muteToasted) {
+      SBE.muteToasted = true;
+      phosToast('The browser would not start sound without a click, so the '
+                + 'preview is muted for now — press the speaker (or M) to '
+                + 'turn it back on. Your setting has not been changed.',
+                { kind: 'warn', duration: 9000 });
+    }
+  }
+}
+
+// THE ONE-CLICK WAY BACK, and the reason the refusal above is survivable: a
+// press of the speaker is a user gesture, so the sound it turns on is sound
+// the browser will now allow.
+function sbeUnmuteFromRefusal() {
+  SBE.muteToasted = false;
+  sbeSetMute(false);
+  if (SBE.playing) { const v = sbeEl('sbeVideo'); if (v) { try { v.play(); } catch (e) {} } }
+  sbeMusicPlay();
+}
+
+// TAKE THE STAGE TO A CLIP, WHATEVER KIND IT IS. The video branch loads,
+// seeks and plays; the other two only decide which layer is lit, because
+// there is nothing to decode, nothing to seek, and no clock to start.
+async function sbeEnter(c, at) {
+  const v = sbeEl('sbeVideo');
+  const img = sbeEl('sbeStill');
+  sbeApplyPreviewFilter(sbeBright(c));
+  const kind = sbeKind(c);
+  if (kind === 'video') {
+    if (img) img.classList.remove('is-on');
+    await sbeLoadInto(v, c, (at === undefined || at === null) ? sbeNum(c.start) : sbeNum(at));
+    v.classList.add('is-on');
+    try { await v.play(); } catch (e) {}
+    return;
+  }
+  try { v.pause(); } catch (e) {}
+  v.classList.remove('is-on');
+  if (img) {
+    if (kind === 'still' && c.path) {
+      const url = sbeClipUrl(c);
+      if (img.getAttribute('src') !== url) img.src = url;
+      img.classList.add('is-on');
+    } else {
+      img.classList.remove('is-on');   // a slug: the stage's own black
+    }
+  }
+}
+
+async function sbePlay() {
+  if (SBE.playing) return;
+  const c = sbeClipAt(SBE.clips, SBE.playhead) || SBE.clips[0];
+  if (!c) return;
+  sbeSrcStop();          // the source yields; the two monitors never overlap
+  SBE.playing = true;
+  SBE.lastTs = 0;
+  sbePaintChrome();
+  if (!sbeClipAt(SBE.clips, SBE.playhead)) SBE.playhead = sbeNum(c.film_start);
+  const v = sbeEl('sbeVideo');
+  SBE.curId = c.id;
+  if (sbeKind(c) === 'video') {
+    await sbeLoadInto(v, c, sbeNum(c.start) + (SBE.playhead - sbeNum(c.film_start)));
+    v.classList.add('is-on');
+    try {
+      await v.play();
+    } catch (e) {
+      // NotAllowedError = no user activation to spend (autoplay policy). Losing
+      // the picture is worse than losing the sound, so fall back to muted and say
+      // so, rather than leaving a Play button that visibly does nothing.
+      // An AbortError is a pause we asked for (the source monitor taking the
+      // screen), and treating that as a block would mute the editor for a
+      // reason that has nothing to do with the browser.
+      if (!SBE.playing || (e && e.name === 'AbortError')) { /* stopped on purpose */ }
+      else if (!v.muted) {
+        v.muted = true;
+        sbeSetMute(true, 'browser blocked sound — click 🔊 to unmute', false);
+        try { await v.play(); } catch (e2) {}
+      }
+    }
+    sbeApplyPreviewFilter(sbeBright(c));
+  } else {
+    await sbeEnter(c);
+  }
+  sbeMusicPlay();
+  sbeStripSync(true);
+  SBE.raf = requestAnimationFrame(sbeFrame);
+}
+
+function sbeStop() {
+  SBE.playing = false;
+  SBE.lastTs = 0;
+  if (SBE.raf) { cancelAnimationFrame(SBE.raf); SBE.raf = 0; }
+  const v = sbeEl('sbeVideo');
+  if (v) { try { v.pause(); } catch (e) {} }
+  sbeMusicStop();
+  sbeStripStop();
+  if (SBE.open) sbePaintChrome();
+}
+
+async function sbeFrame() {
+  if (!SBE.playing) return;
+  const v = sbeEl('sbeVideo');
+  // THE WALL CLOCK, for the clips that do not carry one. A still and a slug
+  // have no <video> whose currentTime the playhead can be read off, so without
+  // this the transport froze the instant a film reached its first black.
+  // Capped at a quarter second so a backgrounded tab resumes rather than
+  // jumping half a film forward on its first frame back.
+  const now = (typeof performance !== 'undefined' && performance.now)
+    ? performance.now() : Date.now();
+  const dt = SBE.lastTs ? Math.max(0, Math.min(0.25, (now - SBE.lastTs) / 1000)) : 0;
+  SBE.lastTs = now;
+  const c = sbeById(SBE.clips, SBE.curId);
+  if (c && sbeKind(c) !== 'video') {
+    SBE.playhead += dt;
+    if (SBE.playhead >= sbeNum(c.film_end) - 1e-3) {
+      const next = SBE.clips[SBE.clips.indexOf(c) + 1];
+      if (!next) {
+        SBE.playhead = sbeNum(c.film_end);
+        sbeStop(); sbePaintHead(); return;
+      }
+      SBE.playing = false;                       // hold the loop across the cut
+      SBE.playhead = sbeNum(next.film_start);
+      SBE.curId = next.id;
+      await sbeEnter(next);
+      SBE.playing = true;
+      sbeMusicSync();
+      sbePaintTrack();
+    }
+  } else if (c) {
+    SBE.playhead = sbeNum(c.film_start) + Math.max(0, v.currentTime - sbeNum(c.start));
+    if (v.currentTime >= sbeNum(c.end) - 1e-3 || v.ended) {
+      const next = SBE.clips[SBE.clips.indexOf(c) + 1];
+      if (!next) { sbeStop(); sbePaintHead(); return; }
+      SBE.playing = false;                       // hold the loop across the cut
+      SBE.playhead = sbeNum(next.film_start);
+      SBE.curId = next.id;
+      await sbeEnter(next);
+      SBE.playing = true;
+      sbeMusicSync();
+      sbePaintTrack();
+    }
+  } else {
+    // A hole: the picture goes black and the clock keeps running, which is
+    // exactly what the render will do if the gap is ever filled.
+    v.classList.remove('is-on');
+    const img = sbeEl('sbeStill');
+    if (img) img.classList.remove('is-on');
+    const nxt = SBE.clips.find(x => sbeNum(x.film_start) > SBE.playhead);
+    SBE.playhead += dt || (1 / 60);
+    if (!nxt) { sbeStop(); sbePaintHead(); return; }
+    if (SBE.playhead >= sbeNum(nxt.film_start)) {
+      SBE.curId = nxt.id;
+      await sbeEnter(nxt);
+      sbeMusicSync();
+    }
+  }
+  // EVERY FRAME, because a strip starts and stops on its own clock rather
+  // than at the cuts — `sbeMusicSync` can ride the transitions, this cannot.
+  sbeStripSync();
+  sbeFadePaint();
+  sbeOvPaint();
+  sbePaintHead();
+  SBE.raf = requestAnimationFrame(sbeFrame);
+}
+
+// The soundtrack is best-effort and says so when it cannot be had: /file serves
+// what is under mlx_outputs, and a track living anywhere else is still perfectly
+// good for the waveform, the grid and the render — it just cannot be auditioned
+// in this browser.
+function sbeSyncMusic() {
+  const path = (SBE.audio || {}).path || '';
+  if (!path) { SBE.musicEl = null; SBE.music = ''; return; }
+  if (SBE.music === path && SBE.musicEl) return;
+  SBE.music = path;
+  SBE.musicOk = true;
+  const a = new Audio('/file?path=' + encodeURIComponent(path));
+  a.preload = 'auto';
+  a.muted = !!SBE.muted;
+  a.addEventListener('error', () => {
+    SBE.musicOk = false;
+    const el = sbeEl('sbeApprox');
+    if (el && el.dataset.musicNoted !== '1') {
+      el.dataset.musicNoted = '1';
+      el.textContent = el.textContent +
+        ' The soundtrack cannot be played from here (it lives outside mlx_outputs) — the waveform, the beat grid and the render still use it.';
+    }
+  });
+  SBE.musicEl = a;
+}
+
+// THE BED PLAYS THE WINDOW THE STRIP SHOWS. Both of these read `offset` and
+// nothing else, so a track whose intro had been trimmed off played untrimmed
+// in the Editor and trimmed in the file — the exact "what the strip shows and
+// what the render builds cannot come apart" contract sbeMusicWindow claims to
+// establish, broken on the one surface the user listens to.
+function sbeMusicAt(t) {
+  const w = sbeMusicWindow(SBE.audio, SBE.peaks ? SBE.peaks.duration : 0);
+  if (t < w.film_start - 1e-3) return null;               // not in yet
+  if (w.film_end !== null && t >= w.film_end) return null;  // out already
+  return Math.max(0, w.head + (t - w.film_start));
+}
+function sbeMusicPlay() {
+  const a = SBE.musicEl;
+  if (!a || !SBE.musicOk) return;
+  const at = sbeMusicAt(SBE.playhead);
+  try {
+    if (at === null) { a.pause(); return; }
+    a.currentTime = at;
+    a.play().catch(() => {});
+  } catch (e) {}
+}
+function sbeMusicSync() {
+  const a = SBE.musicEl;
+  if (!a || !SBE.musicOk || !SBE.playing) return;
+  const want = sbeMusicAt(SBE.playhead);
+  if (want === null) { try { if (!a.paused) a.pause(); } catch (e) {} return; }
+  // THE MIX, HEARD. Not the bed's envelope alone — the whole of what the
+  // render will apply to this track: the fader, the envelope, and the duck if
+  // it is on and nothing outranks it. `sbeBedGainPoints` is the same function
+  // the render's `volume` expression is built from and the same one the level
+  // line draws, so this <audio> element and the mp4 cannot come apart. It was
+  // the envelope and nothing else, while the render silently held the bed at
+  // 0.20 and ducked it — "when you render it, there are some weird
+  // manipulations... the volume of the music goes low when the dialogue
+  // appears."
+  //
+  // ON THE BED'S OWN CLOCK, which is the played window and not the track: the
+  // playhead less the film second the music starts at.
+  const bw = sbeMusicWindow(SBE.audio, SBE.peaks ? SBE.peaks.duration : 0);
+  a.volume = sbeBedGainAt(SBE.audio || {}, SBE.clips,
+                          sbeFilmDuration(SBE.clips),
+                          SBE.playhead - bw.film_start);
+  try {
+    if (a.paused) a.play().catch(() => {});
+    if (Math.abs(a.currentTime - want) > 0.25) a.currentTime = want;
+  } catch (e) {}
+}
+function sbeMusicStop() { const a = SBE.musicEl; if (a) { try { a.pause(); } catch (e) {} } }
+
+// ---- THE STRIP PLAYER ---------------------------------------------------
+// A POOL, NOT AN ELEMENT. The music bed is one track and one <audio>; clip
+// strips overlap by design — that is what a split edit IS — so a J-cut needs
+// two voices sounding at once across the cut. Three: two for the overlap and
+// one spare, so a strip that starts while two are still ringing does not have
+// to steal one that is audible.
+const SBE_STRIP_VOICES = 3;
+// The same tolerance the music bed uses. Re-seeking on every frame would
+// stutter; letting it drift further than a quarter second would be audible.
+const SBE_STRIP_SLIP = 0.25;
+
+function sbeStripPool() {
+  if (!SBE.stripEls) SBE.stripEls = [];
+  while (SBE.stripEls.length < SBE_STRIP_VOICES) {
+    const a = new Audio();
+    a.preload = 'auto';
+    a.dataset.clip = '';
+    SBE.stripEls.push(a);
+  }
+  return SBE.stripEls;
+}
+
+// Drive every audible strip from the PLAYHEAD, exactly as the bed is driven —
+// independent of which picture is on stage, which is the entire point.
+// `force` re-seeks rather than tolerating slip: a scrub or an edit has moved
+// the ground, so "close enough" is the wrong answer.
+function sbeStripSync(force) {
+  if (!SBE.open) return;
+  const pool = sbeStripPool();
+  const want = sbeStripsAt(SBE.clips, SBE.playhead);
+  const live = {};
+  for (const w of want) live[w.id] = w;
+  // A voice whose strip has gone quiet is released BEFORE any is claimed, or
+  // an overlap of two would find the pool full of yesterday's clips.
+  for (const a of pool) {
+    if (a.dataset.clip && !live[a.dataset.clip]) {
+      try { a.pause(); } catch (e) {}
+      a.dataset.clip = '';
+    }
+  }
+  for (const w of want) {
+    let a = null;
+    for (const el of pool) if (el.dataset.clip === w.id) { a = el; break; }
+    let fresh = false;
+    if (!a) {
+      for (const el of pool) if (!el.dataset.clip) { a = el; break; }
+      if (!a) continue;                  // more overlap than voices: skip one
+      a.dataset.clip = w.id;
+      fresh = true;
+    }
+    const url = w.path ? ('/file?path=' + encodeURIComponent(w.path)) : '';
+    if (url && a.dataset.src !== url) {
+      a.dataset.src = url;
+      a.src = url;
+      fresh = true;
+    }
+    a.muted = !!SBE.muted;
+    // THE ENVELOPE, HEARD. The render builds a `volume` expression and the
+    // export writes level keyframes; the preview has to move the same number
+    // or the one place the user checks his work is the one place the fade
+    // does not exist. `w.at - w.start` is the STRIP-relative second, which is
+    // the envelope's own clock.
+    const c2 = sbeById(SBE.clips, w.id);
+    const win = c2 ? sbeClipAudio(c2) : null;
+    a.volume = win ? sbeGainAt(c2, win.len, w.at - win.start) : 1;
+    try {
+      if (fresh || force || Math.abs(a.currentTime - w.at) > SBE_STRIP_SLIP) {
+        a.currentTime = w.at;
+      }
+      if (SBE.playing) { if (a.paused) a.play().catch(() => {}); }
+      else if (!a.paused) a.pause();
+    } catch (e) {}
+  }
+}
+
+function sbeStripStop() {
+  for (const a of (SBE.stripEls || [])) {
+    try { a.pause(); } catch (e) {}
+  }
+}
+
+// ---------------------------------------------------------------------------
+// COMMANDS
+// ---------------------------------------------------------------------------
+// THE VIEW FOLLOWS THE PICTURE, ONE SCREENFUL AT A TIME. Called from
+// sbePaintHead, which runs on every animation frame while the film plays, so
+// the cheap early return in sbeFollowScroll is what keeps it from writing
+// scrollLeft sixty times a second and cancelling a drag of the scrollbar.
+function sbeFollow() {
+  if (!SBE.playing) return;
+  const box = sbeEl('sbeScroll');
+  if (!box) return;
+  const max = Math.max(0, box.scrollWidth - box.clientWidth);
+  if (max <= 0) return;
+  const want = sbeFollowScroll(sbePx(SBE.playhead), box.scrollLeft,
+                               box.clientWidth, max);
+  if (Math.abs(want - box.scrollLeft) > 1) box.scrollLeft = want;
+}
+
+// ---- zoom, all three doors: the buttons, the slider, and alt + wheel ----
+// The floor is never a constant: it is whatever puts THIS film in THIS
+// window, so the slider's left end always means "all of it".
+function sbeZoomMin() {
+  const box = sbeEl('sbeScroll');
+  return sbeZoomFitPps(sbeSpan(), box ? box.clientWidth : 900);
+}
+
+// `at` is a film time to hold still (alt + wheel passes the one under the
+// pointer); without it the playhead is held if it is on screen, the middle of
+// the view if it is not.
+function sbeZoomTo(pps, at) {
+  const box = sbeEl('sbeScroll');
+  const lo = sbeZoomMin();
+  const hi = Math.max(lo, SBE_PPS_MAX);
+  const want = Math.max(lo, Math.min(hi, sbeNum(pps, SBE.pps)));
+  if (!box) { SBE.pps = want; sbePaint(); return; }
+  const anchor = sbeZoomAnchor(SBE.playhead, box.scrollLeft, box.clientWidth,
+                               SBE.pps, at);
+  SBE.pps = want;
+  sbePaint();
+  box.scrollLeft = sbeZoomScroll(anchor, SBE.pps,
+                                 Math.max(0, box.scrollWidth - box.clientWidth));
+  sbePaintChrome();
+}
+
+// The − / + buttons keep the old ladder, clamped to the live floor so they can
+// never step past "the whole film" and leave the slider disagreeing with them.
+function sbeZoom(dir) {
+  const lo = sbeZoomMin();
+  const steps = [8, 12, 18, 26, 42, 64, 96, 140, 200].filter(s => s > lo);
+  steps.unshift(lo);
+  let i = 0;
+  for (let k = 0; k < steps.length; k++) if (steps[k] <= SBE.pps + 1e-6) i = k;
+  sbeZoomTo(steps[Math.max(0, Math.min(steps.length - 1, i + dir))]);
+}
+
+function sbeZoomSlide(v) {
+  const lo = sbeZoomMin();
+  sbeZoomTo(sbeZoomFromSlider(v, lo, Math.max(lo, SBE_PPS_MAX)));
+}
+
+// shift + wheel pans, alt + wheel zooms around the pointer — the two gestures
+// every NLE and every DAW already has. A plain wheel is left alone: it belongs
+// to the column, which scrolls vertically.
+function sbeOnTlWheel(ev) {
+  const box = sbeEl('sbeScroll');
+  if (!box) return;
+  if (ev.altKey) {
+    ev.preventDefault();
+    const r = box.getBoundingClientRect();
+    const at = (box.scrollLeft + (ev.clientX - r.left)) / Math.max(1e-6, SBE.pps);
+    const k = Math.pow(1.0015, -(ev.deltaY || 0));
+    sbeZoomTo(SBE.pps * k, at);
+    return;
+  }
+  // A trackpad sends horizontal intent as deltaX with no modifier at all, and
+  // refusing that would be refusing the one gesture Mac users already know.
+  const dx = (ev.shiftKey ? (ev.deltaY || ev.deltaX) : ev.deltaX) || 0;
+  if (!dx) return;
+  ev.preventDefault();
+  box.scrollLeft += dx;
+}
+
+function sbeRippleSelected() {
+  if (!SBE.sel) return;
+  sbeMutate(cs => sbeRippleDelete(cs, SBE.sel));
+  SBE.sel = '';
+  sbePaint();
+}
+
+function sbeSplitHere() {
+  sbeMutate(cs => sbeSplitAt(cs, SBE.playhead));
+}
+
+function sbeToggleLock() {
+  const c = sbeById(SBE.clips, SBE.sel);
+  if (!c) return;
+  const before = JSON.stringify(SBE.clips);
+  c.locked = !c.locked;
+  if (c.locked) c._pin = sbeNum(c.film_start); else delete c._pin;
+  c.source = 'human';
+  sbeLayout(SBE.clips);
+  SBE.undo.push(before);
+  SBE.redo.length = 0;
+  SBE.dirty = true;
+  sbeSetState('unsaved changes', 'dirty');
+  sbePaint();
+  sbeQueueSave();
+}
+
+function sbePlace(i) {
+  const u = (SBE.unplaced || [])[i];
+  if (!u) return;
+  const at = (u.slot && u.slot.film_start !== undefined)
+    ? sbeNum(u.slot.film_start) : sbeFilmDuration(SBE.clips);
+  const ok = sbeMutate(cs => sbePlaceUnplaced(cs, u, at));
+  if (ok) {
+    SBE.unplaced = SBE.unplaced.filter((_, k) => k !== i);
+    sbePaint();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// PREPARE / AUTO / GENERATE / RENDER
+// ---------------------------------------------------------------------------
+async function sbePrepare() {
+  const fd = new URLSearchParams();
+  fd.set('id', SBE.id);
+  const music = (sbeEl('sbeMusic').value || '').trim();
+  if (music) fd.set('music', music);
+  let r;
+  try { r = await (await fetch('/storyboard/edit/prepare', { method: 'POST', body: fd })).json(); }
+  catch (e) { r = { ok: false, error: String(e) }; }
+  if (!r.ok) {
+    phosToast(r.error || 'Could not start.', { kind: 'danger' });
+    if (r.prepare) { SBE.prepare = r.prepare; sbePaintChrome(); }
+    return;
+  }
+  SBE.prepare = r.prepare || { state: 'running', stage: 'start' };
+  sbePaintChrome();
+}
+
+async function sbePrepareCancel() {
+  const fd = new URLSearchParams(); fd.set('id', SBE.id);
+  try { await fetch('/storyboard/edit/cancel', { method: 'POST', body: fd }); } catch (e) {}
+}
+
+async function sbeAuto() {
+  if (!confirm('Re-cut this film from scratch?\n\n' +
+      'The auto-editor picks the best window of every clip and cuts on the beat. ' +
+      'It THROWS AWAY the arrangement on screen — every trim, every move, every split.\n\n' +
+      'The clips themselves are untouched.')) return;
+  const fd = new URLSearchParams();
+  fd.set('id', SBE.id);
+  const music = (sbeEl('sbeMusic').value || '').trim();
+  if (music) fd.set('music', music);
+  let r;
+  try { r = await (await fetch('/storyboard/edit/auto', { method: 'POST', body: fd })).json(); }
+  catch (e) { r = { ok: false, error: String(e) }; }
+  if (!r.ok) { phosToast(r.error || 'The auto-edit failed.', { kind: 'danger' }); return; }
+  SBE.undo.length = 0; SBE.redo.length = 0;
+  sbeAdopt(r, true);
+  phosToast('Re-cut · ' + (r.edit.clips || []).length + ' clips.', { kind: 'success' });
+}
+
+let _sbeGenAt = 0;
+function sbeGenOpen(filmStart, duration) {
+  _sbeGenAt = sbeNum(filmStart);
+  sbeEl('sbeGenWhere').textContent =
+    'Nothing plays between ' + sbeFmtTime(filmStart) + ' and ' +
+    sbeFmtTime(sbeNum(filmStart) + sbeNum(duration)) + '. This shot is written to the ' +
+    'storyboard and rendered like any other.';
+  // FLOOR, not round: a shot longer than the hole it was ordered for pushes
+  // everything after it off the beat the moment it is placed.
+  sbeEl('sbeGenDuration').value =
+    Math.max(0.5, Math.floor(sbeNum(duration) * 10) / 10).toFixed(1);
+  sbeEl('sbeGenParams').hidden = true;
+  sbeEl('sbeGenParams').textContent = '';
+  sbeEl('sbeGenGo').disabled = false;
+  sbeEl('sbeGenModal').classList.add('show');
+  setTimeout(() => { try { sbeEl('sbeGenPrompt').focus(); } catch (e) {} }, 30);
+}
+function sbeGenClose() { sbeEl('sbeGenModal').classList.remove('show'); }
+
+async function sbeGenSubmit() {
+  const prompt = (sbeEl('sbeGenPrompt').value || '').trim();
+  if (!prompt) { phosToast('Write what the shot shows.', {}); return; }
+  const btn = sbeEl('sbeGenGo');
+  btn.disabled = true;
+  const fd = new URLSearchParams();
+  fd.set('id', SBE.id);
+  fd.set('prompt', prompt);
+  fd.set('duration', String(sbeNum(sbeEl('sbeGenDuration').value, 5)));
+  fd.set('film_start', String(_sbeGenAt));
+  const on = document.querySelector('#sbeGenPass .pill-btn.active');
+  fd.set('pass', (on && on.dataset.pass) || 'draft');
+  let r;
+  try { r = await (await fetch('/storyboard/edit/generate', { method: 'POST', body: fd })).json(); }
+  catch (e) { r = { ok: false, error: String(e) }; }
+  if (!r.ok) {
+    btn.disabled = false;
+    phosToast(r.error || 'Could not queue the shot.', { kind: 'danger' });
+    return;
+  }
+  // WHAT WILL ACTUALLY RENDER. make_job silently drops any form field it does
+  // not name, so the server reads the params back off the queued job and hands
+  // them here rather than echoing the request.
+  const box = sbeEl('sbeGenParams');
+  box.hidden = false;
+  box.textContent = 'queued as shot ' + r.n + ' (job ' + r.job_id + ')\n' +
+    Object.keys(r.params || {}).map(k => k + ': ' + r.params[k]).join('\n');
+  SBE.awaitingClip = Date.now();
+  phosToast('Shot ' + r.n + ' is in the queue. It appears under the timeline when it lands.',
+            { kind: 'success', duration: 6000 });
+}
+
+async function sbeRenderFilm() {
+  if (SBE.rendering) return;
+  // THE RENDER READS THE SAVED FILE, so a save that did not land renders the
+  // previous cut — a film that is silently not the one on screen, which is
+  // the worst possible way to find out about a failing save.
+  if (SBE.dirty && !(await sbeSave(true))) {
+    phosToast('The timeline could not be saved, and the render builds from ' +
+              'the saved file — it would make the previous cut. Fix the save ' +
+              'first.', { kind: 'danger', duration: 8000 });
+    return;
+  }
+  const holes = sbeHoles(SBE.clips);
+  if (holes.length && !confirm(
+      holes.length + ' hole(s) totalling ' +
+      holes.reduce((a, g) => a + g.duration, 0).toFixed(2) + 's are still empty.\n\n' +
+      'The assembler CONCATENATES — a hole closes and everything after it slides ' +
+      'earlier, off the beat it was cut to.\n\nRender anyway?')) return;
+  const btn = sbeEl('sbeRenderBtn');
+  const prev = btn.textContent;
+  SBE.rendering = true;
+  btn.disabled = true;
+  btn.textContent = 'Assembling…';
+  sbeEl('sbeRenderNote').textContent =
+    'One ffmpeg pass over ' + SBE.clips.length + ' clips. This takes as long as an encode takes.';
+  const fd = new URLSearchParams();
+  fd.set('id', SBE.id);
+  const music = (sbeEl('sbeMusic').value || '').trim();
+  if (music) { fd.set('music', music); fd.set('music_mode', sbeMusicMode()); }
+  let r;
+  try { r = await (await fetch('/storyboard/edit/render', { method: 'POST', body: fd })).json(); }
+  catch (e) { r = { ok: false, error: String(e) }; }
+  SBE.rendering = false;
+  btn.disabled = false;
+  btn.textContent = prev;
+  if (!r.ok) {
+    sbeEl('sbeRenderNote').textContent = '';
+    phosToast(r.error || 'The film could not be assembled.', { kind: 'danger', duration: 8000 });
+    return;
+  }
+  sbeEl('sbeRenderNote').textContent = (r.gaps_note || '') +
+    ' Wrote ' + Math.round(sbeNum(r.duration)) + 's to ' + (r.path || '').split('/').pop();
+  phosToast('Rendered ' + r.clips + ' clips · ' + Math.round(sbeNum(r.duration)) + 's' +
+            (r.gaps_note ? ' — ' + r.gaps_note : ''),
+            { kind: 'success', duration: r.gaps_note ? 11000 : 6000 });
+  // The render ENDS ON THE FILM. Before this the timeline wrote an mp4 into
+  // mlx_outputs/storyboards/, printed one line of grey text under the button,
+  // and left the user looking at the timeline wondering where the film went.
+  // The Editor's document is not necessarily the storyboard's open board any
+  // more, so the board is opened before the film screen is asked for it.
+  const focus = (r.path || '').split('/').pop();
+  if (typeof workflowSwitch === 'function') workflowSwitch('storyboard');
+  if (SBE.id !== SB.id && typeof sbOpen === 'function') await sbOpen(SBE.id);
+  sbFilmOpen({ focus: focus });
+}
+
+// ---------------------------------------------------------------------------
+// EXPORT FOR AN NLE — the film as a project the next room can open
+// ---------------------------------------------------------------------------
+async function sbeExportNle() {
+  if (!SBE.open || !SBE.id) return;
+  // Same rule as the render: the project is written from the saved file.
+  if (SBE.dirty && !(await sbeSave(true))) {
+    phosToast('The timeline could not be saved, and the project is written ' +
+              'from the saved file — fix the save first.',
+              { kind: 'danger', duration: 8000 });
+    return;
+  }
+  const btn = sbeEl('sbeNleBtn');
+  const prev = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Writing the project…';
+  const fd = new URLSearchParams();
+  fd.set('id', SBE.id);
+  let r;
+  try { r = await (await fetch('/storyboard/edit/export-nle', { method: 'POST', body: fd })).json(); }
+  catch (e) { r = { ok: false, error: String(e) }; }
+  btn.disabled = false;
+  btn.textContent = prev;
+  if (!r || !r.ok) {
+    phosToast((r && r.error) || 'The project folder could not be written.',
+              { kind: 'danger', duration: 8000 });
+    return;
+  }
+  const folder = (r.dir || '').split('/').pop();
+  // WHAT CAME OUT AND WHAT DID NOT, in the note rather than in a support
+  // thread later: the audio is stems, and a slug is a gap the NLE draws black.
+  sbeEl('sbeRenderNote').textContent =
+    folder + ' · ' + r.clips + ' clips · open the .xml in Premiere or Resolve, ' +
+    'run the _ae.jsx from After Effects. Sound comes out as STEMS — clip audio ' +
+    'and the soundtrack on separate tracks, not the ducked mix.' +
+    ((r.missing || []).length ? ' ' + r.missing.length + ' file(s) were gone and left out.' : '');
+  phosToast('Project folder ready · ' + r.clips + ' clips, ' +
+            (r.linked || 0) + ' hardlinked' +
+            ((r.copied || 0) ? ', ' + r.copied + ' copied' : ''),
+            { kind: 'success', duration: 8000 });
+  // The folder, revealed. A path in a toast is a path somebody has to
+  // retype; `open` on the server is the one honest "here it is".
+  const rf = new URLSearchParams();
+  rf.set('id', SBE.id);
+  rf.set('what', 'project');
+  try { await fetch('/storyboard/edit/reveal', { method: 'POST', body: rf }); }
+  catch (e) {}
+}
+
+// ---------------------------------------------------------------------------
+// TICK, KEYS, WIRING
+// ---------------------------------------------------------------------------
+// How long an unwritten change may sit before the editor stops calling it
+// "unsaved changes" and starts calling it what it is. Three ticks: long enough
+// that a slow save is not slandered, short enough that nobody gets twenty
+// minutes into a cut that is not being stored.
+const SBE_SAVE_GRACE_MS = 12000;
+
+async function sbeTick() {
+  if (!SBE.open || document.hidden) return;
+  // THE WATCHDOG, AND IT RUNS BEFORE ANYTHING ELSE IN THE TICK. Every earlier
+  // path out of this function was also a path past the one check that notices
+  // work is not reaching the disk.
+  //
+  // Two jobs. First, nothing unsaved is ever left with no save on its way:
+  // dirty, not saving, no timer pending is a dropped save, and re-queueing is
+  // free. Second, if the oldest unwritten change is older than the grace, the
+  // alarm goes up — whatever the reason, whoever swallowed it.
+  // UNSAVED IS A LEGITIMATE STATE NOW — it means the user has not pressed
+  // Save, which is his call. What is NOT legitimate is unsaved AND unbacked:
+  // that is work living in one browser tab and nowhere else. So the watchdog
+  // guards the BACKUP, not the save.
+  sbePaintProtected();
+  if (SBE.dirty && !SBE.conflict && SBE.id) {
+    if (!SBE.backingUp && !SBE.saveTimer) sbeQueueSave();
+    if (SBE.dirtyAt && Date.now() - SBE.dirtyAt > SBE_SAVE_GRACE_MS
+        && SBE.backedUpAt < SBE.dirtyAt) {
+      sbeSaveAlarm('these changes have not been backed up for ' +
+                   Math.round((Date.now() - SBE.dirtyAt) / 1000) +
+                   ' seconds — press Save to store them');
+    }
+  }
+  const job = SBE.prepare || {};
+  if (job.state === 'running') {
+    try {
+      const r = await (await fetch('/storyboard/edit/status?id=' +
+                                   encodeURIComponent(SBE.id))).json();
+      const was = job.state;
+      SBE.prepare = r.prepare || {};
+      sbePaintChrome();
+      if (was === 'running' && SBE.prepare.state !== 'running') {
+        SBE.peaksFor = '';
+        await sbeLoad(true);
+      }
+    } catch (e) {}
+    return;
+  }
+  // A shot generated into a hole is rendering somewhere in the panel's one
+  // queue. Poll for it — but never while the user has unsaved work in flight,
+  // because a reload would be a reload over their arrangement.
+  if (SBE.awaitingClip && !SBE.dirty && !SBE.drag && !SBE.saving) {
+    const before = (SBE.unplaced || []).length;
+    await sbeLoad(true);
+    if ((SBE.unplaced || []).length > before) {
+      SBE.awaitingClip = 0;
+      phosToast('The new shot has landed — place it on the timeline.', { kind: 'success' });
+    } else if (Date.now() - SBE.awaitingClip > 45 * 60 * 1000) {
+      SBE.awaitingClip = 0;
+    }
+  }
+}
+
+document.addEventListener('keydown', (ev) => {
+  if (!SBE.open || document.body.dataset.workflow !== 'editor') return;
+  const t = ev.target;
+  if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || '')) return;
+  if (document.querySelector('.modal-bg.show')) return;
+  const step = 1 / sbeFps();
+  if (ev.key === ' ') { ev.preventDefault(); sbeTogglePlay(); return; }
+  if (ev.key === 'ArrowLeft') { ev.preventDefault(); sbeStop(); sbeSeek(SBE.playhead - (ev.shiftKey ? step * 10 : step)); return; }
+  if (ev.key === 'ArrowRight') { ev.preventDefault(); sbeStop(); sbeSeek(SBE.playhead + (ev.shiftKey ? step * 10 : step)); return; }
+  if (ev.key === 'Delete' || ev.key === 'Backspace') { ev.preventDefault(); sbeRippleSelected(); return; }
+  if (ev.key === 's' || ev.key === 'S') { ev.preventDefault(); sbeSplitHere(); return; }
+  if ((ev.metaKey || ev.ctrlKey) && (ev.key === 'z' || ev.key === 'Z')) {
+    ev.preventDefault();
+    ev.shiftKey ? sbeRedo() : sbeUndo();
+    return;
+  }
+  if (ev.key === 'm' || ev.key === 'M') {
+    ev.preventDefault();
+    SBE.muted ? sbeUnmuteFromRefusal() : sbeSetMute(true);
+    return;
+  }
+  if (ev.key === 'Escape') {
+    ev.preventDefault();
+    // The panel first: Escape means "close the thing on top", and closing the
+    // whole document out from under an open picker is a surprise. A menu is
+    // the same argument one layer higher.
+    if (sbePopAnyOpen()) { sbePopCloseAll(''); return; }
+    const vers = document.getElementById('sbeVersions');
+    if (vers && !vers.hidden) { sbeVersionsClose(); return; }
+    sbeClose();
+  }
+  // RENDER HAS A KEY NOW that it is the only filled control on the screen.
+  if ((ev.key === 'r' || ev.key === 'R') && (ev.metaKey || ev.ctrlKey)) {
+    ev.preventDefault();
+    sbeRenderFilm();
+  }
+});
+
+// A menu closes when you click away from it. Capture phase, like the picker
+// below, so the control underneath still gets its click.
+document.addEventListener('click', sbePopGlobal, true);
+
+// Click-away, the same shape the engine menu uses. Capture phase, so a click
+// on a control underneath still lands after the panel is gone.
+document.addEventListener('click', (ev) => {
+  const vers = document.getElementById('sbeVersions');
+  if (!vers || vers.hidden) return;
+  if (ev.target.closest('#sbeVersions') || ev.target.closest('#sbeVersBtn')
+      || ev.target.closest('#sbeKeepBtn')) return;
+  sbeVersionsClose();
+}, true);
+
+(function sbeWire() {
+  const track = document.getElementById('sbeTrack');
+  if (!track) return;
+  sbeSetMute(SBE.muted);   // the button must agree with the stored state on load
+  track.addEventListener('pointerdown', sbeOnTrackDown);
+  track.addEventListener('pointermove', sbeOnTrackMove);
+  track.addEventListener('pointerup', sbeOnTrackUp);
+  track.addEventListener('pointercancel', sbeOnTrackUp);
+  // Pan and zoom over the whole scroller — ruler, waveform and track at once,
+  // because they are one view of one film and panning one of them alone would
+  // be a bug. `passive: false` or preventDefault is a no-op and the column
+  // scrolls out from under the gesture.
+  const box = document.getElementById('sbeScroll');
+  if (box) box.addEventListener('wheel', sbeOnTlWheel, { passive: false });
+  // A RESIZE OBSERVER ON THE COLUMN, not just window.onresize. Measured: a
+  // viewport change from 1900x1000 to 1440x900 left both monitors 437px tall
+  // in a 501px column — 16:9 boxes squashed to 1.15:1 by `max-width` because
+  // the window event never reached sbePaint. The column is the box the budget
+  // is actually about, and it changes for reasons the window never hears:
+  // the bottom pane opening, a scrollbar arriving, the pool being folded.
+  // Coalesced on a TIMER, not on requestAnimationFrame. rAF does not run in
+  // a tab the compositor has decided is not visible — measured in a headless
+  // preview pane, where the callback simply never fired and the monitors kept
+  // the previous window's height — and a resize is exactly the moment a
+  // background tab is about to become the foreground one. sbePaint cannot
+  // change this box's size, so this cannot feed itself.
+  const colBox = document.getElementById('edStage');
+  if (colBox && 'ResizeObserver' in window) {
+    let pending = 0;
+    new ResizeObserver(() => {
+      if (pending) return;
+      pending = setTimeout(() => { pending = 0; if (SBE.open) sbePaint(); }, 0);
+    }).observe(colBox);
+  }
+  // THE MUSIC LANE. Listeners on the LANE and not on the block: the block is
+  // repainted (and its class list rewritten) on every frame of the drag, and a
+  // pointer captured by an element the paint replaces is a drag that dies
+  // halfway. The lane outlives the gesture.
+  const lane = document.getElementById('sbeMusicLane');
+  if (lane) {
+    lane.addEventListener('pointerdown', (ev) => {
+      if (!ev.target.closest('#sbeMusicClip')) return;
+      sbeStop();
+      sbeOnMusicDown(ev);
+    });
+    lane.addEventListener('pointermove', sbeOnMusicMove);
+    lane.addEventListener('pointerup', sbeOnMusicUp);
+    lane.addEventListener('pointercancel', sbeOnMusicUp);
+    lane.addEventListener('dblclick', sbeOnMusicDbl);
+    // The ghost belongs to the pointer, so it goes when the pointer does.
+    lane.addEventListener('pointerleave', () => {
+      if (SBE.kfGhost && SBE.kfGhost.id === '@music') {
+        SBE.kfGhost = null;
+        sbePaint();
+      }
+    });
+  }
+  const alane = document.getElementById('sbeAudioLane');
+  if (alane) {
+    alane.addEventListener('pointerdown', (ev) => { sbeStop(); sbeOnAudioDown(ev); });
+    alane.addEventListener('dblclick', sbeOnAudioDbl);
+    alane.addEventListener('pointermove', sbeOnAudioMove);
+    alane.addEventListener('pointerup', sbeOnAudioUp);
+    alane.addEventListener('pointercancel', sbeOnAudioUp);
+    // The two halves of "hover teaches": the ghost follows the pointer while
+    // it is near a level, and it goes when the pointer does.
+    alane.addEventListener('pointerleave', sbeAudioGhostClear);
+    alane.addEventListener('contextmenu', sbeOnAudioMenu);
+  }
+  const scrubbers = ['sbeRuler', 'sbeWave', 'sbeWaveNone'];
+  for (const id of scrubbers) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    el.addEventListener('pointerdown', (ev) => {
+      sbeStop();
+      el.setPointerCapture && el.setPointerCapture(ev.pointerId);
+      el.dataset.scrub = '1';
+      sbeSeek(sbeTimeFromEvent(ev, el));
+    });
+    el.addEventListener('pointermove', (ev) => {
+      if (el.dataset.scrub !== '1') return;
+      SBE.playhead = Math.max(0, Math.min(sbeFilmDuration(SBE.clips),
+                                          sbeTimeFromEvent(ev, el)));
+      sbePaintHead();
+    });
+    const end = (ev) => {
+      if (el.dataset.scrub !== '1') return;
+      el.dataset.scrub = '';
+      sbeSeek(sbeTimeFromEvent(ev, el));
+    };
+    el.addEventListener('pointerup', end);
+    el.addEventListener('pointercancel', end);
+  }
+  const tabs = document.getElementById('edPoolTabs');
+  if (tabs) {
+    tabs.addEventListener('click', (ev) => {
+      const b = ev.target.closest('.pill-btn');
+      if (b) edPoolSrc(b.dataset.src);
+    });
+  }
+  const pass = document.getElementById('sbeGenPass');
+  if (pass) {
+    pass.addEventListener('click', (ev) => {
+      const b = ev.target.closest('.pill-btn');
+      if (!b) return;
+      pass.querySelectorAll('.pill-btn').forEach(x => x.classList.toggle('active', x === b));
+    });
+  }
+})();
+
 document.getElementById('sbStyle') && document.getElementById('sbStyle')
   .addEventListener('input', () => {});
 
@@ -54589,6 +69483,7 @@ function workflowSwitch(name) {
   const train = document.getElementById('trainSection');
   const audioTab = document.getElementById('audioSectionTab');
   const sbTab = document.getElementById('sbSectionTab');
+  const edTab = document.getElementById('edSectionTab');
   const characters = document.getElementById('charactersSection');  // dead HTML; hide defensively
   // Set body data attribute so CSS can switch the layout per workflow.
   document.body.setAttribute('data-workflow', name);
@@ -54597,6 +69492,7 @@ function workflowSwitch(name) {
   if (train) train.classList.remove('show');
   if (audioTab) audioTab.style.display = 'none';
   if (sbTab) sbTab.style.display = 'none';
+  if (edTab) edTab.style.display = 'none';
   if (characters) characters.classList.remove('show');
   // The board poller is the Storyboard tab's only timer and it stops on exit —
   // no new polling loop runs while the tab is closed.
@@ -54604,6 +69500,12 @@ function workflowSwitch(name) {
     if (typeof sbTeardown === 'function') sbTeardown();
     document.body.classList.remove('sb-full');
   }
+  // LEAVING THE EDITOR IS NOT CLOSING THE DOCUMENT. The storyboard's own
+  // teardown used to take the editor down with it, so glancing at the gallery
+  // threw away the undo stack and the open timeline; you came back to the shot
+  // list. Suspend stops the clock and the picture and keeps everything else —
+  // the document closes when the user closes it, and only then.
+  if (name !== 'editor' && typeof sbeSuspend === 'function') sbeSuspend();
   if (name === 'storyboard') {
     // Storyboard is a layer ABOVE the video modes, not one of them: it submits
     // a brief to a planner and its output is a plan, not a clip. Hence a
@@ -54633,6 +69535,12 @@ function workflowSwitch(name) {
     if (manual) manual.style.display = 'none';
     if (audioTab) audioTab.style.display = 'block';
     if (typeof audioStudioInit === 'function') audioStudioInit();
+  } else if (name === 'editor') {
+    // The Editor. Engine-agnostic and board-agnostic: it opens the document
+    // it had open last, and an empty timeline is a legitimate place to stand.
+    if (manual) manual.style.display = 'none';
+    if (edTab) edTab.style.display = 'flex';
+    if (typeof edInit === 'function') edInit();
   } else {
     // Manual — show the video form, restore the previous video mode.
     if (manual) manual.style.display = '';
@@ -54664,8 +69572,9 @@ try {
   // 2026-05-18 — 'audio' is the Audio → Video workflow tab.
   // 2026-08-11 — 'storyboard' is the plan-a-film workflow tab. It MUST be in
   // this list or the tab simply never restores across a reload.
+  // 2026-08-17 — 'editor' is the timeline's own tab. Same rule, same list.
   if (saved === 'studio' || saved === 'train' || saved === 'characters' ||
-      saved === 'audio' || saved === 'storyboard') {
+      saved === 'audio' || saved === 'storyboard' || saved === 'editor') {
     workflowSwitch(saved);
   }
   // Clear any stale agent-fullscreen flag from the removed chat surface.

@@ -4,9 +4,17 @@ External agents (Claude Code, Codex, OSS, or anything that speaks HTTP) drive Ph
 
 ## Server
 
-- **Base URL:** `http://127.0.0.1:8199`
+- **Base URL:** `http://127.0.0.1:8198` on a normal install. **`8199` is the DEV
+  profile's port**, and every example on this page uses it because that is the
+  panel these were written against. The rule is one line in the source
+  (`mlx_ltx_panel.py:275`): `DEFAULT_PORT = 8199 if PROFILE == "dev" else 8198`,
+  overridable with `LTX_PORT`. If a request here returns nothing, you are
+  almost certainly talking to a port that has no panel on it — try the other one.
 - **Process:** `mlx_ltx_panel.py` (in the repo root)
-- **Wire format:** HTTP/1.1, form-encoded `POST` bodies. JSON exceptions are noted per-endpoint.
+- **Wire format:** form-encoded `POST` bodies; JSON exceptions are noted
+  per-endpoint. Responses are **HTTP/1.0** — `BaseHTTPRequestHandler`'s
+  default, never overridden — so the connection closes after every
+  request and there is no keep-alive to pipeline against.
 - **Auth:** none — bound to loopback only.
 
 ## Conventions
@@ -195,7 +203,23 @@ data = json.loads(raw, strict=False)
 
 ### `GET /loras`
 
-Returns `{"user": [...], "curated": [...], "loras_dir": "...", ...}`. Each entry has `id`, `name`, `path`, `filename`, `size_bytes`, `recommended_strength`, `kind` (`train_character` for LoRAs trained via the panel; `null` otherwise), and CivitAI metadata if known.
+Returns `{"user": [...], "curated": [...], "loras_dir": "...", ...}`. Each entry has `id`, `name`, `path`, `filename`, `size_bytes`, `recommended_strength`, `kind` (`train_character` for LoRAs trained via the panel; `null` otherwise), `adapter_verdict` (see below), and CivitAI metadata if known.
+
+#### `adapter_verdict` — whether this file can do anything
+
+A LoRA can train to completion, write a valid safetensors, load without a warning, and change **nothing**: the deltas it learned are numerically too small to move the model. Every structural gate passes, because every structural gate asks whether the KEYS land and none asks whether there is anything in them (#61, #62).
+
+`adapter_verdict` (`mlx_ltx_panel.py:2200`) is read out of the sidecar's `adapter_strength` block and is one of:
+
+| Value | Meaning |
+|---|---|
+| `ok` | Measured, and the delta RMS is in the working band. |
+| `weak` | Measured, and the deltas are at or under `WEAK_DELTA_RMS` (`2.0e-4`). The file is kept; the render will very likely look LoRA-free. |
+| `unknown` | Trained by a build that did not measure. **Not a synonym for `weak`** — silence is not weakness, and every LoRA older than the measurement reads this way. |
+
+Anything else is whatever the trainer called it, passed through verbatim.
+
+Callers should surface `weak` **before** a render is spent finding out, and should not decorate `unknown`.
 
 ### `POST /loras/refresh`
 
@@ -253,7 +277,7 @@ Kick off a character LoRA training. The panel shells out to `lora_lab.train_char
 |---|---|---|
 | `train_job_id` | string | From `/train/upload`. |
 | `trigger` | string | Trigger token, e.g. `bizarrotrn`. Must be compound and rare so it doesn't collide with normal language. The face LoRA lands at `mlx_models/loras/<trigger>_v2.safetensors`; the optional audio LoRA at `<trigger>.audio.safetensors`. |
-| `preset` | `quick` \| `medium` \| `high` | Hyperparameter preset. `high` = rank 32, 5000 steps. |
+| `preset` | `quick` \| `medium` \| `high` | Hyperparameter preset. See the table below — **the step count is not a constant, and on a sub-64 GB Mac neither is anything else.** |
 | `image_count` | int | Confirmed by the panel from the uploaded images. |
 | `train_audio` | `true` \| `false` | Optional. Default `false`. When `true`, a voice clip must already exist for this `train_job_id` (uploaded via `/train/upload-voice`) — otherwise `/train/start` returns 400. |
 | `audio_steps` | int | Optional. Default `250`. Number of audio-LoRA training steps. Heuristic: ~30 s/step on M4 Max. Smoke = `100`, Standard = `250`, Long = `500`. |
@@ -268,6 +292,40 @@ Advanced overrides (all optional, fall back to preset defaults):
 | `crop_strategy` | `center` |
 
 Returns `{"ok": true, "id": "j-<...>"}`. Track progress via `/status` (the training job appears in `current` then `history`). During the run the `current.progress.phase_label` reads `Training face · step N / M` then `Training voice · step N / M` if the audio phase runs. If audio training fails, the face LoRA is still kept; `error` is set with `audio training failed: …` so callers can surface the partial success.
+
+#### What the presets actually are
+
+Steps are **derived**, not fixed: `steps = epochs × image_count`, floored at 1 and capped by the preset's `max_steps` (`_preset_steps_for`, `mlx_ltx_panel.py:1629`). The cap is part of the server contract — a hand-written API call must not be able to enqueue a multi-thousand-step run on a memory-constrained Mac.
+
+On a Mac with **64 GB or more** (`TRAIN_PRESETS`, `mlx_ltx_panel.py:1558`):
+
+| `preset` | epochs | rank | resolution | `max_steps` | Graded for identity? |
+|---|---|---|---|---|---|
+| `quick` | 30 | 8 | 512 | 8000 | **No.** The pill says "identity ungraded". |
+| `medium` | 60 | 16 | 576 | 12000 | **No.** Same. |
+| `high` | 100 | 32 | 512 | 20000 | **Yes** — the validated v2 recipe (Aria_v2, Bizarro_v2). |
+
+So `high` at 50 images is 5000 steps, at 20 images 2000, at 300 images 20000 (capped). Only the rank-32 recipe has ever been put in front of a human eye and called good.
+
+#### ⚠️ Under 64 GB, every preset is quietly a different preset
+
+`_select_train_profile` (`mlx_ltx_panel.py:1650`) runs once at import and, when total RAM is **`0 < ram < 64` GB**, it **mutates `TRAIN_PRESETS` and `TRAIN_STYLE_PRESETS` in place**. The names do not change. The numbers all do:
+
+| `preset` | epochs | rank | resolution | `max_steps` | target modules |
+|---|---|---|---|---|---|
+| `quick` | 2 | 4 | 384 | 120 | compact set |
+| `medium` | 5 | 8 | 384 | 300 | compact set |
+| `high` | 10 | 8 | 448 | 500 | compact set |
+
+`make_job` mirrors the same clamps server-side, so `rank` / `steps` / `resolution` passed as advanced overrides are **capped too** (`max_rank` 8, `max_resolution` 448, `max_steps` 500) — you cannot ask for the graded recipe on this hardware and get it.
+
+This is a deliberate trade and the reason for it is real: full 512 px LTX LoRA training materialises backward activations for the dev transformer and a 48 GB Mac falls into swap thrash and never finishes. But be clear about what it means: **on a sub-64 GB Mac there is no preset that trains the recipe anybody has graded.** rank 8 at ≤500 steps is exactly the regime `adapter_verdict` was built to catch, so expect `weak` more often here, and read it as "this hardware, this recipe" rather than "this dataset".
+
+`GET /status` exposes the active profile as `train_profile` (`key`: `compact_training` | `full_training`, plus `label`, `ram_gb`, `max_rank`, `max_resolution`, `max_steps`, `note`) **and the effective tables themselves** as `train_presets` / `train_style_presets` (`mlx_ltx_panel.py:21842-21844`). **Read those before trusting a preset name** — they are the post-mutation values, so they are the only place the two tables above are told apart at runtime.
+
+#### The `adapter_strength` trainer event
+
+Not an analytics event — nothing about it leaves the machine (see [docs/ANALYTICS.md](ANALYTICS.md) for the complete list of what does). It is a progress event on the lora_lab subprocess stream, emitted once after the trainer measures the file it just wrote (`mlx_ltx_panel.py:18005`). The panel logs the median delta RMS, the max, and how many modules are carrying, then **finishes the job in a WARNING state rather than a bare `done`** when the verdict is not `ok`. The verdict is written into the LoRA's sidecar as `adapter_strength: {"verdict": …}` and read back out as `adapter_verdict` on `/loras` and `/characters`.
 
 ### `POST /train/install`
 
@@ -334,6 +392,203 @@ See `image_engine.py` for backend-specific options.
 ### `GET /agent/image/config`, `POST /agent/image/config`
 
 Kept under the legacy `/agent/` path for backward compatibility with the Image Studio frontend. Read/write the image engine config (default backend, mflux family, BFL key, etc.). Despite the path, **this is the image-engine config, NOT the removed chat agent**.
+
+---
+
+## Storyboard — plan a film, then shoot it
+
+A **board** is a film: a concept, a cast, locations, and a numbered shot list. Every render it starts goes through the same `make_job` → queue contract as `/queue/add`; none of these routes has a private execution path. Boards live under `state/storyboards/<board_id>/`, with `storyboard.json` written atomically — renders run for hours and a torn board would lose the whole run.
+
+### Read
+
+| Route | Returns |
+|---|---|
+| `GET /storyboard/list` | Every board, newest first. |
+| `GET /storyboard/get?id=<bid>` | One board document. |
+| `GET /storyboard/films` | The assembled films on disk — player path, runtime, picture size, size on disk, when it was made. `list_outputs` globs `OUTPUT/*.mp4` and never descends, so without this the one thing the feature makes is the one thing the app cannot show you. |
+
+### Write — `POST /storyboard/<action>`
+
+Form-encoded unless noted. `id` is the board id throughout.
+
+| Action | Fields | Note |
+|---|---|---|
+| `plan` | `concept`, `id`, `notes`, `shots`, `must`, `engine`, `character_id`, `style`, `locations`, `wardrobe` | Plan or re-plan. **409 while the renderer holds memory or the one planner slot is taken.** `shots` is honoured or refused — never silently swapped for a different count. A re-plan PATCHES locations and wardrobe rather than overwriting them. |
+| `cancel` | `id` | Release a planner slot. |
+| `save` | JSON `{id, board}` | Write a hand-edited board. |
+| `grade` | `id`, `n`, `grade`, `note` | Grade one shot. |
+| `estimate` | `id`, `pass`, `only` | Cost/wall estimate before spending. |
+| `render` | `id`, `pass`, `only`, `out`, `music`, `music_mode` | Shoot the board. |
+| `stop` | `id` | Stop the running board render. |
+| `replan-shots` | `id`, `ns` | Re-roll named shots. A repair that breaks a law is rejected; re-rolls splice into the CURRENT plan, not the original. |
+| `add-shot` | `id`, `path` | |
+| `import-shots` | `id`, `from`, `only` | REFERENCE clips from another board. Provenance (`imported_from`), the source LOCATIONS and the source CAST all travel with them — leaving any one behind breaks something specific. **Refuses while the target film is rendering.** |
+| `export` | `id`, `auto_edit`, `music`, `target_seconds`, `music_mode` | |
+| `reveal` | `id`, `name`, `what` | Show in Finder (macOS). |
+| `delete` | `id` | |
+
+### Board schema — the geography fields
+
+A shot is composed from its location. Since 2026-08-18 a location can also be **faced from more than one direction**, which is what makes a reverse angle a reverse angle instead of a second location.
+
+```jsonc
+"locations": [
+  {"id": "carwash", "name": "The car wash", "description": "…",
+   "views": [                                  // ABSENT, never [], when there are none
+     {"id": "establishing", "name": "…",
+      "light": "camera left",                  // flips with the camera
+      "description": "…"},                     // self-contained: readable without the floor plan
+     {"id": "reverse", "name": "…",
+      "light": "camera right",
+      "description": "… no car in frame …"}    // says what it does NOT hold, in those words
+   ]}
+],
+"shots": [
+  {"n": 1, "location_id": "carwash",
+   "view": "reverse",        // must be a view id OF that location
+   "eyeline": "right",       // "left" | "right" | "lens"
+   …}
+]
+```
+
+| Field | Where | Rules |
+|---|---|---|
+| `locations[].views` | location | List of `{id, name, light, description}`. **Absent, not `[]`,** when a location has none — every board written before views existed has no key, and an empty list would be a new shape for the validator to have opinions about for no gain. Ids follow the same charset as location ids. |
+| `shots[].view` | shot | A view id belonging to that shot's `location_id`. A view on a shot with no location, or a view that is not one of that location's, is a **validation error** (`unknown_view`) and fails exactly the way an unknown location does — a silently-dropped view composes the reverse angle from the establishing description, and the car the view existed to get out of frame is back in it with nothing said. |
+| `shots[].eyeline` | shot | One of `left`, `right`, `lens` — a fact about the FRAME, not the room. `right` = the eyes go off past the right edge. Anything else is a validation error (`bad_eyeline`). |
+
+**What the server does with them.** `shot_scene_text` injects the VIEW's description when a shot names one and falls back to the location's otherwise — so a board with no views, or a shot that names no view, renders exactly as it always did. `eyeline_clause` composes `"his eyes fixed past the right edge of frame"` at render time; **`lens` deliberately produces nothing** (telling these models to look down the barrel buys a stiffer performance than silence), and it exists so a shot can *say* it holds the lens, which is what lets the 180-degree check tell "faces the camera" apart from "nobody wrote one".
+
+**The 180-degree rule is enforced, not suggested.** After planning, `_enforce_eyelines` walks the shots in *screen* order and flips the second of any two adjacent shots that cut between two **different** characters in the **same** location and both claim the same side, and says so in `warnings`. It repairs mechanically because `eyeline` is a discrete field with exactly one complement — flipping it cannot damage anybody's prose. Prose-level laws get a model round trip instead, precisely because they lack that property.
+
+---
+
+## Editor — the timeline
+
+The Editor is a **top-level workflow**, not a stage of the storyboard: engine-agnostic, opens without a board being mid-render, and its document is `edit.json` under the board dir. One video track, one music lane. Per-clip sound is linked by default and can be pulled apart (J/L cuts) — that is **not** a second audio track.
+
+### Read
+
+| Route | Returns |
+|---|---|
+| `GET /storyboard/edit?id=<bid>` | The arrangement. On the first call for a board it runs the auto-edit ONCE, persists it into the automatic lane, and returns it with `generated: true`. Every later GET is a file read. A corrupt `edit.json` returns **500 with `corrupt: true`** and is never silently replaced — that would throw away the arrangement it is a broken copy of. |
+| `GET /storyboard/edit/status?id=<bid>` | The prepare job's state. |
+| `GET /storyboard/edit/peaks?id=<bid>` | The waveform. Hundreds of KB — fetch once, **never on a poll**. `404` until `prepare` has run. |
+| `GET /storyboard/edit/proxy?id=<bid>&name=<file>.mp4` | A proxy video, served with **range support**. Safari will not seek a `<video>` whose server answers plain `200`, which would undo the entire reason proxies exist. `name` must match `[A-Za-z0-9._-]{1,120}\.mp4` — it is a basename the server minted, so anything else is a probe. |
+| `GET /storyboard/edit/uploads` | Videos the user brought with them (`panel_uploads/timeline/`, newest first, capped at 200). Kept out of `OUTPUT` on purpose, which is why they need a route at all; images do not, they land in the library the gallery already walks. |
+| `GET /storyboard/edit/drafts?id=<bid>` | `{active, drafts: [...], backup}` — see **Drafts** below. |
+| `GET /storyboard/edit/versions?id=<bid>` | **Metadata only**: name, revision, when kept, clip count, duration, plus `keep` (= `EDIT_HISTORY_KEEP`, 50). The documents themselves are read once, by `restore`, on the user's word. Opening the panel must not be a download. |
+
+### Write — `POST /storyboard/edit/<sub>`
+
+| Sub | Fields | Note |
+|---|---|---|
+| `prepare` | `id`, `music`, `target_seconds` | Build proxies + peaks. `400` if `music` is not a file. |
+| `add-clip` | `id`, `from`, `only`, `path`, `title`, `kind` | `kind` is `video` \| `still` \| `slug` — passing it is what stops an image landing as a video with no frames. |
+| `relink` | `id` | Re-point clips at files that moved. |
+| `cancel` | `id` | Cancel the prepare job. |
+| `auto` | `id`, `music`, `target_seconds`, `min_shot`, `max_shot` | Re-run the machine's cut. Lands in the **automatic** lane. |
+| `save` | JSON `{id, edit, expect_revision?}` | See below. |
+| `draft` | `id`, `op`, `slug`, `name`, `from` | See **Drafts**. |
+| `backup` | JSON `{id, edit}` | The quiet lane. See **Drafts**. |
+| `recover` | `id` | Adopt the pending backup. |
+| `discard-backup` | `id` | Throw it away. |
+| `version` | `id`, `label` | Name a version. **Naming is not saving** — no revision bump, no write to `edit.json`, nothing about the timeline changes, which is exactly why it is safe to press at any moment. |
+| `restore` | `id`, `file` | Restore a history entry. Refuses while the film renders. |
+| `render` | `id`, `out`, `music`, `music_mode` | Assemble the film. `music_mode` is `replace` \| `under`. |
+| `export-nle` | `id` | FCP7 XML + After Effects JSX + linked media. |
+| `reveal` | `id`, `what` | Show in Finder. |
+| `generate` | `id`, `prompt`, `duration`, `duration_s`, `film_start`, `pass`, `character_id`, `seed`, `title`, `engine`, `trigger` | Shoot a new clip straight into a slot. |
+
+**`save` semantics.** `revision` is the **server's** counter, taken from disk, never from what the client remembered — a stale tab must not be able to wind it backwards. Pass `expect_revision` to find out you were overtaken instead of silently overwriting the other tab: mismatch returns **`409` with `conflict: true`** and the current revision. Validation errors come back as **all of them at once** (`errors: [...]`, `400`) with the file on disk untouched, so a client can highlight every bad clip in one pass instead of playing whack-a-mole.
+
+### `edit.json` schema
+
+`version` is **2** (`EDIT_VERSION`). Version 1 is upgraded on READ only (`migrate_edit`) — bumping the version without a read-path upgrade would not refuse old builds, it would refuse every timeline anybody already had. A version from the future is left alone so the validator can say the honest thing.
+
+```jsonc
+{
+  "version": 2,
+  "board_id": "sb_…",
+  "revision": 17,
+  "origin": "manual",          // "manual" | "auto" | "backup" — who asked for this save
+  "updated_at": 1786…,
+  "duration": 43.5,
+  "clips": [ /* below */ ],
+  "audio": { /* below */ },
+  "beats": null,
+  "settings": {}
+}
+```
+
+#### `clips[]`
+
+| Field | Note |
+|---|---|
+| `id`, `path`, `proxy` | `path`/`proxy` are `null` on a slug. |
+| `start`, `end` | The window INSIDE the source. |
+| `film_start`, `film_end` | The slot on the film. **Never independent** — a clip plays at 1x, so `film_end - film_start == end - start` within `LENGTH_TOLERANCE` (2 ms). |
+| `kind` | `video` (**absent means video** — stamping it on 400 clips would rewrite every `edit.json` on the machine to say what its absence already says), `still` (held for the length of its slot; `start`/`end` are synthesised from the slot, `duration: null`), `slug` (black, no file). |
+| `source` | `auto` \| `human`. |
+| `locked` | bool. |
+| `adjust` | `{brightness}`, an ffmpeg `eq=brightness` additive offset clamped to ±`BRIGHTNESS_LIMIT` (0.5). **Neutral is absent** — dragging the slider back to zero leaves a document identical to one that never had a slider. |
+| `audio` | The split edit. See below. |
+
+#### `clip.audio` — the J-cut and the L-cut
+
+```jsonc
+"audio": {"start": 3.5, "end": 7.0, "film_start": 12.25}
+```
+
+Video clips only. Same three numbers as the picture, for the SOUND — so the sound can start before its picture (J) or run past it (L), which is how a cut stops being a butt join.
+
+**Absent means linked**, and that is the whole migration: every clip ever written has no `audio` key and every one of them plays its own sound under its own picture. `EDIT_VERSION` did not move for it and no document was rewritten.
+
+**The PRESENCE of the field is the switch, not the values in it.** Do not derive "linked" from `audio` equalling the picture window: unlinking writes the window the clip already has, so a clip the user had just unlinked would read as linked and refuse to be dragged. The toggle adds the object or deletes it; nothing else decides. `normalise_edit` rounds the field but **never removes it** for the same reason, and strips it entirely from a still or a slug.
+
+Audio windows may not overlap each other any more than the pictures may. This is still one video track and one music lane — a split edit is a butt join that lands somewhere else, not a mix.
+
+#### `audio` — the soundtrack, as an object on the timeline
+
+```jsonc
+"audio": {"path": "…", "duration": 180.0, "peaks": "peaks.json",
+          "offset": -4.0, "trim_start": 12.0, "trim_end": 96.0}
+```
+
+| Field | Meaning |
+|---|---|
+| `offset` | The second of the TRACK that plays at film time 0. It has meant that since before the editor existed, so every document on disk keeps working. **It may now be negative**: the track begins `-offset` seconds into the film, with silence in front. |
+| `trim_start` / `trim_end` | In/out points INSIDE the track, in track seconds. **Absent means untrimmed**, which is why an `edit.json` written before this is still valid: no field, no trim, same filtergraph. A trim at or past the end of the track is not a trim, and `normalise_edit` drops it — a handle dragged all the way back out leaves a byte-identical graph. |
+
+`music_window(audio, duration=…)` is the single place these become the numbers ffmpeg and every exporter need: `start = max(trim_start, offset)` (a head trim and a positive offset are the same gesture from two directions; whichever cuts more wins), `end` or `None` for "play to the end", and `delay`/`film_start` = `start - offset`. **Trimming the left edge does not slide the rest of the track earlier** — that is a ripple, and music does not ripple — so the seconds a head trim removes come back as silence in front. A window the trims close entirely returns "no music" rather than a zero-length `atrim` ffmpeg refuses.
+
+### Drafts, backups, and history — three different things
+
+**Drafts** are named variations of the same film, in `drafts/` with an `index.json` naming the active one. A board that has only `edit.json` has exactly one draft and always did; it just had no name for it. `load_draft_index` names it on the way out rather than in a rewrite pass, so the upgrade cannot half-happen.
+
+`POST /storyboard/edit/draft` is **one route with five verbs** — they are five edits to the same active pointer, and splitting them would be five places for that pointer to be wrong:
+
+| `op` | Extra fields | Effect |
+|---|---|---|
+| `new` | `name`, `from=current` | New draft, empty or copied from what is on screen. Becomes active. |
+| `duplicate` | `slug`, `name` | |
+| `rename` | `slug`, `name` | |
+| `delete` | `slug` | |
+| `activate` | `slug` | Stashes the current active draft first — never loses it. |
+
+`new`, `duplicate`, `delete` and `activate` return **`409` with `busy: true` while that film is rendering** — the render is reading this document clip by clip, and swapping the timeline under it is the same hazard `import-shots` and `restore` refuse.
+
+**The backup is ours, the saving is the user's.** `POST /storyboard/edit/backup` writes `history/backup-<draft>.json` and **nothing else** — no `edit.json`, no revision, no conflict check. The user's saved draft stays exactly what he last saved. It is surfaced by `GET …/drafts` as `backup` and **offered**, never applied: `recover` adopts it, `discard-backup` throws it away.
+
+**History is two lanes plus a keep lane**, told apart by filename prefix rather than by opening the files — a prune that has to read fifty documents to decide what to delete fails halfway on the first corrupt one:
+
+| Prefix | What | Pruned? |
+|---|---|---|
+| `edit-r*` | An automatic snapshot. | Yes, capped at `EDIT_HISTORY_KEEP` (50). |
+| `save-r*` | A save the user pressed. | **Never.** |
+| `keep-r*` | A version the user named (`version`). | **Never.** |
+
+Every save archives its predecessor before the new document lands (~5 KB each). History failing must never block a save — losing a breadcrumb is nothing next to refusing to persist the arrangement on screen. `origin` is also stamped inside the JSON, for anything reading one file on its own.
 
 ---
 

@@ -394,6 +394,84 @@ def validate_storyboard_detail(
     policy = board.get("policy") or {}
     seen_n: set[int] = set()
 
+    # ---- locations ------------------------------------------------------
+    locs = board.get("locations")
+    known_locs: set[str] = set()
+    known_views: dict[str, set[str]] = {}
+    if locs is not None and not isinstance(locs, list):
+        add("locations_shape", "storyboard.locations must be a list")
+    else:
+        seen_loc: set[str] = set()
+        for i, loc in enumerate(locs or []):
+            if not isinstance(loc, dict):
+                add("location_not_object", f"location {i + 1}: not an object")
+                continue
+            lid = str(loc.get("id") or "").strip().lower()
+            if not LOCATION_ID_RE.match(lid):
+                add("location_id", f"location {i + 1}: id {loc.get('id')!r} must be "
+                                   f"lowercase letters, digits, - or _", got=loc.get("id"))
+                continue
+            if lid in seen_loc:
+                add("location_duplicate", f"location {i + 1}: duplicate id {lid!r}",
+                    duplicate=lid)
+                continue
+            seen_loc.add(lid)
+            known_locs.add(lid)
+            desc = str(loc.get("description") or "").strip()
+            if not desc:
+                # An empty location is worse than none: it reads as continuity
+                # being handled while injecting nothing at all.
+                add("location_empty", f"location {lid!r} has no description — "
+                                      f"it would pin nothing", location_id=lid)
+            elif len(desc) > LOCATION_DESC_MAX:
+                add("location_too_long",
+                    f"location {lid!r}: description is {len(desc)} characters "
+                    f"(max {LOCATION_DESC_MAX})", location_id=lid, length=len(desc))
+
+            # ---- views: the same place, faced the other way -------------
+            views = loc.get("views")
+            known_views[lid] = set()
+            if views is not None and not isinstance(views, list):
+                add("views_shape", f"location {lid!r}: views must be a list",
+                    location_id=lid)
+                continue
+            seen_view: set[str] = set()
+            for j, view in enumerate(views or []):
+                vid = str((view or {}).get("id") or "").strip().lower() \
+                    if isinstance(view, dict) else ""
+                if not VIEW_ID_RE.match(vid):
+                    add("view_id",
+                        f"location {lid!r}, view {j + 1}: id "
+                        f"{(view or {}).get('id') if isinstance(view, dict) else view!r} "
+                        f"must be lowercase letters, digits, - or _",
+                        location_id=lid, got=(view.get("id") if isinstance(view, dict)
+                                              else view))
+                    continue
+                if vid in seen_view:
+                    add("view_duplicate",
+                        f"location {lid!r}: duplicate view id {vid!r}",
+                        location_id=lid, duplicate=vid)
+                    continue
+                seen_view.add(vid)
+                # KNOWN even when its description is wrong: the view exists,
+                # and reporting the real fault plus `unknown_view` on every
+                # shot that names it buries the one line worth reading.
+                known_views[lid].add(vid)
+                vdesc = str(view.get("description") or "").strip()
+                if not vdesc:
+                    # Worse than no view: a shot naming it would fall back to
+                    # the location description — the establishing angle — which
+                    # is the exact prompt the reverse angle exists to escape.
+                    add("view_empty",
+                        f"location {lid!r}: view {vid!r} has no description — a shot "
+                        f"naming it would fall back to the establishing angle",
+                        location_id=lid, view=vid)
+                elif len(vdesc) > LOCATION_DESC_MAX:
+                    add("view_too_long",
+                        f"location {lid!r}, view {vid!r}: description is {len(vdesc)} "
+                        f"characters (max {LOCATION_DESC_MAX})",
+                        location_id=lid, view=vid, length=len(vdesc))
+
     for idx, s in enumerate(shots):
         # `where` used to be computed from s.get() BEFORE the isinstance check, so a shot that
         # was a string (exactly the case the next line reports) raised AttributeError instead
@@ -414,6 +492,45 @@ def validate_storyboard_detail(
                 n=n_for_ui, field="n", duplicate=n)
         else:
             seen_n.add(n)
+
+        # A shot that names a location the board does not have would render
+        # with NO location injected and look exactly like a shot that never
+        # claimed one — the continuity failure arriving silently, which is the
+        # thing locations exist to stop.
+        lref = s.get("location_id")
+        if lref is not None and str(lref).strip():
+            lref = str(lref).strip().lower()
+            if lref not in known_locs:
+                add("unknown_location",
+                    f"{where}: location {lref!r} is not on this storyboard",
+                    n=n_for_ui, field="location_id", location_id=lref,
+                    known=sorted(known_locs))
+        else:
+            lref = ""
+
+        # A shot naming a view that is gone fails EXACTLY the way an unknown
+        # location fails — the reverse angle silently composes from the
+        # establishing description, so the car the whole view existed to get
+        # out of frame is back in frame, and nothing said a word about it.
+        vref = s.get("view")
+        if vref is not None and str(vref).strip():
+            vref = str(vref).strip().lower()
+            if not lref:
+                add("unknown_view",
+                    f"{where}: view {vref!r} but the shot names no location — "
+                    f"a view belongs to a location",
+                    n=n_for_ui, field="view", view=vref)
+            elif vref not in (known_views.get(lref) or set()):
+                add("unknown_view",
+                    f"{where}: view {vref!r} is not a view of location {lref!r}",
+                    n=n_for_ui, field="view", view=vref, location_id=lref,
+                    known=sorted(known_views.get(lref) or ()))
+
+        eye = s.get("eyeline")
+        if eye is not None and str(eye).strip() and str(eye).strip().lower() not in EYELINES:
+            add("bad_eyeline",
+                f"{where}: eyeline {eye!r} is not one of {', '.join(EYELINES)}",
+                n=n_for_ui, field="eyeline", eyeline=eye, valid=list(EYELINES))
 
         mode = s.get("mode")
         if mode not in VALID_MODES:
@@ -445,6 +562,28 @@ def validate_storyboard_detail(
             add("character_without_id",
                 f"{where}: mode 'character' requires a character_id",
                 n=n_for_ui, field="character_id")
+
+        # No mouth moves without words. This blocks the render rather than
+        # warning, on the same principle as everything else here: the failure
+        # it prevents is a finished clip of somebody babbling, and you only
+        # find out after the render.
+        verb = shot_speech_problem(prompt)
+        if verb:
+            add("speech_without_words",
+                f"{where}: {verb!r} implies someone is speaking, but no spoken "
+                f"line is written — the model renders a moving mouth with "
+                f"nothing to say. Write the line in quotes, or describe the "
+                f"shot without speech.",
+                n=n_for_ui, field="prompt", verb=verb)
+        # And the inverse failure: words that exist but cannot survive the
+        # clock. Blocks the render for the same reason everything here does —
+        # the defect (a sentence cut off mid-word) is only visible AFTER the
+        # render time is spent.
+        pacing = shot_pacing_problem(prompt, s.get("duration_s") or 0)
+        if pacing:
+            add("dialogue_does_not_fit",
+                f"{where}: {pacing}.",
+                n=n_for_ui, field="prompt")
 
         dur = s.get("duration_s")
         if not isinstance(dur, (int, float)) or not (0 < float(dur) <= 60):
@@ -744,11 +883,395 @@ def ensure_trigger(prompt: str, trigger: str) -> str:
     return f"{t} {p}" if p else t
 
 
+# =============================================================================
+# THE SPEECH LAW, AT BOARD LEVEL — no mouth moves without words to say
+# =============================================================================
+# `storyboard_planner` has enforced this on shots IT writes since the owner
+# first reported "talking gibberish": a prompt that says a man is speaking and
+# gives him nothing to say leaves the audio branch babbling. The law was
+# correct and it was in the wrong place — it ran inside the planner, so a shot
+# authored any other way (by hand, by the add-shot route, by an importer) sailed
+# past it. The owner reported gibberish a SECOND time on a hand-written board,
+# which is the same bug arriving through the door the first fix did not cover.
+#
+# This is the engine-agnostic form, and it deliberately does NOT reuse the
+# planner's `_speech_violations`: that one runs on the planner's own draft,
+# where a line lives in `<d>[English] ...</d>` and prose quotes are a FORM
+# error to be rewrapped. By the time a shot is on a board its prompt is
+# finished — H3 keeps the tag, LTX has already been converted to single quotes
+# by `_strip_h3_markup` — so at this level the only question is whether WORDS
+# ARE PRESENT AT ALL, in either wrapper.
+_SPOKEN_WORDS_RE = re.compile(
+    r"<d>\s*(?:\[[^\]]*\]\s*)?[^<]*\w+[^<]*</d>"      # H3: the tag, with content
+    r"|['‘“\"]\s*[^'’”\"]*\w+\s+[^'’”\"]*['’”\"]",
+    re.DOTALL)                                        # LTX: a quoted phrase, 2+ words
+
+# Deliberately narrower than the planner's list: this one BLOCKS A RENDER, so
+# it only carries verbs that unambiguously mean a mouth is producing speech.
+# `brief` needs an object — a "briefing room" is a room, which is a false
+# positive the planner's version already paid for once.
+_IMPLIES_SPEECH_RE = re.compile(
+    r"\b(?:explain(?:s|ing)?|describ(?:es|ing) (?:to|the situation)|discuss(?:es|ing)|"
+    r"talk(?:s|ing)|speak(?:s|ing)|says?|saying|tell(?:s|ing)|address(?:es|ing)"
+    r"|announc(?:es|ing)|declar(?:es|ing)|recit(?:es|ing)|narrat(?:es|ing)"
+    r"|murmur(?:s|ing)|mutter(?:s|ing)|whisper(?:s|ing)|mumbl(?:es|ing)"
+    r"|ask(?:s|ing)|answer(?:s|ing)|repl(?:y|ies|ying)|shout(?:s|ing)"
+    r"|order(?:s|ing) (?:him|her|them|the)|instruct(?:s|ing))\b"
+    r"|\b(?:his|her|their|its) voice\b"
+    r"|\bin a (?:low|quiet|soft|hushed|loud|steady|calm|firm|gravelly|deep) voice\b"
+    r"|\bmid-sentence\b|\bmid-speech\b", re.IGNORECASE)
+
+
+def shot_speech_problem(prompt: str) -> str | None:
+    """The speech verb in `prompt` that has no words to go with it, or None.
+
+    A shot is SPOKEN (the words are in it) or SILENT (nothing implies a mouth
+    moving). Implying speech and providing none is the one combination that is
+    always wrong, because the model renders a talking head with nothing to say.
+    """
+    p = prompt or ""
+    if _SPOKEN_WORDS_RE.search(p):
+        return None
+    m = _IMPLIES_SPEECH_RE.search(p)
+    return m.group(0) if m else None
+
+
+# --- dialogue PACING: a line must fit its shot, and it must CLOSE -----------
+# The owner hit the same truncation twice in one day: a line sized to the idea
+# instead of to the clock renders as a sentence that stops mid-word when the
+# shot ends. His ruling, verbatim: "when people talk, there is a structure to
+# the talk... a beginning and an end. It's not just open-ended sentences that
+# get cut."
+#
+# The budget is measured, not guessed, and it BRACKETS the evidence: a 7-word
+# line in a 4.04s shot delivered fine (needs the budget to allow >= 2.31 w/s
+# after settle), and a 20-word line in a 7.04s shot was cut mid-phrase (needs
+# it to refuse >= 3.31). 2.4 sits between the two with margin on both sides.
+SPEECH_WORDS_PER_SEC = 2.4
+# A WARM READ IS SLOWER, and the evidence forced this split: a 9-word line
+# delivered "quietly, almost under her breath" truncated in a 5.04s shot that
+# the 2.4 budget approves, and a 23-word slow read truncated at 13.04s. Both
+# land near 1.7 w/s. One constant cannot bracket a game-show host and a lazy
+# half-smile; the descriptor in front of the line is the tempo marking.
+SPEECH_WORDS_PER_SEC_SLOW = 1.7
+_SLOW_READ_RE = re.compile(
+    r"\bsays? (?:[a-z]+[ ,]+)*?(?:slowly|softly|quietly|low\b|lazily)"
+    r"|\bunder (?:his|her|their) breath\b|\blazy half-smile\b"
+    r"|\bdrawls?\b|\bwhispers?\b",
+    re.IGNORECASE)
+SPEECH_SETTLE_S = 1.0
+
+
+def is_slow_read(prompt: str) -> bool:
+    """True when the voice descriptor asks for slow delivery."""
+    return bool(_SLOW_READ_RE.search(prompt or ""))
+
+# Spoken spans, with their words, in both dialects. The single-quote form must
+# survive apostrophes: a quote FLANKED BY LETTERS is punctuation inside a word
+# ("There's"), not the end of the line — without that rule the counter stops
+# counting at the first contraction.
+_D_SPAN_RE = re.compile(r"<d>\s*(?:\[[^\]]*\]\s*)?(.*?)</d>", re.DOTALL)
+_Q_SPAN_RE = re.compile(
+    r"(?<![A-Za-z])'((?:[^']|(?<=[A-Za-z])'(?=[A-Za-z]))+?)'(?![A-Za-z])",
+    re.DOTALL)
+
+
+def spoken_spans(prompt: str) -> list[str]:
+    """Every spoken line in `prompt`, tag form and quote form both."""
+    p = prompt or ""
+    out = [m.group(1).strip() for m in _D_SPAN_RE.finditer(p)]
+    stripped = _D_SPAN_RE.sub(" ", p)
+    out += [m.group(1).strip() for m in _Q_SPAN_RE.finditer(stripped)]
+    return [s for s in out if s]
+
+
+def speech_fit_frames(word_count: int, fps: int = 24, slow: bool = False) -> int:
+    """The smallest legal frame count (fps*n+1) that fits `word_count` words."""
+    rate = SPEECH_WORDS_PER_SEC_SLOW if slow else SPEECH_WORDS_PER_SEC
+    need_s = word_count / rate + SPEECH_SETTLE_S
+    n = max(1, int((need_s * fps + fps - 1) // fps))
+    return fps * n + 1
+
+
+def shot_pacing_problem(prompt: str, duration_s: float) -> str | None:
+    """Why this shot's dialogue will not survive its duration, or None.
+
+    Two failure shapes, both of which render as a cut-off sentence:
+      * OVERSTUFFED — more words than the clock can carry;
+      * UNFINISHED  — the last line ends on a comma/dash/ellipsis/nothing, so
+        even at a fitting length it sounds like the start of a thought.
+    """
+    spans = spoken_spans(prompt)
+    if not spans:
+        return None
+    # Punctuation-only tokens are not words — an em-dash between clauses was
+    # counted once and pushed a delivered-fine line over the budget.
+    words = sum(1 for sp in spans for t in sp.split() if any(c.isalnum() for c in t))
+    try:
+        dur = float(duration_s or 0)
+    except (TypeError, ValueError):
+        dur = 0.0
+    if dur > 0:
+        slow = is_slow_read(prompt)
+        rate = SPEECH_WORDS_PER_SEC_SLOW if slow else SPEECH_WORDS_PER_SEC
+        allowed = max(0.0, (dur - SPEECH_SETTLE_S) * rate)
+        if words > allowed:
+            pace = "at this SLOW delivery" if slow else "at speaking pace"
+            return (f"{words} spoken words in a {dur:.1f}s shot — {pace} only "
+                    f"~{int(allowed)} fit, so the line is cut off "
+                    f"mid-sentence. Shorten the line, or lengthen the shot to "
+                    f"at least {speech_fit_frames(words, slow=slow)} frames")
+    last = spans[-1].rstrip()
+    if last and last[-1] not in ".!?":
+        return (f"the line ends {last[-12:]!r} — no full stop, so it plays as "
+                f"a sentence that never finishes. Close the thought")
+    return None
+
+
+# =============================================================================
+# LOCATIONS — the same room in every shot that claims to be in it
+# =============================================================================
+# A text-to-video model re-invents everything the prompt does not pin. Four
+# shots that all said "dim room, cinematic close-up" came back as four rooms:
+# a monitor-lit study, a brighter office with papers on the wall, a VINTAGE
+# PARLOUR with no monitors at all, and a near-black void — with the collar
+# changing between them. Nobody wrote a contradiction; the shots simply never
+# agreed on anything, and unstated means re-rolled.
+#
+# So a location is a board-level ENTITY, exactly like a cast member, and a shot
+# references it by id. The description is written once and injected into every
+# shot that claims that location, which is the only way "the same room" can
+# survive shots being re-rendered one at a time months apart.
+LOCATION_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
+LOCATION_DESC_MAX = 600
+
+# ---- VIEWS: a location is a place seen from ANGLES ---------------------------
+# One description per location is one CAMERA POSITION pretending to be a place.
+# Measured on the car-wash day: the establishing description ("a soapy blue
+# sedan on the driveway") actively FIGHTS the reverse shot — the moment he
+# turns to talk to her, the car is behind the camera and must not be in the
+# prompt at all, the houses across the street must be, and the low sun that
+# raked in from camera left now rakes in from camera RIGHT. That was hand-built
+# as a second location (`carwash_reverse`); a view is that, first-class.
+#
+# So a location carries named VIEWS. Each view is a self-contained description
+# of what the camera sees FACING that direction, light side included, and a
+# shot picks `location_id` + `view`. A location with no views behaves exactly
+# as it always has: its description is the only view there is.
+VIEW_ID_RE = LOCATION_ID_RE
+
+# Where the subject is looking, as a fact about the FRAME rather than about the
+# room: off past the left edge, off past the right edge, or down the lens.
+# Two shots that cut between two people must not claim the same one — that is
+# the 180-degree line, and it is why this is a vocabulary and not free text.
+EYELINES = ("left", "right", "lens")
+
+
+def new_view(view_id: str, name: str, description: str = "") -> dict:
+    return {"id": str(view_id).strip().lower(),
+            "name": str(name).strip(),
+            "description": str(description).strip()}
+
+
+def new_location(loc_id: str, name: str, description: str = "",
+                 views: list[dict] | None = None) -> dict:
+    loc = {"id": str(loc_id).strip().lower(),
+           "name": str(name).strip(),
+           "description": str(description).strip()}
+    # ABSENT, not empty, when there are none. Every board written before views
+    # existed has no `views` key, and an empty list would be a new shape for
+    # the panel and the validator to have opinions about for no gain.
+    if views:
+        loc["views"] = list(views)
+    return loc
+
+
+def board_locations(board: dict) -> dict[str, dict]:
+    """`{id: location}` for a board, skipping anything malformed."""
+    out: dict[str, dict] = {}
+    for loc in (board.get("locations") or []):
+        if isinstance(loc, dict) and str(loc.get("id") or "").strip():
+            out[str(loc["id"]).strip().lower()] = loc
+    return out
+
+
+def merge_location_views(board_locs: list[dict] | None,
+                         plan_locs: list[dict] | None) -> list[dict]:
+    """The board's locations, wearing the views the planner derived.
+
+    PATCH, NEVER OVERWRITE — the rule locations already cost this project once,
+    when a re-plan assigned the board's `locations` wholesale and erased what
+    the user had typed. The board's row stays authoritative for id, name and
+    description: those are the user's own words out of the Locations box. Only
+    `views` come from the plan, and only when the plan actually derived some —
+    a re-plan with the geography pass off, or one whose floor plan came back as
+    chatter, must not strip the views the last plan produced, because the shots
+    on the board still name them and an unknown view id is a hard error.
+
+    A location the plan knows and the board does not is appended rather than
+    dropped: its shots point at it, and a board missing it fails validation on
+    every one of them.
+    """
+    out: list[dict] = []
+    plan_by_id = {str(l.get("id") or "").strip().lower(): l
+                  for l in (plan_locs or []) if isinstance(l, dict) and l.get("id")}
+    seen: set[str] = set()
+    for loc in (board_locs or []):
+        if not isinstance(loc, dict) or not str(loc.get("id") or "").strip():
+            continue
+        lid = str(loc["id"]).strip().lower()
+        seen.add(lid)
+        row = dict(loc)
+        views = (plan_by_id.get(lid) or {}).get("views")
+        if views:
+            row["views"] = [dict(v) for v in views if isinstance(v, dict)]
+        out.append(row)
+    for lid, loc in plan_by_id.items():
+        if lid not in seen:
+            out.append(dict(loc))
+    return out
+
+
+def location_views(loc: dict | None) -> dict[str, dict]:
+    """`{id: view}` for one location, skipping anything malformed."""
+    out: dict[str, dict] = {}
+    for v in ((loc or {}).get("views") or []):
+        if isinstance(v, dict) and str(v.get("id") or "").strip():
+            out[str(v["id"]).strip().lower()] = v
+    return out
+
+
+def shot_view(shot: dict, locations: dict[str, dict] | None = None) -> dict | None:
+    """The view a shot names, or None when it names none / names one that is gone."""
+    vid = str((shot or {}).get("view") or "").strip().lower()
+    if not vid:
+        return None
+    loc = (locations or {}).get(str((shot or {}).get("location_id") or "").strip().lower())
+    return location_views(loc).get(vid)
+
+
+def shot_scene_text(shot: dict, locations: dict[str, dict] | None = None) -> str:
+    """What the camera sees: the VIEW's description, else the location's.
+
+    The fallback is the whole back-compat story in one line — a board with no
+    views, or a shot that names no view, injects exactly what it always did.
+    """
+    view = shot_view(shot, locations)
+    if view is not None:
+        desc = str(view.get("description") or "").strip()
+        if desc:
+            return desc
+    loc = (locations or {}).get(str((shot or {}).get("location_id") or "").strip().lower())
+    return str((loc or {}).get("description") or "").strip()
+
+
+def eyeline_clause(eyeline: str | None, pronoun: str = "") -> str:
+    """"his eyes fixed past the right edge of frame" — or "" for lens/none.
+
+    `lens` deliberately produces NOTHING. Looking down the barrel is what these
+    models do unprompted for a piece to camera, and a sentence telling them to
+    do it buys a stiffer performance than saying nothing. The value still
+    exists because a shot has to be able to SAY it holds the lens — that is
+    what makes the 180-degree check able to tell "faces the camera" apart from
+    "nobody wrote an eyeline".
+    """
+    side = str(eyeline or "").strip().lower()
+    if side not in ("left", "right"):
+        return ""
+    poss = {"he": "his", "she": "her", "they": "their",
+            "him": "his", "her": "her"}.get(str(pronoun or "").strip().lower(), "")
+    return "%seyes fixed past the %s edge of frame" % (poss + " " if poss else "", side)
+
+
+def eyeline_complement(eyeline: str | None) -> str:
+    """The other side of the line. `lens` and nothing have no complement."""
+    return {"left": "right", "right": "left"}.get(str(eyeline or "").strip().lower(), "")
+
+
+def board_wardrobe(board: dict) -> dict[str, str]:
+    """`{character_id: what they are wearing in THIS film}`.
+
+    The same failure locations fixed, one axis over. Four shots of one man came
+    back in a navy suit, a navy suit, a period collar and a different period
+    collar, because "a man in a dark suit" is a different suit every time it is
+    re-rolled. Writing the outfit ONCE and attaching it to the character is the
+    only version of this that holds across shots rendered separately — and it
+    is what a hand-written board makes you do by copy-paste, which is exactly
+    the copy-paste that drifts.
+    """
+    out: dict[str, str] = {}
+    for row in (board.get("cast") or []):
+        if isinstance(row, dict) and row.get("id"):
+            w = str(row.get("wardrobe") or "").strip()
+            if w:
+                out[str(row["id"]).strip()] = w
+    return out
+
+
+def compose_shot_prompt(shot: dict, locations: dict[str, dict] | None = None,
+                        wardrobe: dict[str, str] | None = None) -> str:
+    """The prompt that is actually rendered: subject, action, FRAME, PLACE.
+
+    Order is deliberate and matches how these models read a prompt — the
+    subject and what it is doing first, then how it is framed, then where it
+    is. Putting the location first buries the action in scenery. The EYELINE
+    rides with the framing rather than with the room, because where a person
+    looks is a fact about the frame, not about the scenery behind them.
+
+    Every addition is appended rather than merged into `shot["prompt"]`, so
+    the shot keeps the sentence a human wrote and editing a location — or
+    flipping an eyeline to fix the 180-degree line — re-flows every shot that
+    uses it without rewriting anybody's text.
+    """
+    trigger = (shot.get("trigger") or shot.get("character_id") or "").strip()
+    parts = [ensure_trigger(shot.get("prompt") or "", trigger)]
+
+    # WARDROBE goes right after the person, where a costume note belongs, and
+    # only if the shot has not already said it — a board that spells the outfit
+    # out per shot must not get it twice.
+    cid = str(shot.get("character_id") or "").strip()
+    outfit = (wardrobe or {}).get(cid, "").strip().rstrip(",")
+    if outfit and outfit.lower() not in parts[0].lower():
+        parts.append(outfit)
+
+    framing = str(shot.get("framing") or "").strip().rstrip(",")
+    if framing:
+        parts.append(framing)
+
+    eyes = eyeline_clause(shot.get("eyeline"), shot.get("pronoun") or "")
+    if eyes:
+        parts.append(eyes)
+
+    # The VIEW, if the shot names one, otherwise the location as before.
+    scene = shot_scene_text(shot, locations).rstrip(",")
+    if scene:
+        parts.append(scene)
+
+    return ", ".join(p for p in parts if p)
+
+
+# The pass's PIPELINE quality -> the CHARACTER quality token make_job accepts.
+# Chosen by canvas and pipeline, not by name: quick is the small distilled
+# draft (704x384), balanced/standard are the graded 1024x576 distilled recipe
+# ("pro" — the one that holds identity best), and the two High tiers keep their
+# own two-stage pipeline. Anything unrecognised lands on "pro", which is the
+# recipe the character work is actually validated at.
+CHARACTER_QUALITY_FOR_PASS: dict[str, str] = {
+    "quick": "draft",
+    "balanced": "pro",
+    "standard": "pro",
+    "high": "high",
+    "high_720p": "high720",
+}
+
+
 def shot_to_job(shot: dict, policy_pass: dict, *,
                 board_id: str = "", board_title: str = "",
                 h3_available: bool = True,
                 engine_mode: str = DEFAULT_ENGINE_MODE,
-                h3_chain_prompts: bool = False) -> dict:
+                h3_chain_prompts: bool = False,
+                locations: dict[str, dict] | None = None,
+                wardrobe: dict[str, str] | None = None) -> dict:
     """Translate one storyboard shot into the panel's ORDINARY job form fields.
 
     Deliberately produces the same shape a human clicking Generate would produce, so shots
@@ -761,10 +1284,12 @@ def shot_to_job(shot: dict, policy_pass: dict, *,
 
     NOTE `enhance: "off"` is not optional — see ensure_trigger() above.
     """
-    trigger = (shot.get("trigger") or shot.get("character_id") or "").strip()
-    prompt = shot.get("prompt") or ""
-    if trigger:
-        prompt = ensure_trigger(prompt, trigger)
+    # compose_shot_prompt, not shot["prompt"] — the framing and the location
+    # have to reach the model, and this is the one place every shot passes
+    # through on its way to a render. Doing it at the call sites instead would
+    # mean the estimate, the re-render and the gap-fill each getting their own
+    # chance to forget.
+    prompt = compose_shot_prompt(shot, locations, wardrobe)
 
     # The engine. Without this the job dict has no `engine` key, make_job falls back to
     # ENGINE_DEFAULT ("ltx"), and every H3 shot the planner wrote renders silently on a
@@ -813,6 +1338,22 @@ def shot_to_job(shot: dict, policy_pass: dict, *,
 
     if shot.get("character_id"):
         job["character_id"] = shot["character_id"]
+        # A CHARACTER JOB SPEAKS A DIFFERENT QUALITY VOCABULARY, and make_job
+        # REFUSES the pipeline one. `resolve_character_quality()` accepts only
+        # draft / pro / high / high720; a job carrying `quality="quick"` (the
+        # default draft pass) or `"standard"` (the default delivery pass)
+        # raises CharacterRequestError, which `_sb_render_thread` catches and
+        # turns into a failed shot. Every cast shot in every film, both passes,
+        # with the message "character quality must be draft, pro, high or
+        # high720" as the only clue. Translating here is what makes the pass
+        # policy and the character surfaces speak to the same make_job.
+        #
+        # The panel's `resolve_character_quality` is the source of truth for
+        # what these keys MEAN; this table only says which of them a pass maps
+        # onto. `test_storyboard_editor_api` pins the pair together so the two
+        # cannot drift apart in silence.
+        job["quality"] = CHARACTER_QUALITY_FOR_PASS.get(
+            str(policy_pass.get("quality", "balanced")).strip().lower(), "pro")
         # THE VOICE LOADS ONLY WHEN THERE ARE LINES TO SAY.
         #
         # Stacking a character's audio LoRA on a shot with no speech spends the
@@ -826,7 +1367,23 @@ def shot_to_job(shot: dict, policy_pass: dict, *,
         # shot with a <d> tag that has any content speaks; one without does not.
         # (The Manual tab cannot know this and does not pretend to — it sets a
         # default and says it did.)
-        job["no_voice"] = "off" if _HAS_DIALOGUE.search(prompt) else "on"
+        # ENGINE-AGNOSTIC, and it was not. This read `_HAS_DIALOGUE`, which
+        # matches `<d>…</d>` and nothing else, under a comment claiming "it is
+        # exact here… a derivation, not a heuristic". That is true of H3 and
+        # FALSE of LTX: `_strip_h3_markup` has already turned the tag into
+        # 'single quotes' by the time an LTX prompt exists, so the tag is never
+        # present, `no_voice` was ALWAYS "on", and the trained voice LoRA was
+        # stripped from EVERY LTX character shot that had a line to say.
+        # The owner heard it as the characters never using their own voices,
+        # reported it repeatedly, and it survived because the comment sounded
+        # authoritative and was only checked against the engine it was true for.
+        #
+        # `_SPOKEN_WORDS_RE` is the same detector `shot_speech_problem` uses.
+        # That is deliberate: one asks "are there words?" to decide whether the
+        # shot is honest, the other to decide whether the voice loads. If those
+        # two ever disagree you get one of the two bugs — a mouth with nothing
+        # to say, or a line delivered by a stranger.
+        job["no_voice"] = "off" if _SPOKEN_WORDS_RE.search(prompt) else "on"
     if shot.get("seed") is not None:
         job["seed"] = shot["seed"]
 
@@ -870,7 +1427,8 @@ def default_policy() -> dict:
 
 
 def new_storyboard(board_id: str, title: str, *, shots: list[dict] | None = None,
-             cast: list[dict] | None = None, policy: dict | None = None) -> dict:
+             cast: list[dict] | None = None, policy: dict | None = None,
+             locations: list[dict] | None = None) -> dict:
     """Build an empty, schema-correct storyboard. Kept here so the planner, the tests and any
     future importer all produce the identical shape."""
     return {
@@ -879,6 +1437,7 @@ def new_storyboard(board_id: str, title: str, *, shots: list[dict] | None = None
         "title": title,
         "created_at": int(time.time()),
         "cast": cast or [],
+        "locations": locations or [],
         "policy": policy or default_policy(),
         "shots": shots or [],
     }

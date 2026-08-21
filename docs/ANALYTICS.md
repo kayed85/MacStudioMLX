@@ -123,7 +123,7 @@ location the day the disable flag ever went missing.
 
 ## Events
 
-Five events. That's the whole list. (A sixth is described at the end because
+Six events. That's the whole list. (A seventh is described at the end because
 people expect it — it is documented as the thing we deliberately don't send.)
 
 ### `app_installed`
@@ -241,6 +241,22 @@ previous boot. At most four per boot; usually zero.
 A `true → false` transition means a pack that *was* installed is no longer
 detectable — a broken install, not a user choice. This is the whole reason
 this event exists: nothing else in the panel notices that today.
+
+### `star_prompt`
+
+Fired when someone answers the one-time GitHub star ask — at most once per
+install, and only on a deliberate click. Nothing fires when the ask is
+ignored or dismissed.
+
+| Field | Type | Example |
+|---|---|---|
+| `via` | string | `"link"` — one of `link` (opened the repo) or `already` (said they had already starred) |
+
+A closed two-value vocabulary, coerced in the handler: anything else becomes
+`link`. No account, no username, no repo state — the panel cannot see whether
+a star was actually given, and does not ask GitHub. `via` exists only to keep
+"a click we caused" separate from "a click that told us we did not need to
+ask", which is the whole question the ask was added to answer.
 
 ### `engine_selected` — not implemented, on purpose
 
@@ -401,7 +417,7 @@ passes through, so a future engine is counted for free.
 python3 scripts/test_analytics_dryrun.py
 ```
 
-43 tests covering: the shipped key is a write-only `phc_` project key and is
+48 tests covering: the shipped key is a write-only `phc_` project key and is
 really the one that goes on the wire, the toggle and the env kill-switch each
 produce zero sockets *and* zero log lines, the exact field set of every event,
 every event name the panel can fire is documented on this page, prompt/path

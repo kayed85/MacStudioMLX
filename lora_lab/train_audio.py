@@ -587,6 +587,16 @@ def run_pipeline(spec_path: Path) -> int:
     except Exception as exc:  # noqa: BLE001
         emit_error_and_exit("publish", f"failed to copy checkpoint: {exc}")
 
+    # Same honesty the image LoRA gets: say how much delta the voice adapter
+    # carries. #62 reported the voice LoRA "equally ignored", and a run that
+    # ends with a path and no number gives nobody anything to check.
+    try:
+        from lora_lab.train_character import report_adapter_strength
+
+        report_adapter_strength(output_path)
+    except Exception as exc:  # noqa: BLE001 — a probe never fails a finished run
+        emit("log", line=f"adapter strength: not measured ({exc})")
+
     emit("done", path=str(output_path))
     return 0
 

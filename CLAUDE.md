@@ -8,9 +8,20 @@ section overrides it where they conflict.
 
 ---
 
-## 0. Current state — Phosphene v3.0.6 (current public release, 2026-05-31)
+## 0. Current state — read `docs/STATE.md` first
 
-Public release is **v3.0.6**. The v3.0 line launched 2026-05-23 and has
+**THE RELEASE FACTS IN THIS SECTION ARE OLD.** `VERSION` on this branch and
+`docs/STATE.md` are the two things that are current; the v3.0 history below is
+kept as background and nothing else. As of 2026-08-19: `VERSION` reads
+**4.6.0**, and public `main` is at **v4.5.0** — v4.6.0 was promoted and
+withdrawn the same day (the Editor shipped before the owner had cut with it),
+so what a user can install and what this branch is are two different numbers.
+Which release the front page advertises, and when v4.6.0 goes back out, are
+the owner's calls; do not settle them from a doc-hygiene pass.
+
+### Historical — the v3.0 line
+
+Public release was **v3.0.6**. The v3.0 line launched 2026-05-23 and has
 shipped six patch releases: v3.0.0 (Characters/Voice/Image Studio/A2V) →
 v3.0.1 (FFLF crash fix) → v3.0.2 (Boost/Turbo accel restored after a
 2-month silent regression) → v3.0.3 (HiDream hidden, issue #15) → v3.0.4
@@ -614,58 +625,29 @@ prompts. Below -25 dB peak suggests a regression.
   symlinked instruction file, replace that one with a 5-line stub pointing
   here — do not fork the full content back out.
 
-## 11. HTTP API reference (panel)
+## 11. HTTP API reference — see `docs/API.md`
 
-The panel listens on `127.0.0.1:8198` and serves a single-page HTML/JS
-UI plus a JSON API. Pinokio proxies its own port 42000 to 8198. All
-endpoints are unauthenticated (loopback only).
+**There is one API reference and it is `docs/API.md`.** This section used to
+carry a second copy of the endpoint tables, and a second copy is a copy that
+drifts: it listed ~13 GET and ~20 POST routes and none of Storyboard, Editor,
+Characters, Train or the Ideogram API, and it stated the port as `8198` flatly
+while §7 states the rule correctly. Both of those were wrong in ways a reader
+could not detect from inside this file.
 
-### GET endpoints
+The two things worth keeping here, because they are rules rather than tables:
 
-| Path | Returns | Notes |
-|---|---|---|
-| `/` | HTML | The single-page UI. Built from one big template string in `mlx_ltx_panel.py`. |
-| `/status` | JSON | Snapshot of `STATE` — running flag, current job, queue, history (top 20), log tail, tier, memory pressure, helper alive flag, comfy PIDs, repo download state. Polled by the UI every ~1s. |
-| `/uploads` | JSON | Recent files in `panel_uploads/` for the picker's "click to reuse" strip. |
-| `/models` | JSON | Per-repo install completeness — driven by `required_files.json`. |
-| `/settings` | JSON | Returns `{settings, presets, default_preset}`. `settings` is the current `panel_settings.json` content. `presets` is the OUTPUT_PRESETS table (label + blurb + pix_fmt + crf per preset) so the UI doesn't duplicate it. |
-| `/loras` | JSON | Returns `{user, curated, loras_dir, civitai_auth}`. `user` is the scanned `mlx_models/loras/*.safetensors` list (each with sidecar metadata if present). `curated` is the curated Lightricks repo registry minus the HDR-toggle entry (which is exposed as a plain checkbox, not in the picker). `civitai_auth` is True iff `CIVITAI_API_KEY` is set in the panel's env. |
-| `/civitai/search` | JSON | Proxies CivitAI's `/api/v1/models` filtered to `types=LORA&baseModels=LTXV 2.3`. Query params: `query`, `nsfw` (bool), `cursor` (CivitAI uses cursor pagination), `limit`. Returns `{items, next_cursor, has_more}` with each item carrying `{id, version_id, name, creator, description, downloads, nsfw, preview_url, filename, size_kb, download_url, trigger_words, base_model, civitai_url}`. |
-| `/file?path=…` | bytes (mp4/png/jpg) | Range-aware video serve so `<video>` tags can seek without re-downloading. |
-| `/image?path=…` | bytes (image) | Same idea for image previews. |
-| `/sidecar?path=…` | JSON | Per-output sidecar (job params, output stats) if it exists. |
-| `/assets/<file>` | bytes | Static files from `assets/`. |
-
-### POST endpoints
-
-| Path | Body | Returns | Effect |
-|---|---|---|---|
-| `/run` `/queue/add` | urlencoded job spec | `{ok, id}` | Creates a job, appends to queue. Field reference below. |
-| `/queue/batch` | urlencoded with `prompts` (newline-separated, `---` chunks) | `{ok, added, ids}` | Splits the prompts on `^\s*---\s*$` boundaries, creates one job per chunk. |
-| `/queue/remove` | `id=<jid>` | `{removed: bool}` | Drop a queued job by id. |
-| `/queue/clear` | (none) | `{cleared: int}` | Clear all queued jobs (running job continues). |
-| `/queue/pause` | (none) | `{paused: true}` | Worker stops popping new jobs after the current one. |
-| `/queue/resume` | (none) | `{paused: false}` | Worker resumes. |
-| `/output/hide` | `path=<p>` | `{hidden: path}` | Adds path to the gallery's hidden set (persisted). |
-| `/output/show` | `path=<p>` | `{shown: path}` | Inverse. |
-| `/output/show_all` | (none) | `{unhidden_count: int}` | Clear hidden set. |
-| `/upload` | multipart `image=<file>` | `{ok, path}` | Saves to `panel_uploads/<ts>_<safename>`. |
-| `/helper/restart` | (none) | `{ok}` | SIGTERM the helper subprocess; the next job auto-respawns it. Useful for picking up site-packages changes. |
-| `/settings` | `output_preset` / `output_pix_fmt` / `output_crf` / `civitai_api_key` / `hf_token` (any subset) | `{ok, settings, helper_restarted}` | Update + persist. Public-safe `settings` view in the response (no token values, just `has_*` booleans). Helper killed on codec change OR token change so the next job spawns with fresh env. Form parser uses `keep_blank_values=True` so `civitai_api_key=` (the Clear button) is treated as "remove this token" rather than dropped silently. Empty input on the front-end Apply path is "leave as-is" — explicit clearing goes through the dedicated Clear button. |
-| `/loras/refresh` | (none) | `{ok, user, loras_dir}` | Rescan `mlx_models/loras/`. Filesystem is the source of truth; no caching layer to invalidate. |
-| `/loras/delete` | `path=<abs path>` | `{ok, removed}` | Delete a user-installed LoRA + its sidecar. Path must resolve inside `mlx_models/loras/` to prevent traversal. |
-| `/civitai/download` | `download_url=<civitai url>`, `meta=<json>` | `{ok, name, path, sidecar_path, size_bytes, skipped}` | Stream-download a LoRA from CivitAI into `mlx_models/loras/`, write a sidecar JSON. Refuses non-civitai.com hosts. Writes to a `.partial` then atomic-renames so a kill mid-write leaves nothing the next scan would mistake for a complete file. Surfaces 401 with a remediation hint pointing at `CIVITAI_API_KEY`. |
-| `/stop` | (none) | `{ok}` | Cancel the current job (kills helper + mux). Worker advances. |
-| `/stop_comfy` | (none) | `{ok, killed}` | SIGTERM any ComfyUI process matching `LTX_COMFY_PATTERN`. |
-| `/open_pinokio` | (none) | `{ok}` | macOS-only: focus the Pinokio app. |
-| `/models/download` | `key=q4|q8|gemma` | `{ok}` | Spawn `hf download` for the named repo. Streams to log. |
-| `/models/cancel` | (none) | `{ok, killed}` | SIGTERM the active download. |
-| `/prompt/enhance` | `prompt=<p>` | `{ok, original, enhanced}` | Calls helper's Gemma-rewrite path. |
+- **The port follows the profile.** `DEFAULT_PORT = 8199 if PROFILE == "dev"
+  else 8198` (`mlx_ltx_panel.py:275`), overridable with `LTX_PORT`. A dev
+  checkout answers on 8199 and shows the DEV badge; a normal install answers
+  on 8198. Pinokio proxies its own port 42000 to the panel.
+- **Everything is unauthenticated and loopback-only.** There is no auth layer
+  to add a route to, so a route that should not be reachable must not exist.
 
 ## 12. Job spec — the contract for `/run` and `/queue/add`
 
 Every form field below maps to `params.<field>` on the resulting job.
-`make_job()` in `mlx_ltx_panel.py:1140` is the canonical reference.
+`make_job()` in `mlx_ltx_panel.py` is the canonical reference (search for
+`def make_job(` — it is around line 16145 and moves with every edit above it).
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
@@ -1353,41 +1335,16 @@ Tracked here so they don't get lost between sessions.
 - Q8 weights: `dgrauet/ltx-2.3-mlx-q8` on HF
 - Gemma text encoder: `mlx-community/gemma-3-12b-it-4bit` on HF
 
-## 24. Agentic Flows module (`agent/`, shipped 2026-05-06)
+## 24. Agentic Flows — REMOVED 2026-05-15
 
-A chat-driven shot planner tab in the form-pane. User pastes a script,
-agent breaks it into shots, queues them through the existing `/queue/add`
-path, writes a `mlx_outputs/agentflow_<id>/manifest.json`, and finishes.
+The in-panel chat agent and its `agent/` package are gone: the `/agent/*`
+namespace answers 410 Gone, `agent/` is not on disk and neither is the
+`docs/AGENTIC_FLOWS.md` this section used to point at. External agents drive
+the panel over the HTTP API instead — `docs/API.md`.
 
-**See:** `docs/AGENTIC_FLOWS.md` for the user reference.
-
-The `agent/` package is pure-stdlib Python — imports nothing from
-`mlx_ltx_panel.py`. The panel injects a `tools.PanelOps` callback bundle
-at dispatch time so the agent can submit jobs, snapshot the queue, and
-look up jobs by id without circular imports.
-
-| File | Role |
-|---|---|
-| `agent/engine.py` | OpenAI-compat `chat()` client + `EngineConfig` + role-alternation normalizer for the wire format. |
-| `agent/local_server.py` | Spawns `mlx_lm.server` with safe flags (`--prompt-cache-size 0 --prefill-step-size 8192 --prompt-concurrency 1 --decode-concurrency 1` — sidesteps the mlx-lm 0.31.1 cache-merge bug). Discovers chat-capable models in `mlx_models/`. |
-| `agent/tools.py` | Tool registry + dispatcher. PanelOps protocol. Tools: `estimate_shot`, `submit_shot`, `get_queue_status`, `wait_for_shot`, `extract_frame`, `upload_image`, `write_session_manifest`, `finish`. |
-| `agent/prompts.py` | System prompt builder. Encodes Phosphene's operator manual (modes, empirical wall times from §0, failure modes, prompting rules). Single source of truth — update STATE.md / this file → prompt picks it up next turn. |
-| `agent/runtime.py` | Session dataclass, `run_turn()` generator (chat→tool→chat loop with max_steps cap), atomic-replace persistence to `state/agent_sessions/<id>.json`. |
-
-**Tool fenced-block protocol.** Models emit one ` ```action {tool, args} ``` ` block per turn (in their assistant content); the runtime parses, dispatches, feeds the result back as a `<tool_result>...</tool_result>` user message, and loops. No reliance on OpenAI's tool-calling spec — universal across every Chat Completions server.
-
-**Engine pluggability.** Default = Phosphene Local (`mlx_lm.server` against the bundled Gemma 3 12B IT). Custom = any OpenAI-compatible URL + key (Anthropic compat, OpenAI, OpenRouter, LM Studio). Stronger local = drop a chat-capable MLX model in `mlx_models/`. See `docs/AGENTIC_FLOWS.md` § Engine options.
-
-**HTTP endpoints** (added to `mlx_ltx_panel.py`; documented in §11):
-- `GET /agent/config`, `GET /agent/sessions`, `GET /agent/sessions/<id>`, `GET /agent/local/status`
-- `POST /agent/config`, `POST /agent/local/{start,stop}`, `POST /agent/sessions/new`, `POST /agent/sessions/<id>/{message,delete}`
-
-**Persistence.** `state/agent_config.json` (engine config, api_key masked in HTTP responses) + `state/agent_sessions/<id>.json` (one chat thread, atomic-replaced on every turn). Both under `state/` which is fs.link symlinked + gitignored.
-
-**Don't do** when working in this area:
-- Don't add per-provider client code. The OpenAI-compat shape is the universal interface.
-- Don't bypass `panel_ops.submit_job` to write directly into `STATE['queue']` — `make_job()` is the canonical job-spec builder, with tier clamps, defaults, and validation. The agent goes through the same path the manual UI does.
-- Don't auto-stitch the rendered clips. The user wanted the manifest, not a finished movie. Keep it that way.
+This heading is kept rather than deleted because the section it replaces
+survived three months of "read CLAUDE.md first" sessions, teaching every one
+of them about a subsystem it could not find.
 
 ---
 

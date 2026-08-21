@@ -1,5 +1,525 @@
 # Phosphene — project state, history, open work
 
+> **🎚 2026-08-21 — two release-gate findings closed on `dev` (`947a183`,
+> `9c2f63d`, `490d942`). Both were measured, neither was a guess.**
+>
+> **1. A bed with no stated length rendered at FULL level.** The mix fix in
+> `85f3d43` closed the common case; one shape survived. `bed_length` fell back
+> to `audio.duration`, so a soundtrack with no `duration` and no `trim_end`
+> measured 0 seconds → `bed_gain_points` returned an EMPTY curve → an empty
+> curve means *no filter* → the render played the bed at unity over the
+> dialogue while the browser drew it 20 dB lower and the preview played what it
+> drew. Reachable two ways, both verified: `POST /storyboard/edit/save`
+> persists the shape happily, and `_sbe_auto_edit` writes `"duration": None`
+> itself when both the peaks and `probe_media` fail.
+> **The ruling: the render matches the preview.** A bed of unknown length plays
+> UNDER THE FILM — what is left of `edit_duration` after the block starts, which
+> is where the renderer trims the mix anyway. Silence-by-empty-curve is the one
+> behaviour nobody asked for and it is the loud one.
+> **Measured end-to-end** on a real ffmpeg render through
+> `_sb_film_filtergraph` (8 kHz bed, 300 Hz "line", band split, browser JS in
+> node as the reference): **+20.52 dB before, −0.08 dB after.**
+> The client's half is in it too — `sbeBedLen` was handed `SBE.peaks.duration`,
+> a probe of the file the renderer has never read, so a bed length only the
+> browser could compute. The peaks are out of that chain; `sbeBedLen(audio,
+> filmLen)` is `bed_length(audio, film_len)` term for term. The block geometry
+> and the waveform still read the probe, which is what a picture of a file is
+> for.
+> **The gate that missed it is now a TABLE.** `test_editor_mix` compared five
+> constants and four documents; it now runs the real client JS in node against
+> the real Python over **32 documents** — no duration, no trim_end, bed longer
+> than the film, bed shorter, authored envelopes, duck on/off, muted clips,
+> clips with no audio, a J-cut, trims that close the window — asserting the
+> curves are identical point for point, that they agree *between* the knots,
+> and that the ffmpeg expression EVALUATED is the curve the browser drew.
+> Removing the fallback turns 21 tests red; the old suite passed.
+>
+> **2. Two tabs saving at once were both told they had won.**
+> `expect_revision` is a compare-and-swap whose compare and whose swap were in
+> different critical sections: the handler read the revision, compared it,
+> validated, and only then called `save_edit` — on a `ThreadingHTTPServer`. Two
+> debounces landing together both read revision 7, both compared 7 == 7, both
+> wrote, **both got HTTP 200**, and one arrangement was gone (recoverable only
+> from `history/`, and only by somebody who knew to look). Read-check-write is
+> one critical section now, and it lives in `save_edit(..., expect=N)` — the
+> function every writer already goes through — behind a **per-board** RLock, so
+> unrelated films never queue behind one another. The loser gets the identical
+> 409 the sequential case produces. `EditConflict` subclasses `EditError`, so
+> every existing `except` still refuses. Driven by two real threads held past
+> the read-and-compare; a serial test cannot see this defect at all.
+> **A save with no `expect_revision` is accepted, and logged** — the client
+> deliberately omits it for "Keep mine", so refusing would strand the
+> arrangement on screen with no button that could answer. It stops being
+> *silent*: the log names the revision it landed on and says "last write wins".
+>
+> **Also taken, same visit:** `migrate_edit` shallow-copied and then let
+> `repair_audio_overlaps` write `clip["audio"]` on clips still shared with the
+> caller — a READ editing its argument, which makes the file and the snapshot
+> differ over a repair neither contains. The deep-copy dance is one named helper
+> (`_clips_copied`) used by both healers.
+>
+> **Suite: 1558 (was 1537), green** via
+> `./ltx-2-mlx/env/bin/python3.11 -m unittest discover -s . -q`.
+> (`test_prompt_enhance_endpoint` fails identically on unmodified `dev` in a
+> tree without the helper venv — environment, not this work.)
+>
+> **KNOWN AND DEFERRED — filed here, not fixed:**
+> - **A deleted clip source is invisible until render.** `_sb_timeline_segments`
+>   drops an unreadable input and the assembler concatenates, so the film comes
+>   out silently shorter. `gaps` get a `gaps_note` sentence in the render
+>   result; `unreadable` gets a list (`film["unreadable"]`, named in the
+>   markdown) and **no note** — and nothing on the timeline says a source is
+>   gone before you press render. The fix is a preflight readability check
+>   surfaced on `_sbe_payload`, plus the missing note. Not a small change.
+> - **The Editor's `do_GET` has no exception handler** where `_storyboard_post`
+>   has `except Exception → 500 JSON`. An exception in `_storyboard_edit_get`
+>   propagates and the browser sees a dropped connection instead of a sentence.
+>   **Deliberately not wrapped here:** the `proxy` branch streams a video
+>   through `_serve_video_with_range`, so a naive wrapper that answers with
+>   `_json` after bytes are already on the wire writes a second complete
+>   response onto the same socket — the exact defect that route's docstring
+>   records. Doing it safely needs response-started tracking, which is not a
+>   two-line change.
+
+> **🪪 2026-08-20 — the build stamp names the code that is running.** One
+> commit on `dev` (`fe22ed9`), no engine move, no weights move. The header
+> stamp is how the owner tells which build he is on; it was answering with the
+> working tree, and the page was answering with a commit from May.
+>
+> **THE REPORT (2026-08-19).** HEAD was `4f65fb5`, the tree was clean, `POST
+> /restart` returned ok, the page then served `4f65fb5`'s JS — and the header
+> read `dev · c5dc04c`, a SHA from 2026-05-21. The reflog settles it: HEAD went
+> `c7d4154 → 4f65fb5` at 13:33 and `→ ccae93b` at 14:28 that day and was never
+> `c5dc04c`, so no `git rev-parse` produced that string. **It came out of the
+> served page.** A comment inside `renderVersionPill` carried two real SHAs
+> formatted exactly like the stamp it described — `"you're on 3.0.0 · dev ·
+> c5dc04c (2026-05-21)"` — and the RUNNING build appeared nowhere in the HTML
+> at all. Thirteen real commit SHAs ship in that page as historical references
+> (`"the loadParams fix (b024bb5)"`); none of them was ever the answer. The
+> page answered "which build is this?" with a decoy, confidently, in the right
+> format. `<meta name="phosphene-build">` is the answer now, server-rendered,
+> and the pill's own comments hold placeholders.
+>
+> **AND THE STAMP WAS WRONG ANYWAY, in the other direction.** Three failures,
+> one defect:
+> - **The stamp described the TREE, not the process.** `local_short`,
+>   `local_version`, `local_branch` and `local_commit_date` are refreshed from
+>   disk by `_detect_local_install_state()` at the top of every remote poll —
+>   deliberately, so a tree that was dirty at boot and is clean now stops being
+>   suppressed. So within thirty minutes of a pull under a live panel the
+>   header advertises the new build while the old code keeps serving. That is
+>   v4.4.0's "updates silently kept old code" with the alarm rewired to lie.
+>   **Reproduced on the real install before the fix**: :8199 was running
+>   `d8e54cf`, `fe22ed9` landed on disk, one `/version/check` and the header
+>   claimed `fe22ed9` — code that process had never loaded.
+> - **`stale_process` could not cover it.** A boolean bolted onto a
+>   disk-derived stamp, so the restart tooltip printed the disk label on BOTH
+>   sides: *"Phosphene 4.6.0 is on disk, but this panel process loaded 4.6.0."*
+>   Most fixes land without a VERSION bump, so on `dev` that is the normal
+>   case. Both builds are named with their SHAs now.
+> - **The boot SHA was not captured at boot.** `_capture_boot_head()`'s only
+>   caller was `version_check_loop`, a thread `__main__` starts `if
+>   VERSION_CHECK_ENABLED`. With `PHOSPHENE_DISABLE_VERSION_CHECK=1` it stayed
+>   `None`, and `disk != boot` is False when boot is None — the detector dead
+>   again, for exactly the users who opted out of nagging, under a comment
+>   claiming it was "deliberately captured at IMPORT".
+>
+> **THE FIX** is a boot SNAPSHOT rather than a boot SHA — sha, version, branch
+> and commit date frozen together at import, beside the definition.
+> `get_version_state()` returns both builds unconditionally: `local_*` is what
+> the process loaded, `disk_*` is the tree right now. Nothing has to check a
+> flag before it may trust a field.
+>
+> **THE SAME DEFECT, everywhere disk spoke for the process:** the header
+> version badge; `/panel/bug-context`, which now also discloses a moved tree
+> (*"the fix didn't work"* from an un-restarted panel usually IS that); the
+> three analytics events — an `app_boot` from a build that never booted
+> corrupts the version funnel; and the film credit, which was crediting a
+> renderer that never touched the clip. `running_version()` is the one label
+> for all of them.
+>
+> **GATES.** Nine new tests in `test_stale_process.py` (18 total), and all
+> nine fail on the code they replace, each for its own reason: `'n3wn3wn' !=
+> '0ld0ld0'` for the stamp following the tree, an unexpectedly-`None` boot SHA
+> for the import capture, `['c5dc04c','1ea5f1d'] != []` for the decoy.
+> `test_the_version_pill_ships_no_sha_literal` is the one that keeps the decoy
+> out: nothing in the code that RENDERS the stamp may carry a SHA of its own.
+> 1408 python tests and the three node gates pass.
+
+> **🩹 2026-08-19 overnight — the polish wave: the drafts feature stops
+> losing work.** Nine commits on `dev` (`487dd46..HEAD`), no promote, no
+> engine move, no weights move. A five-agent review of last night's
+> twenty-two commits found four blockers and eighteen confirmed majors in a
+> feature that shipped with 1,097 green tests; every one of them lived in the
+> gap between "each guard exists" (which the suites pin) and "the state
+> machine composes" (which they did not). One claim was REFUTED by the
+> red-team and is NOT fixed — see the bottom of this entry.
+>
+> **THE FOUR BLOCKERS.**
+> - **The crash-backup lane destroyed itself.** `sbeBackup` refuses to write
+>   while a recovery offer is unanswered — correct — and NOTHING answered it.
+>   A save cleared `dirty` and the alarm and left `SBE.backup` set, so on any
+>   film that opened with a backup every later backup no-opped, `backedUpAt`
+>   stayed 0, and the twelve-second watchdog raised the full-width red SAVING
+>   IS FAILING banner on a panel whose saves were all landing. The amber bar
+>   stayed over the saved film with a Recover button that would have reverted
+>   the save. The save route deletes the file now, the client follows the
+>   payload, and `recover_backup` refuses anything `pending_backup` would not
+>   have offered. `pending_backup` also stopped deciding on a wall clock: both
+>   stamps are whole seconds, and every write that is not the user's (a draft
+>   switch, an auto-edit, a restore) used to bury an offer holding the only
+>   copy of somebody's afternoon. **An offer ends when the user answers it.**
+> - **Copying a draft raised on every board anybody already had.**
+>   `create_draft(from_current)` and `duplicate_draft` read `edit.json` raw and
+>   handed it to `save_edit`, whose validator refuses any version but the
+>   current one — and migration is read-path only, so every board written
+>   before `EDIT_VERSION` went to 2 is still v1 on disk. Worse, the index was
+>   written BEFORE the document, so the refusal left the film pointing at a
+>   draft that was never created. `_land_draft` writes first and moves the
+>   pointer after, for create, duplicate and activate alike.
+> - **History was keyed on revision alone while revisions restart per draft.**
+>   Draft B's revision 3 collided with draft A's, `archive_edit` dropped the
+>   collision without a word, and the picker shown while B was open listed A's
+>   arrangements — with Restore ready to write one of them into B. **History is
+>   a folder per draft now** (`history/<slug>/`), so the prune, the listing and
+>   the restore are scoped by construction; what was already on disk moves into
+>   the FIRST draft's folder. Deleting a draft takes its past saves with it,
+>   which is what the panel has been claiming it does.
+> - **The clip inspector was a 36px scroll window.** At 1440x900 with thirteen
+>   unplaced shots it held 223px of content in 36px, so "Unlink sound" — the
+>   only entry point the J/L feature has — was off-screen and the one control
+>   fully visible at the bottom of that unmarked scroll was Ripple delete. The
+>   rail's unbounded list is the scroller now, not the inspector.
+>
+> **THE ARITHMETIC, all three proved in node against the extracted functions.**
+> One ⌘Z deleted a peaks-discovered soundtrack (the snapshot read the DOCUMENT
+> while `sbeFetchPeaks` deliberately writes only the timeline); a head trim
+> past the source dragged the strip's out-point left with it (the clamp landed
+> on `start` and not on `film`); and a music drag depended on mouse speed
+> (`offset = head - want` folds the previous offset back in, and a pointermove
+> stream re-reads the mutated object every event — the same six-second drag
+> landed at film 6 as six events and did not move the block at all as one).
+>
+> **THE REST, briefly.** Nothing swaps the document on a save that did not
+> happen (draft switch, restore, relink, render, NLE export — the render most
+> visibly, since it would otherwise build the previous cut); the backup names
+> the draft it was composed from, so a debounced write cannot land on the one
+> you just opened; the geography pass's derived views reach the model even
+> when the reply carried no floor plan (they did not, and every shot was then
+> coerced onto the establishing view); `GET edit/uploads` answered and then
+> told the dispatcher it had not, writing a second 404 behind a 200 — the
+> stand-in that hid it now asserts the return value; naming a save is
+> reachable again; the two lists in the drafts panel stopped competing for one
+> box; and the preview bed plays the window the strip shows.
+>
+> **THE SURFACE.** Two rung scales (`--ctl-h*`, `--fs-*`) replaced eight
+> control heights and eleven type sizes; the header has a hierarchy instead of
+> seven identical buttons; the soundtrack is a name rather than an absolute
+> path; the rail's unplaced strip is a list rather than a ragged pill shelf;
+> the track prettifies model filenames; the alarm reads at 7:1 instead of 3.3;
+> the app header stopped clipping its own right edge at 1440.
+>
+> **NOT FIXED, deliberately.** (1) The claim that a re-plan wipes derived views
+> off the board before the planner runs was **REFUTED** by the red-team: the
+> guard at `mlx_ltx_panel.py:23504` is never satisfied together with an
+> existing board — `sbPlan` sends `locations` and no `id`, `sbReplan`/
+> `sbTryAgain` send `id` and no `locations` — so nothing in the panel can
+> reach it. Do not re-chase it. (2) README's release banner still says v4.1.1
+> and the Editor is still absent from its tab list; both are release
+> decisions, and announcing the Editor early is the exact mistake already made
+> once. (3) `lora_lab`'s CLI presets still differ from the panel's — the
+> comment claiming they are a mirror is gone, the divergence is documented,
+> and which way to resolve it is a product call.
+>
+> Gates at every commit: 21 suites (1,134 tests), `check_ltx_pin`,
+> `check_pinokio_scripts`. Verified live on the 8799 test panel, including a
+> full 42.9s assemble.
+
+> **✂️ 2026-08-18 night — the Editor stops being a viewer, and a scene stops
+> being a list of shots.** Twenty-two commits on `dev`
+> (`4a49103..378054a`), no promote, no engine move, no weights move. Two
+> campaigns: the timeline became a document somebody can OWN, and the planner
+> learned that a scene is a space before it is a shot list.
+>
+> **THE TIMELINE IS A DOCUMENT NOW, not a render's opinion of itself.**
+> - **The music is under the picture, and it is an object.** The soundtrack
+>   sat above the clips as a global `offset` — one number, clamped to
+>   non-negative, unreachable in the direction that matters. `music_window()`
+>   (`storyboard_editor.py:1288`) is the one place that turns three fields into
+>   the three numbers ffmpeg needs: `offset` may now be NEGATIVE (the track
+>   starts *into* the film, silence in front), and `trim_start`/`trim_end` are
+>   in/out points inside the track. A head trim does NOT ripple — music does
+>   not ripple — so the seconds a trim removes come back as silence. Absent
+>   means untrimmed and `normalise_edit` deletes a neutral trim
+>   (`storyboard_editor.py:906-928`), so a handle dragged all the way back out
+>   leaves a byte-identical filtergraph and every edit.json written before
+>   tonight is still a valid one.
+> - **The timeline outlives the clips.** A board whose renders were deleted used
+>   to open on nothing, which made "the film" and "the files" the same object.
+>   They are not.
+> - **Split edits — the sound stops being the picture's shadow.** J-cuts and
+>   L-cuts are one feature and they are the owner's words: *"leave some of the
+>   audio and drag only the image."* A clip may carry `audio:
+>   {start, end, film_start}` (`clip_audio`, `storyboard_editor.py:205`). **The
+>   PRESENCE of the field is the switch, not the values in it** — deriving
+>   "linked" from equality read as linked the instant somebody unlinked a clip
+>   they had not yet moved, and the clip refused to drag. It is still ONE video
+>   track and ONE music lane: a split edit is a butt join that lands somewhere
+>   else, not a second audio track, and the audio windows may not overlap any
+>   more than the pictures may. `EDIT_VERSION` did not move for it — an absent
+>   `audio` key means linked, which every document already says.
+> - **DRAFTS: the saving is the user's, the backup is ours.** `drafts/` holds
+>   named variations with an `index.json` pointing at the active one, and the
+>   migration happens on READ (`load_draft_index`,
+>   `storyboard_editor.py:1913`) — a board that has only `edit.json` has
+>   exactly one draft and always did; it just had no name for it. The upgrade
+>   cannot half-happen, because the worst case is an index written the first
+>   time the board is read. `POST /storyboard/edit/draft` is ONE route with
+>   five verbs (`new` / `duplicate` / `rename` / `delete` / `activate`) because
+>   they are five edits to the same active pointer and splitting them would be
+>   five places for it to be wrong; `activate`/`delete`/`new`/`duplicate`
+>   refuse while that film is rendering, the same guard `import-shots` and
+>   `restore` take. The unsaved work rides a separate quiet lane —
+>   `history/backup-<draft>.json`, no `edit.json` write, no revision, no
+>   conflict check — and is OFFERED back on next open rather than applied.
+> - **Two-lane save history.** The owner: *"the auto saves should be saved
+>   separately from the manual saves."* Three prefixes in one folder, told
+>   apart by their name rather than by opening them (`storyboard_editor.py:988`):
+>   `edit-r*` autosave (pruned, capped at `EDIT_HISTORY_KEEP = 50`), `save-r*`
+>   a save the user pressed, `keep-r*` a version he named. **The prune never
+>   sees the last two.** A glob and not a flag inside the file, because a prune
+>   that has to open fifty documents to decide what to delete fails halfway on
+>   the first corrupt one. `GET /storyboard/edit/versions` is METADATA ONLY —
+>   opening the panel must not be a download.
+> - **A save that cannot be dropped, and a failure that screams.** The editor
+>   saves on a debounce; a debounce that loses its tab loses the work. The
+>   failure path is now a banner, not a console line — the one state where
+>   quiet is the wrong default.
+> - **A browser refusing to autoplay is not a preference.** The mute fallback
+>   is session-only: Chrome's gesture gate made the panel remember a decision
+>   the user never took.
+> - **The pool takes a file you already have.** Upload-to-pool, with the `kind`
+>   fix, so an image lands as a **still** and not as a video with no frames —
+>   a still is held for the length of its slot, `start`/`end` synthesised from
+>   the slot (`normalise_edit`), and a slug is black with no file at all.
+>   `EDIT_VERSION 1 → 2` is for `kind` + `adjust`; `migrate_edit`
+>   (`storyboard_editor.py:1182`) upgrades v1 on READ, one way, so bumping the
+>   version refuses old *builds* and not every timeline anybody already had.
+> - **A test instance cannot pass for the real one.** A TEST badge on the
+>   panel chrome. Two panels on 8198/8199 and no way to tell them apart is how
+>   an evening gets spent debugging the wrong process.
+> - **An empty list is a sentence, not a blank.**
+>
+> **A SCENE IS A SPACE BEFORE IT IS A SHOT LIST.** The owner: *"a man or woman
+> in a bar — behind him there is this, behind her there is that."* The planner
+> now blocks the space first (`_GEOGRAPHY_SYSTEM`,
+> `storyboard_planner.py:757`): one floor-plan paragraph, then 2–4 named camera
+> **views** DERIVED from it. A location carries `views: [{id, name, light,
+> description}]` and a shot picks `location_id` + `view` + `eyeline`
+> (`storyboard.py:1059-1090`). The car-wash day was the prototype and every
+> piece of it was hand-built: `carwash`/`carwash_reverse` as two locations, the
+> flipped sun, the no-car reverse background. All of it is derivable from one
+> paragraph.
+> - **The laws are enforced, not just written.** A view never contains what is
+>   behind the camera in that view, and it must SAY so in the words "no car in
+>   frame" — that sentence is what `_ABSENCE_RE`
+>   (`storyboard_planner.py:2927`) has to stand on. The light flips with the
+>   camera. Nobody's own body goes in the view behind them.
+> - **The 180-degree check reads the CUT, not the file.** `_enforce_eyelines`
+>   (`storyboard_planner.py:2891`) walks shots in *screen* order and flips the
+>   second of two adjacent shots that cut between two DIFFERENT characters in
+>   the SAME place and both claim the same side. Repaired mechanically, which
+>   is only defensible because `eyeline` is a discrete field with exactly one
+>   complement: flipping it cannot damage anybody's prose, and the clause is
+>   composed at render time (`eyeline_clause`). Prose laws get a model round
+>   trip precisely because they do NOT have that property. `lens` deliberately
+>   emits nothing — telling these models to look down the barrel buys a stiffer
+>   performance than saying nothing — but the value exists so a shot can SAY it
+>   holds the lens, which is what lets the check tell "faces the camera" apart
+>   from "nobody wrote an eyeline".
+> - **The derived views land on the user's OWN locations, and reach the board
+>   at plan adoption.** `merge_location_views` (`storyboard.py:1098`) dresses
+>   the board's locations in the views the plan derived and never strips the
+>   last plan's views, because the shots point at them. Back-compat is one
+>   line: `shot_scene_text` falls back to the location's description, so a
+>   board with no views, or a shot that names no view, injects exactly what it
+>   always did. `views` is ABSENT, never `[]`.
+>
+> **A GREEN TALLY WAS NEVER PROOF THE FILE COULD DO ANYTHING** (`037f7fc`,
+> closing the panel half of the #61/#62 entry below). The trainer measures its
+> own delta RMS against `WEAK_DELTA_RMS` and emits `adapter_strength`; the
+> panel reads it, logs median/max/carrying-modules, and a verdict that is not
+> `ok` finishes the job **in a WARNING state rather than a bare done** — the
+> file is kept, but the word for it is not "success". It rides into the sidecar
+> and out through `list_characters`/`/loras` as `adapter_verdict`
+> (`mlx_ltx_panel.py:2200`), so the library can warn before somebody spends a
+> render finding out. A LoRA from a build that never measured reads
+> **`unknown`, never `weak`** — silence is not weakness, and a chip on every
+> older file would be noise nobody could act on. Same commit: **train preset
+> honesty** — the rank-32 recipe is the only one ever graded on faces
+> (Aria_v2, Bizarro_v2), so Quick and Medium now say *"identity ungraded"* on
+> the pill (`mlx_ltx_panel.py:1567,1573`); saying "fast" and letting the user
+> infer "as good, sooner" is the pill doing the lying. **Issue #46** — the A2V
+> warning shipped a rule its own reporter refuted: no frames×area constant
+> separates the four datapoints (832×480×721 = 287.9 Mpx holds while
+> 1024×576×481 = 283.7 Mpx falls apart — a *smaller* product failing), but
+> per-frame area separates them cleanly (clean 0.307/0.399, failing
+> 0.590/0.922, both dying near frame 450). `A2V_PIXEL_BUDGET` is gone, replaced
+> by a knee at **0.45 Mpx/frame**; the canvas is the lever and length is nearly
+> free below it. **Pinokio (fuschichou)** — `#remixSubGroup` is a SIBLING of the
+> mode bar, not a child, and all six `body[data-workflow] #modeGroup` rules
+> omitted it, so the bar hid and the row stayed on Audio, Train, Storyboard,
+> Editor, Characters and Studio; added to all six, with a gate that counts the
+> two ids and fails if they are ever listed apart. And the **caption green
+> summary counted the images, not the files it wrote** (`e35f29b`) — a tally
+> that cannot be wrong in the direction that matters. The strength verdict is
+> also reachable **from a shell** now, on a file you already have (`9dd90fa`).
+>
+> **Gates:** `check_pinokio_scripts` PASS (worst dispatch 377/500) ·
+> `check_ltx_pin` PASS (unmoved) · analytics dry-run 48 — and its
+> "every event the panel fires is documented" test still passes, so
+> `docs/ANALYTICS.md` is unchanged **and true**: `adapter_strength` is a
+> trainer→panel progress event on the lora_lab stream, not an analytics event,
+> and nothing new leaves the machine. Suites touched tonight, all green:
+> `test_storyboard` 111 · `test_storyboard_planner` 151 (1 skipped) ·
+> `test_storyboard_assembly` 111 · `test_storyboard_editor_api` 250 ·
+> `test_storyboard_editor_ui` 181 · `test_lora_compat` 28 ·
+> `test_caption_counts` 4 · `test_geometry_grid` 12 · `test_stale_process` 9.
+>
+> **Docs squared up in the same pass:** `docs/API.md` gained the Storyboard +
+> Editor surface it never had (board schema incl. `locations[].views`,
+> `shots[].view`, `shots[].eyeline`; `edit.json` incl. `clip.audio` and the
+> soundtrack's `offset`/`trim_start`/`trim_end`; the drafts, versions and
+> history routes; `adapter_verdict`), and its `/train/start` preset line was
+> **wrong** — `high` is not "rank 32, 5000 steps", it is `epochs × image_count`
+> capped by the preset, and on a **sub-64 GB Mac `_select_train_profile`
+> silently rewrites every preset to rank ≤8 / ≤448 px / ≤500 steps**, which is
+> the ungraded regime by definition. That trap is now stated in API.md and in
+> the README's Train Character section. **NOT fixed, flagged:**
+> `lora_lab/train_character.py:109` still says its presets "must stay in
+> lockstep with the panel JS mirror" and they have not been for a long time
+> (lab `quick` = rank 16/1500 steps/576 px vs panel `quick` = rank 8/30
+> epochs/512 px; two unrelated ETA estimators), and `CLAUDE.md` still opens on
+> "Current state — v3.0.6", documents port 8198 only, has no Storyboard or
+> Editor in its API section, and its §24 describes an Agentic Flows module that
+> was removed in 2026-05.
+
+> **🔍 2026-08-18 — trained LoRAs come out inert (#61, #62): the measurement
+> exists now, the cause does not yet.** Two users on v4.5.0 trained characters
+> that finished clean and changed nothing. Their render log is the important
+> artifact: `LoRA mode unfused: 1152 modules attached … 0 skipped`,
+> `FUSED=1152/1152 tensors (576/576 modules)`, `strength=1.00`, on the 2.5 q8
+> distilled lane — **every gate we own passed**, because every gate we own asks
+> whether the KEYS land, and none asks whether there is anything in them.
+> `3c53c21` closes that half: `lora_compat.measure_adapter_effect` returns the
+> exact `‖B @ A‖_F` per module (via `trace((BᵀB)(AAᵀ))`, two r×r matmuls, ~1 s
+> on a 500 MB adapter), the helper prints `delta_rms` beside the FUSED= tally on
+> both LoRA routes, training measures the file it just wrote and stamps the
+> verdict into the sidecar, and an adapter whose every product is exactly zero
+> is now REFUSED at render instead of returning a LoRA-free video.
+>
+> **The calibration, measured on this disk** (per-entry delta RMS, median):
+> `elontrn_v2` 1.63e-03 · `ariatrn_v2` 1.45e-03 · `eltrumpo_v2` 1.41e-03 ·
+> `bizarrotrn_v2` 8.84e-04 · third-party `LTX2.3-Rogue` 1.84e-03 ·
+> `Fantasy_Painterly` 5.36e-04 · `bizarrotrn.audio` 4.85e-04 · a
+> four-step adapter 1.72e-05. `WEAK_DELTA_RMS = 2.0e-4` sits under everything
+> that works and two orders over an untrained file.
+>
+> **Two negative results, so nobody re-runs them.** (1) *Magnitude is not the
+> regression.* Fresh runs on the current pin, same data, rank 8, lr 1e-4:
+> 60 steps → 1.43e-04, 240 steps → 2.43e-04. That is √-shaped accumulation
+> (4× the steps, 1.7× the delta), and extrapolating it to 5000 steps lands at
+> ~1.1e-03 — i.e. exactly where the May-trained `eltrumpo_v2` (1.41e-03)
+> actually sits. The current trainer accumulates like the one that produced the
+> shipped characters. (2) *Layout is not the regression.* Emitted keys are
+> byte-for-byte the layout the shipped adapters carry, and both match the 2.3
+> AND 2.5 transformers 576/576 — verified with `inspect_lora_compatibility`.
+> What remains is DIRECTION: a 240-step run on the same person's images is no
+> more aligned with `eltrumpo_v2` (mean per-module cosine +0.052) than an
+> unrelated character is (+0.043), while two runs of the current engine agree
+> with each other (+0.171). Suggestive, not conclusive — different rank, 8 of
+> 37 images, 240 steps against 5000.
+>
+> **The two experiments that settle it, in order.** (E1, one minute) @Morac2
+> offered his 132 MB adapter and his training data — measure the file with
+> `measure_adapter_effect`: in the working band means the file is fine and the
+> fault is downstream of it; ~1e-04 means it is not. (E2, one night, needs a
+> box with headroom — this 64 GB Mac swapped 27 GB and filled the disk trying)
+> the same 37 images at rank 32 / lr 1e-4 / 5000 steps under the current pin
+> versus under `v0.14.8`, both measured and both rendered. Panel-side follow-ups
+> (the `adapter_strength` event has no UI yet; Quick trains at rank 8 and no
+> tier below rank 32 has ever been graded for identity) are written up but NOT
+> implemented — another agent held `mlx_ltx_panel.py`.
+> ⚠️ **That last sentence is SUPERSEDED as of the night of 2026-08-18**
+> (`037f7fc`, top entry): the panel reads `adapter_strength`, warns on a
+> not-`ok` verdict, carries it out as `adapter_verdict`, and Quick/Medium say
+> "identity ungraded" on the pill. E1 and E2 are still open.
+
+> **⏪ 2026-08-18 — v4.6.0 promoted and WITHDRAWN the same day, on the owner's
+> order.** The Editor release went to public `main` (`5b26f91`), tag and GitHub
+> release included, and the owner pulled it back within two hours: *"you
+> shipped too early... I want to work on it properly."* Public `main` is back
+> at v4.5.0 (`ee278e0`); the tag and the release are deleted; the Pinokio
+> announcement was never posted. Nothing else moved — `dev` and `beta` keep all
+> of it, the from-zero validation stands, and the "SHIPPED in v4.6.0" notes
+> below now describe the WITHDRAWN promote. v4.6.0 ships again when the owner
+> has cut with the Editor himself and says so — that is the gate that was
+> missing: green checks are not the same thing as the owner having used the
+> feature.
+
+> **🎬 2026-08-18 — v4.6.0: the Editor becomes a place, and a clip stops having to be a video.** The timeline shipped as the storyboard's sixth stage state, and everything wrong with it followed from that: it could not open without a board, its document id WAS the board id, it died on a tab switch, and its picture was whatever the shot list left over — 150px on any window under 1279px tall. It is now a top-level workflow beside Storyboard, engine-agnostic, with the two columns an editor wants.
+>
+> - **A media pool, replacing a `window.prompt()` that asked the user to type the NUMBER of a film** — while the gallery holding every clip this panel has ever made was `display:none` for the whole surface. Four sources (this film · other films via `import-shots` · the generations · Images, which the gallery has always held and which nothing could use until a clip could be a STILL) plus an Add black control, because black has no file and therefore no row in any list. One verb: click a row and the clip lands on the track without leaving the Editor. `phos_ed_doc` REMEMBERS the document rather than inheriting it, falling back to the picker when the film it names is gone; leaving the tab SUSPENDS (clock, picture, flushed save) where it used to tear the document down, so glancing at the gallery cost an undo stack.
+> - **Three kinds of clip.** `kind: video | still | slug`, absent meaning video, so every `edit.json` on every machine is already a valid v2 document. `EDIT_VERSION 2` shipped WITH the read-path migration, because `validate_edit` hard-refuses a version it does not know — bumping alone would not have refused old builds, it would have refused every timeline anybody already had. A still is `-loop 1 -framerate F -t D` and never goes through ffprobe; a slug consumes no input at all (`color=` is a source filter). That is what forced the input-index refactor: segment index stopped being input index and every input after the first slug shifted. Indices are assigned in one place now, next to the argv fragments that honour them, and the soundtrack is `n_inputs`.
+> - **One slider.** Brightness, constant per clip, clamped to ±0.5 and ABSENT when neutral, so a clip nobody graded serialises exactly as it did yesterday. The preview uses CSS `filter: brightness()`, which is MULTIPLICATIVE where ffmpeg's `eq=brightness` is ADDITIVE — CSS has no additive form — so the two are matched at mid-grey, where a person judges exposure, and the strip already says the preview is approximate. `oninput` paints; `onchange` commits, because a slider at pointer speed would otherwise push eighty undo steps and eighty saves for one gesture.
+> - **Drag and drop, on the substrate the track already used.** The panel had no `dragstart` anywhere and the track's own gestures are pointerdown/move/up with capture; HTML5 drag-and-drop would have swallowed that capture and the track would never have heard the drop. Same substrate, so the two coexist by construction. A drop lands WHERE IT WAS DROPPED, with ripple, by the midpoint rule every NLE uses; click-to-add still lands at the END, because it cannot move anybody's cuts. On the track, Shift reorders and a plain drag moves — a move puts a clip at a TIME and leaves the hole the generate control fills, a reorder puts it at a POSITION and closes that hole, and neither can be inferred from the pointer. The ghost portals to `<body>`: parented in the pool list it is clipped the instant it leaves the column, which is every drag. A drag ends in a click on a `<button>`, so a flag stops every drop adding its clip a second time.
+> - **NLE export — the film as a project somebody else's editor can open.** `<film>_project/` with an FCP7 XML (the one interchange Premiere and Resolve both import), an ExtendScript for After Effects (which has no timeline import at all and never has), and a `media/` of HARDLINKS, `os.link` falling back to a real copy across filesystems. The pathurls are absolute into that `media/`, which is what makes the folder relink on drop. Slugs are written as timeline GAPS rather than generator items: the effect ids for a colour generator differ between the two NLEs, so "one XML for both" would quietly have become one XML for one of them, and a gap reads as black in every editor ever made. The audio is STEMS — clip sound on A1, soundtrack on A2, unducked — because the render's sidechained under-mix has no representation in an NLE timeline, and baking it in would hand an editor a bed they cannot unmix.
+> - **ONE assembler.** Export wrote `<slug>_film.mp4` from a second auto-editor over its own copies; the Editor's Render wrote `<slug>_timeline.mp4` from the cut, with the soundtrack. Same folder, same board, two films, and a chip naming the button as the only way to tell them apart. Export now delegates to the timeline whenever an `edit.json` has clips, passes `music`/`music_mode`, and both doors write the same name.
+> - **RELINK, the live bug.** `_sbe_board_clips` picks delivery over draft, but `edit.json` freezes the path at the moment of the cut and nothing rewrote it — so "Finish keepers" rendered full-size files the film never used, and the next Prepare pruned their proxies. The server flags them on the GET; one button rewrites the paths, keeps every cut and timing, and builds the delivery proxies before answering. Never automatic: the arrangement is the human's.
+> - **A soundtrack can sit UNDER the dialogue instead of deleting it.** `music.mode` is `replace` (unchanged, still the default, byte-identical graph) or `under` (clips keep their audio; the bed is attenuated and then ducked by the dialogue via `sidechaincompress`). The duck constants were MEASURED on a band-split gated-tone rig, not chosen: 0.04/8 gives 5.8 dB, too shallow to hear under a line; 0.02/10 gives 11.4 dB and shipped; 0.01/20 gives 17.7 dB and audibly pumps. The bed returns to full level between lines in all three. End to end through the real filtergraph it measures 7.0 dB with the dialogue intact.
+> - **The under-mix was clipping, and the obvious fix is a no-op here.** The first film mixed `under` peaked at 1.31 pre-encode with 1341 hard-clipped samples: `amix` carries `normalize=0` so nothing at all was protecting the sum, and engine dialogue is hot (0.35 RMS on an opening line). `alimiter=limit=0.97` is the filter this obviously wants and on this build it does NOTHING to float samples — measured on the real mix, input peak 1.3075, output peak 1.3075, unchanged with `level=disabled`, unchanged with an `aformat` to s16 before it, unchanged with one after it, reporting nothing either way. A "fixed" render was shipped that measured WORSE (1.279 against 1.216) before anybody looked at the output peak rather than the filtergraph. `asoftclip=type=tanh` at threshold 0.9 holds: the finished film measures peak 0.9678 with zero clipped samples, against 1.279 and 654 before. One test pins the ceiling as the last stage before `[aout]`; a second BANS the string `alimiter` from the graph, so the inviting cleanup cannot be done by someone who has not measured the output.
+> - **The trained voice was stripped from every LTX character shot.** Owner-reported more than once. `shot_to_job` decides `no_voice`, and `no_voice=on` drops `<trigger>.audio.safetensors` from the LoRA stack — it decided it with `_HAS_DIALOGUE`, which matches `<d>…</d>` and nothing else. That is exact for H3 and wrong for LTX: `_strip_h3_markup` has ALREADY rewritten the tag away by the time an LTX prompt exists, so `no_voice` was always "on" and every LTX character shot with a line rendered with the face LoRA alone. Confirmed on a real sidecar — `no_voice: true`, LoRA stack of one. It survived because the comment above it said the derivation was exact; it was, for the one engine anybody checked. The gate now shares `_SPOKEN_WORDS_RE` with `shot_speech_problem`, and a test asserts the two agree: when they diverge you get one of exactly two bugs — a mouth with nothing to say, or a real line in a stranger's voice — and this repo has now shipped both.
+> - **A line must fit its shot, and it must close.** `shot_pacing_problem()` rejects OVERSTUFFED (more words than the duration can carry) and UNFINISHED (the last line ends on a comma, dash, ellipsis or nothing). The budget BRACKETS the measured evidence rather than guessing: 7 words in 4.04 s delivered fine, so it must allow ≥2.31 w/s; 20 words in 7.04 s was cut mid-phrase, so it must refuse ≥3.31; 2.4 w/s sits between with margin both ways. A warm read is slower — the day's renders split cleanly by voice descriptor at ~2.4 w/s bright against ~1.7 warm, and a 23-word slow read passed the flat budget at 13.04 s and was cut anyway — so `is_slow_read()` reads the descriptor as a tempo marking and both the budget and `speech_fit_frames()` honour it. Hard error on hand-authored boards, where the author is present to choose between cutting words and adding seconds; mechanically REPAIRED at plan adoption, because bouncing a free fix through a 40-second repair round-trip helps nobody. Found in review: the first cut of the descriptor regex was assembled inside a non-raw triple-quoted string, so every `\b` arrived as a literal backspace and the pattern could never have matched — caught because the new tests run against the real module rather than trusting the diff.
+> - **LOCATIONS and WARDROBE — written once, injected everywhere.** Four shots of the same character, each saying "dim room, cinematic close-up", came back as a monitor-lit study, a brighter office with papers on the wall, a vintage parlour with no monitors in it, and a near-black void, with the collar changing between them. Nobody wrote a contradiction: the shots simply never agreed on anything, and what a prompt leaves unstated is re-rolled per shot. A location is a board-level entity now — id, name, description — and a shot references one by id; wardrobe rides with the cast member rather than the shot. Both are injected at the single choke point every render path already passes through (`shot_to_job`, `compose_shot_prompt`) rather than at the call sites, which would give the estimate, the re-render and the gap-fill each their own chance to forget. `unknown_location` is the validator that matters most: without it a shot claiming a room this board never heard of renders with no room injected and looks identical to a shot that never claimed one — the continuity failure arriving silently. Additive: a board with no locations composes byte-identically, and schema stays 1.
+> - **A screenplay pass, before any shot exists.** `plan_film` now writes concept → screenplay → shots, handing the beats and the actual spoken lines down to the shot pass with the instruction to keep every line word for word. There was no screenplay step at all, so structure and coverage were invented in the same breath. Off by `screenplay=False`; a per-shot re-roll never regenerates it, because the other shots are standing on it; a model that answers with "Sure! Here is the scene:" and no beats is discarded rather than handed down as if it were a scene.
+> - **Clips can come from another film.** A board is a timeline, one to one, and coverage is not — the moment B-roll or alternates get rendered as a second board, their clips are unreachable from the first board's timeline, so the answer to "I have clips in two projects" was to render them again. `_sb_import_shots` + `POST /storyboard/import-shots` REFERENCE clips rather than copying them, and three things travel with them because leaving each behind breaks something specific: `imported_from` provenance (without it a re-plan rewrites somebody else's work), the source LOCATIONS (an imported shot pointing at an unknown location correctly refuses to render, so a successful import would produce an unrenderable film), and the source CAST (or wardrobe anchoring silently stops applying). It refuses while the target film is rendering — a running render owns the board file and writes each shot's status back as it lands, so an import holding a read from a second earlier would drop finished clips at the exact moment somebody is collecting them. Found by doing it: an import during a live four-shot render happened to survive, and that is luck, not a design.
+> - **The film has a home.** Both assemblies now END on a film state — player, runtime, picture size, size on disk, when it was made, which button made it, the folder it lives in, Show in Finder revealing the FILE, and earlier films listed underneath — served by a new `GET /storyboard/films`. It was needed because `list_outputs` globs `OUTPUT/*.mp4` and never descends, so the one thing this feature makes was the one thing the app could not show you; the user was left on a list of individual shots wondering which one was the movie.
+> - **Ten review findings, fixed.** Re-plan erased the film's locations and wardrobe — `/storyboard/plan` assigned both unconditionally from the form and only the FIRST plan's client sends them, so a re-plan wiped the continuity anchors with nothing on any screen showing they were gone; the server patches now instead of overwriting. Prepare DELETED the proxies of exactly the clips the user had just imported, because `plan_proxies` prunes anything not in the clip list it is given and it was given board shots only; it is fed board clips UNION every path in `edit.json`. The step rail — the only door to the editor and the finished film — sat 400+px below the player, nested inside the element that takes the gallery's slot; it is the stage pane's first child now, with a CSS belt so it cannot appear outside the storyboard workflow. The tab strip did not wrap in a 300px pane, so the Editor tab was simply not there to click, the same way the Train tab went missing once. The Render button was 1590px wide — the panel's base `button { width: 100% }` was never overridden in that bar — which made the sticky bar 89px instead of 65. The picture's column budget was stale at 819px, measured with a rail and an 89px bar that are not in the Editor's own tab; re-measured to 748, which took the preview from 173px to 244px on the same window with the column still not scrolling. Intersection callbacks do not run in an occluded tab, so the pool's first screenful loads without waiting for one. The grade flag was wide enough to collide with the clip name, which always ran under it. Four pool sources on a 40% basis wrapped two-and-two instead of three-and-one, which read as Images being an afterthought rather than a peer. And a negative-zero `startTime` in the AE script, which is valid ExtendScript and reads like a bug.
+>
+> **Validated in a browser and with ffprobe, not asserted.** On a real v1 `edit.json` — nine clips, cut in the Editor, never touched by this branch — opening it returned version 2 with `migrated_from 1`, validated clean, and re-saved with nothing rewritten in any clip. A four-kind timeline was then built through the SHIPPING verbs: ripple delete and the trim handles, a real `PointerEvent` drag from the Images row onto the track, the Add black button, and the inspector's own slider. The drop landed at 1.5 s BETWEEN the two videos by the midpoint rule and rippled the second to 4.5 s; the click that follows every pointerup did not add the clip a second time. **The render ffprobes at 6.500000 s exactly, 156 frames at 24 fps, 1280x720, two streams, 44100 Hz stereo**, and per-slot mean luma proves what the graph did rather than that it ran: video 102.71 · STILL 74.19 with 0 scene changes across the hold · the same window graded −0.30 at 29.30 against 98.28 ungraded · SLUG 16.00, dead flat limited-range black. The under-mix survived a still and a slug in the graph, which is the thing most likely to have broken quietly: max_volume −4.0 dB against the 0.9 ceiling, bed alone under the still (−34.7) and the black (−46.6), ducked under the dialogue (−14.5 / −24.6). The project folder, parsed with `xml.etree`: xmeml v4, timebase 24, ntsc FALSE, 156 frames, ONE video track with three clipitems and the slug left as a 48-frame gap, two audio tracks, four files declared once each with absolute pathurls into the folder's own `media/`, every media file at link count 2 and zero bytes copied. The `.jsx` parses as JavaScript and maps −0.30 to −45.0 of After Effects' Brightness.
+>
+> **Gates:** `check_ltx_pin` PASS (pin unmoved at `v0.14.19+ltx25.6`) · `check_pinokio_scripts` PASS (worst 377/500) · `check_output_codec` PASS · `node --check` install/update · `py_compile` panel + image engine · Ideogram from-zero (model deleted, token-less re-download and render) PASS · **20 root suites, 826 tests green** · `scripts/test_analytics_dryrun` 48/48, green for the first time since v4.2.0. No engine re-pin, no weights change, no render path touched: `ltx-2-mlx/`, `required_files.json`, `install.js` and `update.js` are byte-identical to v4.5.0.
+>
+> **Recorded so nobody hunts it, and NOT a regression:** on the validation browser no `<video>` element reaches `readyState 1` at all right now — Chrome's own built-in player stalls on the same proxy file that `curl` serves in 13 ms with correct 206 ranges. Every `<img>` path (stills on the stage, on the track, in the pool) loads fine in the same tab. The timeline's picture was therefore verified through ffprobe and per-slot luma on the rendered file rather than through the live preview.
+>
+> **A human must still judge by eye:** how the cut FEELS at the seams, whether the beat lines read at default zoom, whether the ducked bed sits right under a real performance, and whether the stage/track proportions are right on a 14" screen.
+
+> **🎞️ 2026-08-16 — SHIPPED in v4.6.0: the timeline gets a face.** ⚠️ **PARTLY SUPERSEDED by the v4.6.0 entry at the top.** The timeline is no longer the storyboard tab's sixth stage state — it is its own top-level Editor tab with its own document id, and the `body.sbe-open` layout takeover described below was deleted rather than kept. Everything else here stands as the record. The editor's server half (proxies, peaks, `edit.json`, eight routes) shipped in `3b129ca`/`3096da5` with nothing to drive it. This is the interface, built as the storyboard tab's **sixth stage state** — not a widget bolted beside it. Vanilla JS, inline CSS, zero dependencies, same idioms as the shot list it sits next to (`sbe*` / `.sbe-*` beside `sb*` / `.sb-*`).
+>
+> - **One `<video>`, and the measurements say why.** Double-buffering measured no benefit once proxies are all-intra, so there is one element and one decoder. The preview never points at `clip.path` when a proxy exists (235 ms median seek vs 3.5 ms); the one case where it must says `SOURCE (slow — run Prepare)` on the badge instead of pretending. `muted` is set before the first `play()` (Chrome refuses autoplay silently) and nothing is hidden with `display:none` (WebKit will not load it). The approximation is stated once, quietly, under the transport: the browser lands within a few frames of each cut and freezes for about one there; the render is exact.
+> - **Every clip owns the gap that precedes it.** That one choice makes a move, a ripple delete and a split one-liners each, and makes `film_end` derivable rather than storable — so the 1x invariant the server refuses an edit for breaking cannot be broken by the client. Both trim handles follow the pointer (left moves the in-point and leaves the tail alone; right ripples), a **locked** clip is an anchor the flow goes around rather than through, and a drag that moves the pointer but not the film is discarded rather than saved as a no-op edit that burns a revision.
+> - **The beat grid is never extrapolated.** `beat_map()` fits ONE tempo across a span because real tracks drift; beats outside it do not exist, and neither do lines. Below 0.4 confidence the grid draws muted and the inspector says it is a guess, with the number.
+> - **The waveform appears before `edit.json` knows about it.** `prepare` writes `peaks.json`; only an auto-edit writes the soundtrack INTO the edit. Rather than show an empty strip over a track that is right there, the axis comes off the peaks document — and the prepare line says plainly that the arrangement on screen was cut without the grid, and that Auto-edit is what puts the cuts on it.
+> - **Filling a hole does NOT move the film after it** — the one operation here that does not ripple, because the shot was generated for that slot so the cuts around it would stay on their beats. `edit/generate` shows the params read back off the QUEUED JOB, not the request, because `make_job` silently drops any field it does not name.
+> - **409 is answered honestly:** the other tab's revision, your revision, your arrangement still on screen, and two buttons. `Keep mine` is the only path that drops `expect_revision`, and only because a human clicked it. A 400 lights up every offending clip at once from the server's `errors[]`.
+> - **The timeline owns the tab while it is open.** `body.sbe-open` folds the planning column away and gives the stage the window. Not a preference: the brief plans a film that has already been shot by the time anyone opens a timeline, and a timeline is the one surface here whose usefulness is measured in pixels per second.
+> - **A narrow-window bug that predates all of this, fixed on the way past.** `.layout` is `flex: 1 1 auto` inside a `display:flex; min-height:100vh` body, so the storyboard breakpoint's `height: auto` never did anything — the grid kept the full 812px, its three `auto` rows were squeezed, the form column got ~316px for ~730px of brief, and `overflow: visible` spilled the remaining **479px straight down through the stage**. The ENGINE strip and the character picker printed over the shot list and over the editor. `flex: 0 0 auto` in that same block is the whole fix, and it is what the block's own comment ("Stacked, the PAGE scrolls") has been promising since it was written.
+> - **Validated in a browser, not asserted.** A sandbox panel on :8799 against a real 5-shot board and a real track: prepare built 5 proxies in 0.85 s, tracked 104.195 BPM (confidence 0.54, 82 beats / 20 downbeats), drag-reorder / ripple-trim / split-at-playhead / ⌘Z / place-into-slot all driven with a real pointer, a real 409 forced from a second client, and `edit/render` produced a 27.875 s film with the gaps note disclosed. Checked at **800px and 1400px**: nothing outside `#sbStage` intersects the editor at either width, and the clip track clears the sticky action bar at both. Six bugs were found that way and fixed: `[hidden]` losing to `display:flex`, the stage stealing the track's height inside `#sbStage`'s flex column, the no-op drag, the follower sliding when a hole was filled, the spilled planning column above, and the video's 34vh cap pushing the track under the action bar on a 900px window (it now yields to the timeline: `min(34vh, 340px, calc(100vh - 700px))`).
+>
+> **Gates:** `check_ltx_pin` PASS · `check_pinokio_scripts` PASS · `check_output_codec` PASS · **588 root tests green** (`test_storyboard_editor_ui.py`, 56 new, extracts the real client functions and runs them in node).
+>
+> **A human must still judge by eye:** how the cut FEELS at the seams, whether the beat lines read at default zoom, and whether the stage/track proportions are right on a 14" screen.
+
+> **✂️ 2026-08-16 — SHIPPED in v4.6.0: the storyboard export learns to edit.** Assembled films read as clips glued end to end because that is what they were: `_sb_export` concatenated WHOLE clips in `n` order, so every soft head and degrading tail played, and every cut landed wherever a 5.125 s render happened to stop.
+>
+> - **`storyboard_edit.py`** (new, root) — pure analysis, no HTTP, no panel import, numpy + stdlib only. `best_window()` scores every candidate window inside a clip on sharpness (variance of Laplacian), stability (frame-to-frame difference scored as a BAND, and on the window's quietest quarter as well as its mean, so a mostly-frozen window cannot average its way into the healthy range), luma sanity (near-black and blown-out windows are VETOED, not marked down — the white-tail bug class), and a configurable head/tail positional prior. Every window returns `per_second` diagnostics and a sentence saying what it beat and by how much. `beat_map()` is onset-flux + autocorrelation + a log-normal tempo prior, refined by a phase-folded grid search; it returns `confidence` and the evidence behind it. `plan_cut()` snaps each cut to a downbeat, then a beat, then leaves it alone — and says which, and by how many milliseconds.
+> - **Trimming happens in the filtergraph that was already running.** `_sb_film_filtergraph` gained `cuts` and `music`; `trim`/`atrim` + `setpts` per segment, one decode, one encode. A second ffmpeg pass would have cost a whole generation of quality for nothing. The plan is matched to segments **by path, not by position**, because the assembler drops clips ffprobe cannot read.
+> - **Opt-in, and provably so.** `_sb_export(auto_edit=False)` is the default, the assembler is called with the same two positional arguments it always was, and `test_no_plan_and_no_music_is_byte_identical_to_the_old_graph` pins the pre-existing graph as a literal.
+> - **Validated on the real AURELIUS project**, not on fixtures: ten 1080p renders and AMOR_FATI (7:59). Detected **126.66 BPM** over the first 100 s against the shotbook's ~126, onset energy locked to **±5.55 ms**, **10/10 cuts on the grid** (6 downbeats, 4 beats), 0.00 ms residual, 57.50 s of film in **13.1 s** of wall time. The 60 s target is unreachable and the module says why rather than faking it: eleven beats is 5.211 s and the clips hold 5.167 s, so ten beats per shot is the ceiling.
+> - **Honest limits recorded:** the tempo model is ONE constant BPM in 4/4 — the track drifts +0.61 BPM across 100 s and fits at 128.43 across the whole 8 minutes, which is why the grid is fitted to the span being cut rather than the whole file. Octave margin over the 84.4 BPM rival is only 0.15. Grid times carry a measured ~10 ms lead from the analysis window.
+>
+> **Gates:** `check_ltx_pin` PASS · `check_pinokio_scripts` PASS · `check_output_codec` PASS · 429 root tests green (`test_storyboard_edit` 55 new, `test_storyboard_assembly` 80). `scripts/test_analytics_dryrun` has 3 failures that pre-date this work (verified against a stashed tree) — all three were one undocumented event, `star_prompt`, and were fixed in v4.6.0 (`598d367`).
+
 > **🎛️ 2026-08-16 — v4.5.0: the health cluster becomes one chip, and two fixes that came from outside.**
 >
 > - **One health chip.** Six pills truncated on a 14" window and could not take a seventh. The chip states the summary — worst state wins the colour, memory stays on the face — and a portaled popover holds Tier / Memory / Helper / Models / ComfyUI / Queue / Render. The pills are unchanged: same ids, same updaters, relocated once at boot and read back, so the summary can never disagree with them.
