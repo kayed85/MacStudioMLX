@@ -12,10 +12,10 @@ let lastPythonLogs = '';
 
 function getPhospheneRoot() {
   const candidates = [
-    __dirname,
-    path.resolve(__dirname, '..'),
     '/Users/mk/Phosphene',
-    path.join(app.getPath('home'), 'Phosphene')
+    path.join(app.getPath('home'), 'Phosphene'),
+    __dirname,
+    path.resolve(__dirname, '..')
   ];
   for (const cand of candidates) {
     if (fs.existsSync(path.join(cand, 'mlx_ltx_panel.py'))) {
@@ -33,14 +33,15 @@ const defaultModelsDir = fs.existsSync(path.join(projectRoot, 'mlx_models'))
 
 function getPythonBin() {
   const envCandidates = [
-    path.join(projectRoot, 'ltx-2-mlx/env/bin/python3.11'),
     '/Users/mk/Phosphene/ltx-2-mlx/env/bin/python3.11',
-    path.join(projectRoot, 'ltx-2-mlx/env/bin/python3'),
     '/Users/mk/Phosphene/ltx-2-mlx/env/bin/python3',
-    'python3'
+    path.join(app.getPath('home'), 'Phosphene/ltx-2-mlx/env/bin/python3.11'),
+    path.join(app.getPath('home'), 'Phosphene/ltx-2-mlx/env/bin/python3'),
+    path.join(projectRoot, 'ltx-2-mlx/env/bin/python3.11'),
+    path.join(projectRoot, 'ltx-2-mlx/env/bin/python3')
   ];
   for (const cand of envCandidates) {
-    if (cand === 'python3' || fs.existsSync(cand)) {
+    if (fs.existsSync(cand)) {
       return cand;
     }
   }
@@ -82,10 +83,18 @@ function startPythonServerIfNeeded(onReady) {
 
     console.log('Starting Phosphene Python server...');
     startedByUs = true;
-    lastPythonLogs = 'Starting Python server process...\n';
+    lastPythonLogs = `Starting Python server process using ${pythonBin} at ${projectRoot}...\n`;
     if (mainWindow) {
       mainWindow.webContents.send('server-log', lastPythonLogs);
     }
+
+    const pythonPathEnv = [
+      path.join(projectRoot, 'ltx-2-mlx/env/lib/python3.11/site-packages'),
+      '/Users/mk/Phosphene/ltx-2-mlx/env/lib/python3.11/site-packages',
+      '/Users/mk/Phosphene',
+      projectRoot,
+      __dirname
+    ].join(':');
 
     const env = Object.assign({}, process.env, {
       PYTHONUNBUFFERED: '1',
@@ -98,13 +107,13 @@ function startPythonServerIfNeeded(onReady) {
       LTX_HELPER_PYTHON: pythonBin,
       HF_HOME: path.join(projectRoot, 'cache/HF_HOME'),
       PHOSPHENE_SKIP_PREFLIGHT: '1',
-      PYTHONPATH: path.join(projectRoot, 'ltx-2-mlx/env/lib/python3.11/site-packages')
+      PYTHONPATH: pythonPathEnv
     });
 
     try {
       pyProcess = spawn(
         pythonBin,
-        ['mlx_ltx_panel.py'],
+        [scriptPath],
         {
           cwd: projectRoot,
           env: env,
@@ -240,6 +249,7 @@ ipcMain.on('start-download', (event, modelId) => {
 
 ipcMain.on('start-main-app', () => {
   if (mainWindow) {
+    mainWindow.loadFile(path.join(__dirname, 'error.html'));
     startPythonServerIfNeeded(() => {
       mainWindow.loadURL('http://127.0.0.1:8198');
     });
