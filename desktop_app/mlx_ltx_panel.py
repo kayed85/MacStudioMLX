@@ -69579,62 +69579,37 @@ function workflowSwitch(name) {
   // The board poller is the Storyboard tab's only timer and it stops on exit —
   // no new polling loop runs while the tab is closed.
   if (name !== 'storyboard') {
-    if (typeof sbTeardown === 'function') sbTeardown();
+    try { if (typeof sbTeardown === 'function') sbTeardown(); } catch (e) {}
     document.body.classList.remove('sb-full');
   }
-  // LEAVING THE EDITOR IS NOT CLOSING THE DOCUMENT. The storyboard's own
-  // teardown used to take the editor down with it, so glancing at the gallery
-  // threw away the undo stack and the open timeline; you came back to the shot
-  // list. Suspend stops the clock and the picture and keeps everything else —
-  // the document closes when the user closes it, and only then.
-  if (name !== 'editor' && typeof sbeSuspend === 'function') sbeSuspend();
+  if (name !== 'editor') {
+    try { if (typeof sbeSuspend === 'function') sbeSuspend(); } catch (e) {}
+  }
   if (name === 'storyboard') {
-    // Storyboard is a layer ABOVE the video modes, not one of them: it submits
-    // a brief to a planner and its output is a plan, not a clip. Hence a
-    // workflow tab rather than a 6th chip in #modeGroup.
     if (manual) manual.style.display = 'none';
     if (sbTab) sbTab.style.display = 'block';
-    if (typeof sbInit === 'function') sbInit();
+    try { if (typeof sbInit === 'function') sbInit(); } catch (e) {}
   } else if (name === 'studio') {
-    // Studio is its own top-level tab now (was a mode chip inside
-    // Manual). The setMode('image') logic still wires up the studio
-    // pane + portals the LoRA picker into the studio composer; just
-    // hide #genForm + show #studioSection on top of that.
     if (manual) manual.style.display = 'none';
     if (studio) studio.classList.add('show');
-    if (typeof setMode === 'function') setMode('image');
+    try { if (typeof setMode === 'function') setMode('image'); } catch (e) {}
   } else if (name === 'train') {
-    // Train Character is its own workflow tier. Hide the manual render
-    // form, show the train section, run its init.
     if (manual) manual.style.display = 'none';
     if (train) train.classList.add('show');
-    if (typeof trainInit === 'function') trainInit();
+    try { if (typeof trainInit === 'function') trainInit(); } catch (e) {}
   } else if (name === 'audio') {
-    // Audio → Video — own workflow tab. Pure A2V (audio + prompt) and
-    // Image + Audio (audio + still + prompt) both live here, behind a
-    // single drop-zone + optional image picker. Routes to make_job
-    // with mode='a2v'.
     if (manual) manual.style.display = 'none';
     if (audioTab) audioTab.style.display = 'block';
-    if (typeof audioStudioInit === 'function') audioStudioInit();
+    try { if (typeof audioStudioInit === 'function') audioStudioInit(); } catch (e) {}
   } else if (name === 'editor') {
-    // The Editor. Engine-agnostic and board-agnostic: it opens the document
-    // it had open last, and an empty timeline is a legitimate place to stand.
     if (manual) manual.style.display = 'none';
     if (edTab) edTab.style.display = 'flex';
-    if (typeof edInit === 'function') edInit();
+    try { if (typeof edInit === 'function') edInit(); } catch (e) {}
   } else {
     // Manual — show the video form, restore the previous video mode.
     if (manual) manual.style.display = '';
   }
-  // The Ideogram edit canvas belongs to the Images workflow only — re-sync
-  // so leaving suspends it (player/outputs restored) and returning to
-  // Images with Ideogram active brings it back with its boxes intact.
-  if (typeof ideoSyncStage === 'function') ideoSyncStage();
-  // The engine switcher is a Video-form control (each ENGINES row names the
-  // `surfaces` it belongs to). Offering a render engine while the user is in
-  // Images or Train Character would be a choice that changes nothing, so the
-  // switcher and its divider fold away with the form they belong to.
+  try { if (typeof ideoSyncStage === 'function') ideoSyncStage(); } catch (e) {}
   if (typeof renderEngineSwitch === 'function') {
     try { renderEngineSwitch(); } catch (e) {}
   }
