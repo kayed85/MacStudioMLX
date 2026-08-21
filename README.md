@@ -6,11 +6,19 @@
 
 > **Maintained & Enhanced by [@kayed85](https://github.com/kayed85)**  
 > **Optimized for Apple Silicon Macs (MacBook Pro M1 Pro / M1 / M2 / M3 / M4)**  
-> Includes Native macOS `.dmg` Installer, On-Demand Model Hub Downloader, and M1 Pro Performance Enhancements.
+
+<p align="center">
+  <a href="https://github.com/kayed85/Phosphene/releases/latest">
+    <img src="https://img.shields.io/badge/Download_for_Mac-.dmg-6366f1?style=for-the-badge&logo=apple&logoColor=white" alt="Download DMG">
+  </a>
+</p>
+
+### 📥 [Click Here to Download Phosphene Studio for Mac (.dmg)](https://github.com/kayed85/Phosphene/releases/latest)
 
 ---
 
 ## ✨ What's New in This Fork?
+
 
 * **📱 Native macOS App & DMG Installer:** No command line or external browser runners required. Double-click the `.dmg` file to install `Phosphene Studio.app` directly into `/Applications`.
 * **🎛️ Interactive Model Hub (Manager):** Lightweight 120 MB installer. Select and download only the AI models you want (`LTX-Video 2.5 4-bit`, `Gemma 3 4-bit`, `FLUX.2 Edit`, `IC-LoRAs`) directly into your local Mac application data directory.
