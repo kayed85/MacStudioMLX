@@ -38339,27 +38339,17 @@ HTML = r"""<!doctype html>
       body > header #healthCluster > span.pill .dot { margin: 0; }
       body > header #healthCluster > span.pill svg { width: 12px; height: 12px; }
     }
+    body > header .brand {
+      display: inline-flex; align-items: center; gap: 10px; text-decoration: none;
+    }
     body > header .brand img {
-      /* Phosphene brand mark — the rings + wordmark composed as ONE wide
-         banner (1291×392, transparent bg). Replaces the previous setup
-         where the small ring mark (`phosphene_brand.png`) was injected
-         via `content: url()` and the wordmark text was added via
-         `::after` with a CSS gradient. The banner ships both as a
-         single PNG so the gradient + spacing + letterforms are pinned
-         exactly as designed instead of approximated by CSS gradient on
-         a system font. Glow on the whole banner is OK because the PNG
-         has transparent background — drop-shadow only paints where
-         pixels are non-transparent.
-         The natural <img src=""> attribute now wins because nothing
-         overrides it; height controls scale, width auto preserves
-         aspect ratio (banner is ~3.29:1). */
-      height: 80px;
-      width: auto;
-      max-width: 100%;
-      display: block;
-      filter:
-        drop-shadow(0 0 14px rgba(255, 95, 168, 0.55))
-        drop-shadow(0 0 6px rgba(79, 214, 255, 0.35));
+      height: 38px; width: 38px; object-fit: contain; display: block; background: transparent !important; border: none !important;
+      filter: drop-shadow(0 0 8px rgba(90,124,255,0.5));
+    }
+    body > header .brand .brand-title {
+      font-size: 19px; font-weight: 700; color: #f0f4fb; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      letter-spacing: -0.02em; background: linear-gradient(135deg, #ffffff, #58a6ff); -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      white-space: nowrap;
     }
     /* (previous `.brand::after { content: 'Phosphene' }` removed
        2026-05-19 — wordmark text is now baked into the banner PNG so
@@ -39336,7 +39326,10 @@ HTML = r"""<!doctype html>
 </div>
 
 <header>
-  <a href="/" class="brand"><img src="/assets/phosphene_cycle_word_transparent.png" alt="Phosphene"></a>
+  <a href="/" class="brand">
+    <img src="/assets/phosphene_logo_transparent.png" alt="Phosphene Studio">
+    <span class="brand-title">Phosphene Studio</span>
+  </a>
   <!-- The standalone version badge is gone: #versionPill already carries the
        version in EVERY state it can be in — "Up to date · 4.2.0",
        "Update to 4.3.0", "Checking · 4.2.0", "4.2.0 · dev · <sha>",
