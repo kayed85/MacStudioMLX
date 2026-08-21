@@ -10,7 +10,7 @@
     .container { max-width: 750px; margin: 40px auto; background: #131b2e; padding: 32px; border-radius: 16px; border: 1px solid #1e293b; }
     h1 { font-size: 22px; color: #f8fafc; margin-bottom: 12px; }
     p { font-size: 14px; color: #94a3b8; line-height: 1.6; margin-bottom: 24px; }
-    .log-box { background: #090d16; color: #a0aec0; font-family: monospace; font-size: 12px; padding: 16px; border-radius: 8px; text-align: left; max-height: 240px; overflow-y: auto; white-space: pre-wrap; margin-bottom: 24px; user-select: text !important; -webkit-user-select: text !important; border: 1px solid #1e293b; }
+    .log-box { background: #090d16; color: #a0aec0; font-family: monospace; font-size: 12px; padding: 16px; border-radius: 8px; text-align: left; max-height: 260px; overflow-y: auto; white-space: pre-wrap; margin-bottom: 24px; user-select: text !important; -webkit-user-select: text !important; border: 1px solid #1e293b; }
     .btn { background: #3b82f6; color: white; border: none; padding: 12px 28px; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 14px; margin: 0 6px; }
     .btn:hover { background: #2563eb; }
     .btn-secondary { background: #334155; }
@@ -21,7 +21,7 @@
   <div class="container">
     <h1>Phosphene Python Backend Server</h1>
     <p>Starting local Python server process. If loading takes longer than expected, review the diagnostic logs below or retry.</p>
-    <div class="log-box" id="errorLogs">Initializing server check...</div>
+    <div class="log-box" id="errorLogs">Initializing server logs...</div>
     <div>
       <button class="btn" onclick="retry()">Retry Launch</button>
       <button class="btn btn-secondary" onclick="openModelHub()">Model Manager</button>
@@ -43,6 +43,9 @@
       window.location.href = 'model_hub.html';
     }
     ipcRenderer.send('get-server-logs');
+    setInterval(() => {
+      ipcRenderer.send('get-server-logs');
+    }, 1000);
   </script>
 </body>
 </html>

@@ -71,16 +71,22 @@ function checkServerReady(cb, retries = 180) {
 function startPythonServerIfNeeded(onReady) {
   checkServerReady((alreadyRunning) => {
     if (alreadyRunning) {
-      console.log('Phosphene server is already running.');
+      console.log('Phosphene server is already running on port 8198.');
       onReady();
       return;
+    }
+
+    if (mainWindow) {
+      mainWindow.loadFile(path.join(__dirname, 'error.html'));
     }
 
     const scriptPath = path.join(projectRoot, 'mlx_ltx_panel.py');
     if (!fs.existsSync(scriptPath)) {
       console.error(`Cannot find mlx_ltx_panel.py at ${scriptPath}`);
       if (mainWindow) {
-        mainWindow.webContents.send('server-log', `Error: mlx_ltx_panel.py not found at ${scriptPath}`);
+        setTimeout(() => {
+          if (mainWindow) mainWindow.webContents.send('server-log', `Error: mlx_ltx_panel.py not found at ${scriptPath}`);
+        }, 500);
       }
       return;
     }
@@ -89,7 +95,9 @@ function startPythonServerIfNeeded(onReady) {
     startedByUs = true;
     lastPythonLogs = `Starting Python server process using ${pythonBin} at ${projectRoot}...\n`;
     if (mainWindow) {
-      mainWindow.webContents.send('server-log', lastPythonLogs);
+      setTimeout(() => {
+        if (mainWindow) mainWindow.webContents.send('server-log', lastPythonLogs);
+      }, 500);
     }
 
     const pythonPathEnv = [
@@ -189,10 +197,6 @@ function createMainWindow() {
     // Show Model Hub UI immediately
     mainWindow.loadFile(path.join(__dirname, 'model_hub.html'));
   } else {
-    // Show status/error page IMMEDIATELY so window is never blank/black
-    mainWindow.loadFile(path.join(__dirname, 'error.html'));
-    
-    // Boot server and load app
     startPythonServerIfNeeded(() => {
       mainWindow.loadURL('http://127.0.0.1:8198');
     });
@@ -252,7 +256,6 @@ ipcMain.on('start-download', (event, modelId) => {
 
 ipcMain.on('start-main-app', () => {
   if (mainWindow) {
-    mainWindow.loadFile(path.join(__dirname, 'error.html'));
     startPythonServerIfNeeded(() => {
       mainWindow.loadURL('http://127.0.0.1:8198');
     });
