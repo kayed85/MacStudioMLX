@@ -39493,21 +39493,13 @@ HTML = r"""<!doctype html>
          (pick a trained character + scene + ship), Train (train new
          character LoRAs). Default = manual; the choice persists in
          localStorage so the user lands on the same tab next session. -->
-    <nav class="workflow-tabs" id="workflowTabs">
-      <button data-workflow="manual" class="active"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-film-strip"/></svg>Video</button>
-      <button data-workflow="studio"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-image"/></svg>Images</button>
-      <!-- Storyboard sits next to the video surfaces; Audio and Train are the
-           two "go elsewhere and come back" tabs. No NEW badge on purpose —
-           with no film in progress the panel must look exactly as it did
-           yesterday, plus one calm word. The count span is filled only while
-           a storyboard render is actually in flight. -->
-      <button data-workflow="storyboard"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-film-slate"/></svg>Storyboard<span class="new-badge sb-live" id="sbTabCount" hidden></span></button>
-      <!-- The Editor is a PLACE, not a room inside the Storyboard. It opens
-           with no board, on clips from any engine, and it stays open while
-           you go and look at something else. -->
-      <button data-workflow="editor"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-scissors"/></svg>Editor</button>
-      <button data-workflow="audio"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-music-notes"/></svg>Audio<span class="new-badge">NEW</span></button>
-      <button data-workflow="train"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-user-plus"/></svg>Train Character</button>
+    <nav class="workflow-tabs" id="workflowTabs" style="position:relative; z-index:100; pointer-events:auto !important;">
+      <button data-workflow="manual" class="active" onclick="workflowSwitch('manual')"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-film-strip"/></svg>Video</button>
+      <button data-workflow="studio" onclick="workflowSwitch('studio')"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-image"/></svg>Images</button>
+      <button data-workflow="storyboard" onclick="workflowSwitch('storyboard')"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-film-slate"/></svg>Storyboard<span class="new-badge sb-live" id="sbTabCount" hidden></span></button>
+      <button data-workflow="editor" onclick="workflowSwitch('editor')"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-scissors"/></svg>Editor</button>
+      <button data-workflow="audio" onclick="workflowSwitch('audio')"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-music-notes"/></svg>Audio<span class="new-badge">NEW</span></button>
+      <button data-workflow="train" onclick="workflowSwitch('train')"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-user-plus"/></svg>Train Character</button>
     </nav>
     <!-- The original manual form is unchanged; it sits below in the DOM
          and is shown/hidden by JS as the workflow tab toggles. -->
