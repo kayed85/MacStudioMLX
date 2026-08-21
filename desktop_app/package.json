@@ -20,6 +20,7 @@
     "mac": {
       "category": "public.app-category.graphics-design",
       "icon": "icon.icns",
+      "identity": null,
       "target": [
         "dmg"
       ]

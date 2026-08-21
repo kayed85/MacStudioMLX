@@ -53,20 +53,39 @@ class ModelDownloader {
       fs.mkdirSync(targetDir, { recursive: true });
     }
 
-    const script = `
+    const projectRoot = path.resolve(__dirname, '..');
+    const fetchScript = path.join(projectRoot, 'scripts/fetch_pack_release.py');
+
+    let args = [];
+    let cwd = projectRoot;
+
+    // Check if this model key is a GitHub release mirrored pack (like q4_25, q8_25, hq_25)
+    if (['q4_25', 'q8_25', 'hq_25'].includes(model.key) && fs.existsSync(fetchScript)) {
+      args = [fetchScript, '--repo-key', model.key, '--dest', targetDir];
+    } else {
+      // Hugging Face repo download via python snapshot_download
+      const script = `
 import sys
 import os
-from huggingface_hub import snapshot_download
 
 repo_id = sys.argv[1]
 local_dir = sys.argv[2]
-print(f"Starting download of {repo_id} to {local_dir}...")
-snapshot_download(repo_id=repo_id, local_dir=local_dir, resume_download=True)
-print("DOWNLOAD_COMPLETE")
-`;
 
-    const args = ['-c', script, model.repo_id, targetDir];
+print(f"Starting download of {repo_id} to {local_dir}...")
+
+try:
+    from huggingface_hub import snapshot_download
+    snapshot_download(repo_id=repo_id, local_dir=local_dir, resume_download=True)
+    print("DOWNLOAD_COMPLETE")
+except Exception as e:
+    print(f"Hugging Face download failed: {e}", file=sys.stderr)
+    sys.exit(1)
+`;
+      args = ['-c', script, model.repo_id, targetDir];
+    }
+
     this.currentProcess = spawn(this.pythonBin, args, {
+      cwd: cwd,
       env: Object.assign({}, process.env, { HF_HUB_ENABLE_HF_TRANSFER: '1' })
     });
 
@@ -87,7 +106,7 @@ print("DOWNLOAD_COMPLETE")
       if (code === 0) {
         if (onComplete) onComplete(model);
       } else {
-        if (onError) onError(new Error(`Process exited with code ${code}`));
+        if (onError) onError(new Error(`Download process exited with code ${code}`));
       }
     });
   }
