@@ -1,0 +1,399 @@
+{
+  "_comment": "Single source of truth for what counts as a complete install. Read by pinokio.js (sidebar menu), mlx_ltx_panel.py (/status, /models, run-time job validation), and consumed indirectly by install.js + download_q8.js (whose `hf download` calls land files at the local_dir paths listed below). When the upstream model layout changes, edit ONE file.",
+  "_download_include_comment": "Y1.024 — `download_include` is the list of patterns passed as `--include` flags to `hf download`. Without it `hf download` grabs every file in the repo, which on dgrauet's LTX repos means duplicate transformer variants (transformer-distilled.safetensors AND transformer-distilled-1.1.safetensors AND transformer-dev.safetensors), duplicate distilled LoRAs (-384 and -384-1.1), the temporal upscaler we don't wire, and the x1.5 spatial upscaler we don't use — turning a declared 25 GB Q8 download into 82 GB on disk (and a 25 GB Q4 into 56 GB). With `download_include` we pull only what the panel actually loads. Pattern syntax: huggingface_hub fnmatch globs — bare filenames and wildcards both work. We pass `*.json` to keep all sidecar configs (split_model.json etc.) which are tiny and required at runtime.",
+  "capabilities": {
+    "_comment": "CAPABILITY-LEVEL REQUIREMENTS. Before this block, readiness was `kind: \"base\"` plus a handful of hand-written booleans, and 'base' had come to mean two different things: 'this pack is fetched on a fresh install' AND 'the panel cannot render without it'. Those are not the same question, and conflating them is what let a partially-downloaded Gemma 3 -- the LTX-2.3 encoder and the Enhance/planner model, which the active 2.5 generation does not render with -- tell Pinokio the base renderer was incomplete and hide Start. The preview decoder had the identical bug one commit earlier. Each capability names what it actually needs; both consumers (mlx_ltx_panel.py and pinokio.js) read THIS, so they cannot drift apart. `blocking` is the only thing that may hide Start.",
+    "render": {
+      "label": "Render video",
+      "blocking": true,
+      "_comment": "Per generation, because which packs render is exactly what a generation IS. The active version is resolved at runtime by the panel; pinokio.js uses `default_version` since a fresh install boots into it.",
+      "default_version": "ltx25",
+      "repos_by_version": {
+        "ltx25": [
+          "q4_25",
+          "gemma4_25"
+        ],
+        "ltx23": [
+          "q4",
+          "gemma"
+        ]
+      }
+    },
+    "enhance": {
+      "label": "Prompt Enhance and the Storyboard planner",
+      "blocking": false,
+      "_comment": "Gemma 3 runs these WHICHEVER generation renders, which is why it is still fetched on a fresh install -- but a missing or half-downloaded planner model costs you Enhance and the planner, not the renderer.",
+      "repos": [
+        "gemma"
+      ]
+    },
+    "characters": {
+      "label": "Trained characters and voices",
+      "blocking": false,
+      "_comment": "Per generation, for the same reason render is: on 2.3 a trained character renders on ITS q8 pack, not 2.5's. Hardcoding q8_25 told a user pinned back with LTX_MODEL_VERSION=ltx23 to download a pack their generation does not use.",
+      "default_version": "ltx25",
+      "repos_by_version": {
+        "ltx25": [
+          "q8_25"
+        ],
+        "ltx23": [
+          "q8"
+        ]
+      }
+    },
+    "high_tier": {
+      "label": "High tier, FFLF and Extend",
+      "blocking": false,
+      "_comment": "2.3 ships its dev transformer and distilled LoRA INSIDE its own q8 repo and has no add-on at all, so the 2.5 add-on must not be demanded there.",
+      "default_version": "ltx25",
+      "repos_by_version": {
+        "ltx25": [
+          "q8_25",
+          "hq_25"
+        ],
+        "ltx23": [
+          "q8"
+        ]
+      }
+    },
+    "live_preview": {
+      "label": "Live preview",
+      "blocking": false,
+      "_comment": "`engines` scopes the UI notice: the decoder decodes LTX latents, so an H3 or image job missing it is not a fact about that job and must not be announced on it.",
+      "engines": [
+        "ltx"
+      ],
+      "repos": [
+        "tae"
+      ]
+    },
+    "h3": {
+      "label": "Hailuo H3 (second video engine)",
+      "blocking": false,
+      "_comment": "THE COMPONENT LIST BOTH CONSUMERS CHECK. pinokio.js used to call H3 ready on venv + runner + the one big DiT, while the panel additionally required every compact Q8 component and the upstream text config -- so a partial install hid the Install/Repair entry in Pinokio while the panel refused to run H3. `model_roots` are alternatives (either layout is valid, no post-download move is ever needed); everything under `models` is required beneath whichever root carried the DiT.",
+      "paths": [
+        "minimax-h3-mlx/scripts/generate_staged.py"
+      ],
+      "venv_any": [
+        "minimax-h3-mlx/.venv/bin/python3.11",
+        "minimax-h3-mlx/.venv/bin/python"
+      ],
+      "model_roots": [
+        "mlx_models/hailuo-h3/models",
+        "mlx_models/hailuo-h3"
+      ],
+      "models": [
+        "deepbeep-pruned-bf16/MiniMax-H3-FL2VA-pruned_bf16.safetensors",
+        "ddalcu-q8/text_encoder.safetensors",
+        "ddalcu-q8/video_vae.safetensors",
+        "ddalcu-q8/audio_vae.safetensors",
+        "upstream-meta/FL2VA/text_encoder/config.json"
+      ],
+      "_venv_comment": "INTERPRETERS ONLY. `bin/activate` was listed here and Pinokio accepted it, so a broken venv read as ready on one side and not the other. uv creates bin/python as a symlink chain into a shared managed interpreter, and installing another pack can move it -- leaving activate in place beside a dangling python. That is the v3.4.0 'installed other packs and Hailuo H3 vanished' report. Both consumers resolve the symlink (fs.existsSync / Path.exists both follow), so a dangling chain is false."
+    }
+  },
+  "repos": [
+    {
+      "_v40_comment": "kind flipped base -> optional in v4.0. `base` means an install WITHOUT it reads INCOMPLETE, so a fresh 2.5-only install showed the red 'Base models needed before you can render' block and Pinokio offered Resume Install — for a pack nothing renders with. From v4.0 a fresh install fetches 2.5 only and this is a normal in-panel offer, downloaded when the user wants to TRAIN a character. Existing installs that already hold it see no behaviour change: the files are there, the row reads Ready, and Storage still offers to reclaim it.",
+      "key": "q4",
+      "kind": "optional",
+      "name": "LTX-2.3 (previous generation)",
+      "blurb": "Needed to TRAIN a character - the trainer runs against LTX-2.3, not 2.5. Nothing renders on it; your clips come from LTX-2.5 either way.",
+      "repo_id": "dgrauet/ltx-2.3-mlx-q4",
+      "local_dir": "mlx_models/ltx-2.3-mlx-q4",
+      "size_gb": 20.48,
+      "files": [
+        "transformer-distilled.safetensors",
+        "connector.safetensors",
+        "vae_decoder.safetensors",
+        "vae_encoder.safetensors",
+        "audio_vae.safetensors",
+        "vocoder.safetensors",
+        "spatial_upscaler_x2_v1_1.safetensors"
+      ],
+      "download_include": [
+        "*.json",
+        "transformer-distilled.safetensors",
+        "connector.safetensors",
+        "vae_decoder.safetensors",
+        "vae_encoder.safetensors",
+        "audio_vae.safetensors",
+        "vocoder.safetensors",
+        "spatial_upscaler_x2_v1_1.safetensors"
+      ]
+    },
+    {
+      "key": "gemma",
+      "kind": "base",
+      "name": "Gemma 3 12B (4-bit text encoder)",
+      "blurb": "LTX-2.3's text encoder — and what Enhance and the Storyboard planner run on, whichever generation renders.",
+      "repo_id": "mlx-community/gemma-3-12b-it-4bit",
+      "local_dir": "mlx_models/gemma-3-12b-it-4bit",
+      "size_gb": 6,
+      "files": [
+        "config.json",
+        "tokenizer.json",
+        "model-00001-of-00002.safetensors",
+        "model-00002-of-00002.safetensors"
+      ]
+    },
+    {
+      "key": "q8",
+      "kind": "optional",
+      "name": "LTX 2.3 — Q8 (high-quality + FFLF)",
+      "blurb": "The previous generation's high-quality weights. On LTX-2.5 the High tier uses the 2.5 Q8 pack plus the High add-on instead.",
+      "repo_id": "dgrauet/ltx-2.3-mlx-q8",
+      "local_dir": "mlx_models/ltx-2.3-mlx-q8",
+      "size_gb": 37,
+      "files": [
+        "connector.safetensors",
+        "transformer-dev.safetensors",
+        "ltx-2.3-22b-distilled-lora-384.safetensors",
+        "vae_decoder.safetensors",
+        "vae_encoder.safetensors",
+        "audio_vae.safetensors",
+        "vocoder.safetensors",
+        "spatial_upscaler_x2_v1_1.safetensors"
+      ],
+      "download_include": [
+        "*.json",
+        "transformer-dev.safetensors",
+        "connector.safetensors",
+        "ltx-2.3-22b-distilled-lora-384.safetensors",
+        "vae_decoder.safetensors",
+        "vae_encoder.safetensors",
+        "audio_vae.safetensors",
+        "vocoder.safetensors",
+        "spatial_upscaler_x2_v1_1.safetensors"
+      ]
+    },
+    {
+      "key": "ic_colorize",
+      "kind": "optional",
+      "name": "Colorize IC-LoRA (community)",
+      "blurb": "Optional. Powers the Colorize restore mode — adds natural color to a B&W source clip. Un-gated community weights (no HF token).",
+      "repo_id": "DoctorDiffusion/LTX-2.3-IC-LoRA-Colorizer",
+      "local_dir": "mlx_models/loras/ic",
+      "size_gb": 1,
+      "files": [
+        "LTX-2.3-22b-IC-LoRA-Colorizer-0.9.safetensors"
+      ],
+      "file_sizes": {
+        "LTX-2.3-22b-IC-LoRA-Colorizer-0.9.safetensors": 327287384
+      },
+      "download_include": [
+        "LTX-2.3-22b-IC-LoRA-Colorizer-0.9.safetensors"
+      ]
+    },
+    {
+      "_comment": "Ingredients (flagship multi-reference) IC-LoRA. BYTE-IDENTICAL to the gated official Lightricks/LTX-2.3-22b-IC-LoRA-Ingredients (same 1308778338-byte size, sha256 515e4e139001ac6282357a5b35372e42e98b3affd5fcc886a52242abeed19559), mirrored un-gated. WARNING: DeepBeepMeep/LTX-2 is a ~708 GB mega-repo (71 safetensors) — the download_include here pulls ONLY the one ingredients file (1.3 GB), and the worker fallback uses hf_hub_download for the exact filename, NEVER a bare snapshot_download of the whole repo.",
+      "key": "ic_ingredients",
+      "kind": "optional",
+      "name": "Ingredients IC-LoRA",
+      "blurb": "Optional. Powers the Ingredients mode — composes 2-8 reference images (face + prop + location) into one new video. Un-gated mirror of the official weight (no HF token).",
+      "repo_id": "DeepBeepMeep/LTX-2",
+      "local_dir": "mlx_models/loras/ic",
+      "size_gb": 2,
+      "files": [
+        "ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors"
+      ],
+      "file_sizes": {
+        "ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors": 1308778338
+      },
+      "download_include": [
+        "ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors"
+      ]
+    },
+    {
+      "_comment": "Control (Union) IC-LoRA — drives a render's motion/structure/composition from a control video. This is the OFFICIAL Lightricks weight and it is UN-GATED + public (gated:false, single 654465352-byte safetensors), so it downloads token-less exactly like the community Colorizer — NO mrbizarro mirror, NO HF token, NO mega-repo workaround. reference_downscale_factor=2 (the IC encoder halves the control clip; handled in iclora_utils).",
+      "key": "ic_union_control",
+      "kind": "optional",
+      "name": "Control IC-LoRA (Union, official)",
+      "blurb": "Optional. Powers the Control mode — drives motion/structure/composition from a control video. Official un-gated Lightricks weight (no HF token).",
+      "repo_id": "Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control",
+      "local_dir": "mlx_models/loras/ic",
+      "size_gb": 1,
+      "files": [
+        "ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors"
+      ],
+      "file_sizes": {
+        "ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors": 654465352
+      },
+      "download_include": [
+        "ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors"
+      ]
+    },
+    {
+      "_comment": "LTX-2.5 Q4. Built by us (scripts/convert_ltx_mlx.py -> scripts/quantize_ltx.py) from the official Lightricks bf16 release, not by dgrauet. Mirrored through a GitHub release rather than HuggingFace, so deep-verify reads sha256 from the in-pack phosphene_quant_manifest.json (verify_source 'manifest') instead of the HF checksum API — which is why that manifest is listed as a required file. temporal_upscaler and duration_head ship because 2.5 has them and they are tiny; the x1.5 spatial upscaler does not exist for 2.5.",
+      "_mirror_comment": "PUBLISHED 2026-08-12. `repo_id` names a HuggingFace repo that DOES NOT EXIST and never will — our HF token is read-only and this pack is our own quantisation of a gated upstream. It is kept only as the pack's stable identity string (the panel shows it, and `_expected_meta` never calls the HF API for a verify_source 'manifest' pack). The bytes come from the `mirror` block: GitHub release assets, sharded at 1.9 GB because the cap is 2 GiB, fetched + reassembled + sha256-verified by scripts/fetch_pack_release.py. `download_include` is inert on this lane (the release manifest is the allowlist) and is kept only so the entry stays shaped like every other.",
+      "key": "q4_25",
+      "kind": "base",
+      "name": "LTX-2.5 base",
+      "blurb": "The engine. Every render needs it.",
+      "repo_id": "mrbizarro/ltx-2.5-mlx-q4",
+      "local_dir": "mlx_models/ltx-2.5-mlx-q4",
+      "size_gb": 20.74,
+      "mirror": {
+        "kind": "github-release",
+        "release_repo": "mrbizarro/Phosphene",
+        "tag": "weights-ltx25-v1",
+        "manifest_asset": "q4_25__phosphene_release_manifest.json"
+      },
+      "files": [
+        "transformer-distilled.safetensors",
+        "connector.safetensors",
+        "vae_decoder.safetensors",
+        "vae_encoder.safetensors",
+        "audio_vae.safetensors",
+        "vocoder.safetensors",
+        "spatial_upscaler_x2_v1_1.safetensors",
+        "temporal_upscaler_x2_v1_0.safetensors",
+        "duration_head.safetensors",
+        "phosphene_quant_manifest.json"
+      ],
+      "download_include": [
+        "*.json",
+        "transformer-distilled.safetensors",
+        "connector.safetensors",
+        "vae_decoder.safetensors",
+        "vae_encoder.safetensors",
+        "audio_vae.safetensors",
+        "vocoder.safetensors",
+        "spatial_upscaler_x2_v1_1.safetensors",
+        "temporal_upscaler_x2_v1_0.safetensors",
+        "duration_head.safetensors"
+      ]
+    },
+    {
+      "_comment": "LTX-2.5 Q8 - the HQ tier, same relationship to q4_25 that the 2.3 q8 pack has to the 2.3 q4 pack. Built 2026-08-12 by scripts/quantize_ltx.py --bits 8 from the same MLX-layout bf16 transformer the q4 pack came from; 20,595,260,317 B against the 2.3 q8 pack's 20,597,189,549 B, and every byte of the -1,929,232 B difference is 2.5's 96 absent FFN biases (-1,966,080), its one extra keyframe embedding (+8,192) and header growth (+28,656). The eight non-transformer components are sha256-identical to the q4 pack's copies - verified file by file - because quantisation touches only transformer.transformer_blocks.*, exactly as in 2.3. Same GitHub-release mirror lane as q4_25, so verify_source is 'manifest' and phosphene_quant_manifest.json is a required file. 2026-08-12 THIRD PASS, THE SPLIT: transformer-dev.safetensors and ltx-2.5-22b-distilled-lora-450.safetensors were briefly listed HERE (e870061) and now live in the hq_25 add-on entry below. They are not part of this pack - they are a separate, later build (the dev transformer is 42 GB upstream and was still downloading), and listing them here made a pack that is COMPLETE ON DISK both unpublishable and un-installable. The gate e870061 bought by listing them is NOT lost: the panel asks hq_surface_missing(), which unions this pack with the add-on, so High / Extend / Keyframe / A2V still refuse by name. Only the owning download unit changed.",
+      "key": "q8_25",
+      "kind": "optional",
+      "name": "LTX-2.5 Q8 weights",
+      "blurb": "8-bit instead of 4-bit. Needed for trained characters and voices — on the base pack most of a trained face is lost before the first frame. Same speed, more memory.",
+      "repo_id": "mrbizarro/ltx-2.5-mlx-q8",
+      "local_dir": "mlx_models/ltx-2.5-mlx-q8",
+      "size_gb": 30.02,
+      "files": [
+        "transformer-distilled.safetensors",
+        "connector.safetensors",
+        "vae_decoder.safetensors",
+        "vae_encoder.safetensors",
+        "audio_vae.safetensors",
+        "vocoder.safetensors",
+        "spatial_upscaler_x2_v1_1.safetensors",
+        "temporal_upscaler_x2_v1_0.safetensors",
+        "duration_head.safetensors",
+        "phosphene_quant_manifest.json"
+      ],
+      "download_include": [
+        "*.json",
+        "transformer-distilled.safetensors",
+        "connector.safetensors",
+        "vae_decoder.safetensors",
+        "vae_encoder.safetensors",
+        "audio_vae.safetensors",
+        "vocoder.safetensors",
+        "spatial_upscaler_x2_v1_1.safetensors",
+        "temporal_upscaler_x2_v1_0.safetensors",
+        "duration_head.safetensors"
+      ],
+      "mirror": {
+        "kind": "github-release",
+        "release_repo": "mrbizarro/Phosphene",
+        "tag": "weights-ltx25-v1",
+        "manifest_asset": "q8_25__phosphene_release_manifest.json"
+      }
+    },
+    {
+      "_comment": "LTX-2.5 HQ add-on - the two-stage HQ FEATURE surface, not a model pack. High, Extend, Keyframe and A2V reach past model_dir and load these two files BY NAME; the panel names them per generation via MODEL_VERSIONS[...]['hq_weights'], because the number in the LoRA filename is its alpha/rank (2.3 ships 384, 2.5 ships 450) and the names are NOT interchangeable between generations. WHY A SEPARATE ENTRY AND NOT PART OF q8_25: it is a separate build that finishes later, and a download unit has to be publishable the moment its bytes exist. Folding these into q8_25 held a complete 20.6 GB pack hostage to a 42 GB download. WHY local_dir IS THE q8 DIRECTORY: these files are loaded out of the q8 pack BY NAME, so they must land beside it. Two entries, one directory, deliberately - the entry is a download unit, not a directory. MIRROR BLOCK LANDED 2026-08-12, in the same commit as the assets - the rule this entry was written to demonstrate. The dev transformer (20,595,256,595 B, ltx-dit q8) and the LoRA (8,899,889,568 B, verbatim bf16) are published to weights-ltx25-v1 and both carry sha256 rows in the in-pack phosphene_quant_manifest.json, so deep-verify (verify_source 'manifest') can check them. publish_scope 'files' keeps this add-on from claiming the q8 pack's sidecars.",
+      "key": "hq_25",
+      "kind": "optional",
+      "name": "LTX-2.5 High add-on",
+      "blurb": "Unlocks the High tier, Extend and Keyframes. Installs into the Q8 folder, so it needs Q8 first.",
+      "repo_id": "mrbizarro/ltx-2.5-mlx-hq",
+      "local_dir": "mlx_models/ltx-2.5-mlx-q8",
+      "size_gb": 29.5,
+      "publish_scope": "files",
+      "mirror": {
+        "kind": "github-release",
+        "release_repo": "mrbizarro/Phosphene",
+        "tag": "weights-ltx25-v1",
+        "manifest_asset": "hq_25__phosphene_release_manifest.json"
+      },
+      "files": [
+        "transformer-dev.safetensors",
+        "ltx-2.5-22b-distilled-lora-450.safetensors"
+      ],
+      "download_include": [
+        "transformer-dev.safetensors",
+        "ltx-2.5-22b-distilled-lora-450.safetensors"
+      ]
+    },
+    {
+      "_comment": "LTX-2.5's text encoder is NOT the stock Gemma 3 the 2.3 pack uses: it is a custom Gemma 4 12B fine-tune declaring model_type gemma4_unified, and the DiT's dual text projection was moved out of connector.safetensors and into it (we route that back into the connector at conversion time). Falling back to Gemma 3 would load, run, and quietly encode wrongly, so the loader refuses instead.",
+      "key": "gemma4_25",
+      "kind": "base",
+      "name": "LTX-2.5 text encoder (Gemma 4)",
+      "blurb": "Reads your prompt. LTX-2.5 will not run on 2.3's encoder.",
+      "repo_id": "mrbizarro/gemma4-12b-ltx25-q4",
+      "local_dir": "mlx_models/gemma4-12b-ltx25-q4",
+      "size_gb": 6.73,
+      "mirror": {
+        "kind": "github-release",
+        "release_repo": "mrbizarro/Phosphene",
+        "tag": "weights-ltx25-v1",
+        "manifest_asset": "gemma4_25__phosphene_release_manifest.json"
+      },
+      "files": [
+        "config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "model.safetensors.index.json",
+        "model-00001-of-00001.safetensors"
+      ],
+      "download_include": [
+        "*.json",
+        "*.jinja",
+        "model-*.safetensors"
+      ]
+    },
+    {
+      "_comment": "The tiny decoder behind LIVE PREVIEW. 22.4 MiB, MIT, ungated, from github.com/madebyollin/taehv (taeltx2_3.safetensors, 23,531,296 B, sha256 f0773b4e…be246 — verified byte count and hash before publishing). It turns the x0 estimate the denoise loop ALREADY HOLDS into a thumbnail, so nothing is recomputed and a render with the preview on is byte-identical to the same render with it off.",
+      "_mirror_comment": "Mirrored onto the SAME release as the 2.5 packs rather than fetched from raw.githubusercontent at render time, so it rides the ordinary lane: files[] + download_include[], one manifest format, sha256-verified and resumable by scripts/fetch_pack_release.py, and no new fetch-lane code. `repo_id` names the upstream for attribution; the bytes come from the mirror block.",
+      "_kind_comment": "NOT `base`, and marking it base cost a user their panel. `kind: base` is the gate for CAN THIS MACHINE RENDER AT ALL: pinokio.js hides Start behind it and the panel raises the red 'Base models needed before you can render' block over everything. A missing 22 MB PREVIEW decoder is none of those things - the renderer never loads it, live_preview_enabled() returns False and every render proceeds normally. Marked base, its absence reported a working install as unable to render, permanently, as '(1 files left)', with no way to clear it but a download the user had no idea they needed. Both fetch lanes name it explicitly (--repo-key tae in scripts/pinokio/ltx25_weights.sh and scripts/post_update.sh), so `optional` costs nothing on install or update; it only stops the panel lying about what is broken.",
+      "key": "tae",
+      "kind": "optional",
+      "name": "Live-preview decoder",
+      "blurb": "22 MB. Draws the shot as it forms, so a wrong take can be stopped in seconds instead of minutes.",
+      "repo_id": "madebyollin/taehv",
+      "local_dir": "mlx_models/tae",
+      "size_gb": 0.02,
+      "mirror": {
+        "kind": "github-release",
+        "release_repo": "mrbizarro/Phosphene",
+        "tag": "weights-ltx25-v1",
+        "manifest_asset": "tae__phosphene_release_manifest.json"
+      },
+      "files": [
+        "taeltx2_3.safetensors",
+        "LICENSE-taehv"
+      ],
+      "download_include": [
+        "taeltx2_3.safetensors",
+        "LICENSE-taehv"
+      ]
+    }
+  ],
+  "env": {
+    "_comment": "Marker that the venv exists. SHIP-BLOCKER history: we used to point at `bin/python3.11` but uv creates that as a symlink chain (python3.11 -> python -> ~/pinokio/cache/.../uv/python/.../python3.11). Pinokio's info.exists() check returned false on that chain, so the menu rendered Install instead of Start even after a complete install — confirmed by cocktailpeanut. Use `pyvenv.cfg` instead: it's a tiny ASCII file uv writes to every venv root, never a symlink, never moves. `bin/activate` is the same kind of plain file; we keep it as a secondary check. The bin/python3.11 entries stay last as a final fallback for older installs.",
+    "marker_paths": [
+      "ltx-2-mlx/env/pyvenv.cfg",
+      "ltx-2-mlx/.venv/pyvenv.cfg",
+      "ltx-2-mlx/env/bin/activate",
+      "ltx-2-mlx/.venv/bin/activate",
+      "ltx-2-mlx/env/bin/python3.11",
+      "ltx-2-mlx/.venv/bin/python3.11"
+    ]
+  },
+  "min_size_bytes": 1024
+}

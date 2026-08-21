@@ -54,7 +54,10 @@ class ModelDownloader {
     }
 
     const projectRoot = path.resolve(__dirname, '..');
-    let fetchScript = path.join(projectRoot, 'scripts/fetch_pack_release.py');
+    const fetchScript = fs.existsSync(path.join(__dirname, 'scripts/fetch_pack_release.py'))
+      ? path.join(__dirname, 'scripts/fetch_pack_release.py')
+      : path.join(projectRoot, 'scripts/fetch_pack_release.py');
+
     let hfDownloaderScript = path.join(__dirname, 'hf_downloader.py');
 
     if (hfDownloaderScript.includes('app.asar')) {
@@ -65,7 +68,7 @@ class ModelDownloader {
     }
 
     let args = [];
-    let cwd = projectRoot;
+    let cwd = __dirname;
 
     // Check if this model key is a GitHub release mirrored pack (like q4_25, q8_25, hq_25)
     if (['q4_25', 'q8_25', 'hq_25'].includes(model.key) && fs.existsSync(fetchScript)) {

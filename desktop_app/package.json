@@ -51,7 +51,9 @@
       "models_manifest.json",
       "model_hub.html",
       "icon.png",
-      "icon.icns"
+      "icon.icns",
+      "required_files.json",
+      "scripts/**/*"
     ]
   }
 }
