@@ -99,7 +99,18 @@ function startPythonServerIfNeeded(onReady) {
       '/Users/mk/Phosphene'
     ].join(':');
 
+    const extendedPath = [
+      '/opt/homebrew/bin',
+      '/usr/local/bin',
+      '/usr/bin',
+      '/bin',
+      '/usr/sbin',
+      '/sbin',
+      path.join(app.getPath('home'), '.local/bin')
+    ].join(':');
+
     const env = Object.assign({}, process.env, {
+      PATH: process.env.PATH ? `${process.env.PATH}:${extendedPath}` : extendedPath,
       PYTHONUNBUFFERED: '1',
       LTX_TIER_OVERRIDE: 'base',
       LTX_MODEL: path.join(defaultModelsDir, 'ltx-2.3-mlx-q4'),
@@ -139,6 +150,22 @@ function startPythonServerIfNeeded(onReady) {
         lastPythonLogs += msg;
         if (mainWindow) {
           mainWindow.webContents.send('server-log', lastPythonLogs);
+        }
+      });
+
+      pyProcess.on('error', (err) => {
+        lastPythonLogs += `\n[Process Error]: ${err.message}`;
+        if (mainWindow) {
+          mainWindow.webContents.send('server-log', lastPythonLogs);
+        }
+      });
+
+      pyProcess.on('exit', (code, signal) => {
+        if (code !== 0 && code !== null) {
+          lastPythonLogs += `\n[Process Exited]: Code ${code}, Signal ${signal}`;
+          if (mainWindow) {
+            mainWindow.webContents.send('server-log', lastPythonLogs);
+          }
         }
       });
     } catch (err) {
@@ -250,7 +277,6 @@ ipcMain.on('start-download', (event, modelId) => {
 
 ipcMain.on('start-main-app', () => {
   if (mainWindow) {
-    // Immediately transition to loading page so user has 0ms feedback
     mainWindow.loadFile(path.join(__dirname, 'error.html'));
     startPythonServerIfNeeded(() => {
       mainWindow.loadURL('http://127.0.0.1:8198');
