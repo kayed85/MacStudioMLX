@@ -29597,6 +29597,9 @@ HTML = r"""<!doctype html>
       --t-slow: 240ms cubic-bezier(.2,.8,.2,1);
     }
     * { box-sizing: border-box; }
+    header, nav, .workflow-tabs, #workflowTabs, #workflowTabs button, button, select, input, textarea, a, label, .icon-btn, .btn, .card, .chip, .chip-group, aside, main {
+      -webkit-app-region: no-drag !important;
+    }
     html, body { margin: 0; height: 100%; }
 
     /* Phase 0 a11y floor —
