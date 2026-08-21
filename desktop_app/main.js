@@ -9,22 +9,49 @@ let mainWindow = null;
 let pyProcess = null;
 let startedByUs = false;
 
-// Resolve directories dynamically
-const projectRoot = path.resolve(__dirname, '..');
+// Robustly resolve project root and python environment
+function getPhospheneRoot() {
+  const candidates = [
+    __dirname,
+    path.resolve(__dirname, '..'),
+    '/Users/mk/Phosphene',
+    path.join(app.getPath('home'), 'Phosphene')
+  ];
+  for (const cand of candidates) {
+    if (fs.existsSync(path.join(cand, 'mlx_ltx_panel.py'))) {
+      return cand;
+    }
+  }
+  return __dirname;
+}
+
+const projectRoot = getPhospheneRoot();
+
 const defaultModelsDir = fs.existsSync(path.join(projectRoot, 'mlx_models'))
   ? path.join(projectRoot, 'mlx_models')
   : path.join(app.getPath('userData'), 'mlx_models');
 
-const pythonBin = fs.existsSync(path.join(projectRoot, 'ltx-2-mlx/env/bin/python3.11'))
-  ? path.join(projectRoot, 'ltx-2-mlx/env/bin/python3.11')
-  : (fs.existsSync(path.join(projectRoot, 'ltx-2-mlx/env/bin/python3'))
-    ? path.join(projectRoot, 'ltx-2-mlx/env/bin/python3')
-    : 'python3');
+function getPythonBin() {
+  const envCandidates = [
+    path.join(projectRoot, 'ltx-2-mlx/env/bin/python3.11'),
+    '/Users/mk/Phosphene/ltx-2-mlx/env/bin/python3.11',
+    path.join(projectRoot, 'ltx-2-mlx/env/bin/python3'),
+    '/Users/mk/Phosphene/ltx-2-mlx/env/bin/python3',
+    'python3'
+  ];
+  for (const cand of envCandidates) {
+    if (cand === 'python3' || fs.existsSync(cand)) {
+      return cand;
+    }
+  }
+  return 'python3';
+}
 
+const pythonBin = getPythonBin();
 const manifestPath = path.join(__dirname, 'models_manifest.json');
 const downloader = new ModelDownloader(defaultModelsDir, manifestPath, pythonBin);
 
-function checkServerReady(cb, retries = 30) {
+function checkServerReady(cb, retries = 40) {
   http.get('http://127.0.0.1:8198', (res) => {
     cb(true);
   }).on('error', () => {
@@ -41,6 +68,16 @@ function startPythonServerIfNeeded(onReady) {
     if (alreadyRunning) {
       console.log('Phosphene server is already running.');
       onReady();
+      return;
+    }
+
+    const scriptPath = path.join(projectRoot, 'mlx_ltx_panel.py');
+    if (!fs.existsSync(scriptPath)) {
+      console.error(`Cannot find mlx_ltx_panel.py at ${scriptPath}`);
+      if (mainWindow) {
+        mainWindow.loadFile(path.join(__dirname, 'error.html'));
+        mainWindow.webContents.send('server-log', `Error: mlx_ltx_panel.py not found at ${scriptPath}`);
+      }
       return;
     }
 
@@ -70,12 +107,18 @@ function startPythonServerIfNeeded(onReady) {
       }
     );
 
+    if (mainWindow) {
+      mainWindow.loadFile(path.join(__dirname, 'error.html'));
+    }
+
     checkServerReady((ready) => {
       if (ready) {
         onReady();
       } else {
-        console.error('Failed to start Python server in time.');
-        onReady();
+        console.error('Server boot timeout.');
+        if (mainWindow) {
+          mainWindow.webContents.send('server-log', 'Server boot timeout. Make sure Python dependencies (mlx, fastapi, gradio) are installed.');
+        }
       }
     });
   });

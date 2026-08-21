@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Phosphene Studio - Server Status</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { background-color: #0b0f19; color: #e2e8f0; padding: 40px; text-align: center; }
+    .container { max-width: 650px; margin: 60px auto; background: #131b2e; padding: 32px; border-radius: 16px; border: 1px solid #1e293b; }
+    h1 { font-size: 22px; color: #f8fafc; margin-bottom: 12px; }
+    p { font-size: 14px; color: #94a3b8; line-height: 1.6; margin-bottom: 24px; }
+    .log-box { background: #090d16; color: #f87171; font-family: monospace; font-size: 12px; padding: 16px; border-radius: 8px; text-align: left; max-height: 160px; overflow-y: auto; white-space: pre-wrap; margin-bottom: 24px; }
+    .btn { background: #3b82f6; color: white; border: none; padding: 12px 28px; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 14px; }
+    .btn:hover { background: #2563eb; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Phosphene Python Server Initializing...</h1>
+    <p>The Phosphene Python backend server is starting up or taking a moment to load model weights. If it doesn't open automatically, click Retry below.</p>
+    <div class="log-box" id="errorLogs">Checking local Phosphene server on http://127.0.0.1:8198...</div>
+    <button class="btn" onclick="retry()">Retry Launch</button>
+  </div>
+  <script>
+    const { ipcRenderer } = require('electron');
+    ipcRenderer.on('server-log', (event, log) => {
+      document.getElementById('errorLogs').innerText = log;
+    });
+    function retry() {
+      ipcRenderer.send('start-main-app');
+    }
+  </script>
+</body>
+</html>

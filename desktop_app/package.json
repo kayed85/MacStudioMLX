@@ -50,10 +50,13 @@
       "hf_downloader.py",
       "models_manifest.json",
       "model_hub.html",
+      "error.html",
       "icon.png",
       "icon.icns",
       "required_files.json",
-      "scripts/**/*"
+      "*.py",
+      "scripts/**/*",
+      "lora_lab/**/*"
     ]
   }
 }
