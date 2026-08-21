@@ -52,6 +52,26 @@ function getPythonBin() {
   return 'python3';
 }
 
+function getDyldLibraryPath() {
+  const uvBase = path.join(app.getPath('home'), '.local/share/uv/python');
+  let libPaths = [];
+  try {
+    if (fs.existsSync(uvBase)) {
+      const dirs = fs.readdirSync(uvBase);
+      for (const d of dirs) {
+        const libDir = path.join(uvBase, d, 'lib');
+        if (fs.existsSync(libDir)) {
+          libPaths.push(libDir);
+        }
+      }
+    }
+  } catch (e) {}
+  if (process.env.DYLD_LIBRARY_PATH) {
+    libPaths.push(process.env.DYLD_LIBRARY_PATH);
+  }
+  return libPaths.join(':');
+}
+
 const pythonBin = getPythonBin();
 const manifestPath = path.join(__dirname, 'models_manifest.json');
 const downloader = new ModelDownloader(defaultModelsDir, manifestPath, pythonBin);
@@ -111,6 +131,7 @@ function startPythonServerIfNeeded(onReady) {
 
     const env = Object.assign({}, process.env, {
       PATH: process.env.PATH ? `${process.env.PATH}:${extendedPath}` : extendedPath,
+      DYLD_LIBRARY_PATH: getDyldLibraryPath(),
       PYTHONUNBUFFERED: '1',
       LTX_TIER_OVERRIDE: 'base',
       LTX_MODEL: path.join(defaultModelsDir, 'ltx-2.3-mlx-q4'),
