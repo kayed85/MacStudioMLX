@@ -14,15 +14,20 @@ function getPhospheneRoot() {
   const candidates = [
     '/Users/mk/Phosphene',
     path.join(app.getPath('home'), 'Phosphene'),
-    __dirname,
-    path.resolve(__dirname, '..')
+    path.resolve(__dirname, '..'),
+    __dirname
   ];
+  for (const cand of candidates) {
+    if (fs.existsSync(path.join(cand, 'mlx_ltx_panel.py')) && fs.existsSync(path.join(cand, 'ltx-2-mlx/env/bin/python3.11'))) {
+      return cand;
+    }
+  }
   for (const cand of candidates) {
     if (fs.existsSync(path.join(cand, 'mlx_ltx_panel.py'))) {
       return cand;
     }
   }
-  return __dirname;
+  return '/Users/mk/Phosphene';
 }
 
 const projectRoot = getPhospheneRoot();
@@ -33,12 +38,11 @@ const defaultModelsDir = fs.existsSync(path.join(projectRoot, 'mlx_models'))
 
 function getPythonBin() {
   const envCandidates = [
-    '/Users/mk/Phosphene/ltx-2-mlx/env/bin/python3.11',
-    '/Users/mk/Phosphene/ltx-2-mlx/env/bin/python3',
-    path.join(app.getPath('home'), 'Phosphene/ltx-2-mlx/env/bin/python3.11'),
-    path.join(app.getPath('home'), 'Phosphene/ltx-2-mlx/env/bin/python3'),
     path.join(projectRoot, 'ltx-2-mlx/env/bin/python3.11'),
-    path.join(projectRoot, 'ltx-2-mlx/env/bin/python3')
+    '/Users/mk/Phosphene/ltx-2-mlx/env/bin/python3.11',
+    path.join(projectRoot, 'ltx-2-mlx/env/bin/python3'),
+    '/Users/mk/Phosphene/ltx-2-mlx/env/bin/python3',
+    path.join(app.getPath('home'), 'Phosphene/ltx-2-mlx/env/bin/python3.11')
   ];
   for (const cand of envCandidates) {
     if (fs.existsSync(cand)) {
@@ -91,9 +95,8 @@ function startPythonServerIfNeeded(onReady) {
     const pythonPathEnv = [
       path.join(projectRoot, 'ltx-2-mlx/env/lib/python3.11/site-packages'),
       '/Users/mk/Phosphene/ltx-2-mlx/env/lib/python3.11/site-packages',
-      '/Users/mk/Phosphene',
       projectRoot,
-      __dirname
+      '/Users/mk/Phosphene'
     ].join(':');
 
     const env = Object.assign({}, process.env, {
