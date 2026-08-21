@@ -51862,16 +51862,16 @@ function _setOfflineBanner(visible, msg) {
       bar.id = 'panelOfflineBanner';
       bar.className = 'panel-offline-banner';
       bar.innerHTML =
-        '<span class="icon"><img src="/assets/favicon-64.png" alt=""></span>' +
-        '<span class="label">Phosphene offline</span>' +
+        '<span class="icon"><img src="/assets/phosphene_logo_transparent.png" alt=""></span>' +
+        '<span class="label">Phosphene Studio offline</span>' +
         '<span class="text"></span>' +
-        '<span class="hint">restart from Pinokio</span>';
+        '<span class="hint">reconnecting automatically...</span>';
       document.body.appendChild(bar);
     }
     bar.classList.remove('reconnected');
-    bar.querySelector('.label').textContent = 'Phosphene offline';
+    bar.querySelector('.label').textContent = 'Phosphene Studio offline';
     bar.querySelector('.text').textContent = text;
-    bar.querySelector('.hint').textContent = 'restart from Pinokio';
+    bar.querySelector('.hint').textContent = 'reconnecting automatically...';
     const entry = `${new Date().toLocaleTimeString()} offline · ${text}`;
     window._panelBannerLog.push(entry);
     if (window._panelBannerLog.length > 8) window._panelBannerLog.shift();
