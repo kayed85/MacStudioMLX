@@ -3,54 +3,103 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Phosphene Studio - Server Status</title>
+  <title>Phosphene Studio - Live Console</title>
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-    body { background-color: #0b0f19; color: #e2e8f0; padding: 40px; text-align: center; }
-    .container { max-width: 750px; margin: 40px auto; background: #131b2e; padding: 32px; border-radius: 16px; border: 1px solid #1e293b; }
-    .spinner { width: 36px; height: 36px; border: 3px solid #1e293b; border-top-color: #3b82f6; border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 16px auto; }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace; }
+    body { background-color: #080c14; color: #e2e8f0; padding: 30px; text-align: center; height: 100vh; display: flex; flex-direction: column; justify-content: center; align-items: center; }
+    .container { width: 100%; max-width: 900px; background: #0f172a; padding: 28px; border-radius: 16px; border: 1px solid #1e293b; box-shadow: 0 20px 40px rgba(0,0,0,0.6); display: flex; flex-direction: column; }
+    .header-bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; text-align: left; }
+    .status-title { display: flex; align-items: center; gap: 12px; }
+    .spinner { width: 24px; height: 24px; border: 3px solid #1e293b; border-top-color: #38bdf8; border-radius: 50%; animation: spin 0.8s linear infinite; }
     @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-    h1 { font-size: 22px; color: #f8fafc; margin-bottom: 12px; }
-    p { font-size: 14px; color: #94a3b8; line-height: 1.6; margin-bottom: 24px; }
-    .log-box { background: #090d16; color: #a0aec0; font-family: monospace; font-size: 12px; padding: 16px; border-radius: 8px; text-align: left; max-height: 260px; overflow-y: auto; white-space: pre-wrap; margin-bottom: 24px; user-select: text !important; -webkit-user-select: text !important; border: 1px solid #1e293b; }
-    .btn { background: #3b82f6; color: white; border: none; padding: 12px 28px; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 14px; margin: 0 6px; }
+    h1 { font-size: 20px; color: #f8fafc; font-weight: 600; }
+    p.sub { font-size: 13px; color: #64748b; margin-top: 2px; }
+    
+    /* Terminal Console Window */
+    .terminal-window { background: #030712; border-radius: 12px; border: 1px solid #1f2937; text-align: left; overflow: hidden; display: flex; flex-direction: column; margin-bottom: 20px; }
+    .terminal-header { background: #111827; padding: 10px 16px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #1f2937; }
+    .dots { display: flex; gap: 8px; }
+    .dot { width: 12px; height: 12px; border-radius: 50%; }
+    .dot.red { background: #ef4444; }
+    .dot.yellow { background: #f59e0b; }
+    .dot.green { background: #10b981; }
+    .terminal-title { font-family: "SF Mono", monospace; font-size: 12px; color: #9ca3af; }
+    
+    .terminal-body { padding: 16px; height: 320px; overflow-y: auto; font-family: "JetBrains Mono", "SF Mono", Menlo, monospace; font-size: 13px; line-height: 1.6; color: #4ade80; white-space: pre-wrap; word-break: break-word; user-select: text !important; -webkit-user-select: text !important; }
+    .terminal-body .log-line { margin-bottom: 4px; }
+    .terminal-body .err { color: #f87171; }
+    .terminal-body .info { color: #38bdf8; }
+    .terminal-body .success { color: #4ade80; font-weight: bold; }
+    
+    .controls { display: flex; justify-content: flex-end; gap: 12px; }
+    .btn { background: #3b82f6; color: white; border: none; padding: 10px 22px; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 13px; transition: all 0.2s ease; }
     .btn:hover { background: #2563eb; }
-    .btn-secondary { background: #334155; }
-    .btn-secondary:hover { background: #475569; }
+    .btn-sec { background: #1e293b; color: #94a3b8; }
+    .btn-sec:hover { background: #334155; color: #f8fafc; }
   </style>
 </head>
 <body>
   <div class="container">
-    <div class="spinner"></div>
-    <h1>Starting Phosphene Engine...</h1>
-    <p>Initializing local Python backend server on port 8198. Studio will open automatically as soon as ready.</p>
-    <div class="log-box" id="errorLogs">Starting Python server process...</div>
-    <div>
+    <div class="header-bar">
+      <div class="status-title">
+        <div class="spinner"></div>
+        <div>
+          <h1>Starting Phosphene Python Engine...</h1>
+          <p class="sub">Local server loading on Apple Silicon. App will launch automatically as soon as ready.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="terminal-window">
+      <div class="terminal-header">
+        <div class="dots">
+          <div class="dot red"></div>
+          <div class="dot yellow"></div>
+          <div class="dot green"></div>
+        </div>
+        <div class="terminal-title">bash — Phosphene Python Process Live Output (Port 8198)</div>
+      </div>
+      <div class="terminal-body" id="termBody">
+[00:00:00] 🚀 Initializing Phosphene Studio Python Environment...
+[00:00:01] 🐍 Loading Apple Silicon MLX & Metal Shaders...
+[00:00:02] ⚙️ Binding HTTP Server on 127.0.0.1:8198...
+      </div>
+    </div>
+
+    <div class="controls">
+      <button class="btn btn-sec" onclick="openModelHub()">Model Manager</button>
       <button class="btn" onclick="retry()">Retry Launch</button>
-      <button class="btn btn-secondary" onclick="openModelHub()">Model Manager</button>
     </div>
   </div>
+
   <script>
     const { ipcRenderer } = require('electron');
+    const termBody = document.getElementById('termBody');
+
+    function appendLog(text) {
+      if (!text) return;
+      termBody.innerText = text;
+      termBody.scrollTop = termBody.scrollHeight;
+    }
+
     ipcRenderer.on('server-log', (event, log) => {
-      if (log) {
-        const box = document.getElementById('errorLogs');
-        box.innerText = log;
-        box.scrollTop = box.scrollHeight;
-      }
+      appendLog(log);
     });
+
     function retry() {
-      document.getElementById('errorLogs').innerText = 'Retrying launch...';
+      appendLog('Retrying launch...\n');
       ipcRenderer.send('start-main-app');
     }
+
     function openModelHub() {
       ipcRenderer.send('get-models-status');
       window.location.href = 'model_hub.html';
     }
+
     ipcRenderer.send('get-server-logs');
     setInterval(() => {
       ipcRenderer.send('get-server-logs');
-    }, 1000);
+    }, 500);
   </script>
 </body>
 </html>
