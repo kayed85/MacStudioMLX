@@ -2,20 +2,25 @@
   <img src="assets/phosphene_banner.png" alt="Phosphene" width="100%">
 </p>
 
-<p align="center">
-  <strong>Generative video, image, and character training on your Mac.</strong><br>
-  MLX. No PyTorch, no CUDA, no cloud, no API key.<br>
-  <a href="https://x.com/PhospheneAI">@PhospheneAI</a> on X · <a href="https://github.com/mrbizarro/phosphene">github.com/mrbizarro/phosphene</a>
-</p>
+# 🚀 Phosphene Studio - Native macOS Desktop Edition
 
-<p align="center">
-<img width="1920" height="993" alt="image" src="https://github.com/user-attachments/assets/0c504d54-1666-4a64-8872-7d471682c8f0" />
+> **Maintained & Enhanced by [@kayed85](https://github.com/kayed85)**  
+> **Optimized for Apple Silicon Macs (MacBook Pro M1 Pro / M1 / M2 / M3 / M4)**  
+> Includes Native macOS `.dmg` Installer, On-Demand Model Hub Downloader, and M1 Pro Performance Enhancements.
 
-</p>
+---
 
-> **Current release: v4.1.1.** **The forming take loops, and a render-killing crash is fixed.** The live preview already decoded a window of frames on every publish and kept only one of them; it keeps them all now and plays an animated loop, so a forming render moves instead of standing still — same decode, same cost. v4.1.1 fixes the `SIGABRT` crash that killed every render on some Apple silicon: the automatic Metal-watchdog retry existed and was correct, but macOS names that kill differently by chip, and we matched only one of the names ([#59](https://github.com/mrbizarro/phosphene/issues/59), root-caused by @ybekocak). Recent releases also brought H3 portrait/vertical renders, the H3 live preview, Anchor/Inspire reference modes on LTX-2.5, and per-machine analytics. Full notes on the [releases page](https://github.com/mrbizarro/phosphene/releases).
+## ✨ What's New in This Fork?
+
+* **📱 Native macOS App & DMG Installer:** No command line or external browser runners required. Double-click the `.dmg` file to install `Phosphene Studio.app` directly into `/Applications`.
+* **🎛️ Interactive Model Hub (Manager):** Lightweight 120 MB installer. Select and download only the AI models you want (`LTX-Video 2.5 4-bit`, `Gemma 3 4-bit`, `FLUX.2 Edit`, `IC-LoRAs`) directly into your local Mac application data directory.
+* **💻 Tailored for MacBook Pro M1 Pro (16GB RAM+):** Pre-tuned low-memory precision profiles and TeaCache acceleration for high-speed local generation on M1 Pro chips.
+* **🎨 Custom macOS Futuristic Icon:** High-resolution 3D Apple squircle app icon.
+
+---
 
 ## Overview
+
 
 Phosphene is a local generative-media panel for Apple Silicon. It runs **two video engines as peers** — [LTX-Video 2.5](https://github.com/Lightricks/LTX-Video) (MLX port) and [Hailuo H3](https://github.com/MiniMax-AI) (MiniMax-H3 FL2VA) — both doing joint audio-and-video synthesis, plus [Qwen-Image-Edit-2509](https://huggingface.co/Qwen/Qwen-Image-Edit-2509) (with a Lightning 4-step fast tier) for stills, and an in-panel LoRA training pipeline for character identity (face + voice from a single dataset). Everything runs on-device: no cloud, no API keys, and no prompt, image, video or filename ever leaves your Mac. It does send anonymous usage counts (version, hardware class, render stats) — every field is listed in [docs/ANALYTICS.md](docs/ANALYTICS.md), and one click in Settings turns it off.
 
