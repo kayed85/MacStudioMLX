@@ -147,7 +147,7 @@ If you have a Hugging Face token, paste it under **Settings** in the panel. Down
 
 ```bash
 # 1. Clone Phosphene + the MLX port (pinned to our LTX-2.5 fork build).
-git clone https://github.com/mrbizarro/phosphene.git
+git clone https://github.com/kayed85/Phosphene.git
 cd phosphene
 git clone https://github.com/dgrauet/ltx-2-mlx.git ltx-2-mlx
 cd ltx-2-mlx
@@ -295,7 +295,7 @@ Phosphene is free and open source.
 
 - Follow [@PhospheneAI](https://x.com/PhospheneAI) on X for releases and clips
 - Patreon: https://www.patreon.com/PhospheneAI
-- Issues and PRs: https://github.com/mrbizarro/phosphene
+- Issues and PRs: https://github.com/kayed85/Phosphene
 
 ## Network note
 
