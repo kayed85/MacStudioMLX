@@ -142,11 +142,22 @@ ROOT = Path(__file__).resolve().parent
 # anything twice. LTX_STORYBOARD_PLANNER is the escape hatch for pointing at Qwen3.5 (or
 # anything else mlx-lm can load) without touching this file.
 MODELS_DIR = Path(os.environ.get("LTX_MODELS_DIR", str(ROOT / "mlx_models")))
-DEFAULT_MODEL_PATH = Path(
-    os.environ.get("LTX_STORYBOARD_PLANNER")
-    or os.environ.get("LTX_GEMMA_PATH")
-    or (MODELS_DIR / "gemma-3-12b-it-4bit")
-)
+def _resolve_default_model_path() -> Path:
+    env_path = os.environ.get("LTX_STORYBOARD_PLANNER") or os.environ.get("LTX_GEMMA_PATH")
+    if env_path:
+        return Path(env_path)
+    candidates = [
+        MODELS_DIR / "gemma-3-12b-it-4bit",
+        ROOT / "mlx_models" / "gemma-3-12b-it-4bit",
+        MODELS_DIR / "gemma4-12b-ltx25-q4",
+        ROOT / "mlx_models" / "gemma4-12b-ltx25-q4",
+    ]
+    for cand in candidates:
+        if cand.exists():
+            return cand
+    return MODELS_DIR / "gemma-3-12b-it-4bit"
+
+DEFAULT_MODEL_PATH = _resolve_default_model_path()
 
 # The child needs mlx + mlx_lm; the panel's own interpreter may not have them (it is 3.9).
 # Same resolution order as the panel's _resolve_helper_python().
