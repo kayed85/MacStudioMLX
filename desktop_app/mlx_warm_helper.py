@@ -1584,7 +1584,11 @@ def get_gemma_lm():
         target_path = ENHANCE_GEMMA_PATH
         if target_path.startswith("/") and not os.path.exists(target_path):
             candidates = [
-                str(MODELS_DIR / "gemma-3-12b-it-4bit")
+                os.environ.get("LTX_GEMMA"),
+                str(MODELS_DIR / "gemma-3-12b-it-4bit"),
+                str(MODELS_DIR.parent / "mlx_models" / "gemma-3-12b-it-4bit"),
+                str(MODELS_DIR / "gemma4-12b-ltx25-q4"),
+                str(MODELS_DIR.parent / "mlx_models" / "gemma4-12b-ltx25-q4"),
             ]
             found = False
             for cand in candidates:
@@ -1593,7 +1597,7 @@ def get_gemma_lm():
                     found = True
                     break
             if not found:
-                target_path = "mlx-community/gemma-3-12b-it-4bit"
+                target_path = "mrbizarro/gemma4-12b-ltx25-q4"
         with _pipe_lock:
             # Free any active pipeline first — Gemma is ~6 GB, the dev
             # transformer is ~12-19 GB, having both resident risks pushing

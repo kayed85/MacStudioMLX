@@ -218,7 +218,7 @@ HELPER_LOW_MEMORY = os.environ.get("LTX_HELPER_LOW_MEMORY", "true")
 # run for tens of minutes. Bound its helper wait below the UI/curl client's
 # 120-second ceiling so a silent helper still produces a JSON error response.
 PROMPT_ENHANCE_TIMEOUT = max(
-    1.0, float(os.environ.get("LTX_PROMPT_ENHANCE_TIMEOUT", "90") or 90)
+    1.0, float(os.environ.get("LTX_PROMPT_ENHANCE_TIMEOUT", "300") or 300)
 )
 FPS = 24
 
@@ -12203,11 +12203,21 @@ class WarmHelper:
             # timeout loading Gemma 4 and then close with no response body.
             enhance_path = str(GEMMA)
             if not os.path.exists(enhance_path):
-                gemma3_local = str(MODELS_DIR / "gemma-3-12b-it-4bit")
-                if os.path.exists(gemma3_local):
-                    enhance_path = gemma3_local
-                else:
-                    enhance_path = "mlx-community/gemma-3-12b-it-4bit"
+                candidates = [
+                    os.environ.get("LTX_GEMMA"),
+                    str(MODELS_DIR / "gemma-3-12b-it-4bit"),
+                    str(MODELS_DIR.parent / "mlx_models" / "gemma-3-12b-it-4bit"),
+                    str(MODELS_DIR / "gemma4-12b-ltx25-q4"),
+                    str(MODELS_DIR.parent / "mlx_models" / "gemma4-12b-ltx25-q4"),
+                ]
+                found = False
+                for cand in candidates:
+                    if cand and os.path.exists(cand):
+                        enhance_path = cand
+                        found = True
+                        break
+                if not found:
+                    enhance_path = "mrbizarro/gemma4-12b-ltx25-q4"
             env["LTX_ENHANCE_GEMMA"] = enhance_path
             env["LTX_IDLE_TIMEOUT"] = str(HELPER_IDLE_TIMEOUT)
             env["LTX_LOW_MEMORY"] = HELPER_LOW_MEMORY
