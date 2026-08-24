@@ -1581,13 +1581,26 @@ def get_gemma_lm():
     if _gemma_lm is None:
         from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
         emit({"event": "log", "line": "Loading Gemma language model for prompt enhancement (~10-15s)…"})
+        target_path = ENHANCE_GEMMA_PATH
+        if target_path.startswith("/") and not os.path.exists(target_path):
+            candidates = [
+                str(MODELS_DIR / "gemma-3-12b-it-4bit")
+            ]
+            found = False
+            for cand in candidates:
+                if cand and os.path.exists(cand):
+                    target_path = cand
+                    found = True
+                    break
+            if not found:
+                target_path = "mlx-community/gemma-3-12b-it-4bit"
         with _pipe_lock:
             # Free any active pipeline first — Gemma is ~6 GB, the dev
             # transformer is ~12-19 GB, having both resident risks pushing
             # us past 64 GB on standard tier.
             release_pipelines(keep_kind=None)
             _gemma_lm = GemmaLanguageModel()
-            _gemma_lm.load(ENHANCE_GEMMA_PATH)
+            _gemma_lm.load(target_path)
         emit({"event": "log", "line": "Gemma loaded — subsequent enhances will be fast."})
     return _gemma_lm
 

@@ -12203,11 +12203,11 @@ class WarmHelper:
             # timeout loading Gemma 4 and then close with no response body.
             enhance_path = str(GEMMA)
             if not os.path.exists(enhance_path):
-                te_25 = str(MODELS_DIR / "gemma4-12b-ltx25-q4")
-                if os.path.exists(te_25):
-                    enhance_path = te_25
+                gemma3_local = str(MODELS_DIR / "gemma-3-12b-it-4bit")
+                if os.path.exists(gemma3_local):
+                    enhance_path = gemma3_local
                 else:
-                    enhance_path = "mrbizarro/gemma4-12b-ltx25-q4"
+                    enhance_path = "mlx-community/gemma-3-12b-it-4bit"
             env["LTX_ENHANCE_GEMMA"] = enhance_path
             env["LTX_IDLE_TIMEOUT"] = str(HELPER_IDLE_TIMEOUT)
             env["LTX_LOW_MEMORY"] = HELPER_LOW_MEMORY
