@@ -669,32 +669,86 @@ def _normalize_multiref_prompt(p: str, width: int = 0, height: int = 0) -> str:
     for pat, repl in replacements:
         res = re.sub(pat, repl, res)
 
-    # Append aspect & orientation preservation directive for reference editing
-    # Prevents Qwen-Edit / Flux2-Edit from distorting or reshaping products to match the canvas orientation
+    # Convert Eastern Arabic digits (٠-٩) to Western (0-9) for dimension parsing
+    digits_map = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+    norm_p = res.translate(digits_map)
+
+    # Detect physical dimensions (e.g. 15cm height x 5cm width / طولها 15 سم وعرضها 5 سم)
+    h_val, w_val, unit = None, None, "cm"
+    ar_h_m = re.search(r"(?:طول|ارتفاع)(?:ها|ه)?\s*[:=]?\s*(\d+(?:\.\d+)?)\s*(سم|ملم|متر|cm|mm|m)?", norm_p, re.IGNORECASE)
+    ar_w_m = re.search(r"(?:عرض)(?:ها|ه)?\s*[:=]?\s*(\d+(?:\.\d+)?)\s*(سم|ملم|متر|cm|mm|m)?", norm_p, re.IGNORECASE)
+
+    if ar_h_m and ar_w_m:
+        try:
+            h_val = float(ar_h_m.group(1))
+            w_val = float(ar_w_m.group(1))
+            unit = ar_h_m.group(2) or ar_w_m.group(2) or "cm"
+        except (ValueError, TypeError):
+            pass
+    else:
+        en_h_m = re.search(r"(\d+(?:\.\d+)?)\s*(cm|mm|m|inches|inch|\")?\s*(?:height|tall|long)", norm_p, re.IGNORECASE) or \
+                 re.search(r"(?:height|tall|long)\s*[:=]?\s*(\d+(?:\.\d+)?)\s*(cm|mm|m|inches|inch|\")?", norm_p, re.IGNORECASE)
+        en_w_m = re.search(r"(\d+(?:\.\d+)?)\s*(cm|mm|m|inches|inch|\")?\s*(?:width|wide)", norm_p, re.IGNORECASE) or \
+                 re.search(r"(?:width|wide)\s*[:=]?\s*(\d+(?:\.\d+)?)\s*(cm|mm|m|inches|inch|\")?", norm_p, re.IGNORECASE)
+        if en_h_m and en_w_m:
+            try:
+                h_val = float(en_h_m.group(1))
+                w_val = float(en_w_m.group(1))
+                unit = en_h_m.group(2) or en_w_m.group(2) or "cm"
+            except (ValueError, TypeError):
+                pass
+
+    dim_rule = ""
+    if h_val and w_val and h_val > 0 and w_val > 0:
+        ratio = round(h_val / w_val, 2)
+        if ratio >= 1.2:
+            shape_desc = f"tall, slender vertical object with {ratio:g}:1 height-to-width proportions"
+        elif ratio <= 0.83:
+            inv_ratio = round(w_val / h_val, 2)
+            shape_desc = f"wide, low-profile horizontal object with {inv_ratio:g}:1 width-to-height proportions"
+        else:
+            shape_desc = "symmetrical cube-like object with balanced 1:1 proportions"
+
+        dim_rule = (
+            f"Product physical dimensions are specified as height: {h_val:g}{unit}, width: {w_val:g}{unit} "
+            f"(physical aspect ratio {ratio:g}:1). Render the product as a {shape_desc}. "
+            "Do not distort or stretch these specified physical proportions."
+        )
+
+    # Append aspect & orientation preservation directive for reference editing and text generation
+    # Prevents FLUX.2 Klein / Qwen-Edit / Flux2-Edit from distorting or reshaping products to match canvas orientation (e.g. 16:9 widescreen YouTube format)
     if width > 0 and height > 0:
         if height > width:
             # Vertical / Reel format (e.g. 9:16)
             rule = (
-                "Preserve exact natural proportions, shape, and aspect ratio of the product/subject "
-                "from reference image(s). Do not stretch, warp, or deform the product vertically to fill "
-                "the tall 9:16 frame. Render the product with correct original proportions centered vertically."
+                "Preserve exact natural physical proportions, height-to-width ratio, and correct scale of the product or subject. "
+                "Do not stretch, squeeze, warp, or deform the product vertically to fill the tall 9:16 frame. "
+                "Render the product with correct natural un-distorted scale and original proportions centered vertically."
             )
         elif width > height:
             # Horizontal / YouTube format (e.g. 16:9)
             rule = (
-                "Preserve exact natural proportions, shape, and aspect ratio of the product/subject "
-                "from reference image(s). Do not stretch, warp, or deform the product horizontally to fill "
-                "the wide 16:9 frame. Render the product with correct original proportions centered horizontally."
+                "Preserve exact natural physical proportions, height-to-width ratio, and correct scale of the product or subject. "
+                "Do not stretch, flatten, warp, or widen the product horizontally to fill the wide 16:9 frame (do not make the product shorter and wider). "
+                "Render the product with correct un-distorted vertical height and natural proportions centered horizontally with balanced framing."
             )
         else:
             # Square (1:1)
             rule = (
-                "Preserve exact natural proportions, shape, and aspect ratio of the product/subject "
-                "from reference image(s). Do not stretch, warp, or deform the product to fit the square frame."
+                "Preserve exact natural physical proportions, height-to-width ratio, and correct scale of the product or subject. "
+                "Do not stretch, warp, or deform the product to fit the square frame."
             )
+
+        if dim_rule:
+            rule = f"{dim_rule} {rule}"
 
         if "proportions" not in res.lower() and "aspect ratio" not in res.lower() and "stretch" not in res.lower():
             res = f"{res}\n\n[Composition Rule: {rule}]"
+        elif dim_rule and "Product physical dimensions" not in res:
+            res = f"{res}\n\n[Product Dimension Rule: {dim_rule}]"
+
+    elif dim_rule and "Product physical dimensions" not in res:
+        res = f"{res}\n\n[Product Dimension Rule: {dim_rule}]"
 
     return res
 
@@ -770,8 +824,9 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
             "text-only generation."
         )
 
-    if refs and fam in ("qwen_edit", "flux2_edit"):
-        prompt = _normalize_multiref_prompt(prompt, width=width, height=height)
+    # Normalize prompt aspect ratio & composition preservation for FLUX.2 Klein,
+    # FLUX.2 Edit, Qwen Edit, and all mflux generations to prevent product flattening/widening in 16:9
+    prompt = _normalize_multiref_prompt(prompt, width=width, height=height)
 
     # Effective steps + guidance: prefer user-set values if non-zero,
     # otherwise fall back to the family default.
