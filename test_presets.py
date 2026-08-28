@@ -25,5 +25,21 @@ class TestPresets(unittest.TestCase):
         self.assertIn("drone", P.CAMERA_MOTION_PRESETS)
         self.assertIn("anime_ghibli", P.VISUAL_STYLE_PRESETS)
 
+    def test_parse_comfyui_workflow(self):
+        sample_graph = {
+            "3": {
+                "class_type": "KSampler",
+                "inputs": {"seed": 424242, "steps": 12}
+            },
+            "6": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": "Cyberpunk warrior in neon rain"}
+            }
+        }
+        res = P.parse_comfyui_workflow(sample_graph)
+        self.assertEqual(res["seed"], 424242)
+        self.assertEqual(res["steps"], 12)
+        self.assertEqual(res["prompt"], "Cyberpunk warrior in neon rain")
+
 if __name__ == "__main__":
     unittest.main()

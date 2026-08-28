@@ -16970,6 +16970,69 @@ def _safe_float(raw, default: float = 0.0, *,
     return val
 
 
+def parse_comfyui_workflow(data: dict) -> dict:
+    result = {
+        "prompt": "",
+        "negative_prompt": "",
+        "seed": -1,
+        "steps": 8,
+        "width": 1280,
+        "height": 704,
+        "frames": 121,
+        "loras": []
+    }
+    if isinstance(data, dict):
+        if "nodes" in data and isinstance(data["nodes"], list):
+            for n in data["nodes"]:
+                if isinstance(n, dict) and "type" in n and "widgets_values" in n:
+                    ntype = str(n.get("type", "")).lower()
+                    vals = n.get("widgets_values", [])
+                    if "cliptextencode" in ntype or "prompt" in ntype:
+                        for v in vals:
+                            if isinstance(v, str) and len(v) > 2:
+                                if not result["prompt"]:
+                                    result["prompt"] = v
+                                elif not result["negative_prompt"]:
+                                    result["negative_prompt"] = v
+                    elif "ksampler" in ntype or "ltxsampler" in ntype:
+                        for v in vals:
+                            if isinstance(v, int) and v > 1000:
+                                result["seed"] = v
+                            elif isinstance(v, int) and 1 <= v <= 100:
+                                result["steps"] = v
+        else:
+            for nid, n in data.items():
+                if isinstance(n, dict) and "class_type" in n:
+                    ctype = str(n.get("class_type", "")).lower()
+                    inputs = n.get("inputs", {})
+                    if isinstance(inputs, dict):
+                        if "text" in inputs and isinstance(inputs["text"], str):
+                            txt = inputs["text"].strip()
+                            if txt:
+                                if not result["prompt"]:
+                                    result["prompt"] = txt
+                                elif not result["negative_prompt"]:
+                                    result["negative_prompt"] = txt
+                        if "seed" in inputs and isinstance(inputs["seed"], (int, float)):
+                            result["seed"] = int(inputs["seed"])
+                        if "steps" in inputs and isinstance(inputs["steps"], (int, float)):
+                            result["steps"] = int(inputs["steps"])
+                        if "width" in inputs and isinstance(inputs["width"], (int, float)):
+                            result["width"] = int(inputs["width"])
+                        if "height" in inputs and isinstance(inputs["height"], (int, float)):
+                            result["height"] = int(inputs["height"])
+                        if "frame_count" in inputs or "length" in inputs or "frames" in inputs:
+                            f = inputs.get("frame_count") or inputs.get("length") or inputs.get("frames")
+                            if isinstance(f, (int, float)):
+                                result["frames"] = int(f)
+                        if "lora_name" in inputs and isinstance(inputs["lora_name"], str):
+                            result["loras"].append({
+                                "name": inputs["lora_name"],
+                                "strength": inputs.get("strength_model", 1.0)
+                            })
+    return result
+
+
 def make_job(form: dict[str, list[str]] | dict[str, str], *,
              override_prompt: str | None = None) -> dict:
     def f(name: str, default: str = "") -> str:
@@ -28662,6 +28725,21 @@ class Handler(BaseHTTPRequestHandler):
                 }
             ]
             return self._json({"ok": True, "concept": concept, "shots": shots})
+
+        if path == "/workflow/parse_comfyui":
+            raw_json = (form.get("json_str", [""])[0] if isinstance(form.get("json_str"), list) else form.get("json_str", "")).strip()
+            if not raw_json and isinstance(form, dict) and "json_data" in form:
+                data = form["json_data"]
+            elif raw_json:
+                try:
+                    data = json.loads(raw_json)
+                except Exception as exc:
+                    return self._json({"ok": False, "error": f"invalid JSON: {exc}"}, 400)
+            else:
+                data = form if isinstance(form, dict) else {}
+
+            parsed = parse_comfyui_workflow(data)
+            return self._json({"ok": True, "params": parsed})
 
         if path == "/settings":
             # Accept partial-patch updates: only the fields the user
