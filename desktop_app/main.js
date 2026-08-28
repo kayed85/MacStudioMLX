@@ -12,6 +12,8 @@ let lastPythonLogs = '';
 
 function getPhospheneRoot() {
   const candidates = [
+    '/Users/mk/MacStudioMLX',
+    path.join(app.getPath('home'), 'MacStudioMLX'),
     '/Users/mk/Phosphene',
     path.join(app.getPath('home'), 'Phosphene'),
     path.resolve(__dirname, '..'),
@@ -27,7 +29,7 @@ function getPhospheneRoot() {
       return cand;
     }
   }
-  return '/Users/mk/Phosphene';
+  return '/Users/mk/MacStudioMLX';
 }
 
 const projectRoot = getPhospheneRoot();

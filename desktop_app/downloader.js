@@ -22,16 +22,28 @@ class ModelDownloader {
   }
 
   getModelsStatus() {
+    const home = process.env.HOME || '/Users/mk';
     return this.manifest.models.map(model => {
-      const targetPath = path.join(this.modelsDir, model.local_dir.replace(/^mlx_models\/?/, ''));
+      const relDir = model.local_dir.replace(/^mlx_models\/?/, '');
+      const candidates = [
+        path.join(this.modelsDir, relDir),
+        path.join('/Users/mk/MacStudioMLX/mlx_models', relDir),
+        path.join(home, 'Library/Application Support/macstudio-mlx/mlx_models', relDir),
+        path.join(home, 'Library/Application Support/phosphene-studio/mlx_models', relDir)
+      ];
       let isDownloaded = false;
-      try {
-        if (fs.existsSync(targetPath)) {
-          const files = fs.readdirSync(targetPath);
-          isDownloaded = files.length > 0;
-        }
-      } catch (e) {
-        isDownloaded = false;
+      let targetPath = candidates[0];
+      for (const cand of candidates) {
+        try {
+          if (fs.existsSync(cand)) {
+            const files = fs.readdirSync(cand);
+            if (files.length > 0) {
+              isDownloaded = true;
+              targetPath = cand;
+              break;
+            }
+          }
+        } catch (e) {}
       }
       return {
         ...model,
