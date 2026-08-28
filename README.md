@@ -8,12 +8,12 @@
 > **Optimized for Apple Silicon Macs (MacBook Pro M1 Pro / M1 / M2 / M3 / M4)**  
 
 <p align="center">
-  <a href="https://github.com/kayed85/Phosphene/releases/latest">
+  <a href="https://github.com/kayed85/MacStudioMLX/releases/latest">
     <img src="https://img.shields.io/badge/Download_for_Mac-.dmg-6366f1?style=for-the-badge&logo=apple&logoColor=white" alt="Download DMG">
   </a>
 </p>
 
-### 📥 [Click Here to Download Phosphene Studio for Mac (.dmg)](https://github.com/kayed85/Phosphene/releases/latest)
+### 📥 [Click Here to Download Phosphene Studio for Mac (.dmg)](https://github.com/kayed85/MacStudioMLX/releases/latest)
 
 ---
 
@@ -147,7 +147,7 @@ If you have a Hugging Face token, paste it under **Settings** in the panel. Down
 
 ```bash
 # 1. Clone Phosphene + the MLX port (pinned to our LTX-2.5 fork build).
-git clone https://github.com/kayed85/Phosphene.git
+git clone https://github.com/kayed85/MacStudioMLX.git
 cd phosphene
 git clone https://github.com/dgrauet/ltx-2-mlx.git ltx-2-mlx
 cd ltx-2-mlx
@@ -295,7 +295,7 @@ Phosphene is free and open source.
 
 - Follow [@PhospheneAI](https://x.com/PhospheneAI) on X for releases and clips
 - Patreon: https://www.patreon.com/PhospheneAI
-- Issues and PRs: https://github.com/kayed85/Phosphene
+- Issues and PRs: https://github.com/kayed85/MacStudioMLX
 
 ## Network note
 
