@@ -22549,6 +22549,38 @@ class Handler(BaseHTTPRequestHandler):
             try: self.wfile.write(html)
             except (BrokenPipeError, ConnectionResetError): pass
             return
+        if parsed.path == "/system/recommended_models":
+            ram = SYSTEM_RAM_GB
+            tier = SYSTEM_TIER
+            if ram < 24:
+                rec = {
+                    "ram_gb": round(ram, 1),
+                    "tier": tier,
+                    "recommended_ltx": "q4",
+                    "recommended_h3": "q4_compact",
+                    "badge_text": "⭐ Recommended for 16GB RAM",
+                    "description": "16 GB Unified Memory detected. Q4 Distilled & H3 Compact Tiers are optimal for high speed and zero swap memory overhead."
+                }
+            elif ram < 48:
+                rec = {
+                    "ram_gb": round(ram, 1),
+                    "tier": tier,
+                    "recommended_ltx": "q4",
+                    "recommended_h3": "q8",
+                    "badge_text": "⭐ Recommended for 32GB RAM",
+                    "description": "32 GB Unified Memory detected. Q4 Fast / Q8 Balanced tiers are recommended."
+                }
+            else:
+                rec = {
+                    "ram_gb": round(ram, 1),
+                    "tier": tier,
+                    "recommended_ltx": "q8",
+                    "recommended_h3": "bf16",
+                    "badge_text": "⭐ Recommended for 64GB+ RAM",
+                    "description": "64+ GB Unified Memory detected. High Precision Q8 & Full BF16 tiers recommended."
+                }
+            return self._json({"ok": True, "system": rec})
+
         if parsed.path == "/stats/data":
             try:
                 body = STATS_DATA_FILE.read_bytes()

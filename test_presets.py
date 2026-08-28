@@ -41,5 +41,10 @@ class TestPresets(unittest.TestCase):
         self.assertEqual(res["steps"], 12)
         self.assertEqual(res["prompt"], "Cyberpunk warrior in neon rain")
 
+    def test_system_ram_detection(self):
+        ram = P.SYSTEM_RAM_GB
+        self.assertGreater(ram, 0.0)
+        self.assertIn(P.SYSTEM_TIER, ("base", "standard", "high", "pro"))
+
 if __name__ == "__main__":
     unittest.main()
