@@ -59827,7 +59827,7 @@ function renderVersionPill() {
     const v = s.pull_pulled_to_version || s.pull_pulled_to_short || 'the new code';
     pill.title = s.pull_requires_full_update
       ? `Pulled ${v}. This update touched dependencies — use Pinokio's Update button (not just Stop+Start).`
-      : `Pulled ${v}. Click Stop → Start in Pinokio to apply.`;
+      : `Pulled ${v}. Restart MacStudio MLX to apply.`;
     return;
   }
   // Same restart affordance for a checkout that advanced UNDER this
@@ -60348,8 +60348,8 @@ async function versionDoPull(opts) {
   if (!opts.skipConfirm) {
     const ok = confirm(
       `Pull update from ${local} → ${target}?\n\n` +
-      `This runs git pull on your phosphene install. After it succeeds, ` +
-      `you'll need to click Stop, then Start in Pinokio to load the new code. ` +
+      `This runs git pull on your MacStudio MLX install. After it succeeds, ` +
+      `you'll need to restart MacStudio MLX to load the new code. ` +
       `Your queue and settings are preserved across restarts.`
     );
     if (!ok) return;
@@ -60390,7 +60390,7 @@ async function versionDoPull(opts) {
         && _ubRestartState(newVersion, !!(data.state && data.state.pull_requires_full_update))) {
       // handled inline
     } else {
-      alert(`Pulled to ${newVersion}.\n\nClick Stop, then Start in Pinokio to apply.${fullUpdateNote}`);
+      alert(`Pulled to ${newVersion}.\n\nRestart MacStudio MLX to apply.${fullUpdateNote}`);
     }
   } catch (e) {
     pill.classList.remove('pill-busy');
