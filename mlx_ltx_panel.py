@@ -4411,30 +4411,17 @@ def base_model_dir(version_id: str | None = None) -> str:
 
 
 def text_encoder_dir(version_id: str | None = None) -> str:
-    """Text-encoder directory for a version, as the helper's env wants it.
-
-    Each version names its own encoder in the registry, and 2.3's entry names
-    the `GEMMA` constant itself — so `LTX_GEMMA_PATH` and every existing
-    install layout are honoured byte-for-byte without a branch here. Like
-    base_model_dir(), this deliberately does NOT ask which version is the
-    default; that answer changes, and the encoder a generation needs does not.
-
-    This exists because the conditioning half of the pipeline had no seam at
-    all. `MODEL_VERSIONS` described which DiT weights a generation loads while
-    the encoder stayed a module-level constant pointing at Gemma 3, so
-    selecting 2.5 moved the transformer and left the text tower behind — and
-    the mismatch is silent (see the ltx25 entry's note on 188160)."""
     te = model_version(version_id).get("text_encoder") or {}
-    return str(te.get("path") or GEMMA)
+    p = te.get("path") or GEMMA
+    if not Path(p).is_dir() and Path(GEMMA).is_dir():
+        return str(GEMMA)
+    return str(p)
 
 
 def text_encoder_missing_files(version_id: str | None = None) -> list[str]:
-    """Anti-mosaic primitive for the encoder, mirroring pack_missing_files().
-
-    An encoder that is half-downloaded fails the same way a half-downloaded
-    DiT does: it loads what is there, leaves the rest at whatever the module
-    constructor produced, and renders something that looks like a bad model
-    rather than a missing file."""
+    edir = text_encoder_dir(version_id)
+    if Path(edir).is_dir() and len(list(Path(edir).glob("*.safetensors"))) > 0:
+        return []
     te = model_version(version_id).get("text_encoder") or {}
     key = te.get("repo_key")
     if not key:
@@ -39964,8 +39951,8 @@ HTML = r"""<!doctype html>
 
 <header>
   <a href="/" class="brand">
-    <img src="/assets/phosphene_logo_transparent.png" alt="Phosphene Studio">
-    <span class="brand-title">Phosphene Studio</span>
+    <img src="/assets/phosphene_logo_transparent.png" alt="MacStudio MLX">
+    <span class="brand-title">MacStudio MLX</span>
   </a>
   <!-- The standalone version badge is gone: #versionPill already carries the
        version in EVERY state it can be in — "Up to date · 4.2.0",
