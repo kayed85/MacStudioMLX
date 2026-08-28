@@ -17033,6 +17033,51 @@ def parse_comfyui_workflow(data: dict) -> dict:
     return result
 
 
+def stitch_storyboard_videos(video_paths: list[str]) -> dict:
+    """Stitches multiple video files into a single seamless movie using ffmpeg."""
+    valid_paths = [p for p in video_paths if isinstance(p, str) and Path(p).is_file()]
+    if not valid_paths:
+        raise ValueError("No valid video files provided for stitching")
+
+    out_dir = OUTPUT
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = int(time.time() * 1000)
+    out_file = out_dir / f"storyboard_film_{stamp}.mp4"
+
+    list_file = out_dir / f"concat_{stamp}.txt"
+    with open(list_file, "w", encoding="utf-8") as f:
+        for vp in valid_paths:
+            f.write(f"file '{Path(vp).resolve()}'\n")
+
+    cmd = [
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+        "-i", str(list_file), "-c", "copy", str(out_file)
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if list_file.is_file():
+        try:
+            list_file.unlink()
+        except OSError:
+            pass
+
+    if res.returncode != 0:
+        re_cmd = [
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+            "-i", str(list_file), "-c:v", "libx264", "-c:a", "aac", str(out_file)
+        ]
+        res = subprocess.run(re_cmd, capture_output=True, text=True, timeout=180)
+
+    if not out_file.is_file():
+        raise RuntimeError(f"FFmpeg movie stitching failed: {res.stderr}")
+
+    return {
+        "ok": True,
+        "film_path": str(out_file),
+        "film_url": f"/file?path={quote(str(out_file))}",
+        "num_shots": len(valid_paths)
+    }
+
+
 def build_storyboard_script(concept: str, num_shots: int = 4, character_name: str = "", product_name: str = "") -> list[dict]:
     """Generates a structured multi-shot storyboard script with character & product consistency."""
     num_shots = max(2, min(12, int(num_shots or 4)))
@@ -28835,6 +28880,22 @@ class Handler(BaseHTTPRequestHandler):
 
             shots = build_storyboard_script(concept, num_shots=n, character_name=character_name, product_name=product_name)
             return self._json({"ok": True, "concept": concept, "num_shots": n, "character": character_name, "product": product_name, "shots": shots})
+
+        if path == "/storyboard/stitch":
+            vraw = (form.get("video_paths", [""])[0] if isinstance(form.get("video_paths"), list) else form.get("video_paths", "")).strip()
+            vlist = []
+            if vraw:
+                try:
+                    vlist = json.loads(vraw)
+                except Exception:
+                    vlist = [p.strip() for p in vraw.split(",") if p.strip()]
+            if not vlist:
+                return self._json({"ok": False, "error": "video_paths is required"}, 400)
+            try:
+                res = stitch_storyboard_videos(vlist)
+                return self._json(res)
+            except Exception as exc:
+                return self._json({"ok": False, "error": str(exc)}, 500)
 
         if path == "/workflow/parse_comfyui":
             raw_json = (form.get("json_str", [""])[0] if isinstance(form.get("json_str"), list) else form.get("json_str", "")).strip()

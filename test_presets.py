@@ -72,5 +72,9 @@ class TestPresets(unittest.TestCase):
         self.assertEqual(shots[0]["shot"], 1)
         self.assertEqual(shots[5]["shot"], 6)
 
+    def test_stitch_storyboard_videos_validation(self):
+        with self.assertRaises(ValueError):
+            P.stitch_storyboard_videos([])
+
 if __name__ == "__main__":
     unittest.main()
