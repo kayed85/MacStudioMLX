@@ -30162,8 +30162,8 @@ def page() -> str:
             .replace("__SEQS__", SEQ_NOUN_PL)
             .replace("__SEQ__", SEQ_NOUN)
             .replace("<title>Phosphene</title>",
-                     "<title>Phosphene TEST</title>" if is_test
-                     else "<title>Phosphene</title>")
+                     "<title>MacStudio MLX TEST</title>" if is_test
+                     else "<title>MacStudio MLX</title>")
             .replace("__BOOTSTRAP__", bootstrap)
             .replace("__PROFILE_BADGE__", profile_badge)
             .replace("__Q8_CHARACTER_INSTALL_COPY__",
@@ -30189,7 +30189,7 @@ HTML = r"""<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Phosphene</title>
+  <title>MacStudio MLX</title>
   <!-- The build this PROCESS is serving, not the one in the working tree.
        Server-rendered, so it answers before a byte of JS runs and survives
        a page saved to disk. See build_stamp_text(). -->
