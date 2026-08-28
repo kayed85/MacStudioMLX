@@ -8144,6 +8144,64 @@ LTX_QUALITIES: dict[str, dict] = _ltx_qualities()
 LTX_LENGTHS: dict[str, dict] = _ltx_lengths()
 LTX_QUALITY_DEFAULT = "balanced"
 LTX_LENGTH_DEFAULT = "5s"
+
+CAMERA_MOTION_PRESETS = {
+    "off": {"label": "None", "prompt_suffix": ""},
+    "zoom_in": {"label": "Push In (Zoom In)", "prompt_suffix": ", smooth camera push in towards the subject, cinematic slow zoom"},
+    "zoom_out": {"label": "Pull Out (Zoom Out)", "prompt_suffix": ", camera slowly pulling out revealing the surrounding environment"},
+    "pan_left": {"label": "Pan Left", "prompt_suffix": ", camera panning smoothly to the left across the scene"},
+    "pan_right": {"label": "Pan Right", "prompt_suffix": ", camera panning smoothly to the right across the scene"},
+    "orbit": {"label": "Orbit Shot", "prompt_suffix": ", cinematic 360 degree smooth orbit camera movement around the subject"},
+    "drone": {"label": "Drone Aerial View", "prompt_suffix": ", high elevation aerial drone shot, majestic sweeping movement"},
+    "handheld": {"label": "Handheld Kinetic", "prompt_suffix": ", energetic handheld camera movement, realistic dynamic camera shake"},
+    "close_up": {"label": "Cinematic Close-Up", "prompt_suffix": ", tight intimate close-up shot, shallow depth of field, crisp focus"},
+    "wide_angle": {"label": "Ultra-Wide Landscape", "prompt_suffix": ", dramatic ultra-wide angle view, expansive panoramic perspective"},
+}
+
+VISUAL_STYLE_PRESETS = {
+    "off": {
+        "label": "None",
+        "prompt_prefix": "",
+        "prompt_suffix": "",
+        "negative_prompt": ""
+    },
+    "cinematic_35mm": {
+        "label": "35mm Classic Film",
+        "prompt_prefix": "Cinematic 35mm film shot of ",
+        "prompt_suffix": ", shot on Panavision 35mm lens, rich color grading, subtle film grain, masterpiece",
+        "negative_prompt": "blurry, low quality, cartoon, noise, oversaturated, amateur"
+    },
+    "cyberpunk_neon": {
+        "label": "Cyberpunk Neon",
+        "prompt_prefix": "Futuristic cyberpunk scene, ",
+        "prompt_suffix": ", glowing neon lights, rain-slicked reflective surfaces, high contrast, magenta and cyan atmosphere",
+        "negative_prompt": "daylight, sepia, vintage, low contrast, washed out"
+    },
+    "anime_ghibli": {
+        "label": "Anime / Studio Ghibli",
+        "prompt_prefix": "Studio Ghibli style animated scene of ",
+        "prompt_suffix": ", vibrant hand-drawn aesthetic, lush painterly background, whimsical lighting, anime masterpiece",
+        "negative_prompt": "photorealistic, 3d render, live action, real photo"
+    },
+    "photorealistic_raw": {
+        "label": "Photorealistic Raw HDR",
+        "prompt_prefix": "Hyperrealistic 8k photo of ",
+        "prompt_suffix": ", natural lighting, intricate textures, shot on Hasselblad medium format, ultra detailed",
+        "negative_prompt": "cgi, 3d, painting, drawing, cartoon, fake, plastic"
+    },
+    "vintage_vhs": {
+        "label": "Vintage VHS 80s",
+        "prompt_prefix": "1980s retro VHS video recording of ",
+        "prompt_suffix": ", analog magnetic tape texture, subtle scanlines, nostalgic warm vintage color grade",
+        "negative_prompt": "modern, 4k, digital sharp, clean"
+    },
+    "noir_monochrome": {
+        "label": "Film Noir Black & White",
+        "prompt_prefix": "Classic 1940s film noir black and white scene of ",
+        "prompt_suffix": ", dramatic chiaroscuro lighting, deep shadows, high contrast monochrome, moody atmosphere",
+        "negative_prompt": "color, rainbow, vibrant, bright"
+    }
+}
 # The Characters tab's duration axis, derived from the table above rather than
 # typed a fourth time. Bound here because that is the first point at which
 # LTX_LENGTHS exists; the function and the argument live at its declaration.
@@ -17191,6 +17249,27 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
     prompt = override_prompt if override_prompt is not None else f("prompt", "")
     if not prompt:
         prompt = "A cinematic atmospheric scene"
+
+    camera_motion_key = f("camera_motion", "off").lower()
+    visual_style_key = f("visual_style", "off").lower()
+    cm_preset = CAMERA_MOTION_PRESETS.get(camera_motion_key) or CAMERA_MOTION_PRESETS["off"]
+    vs_preset = VISUAL_STYLE_PRESETS.get(visual_style_key) or VISUAL_STYLE_PRESETS["off"]
+
+    full_prompt = prompt
+    if vs_preset.get("prompt_prefix") and not full_prompt.startswith(vs_preset["prompt_prefix"]):
+        full_prompt = vs_preset["prompt_prefix"] + full_prompt
+    if vs_preset.get("prompt_suffix") and vs_preset["prompt_suffix"] not in full_prompt:
+        full_prompt = full_prompt + vs_preset["prompt_suffix"]
+    if cm_preset.get("prompt_suffix") and cm_preset["prompt_suffix"] not in full_prompt:
+        full_prompt = full_prompt + cm_preset["prompt_suffix"]
+    prompt = full_prompt
+
+    neg_prompt = f("negative_prompt", "")
+    if vs_preset.get("negative_prompt"):
+        if neg_prompt:
+            neg_prompt = f"{neg_prompt}, {vs_preset['negative_prompt']}"
+        else:
+            neg_prompt = vs_preset["negative_prompt"]
     # Resolve a character token BEFORE reading the quality cell. The two
     # character surfaces submit ``quality_choice`` (draft/pro/high/high720),
     # while API replay may submit the real pipeline quality. Both must become
@@ -17540,12 +17619,11 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             # it. SAME allowlist trap as every key in this dict: leave it out
             # and the Speed control looks wired and silently no-ops.
             "schedule_preset": _schedule_preset,
-            # i2v reference mode: "anchor" (animate the image) or "inspire"
-            # (2.5: guide subject/style, re-imagine the composition). Already
-            # lane-gated above. SAME allowlist trap as every key here.
             "i2v_reference_mode": _i2v_ref_mode,
+            "camera_motion": camera_motion_key,
+            "visual_style": visual_style_key,
             "prompt": prompt,
-            "negative_prompt": f("negative_prompt", ""),
+            "negative_prompt": neg_prompt,
             "width": max(32, int(f("width", str(default_w)) or default_w)),
             "height": max(32, int(f("height", str(default_h)) or default_h)),
             "frames": max(1, int(f("frames", _frames_default) or _frames_default)),
@@ -40155,6 +40233,37 @@ HTML = r"""<!doctype html>
              documented in the LTX 2.3 paper but unobvious. -->
         <textarea name="prompt" id="prompt" class="composer-prompt"
                   placeholder="Describe the scene AND the sound — e.g. wizard in a forest clearing, fireflies spiraling up · low whispered chant, ember crackle, distant owl. Audio is generated jointly with video; without sound cues the model outputs near-silent ambient."></textarea>
+
+        <!-- Presets Row — Camera Motion & Visual Style Gallery -->
+        <div class="composer-presets-row" style="display:flex; gap:12px; margin-top:8px; margin-bottom:8px; align-items:center; background:rgba(255,255,255,0.03); padding:8px 12px; border-radius:8px; border:1px solid rgba(255,255,255,0.08);">
+          <div style="flex:1; display:flex; align-items:center; gap:6px;">
+            <label style="font-size:11px; font-weight:600; color:rgba(255,255,255,0.7); text-transform:uppercase; letter-spacing:0.5px;">🎥 Camera:</label>
+            <select name="camera_motion" id="cameraMotionSelect" style="flex:1; padding:4px 8px; border-radius:6px; border:1px solid rgba(255,255,255,0.15); background:rgba(0,0,0,0.5); color:#fff; font-size:12px;">
+              <option value="off">Standard (No Camera Preset)</option>
+              <option value="zoom_in">Push In (Zoom In)</option>
+              <option value="zoom_out">Pull Out (Zoom Out)</option>
+              <option value="pan_left">Pan Left</option>
+              <option value="pan_right">Pan Right</option>
+              <option value="orbit">Orbit Shot (360° Rotate)</option>
+              <option value="drone">Drone Aerial View</option>
+              <option value="handheld">Handheld Kinetic Motion</option>
+              <option value="close_up">Cinematic Close-Up</option>
+              <option value="wide_angle">Ultra-Wide Landscape</option>
+            </select>
+          </div>
+          <div style="flex:1; display:flex; align-items:center; gap:6px;">
+            <label style="font-size:11px; font-weight:600; color:rgba(255,255,255,0.7); text-transform:uppercase; letter-spacing:0.5px;">🎨 Style:</label>
+            <select name="visual_style" id="visualStyleSelect" style="flex:1; padding:4px 8px; border-radius:6px; border:1px solid rgba(255,255,255,0.15); background:rgba(0,0,0,0.5); color:#fff; font-size:12px;">
+              <option value="off">Standard (No Style Preset)</option>
+              <option value="cinematic_35mm">35mm Classic Film</option>
+              <option value="cyberpunk_neon">Cyberpunk Neon</option>
+              <option value="anime_ghibli">Anime / Studio Ghibli</option>
+              <option value="photorealistic_raw">Photorealistic Raw HDR</option>
+              <option value="vintage_vhs">Vintage VHS 80s</option>
+              <option value="noir_monochrome">Film Noir Black & White</option>
+            </select>
+          </div>
+        </div>
 
         <!-- Tools strip — Enhance + HDR + No-music + Avoid disclosure.
              All inline so they read as part of composing the prompt.
