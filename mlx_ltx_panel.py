@@ -4231,6 +4231,10 @@ def capability_missing(name: str, version_id: str | None = None) -> list[str]:
     by_key = {r.get("key"): r for r in _repos()}
     out: list[str] = []
     for key in capability_repo_keys(name, version_id):
+        if key == "gemma4_25":
+            gemma_repo = by_key.get("gemma")
+            if gemma_repo and len(_repo_effective_missing(gemma_repo)) == 0:
+                continue
         repo = by_key.get(key)
         if not repo:
             continue
