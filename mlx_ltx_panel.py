@@ -29115,33 +29115,41 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "deleted": deleted, "repo_id": repo["repo_id"]}, 202); return
 
         if path == "/prompt/enhance":
-            # Gemma-driven prompt enhancement, routed through the warm
-            # helper subprocess. First call after panel start eats a
-            # ~10-15s Gemma load; cached afterwards (subsequent enhances
-            # ~3-5s). Helper's release_pipelines frees Gemma when a real
-            # render comes in, so memory doesn't accumulate on top of
-            # the dev transformer.
             user_prompt = (form.get("prompt", [""])[0] or "").strip()
             mode = (form.get("mode", ["t2v"])[0] or "t2v").lower()
             if mode not in ("t2v", "i2v"):
                 mode = "t2v"
             if not user_prompt:
                 self._json({"error": "no prompt provided"}, 400); return
-            # 2026-05-20 — collect trigger tokens that Gemma MUST preserve
-            # case-exact. Three sources, unioned:
-            #   1. The panel-supplied `preserve_tokens` form field (the
-            #      Enhance button sends active-LoRA triggers + character
-            #      trigger).
-            #   2. Known character names from list_characters() — covers
-            #      the case where the user typed a character name without
-            #      having loaded the LoRA yet (e.g. typing "bizarrotrn" in
-            #      a fresh session before the avatar picker fired).
-            #   3. Tokens in the user's prompt that look like trigger words
-            #      (lowercase, no spaces, ends in `trn` or matches a known
-            #      character id) — defense in depth against (1) being
-            #      empty.
+
+            # Extract Arabic dialogue in quotes or <d>...</d> tags to preserve it intact
+            import re
+            dialogues: dict[str, str] = {}
+            
+            def _d_sub(match):
+                idx = len(dialogues)
+                key = f"__DIALOGUE_{idx}__"
+                dialogues[key] = match.group(0)
+                return key
+            
+            prompt_clean = re.sub(r"<d>.*?</d>", _d_sub, user_prompt, flags=re.DOTALL)
+            
+            def _quote_sub(match):
+                txt = match.group(1).strip()
+                idx = len(dialogues)
+                key = f"__DIALOGUE_{idx}__"
+                dialogues[key] = f"<d>{txt}</d>"
+                return key
+
+            quote_pattern = r'["\'«”]([^"\'»“]+)["\'»”]'
+            prompt_clean = re.sub(quote_pattern, _quote_sub, prompt_clean)
+
+            # Preserve dialogue placeholder keys
+            for dkey in dialogues.keys():
+                preserve_set.add(dkey)
+
             preserve_raw = (form.get("preserve_tokens", [""])[0] or "").strip()
-            preserve_set: set[str] = set()
+            preserve_set: set[str] = set(dialogues.keys())
             if preserve_raw:
                 try:
                     preserve_set.update(
@@ -29149,7 +29157,6 @@ class Handler(BaseHTTPRequestHandler):
                         if str(t).strip()
                     )
                 except (TypeError, ValueError, json.JSONDecodeError):
-                    # Allow plain comma-separated fallback for API users
                     preserve_set.update(
                         t.strip() for t in preserve_raw.split(",")
                         if t.strip()
@@ -29157,12 +29164,11 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 for char in list_characters():
                     trig = (char.get("trigger") or "").strip()
-                    if trig and trig in user_prompt:
+                    if trig and trig in prompt_clean:
                         preserve_set.add(trig)
             except Exception:
                 pass
 
-            import re
             ref_token_patterns = [
                 r"(?i)from\s+image\s+[1-3]",
                 r"(?i)image\s+[1-3]",
@@ -29170,7 +29176,7 @@ class Handler(BaseHTTPRequestHandler):
                 r"(?i)الصورة\s+(الأولى|الاولى|الثانية|الثانيه|الثالثة|الثالثه|1|2|3)",
             ]
             for pat in ref_token_patterns:
-                for match in re.finditer(pat, user_prompt):
+                for match in re.finditer(pat, prompt_clean):
                     preserve_set.add(match.group(0))
 
             preserve_tokens = sorted(preserve_set)
@@ -29205,15 +29211,15 @@ class Handler(BaseHTTPRequestHandler):
                     push(f"[enhance] vision caption note: {exc}")
 
             if vision_caption:
-                user_prompt = f"Reference image details: {vision_caption}. Instructions: {user_prompt}"
+                prompt_clean = f"Reference image details: {vision_caption}. Instructions: {prompt_clean}"
 
-            push(f"[enhance] {mode}: {user_prompt[:80]}…"
+            push(f"[enhance] {mode}: {prompt_clean[:80]}…"
                  + (f"  preserve={preserve_tokens}" if preserve_tokens else ""))
             try:
                 result = HELPER.run({
                     "action": "enhance_prompt",
                     "id": f"enh-{int(time.time()*1000)}",
-                    "params": {"prompt": user_prompt, "mode": mode, "seed": 10,
+                    "params": {"prompt": prompt_clean, "mode": mode, "seed": 10,
                                "preserve_tokens": preserve_tokens},
                 }, timeout=PROMPT_ENHANCE_TIMEOUT)
             except Exception as exc:
@@ -29228,10 +29234,17 @@ class Handler(BaseHTTPRequestHandler):
             if not enhanced:
                 self._json({"error": "Gemma returned empty result"}, 500); return
 
-            # Ensure any reference tokens from user_prompt survive in enhanced
             for token in preserve_set:
                 if ("image" in token.lower() or "الصورة" in token) and token not in enhanced:
                     enhanced = f"{enhanced} ({token})"
+
+            # Restore dialogue tags intact
+            for dkey, dval in dialogues.items():
+                if dkey in enhanced:
+                    enhanced = enhanced.replace(dkey, f" {dval} ")
+                else:
+                    enhanced = f"{enhanced} {dval}"
+            enhanced = re.sub(r"\s+", " ", enhanced).strip()
 
             push(f"[enhance] → {enhanced[:120]}… ({result.get('elapsed_sec','?')}s)")
             self._json({

@@ -46,5 +46,13 @@ class TestPresets(unittest.TestCase):
         self.assertGreater(ram, 0.0)
         self.assertIn(P.SYSTEM_TIER, ("base", "standard", "high", "pro"))
 
+    def test_arabic_dialogue_extraction(self):
+        import re
+        prompt = 'بنت بتمشي بالشارع و بتقول "يا سلام شو هذا"'
+        quote_pattern = r'["\'«”]([^"\'»“]+)["\'»”]'
+        matches = re.findall(quote_pattern, prompt)
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0], "يا سلام شو هذا")
+
 if __name__ == "__main__":
     unittest.main()
