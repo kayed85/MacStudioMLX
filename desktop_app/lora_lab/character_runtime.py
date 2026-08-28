@@ -68,7 +68,7 @@ class CharacterBundle:
     pronoun: str            # "he" | "she" | "they"
     subject_noun: str       # "man" | "woman" | "person"
     default_action: str
-    face_lora_path: str
+    face_lora_path: Optional[str]
     face_strength: float
     audio_lora_path: Optional[str]
     audio_strength: float
@@ -111,7 +111,7 @@ def list_characters(
                 id=bundle["id"],
                 name=bundle.get("name", bundle["id"]),
                 has_face=bool(bundle.get("face")),
-                has_voice=bool(bundle.get("voice")),
+                has_voice=bool(bundle.get("voice") or (bundle.get("voice_clip") and (sub / bundle.get("voice_clip")).exists())),
                 preview_path=preview_path,
                 source="bundle",
             ))
@@ -154,27 +154,42 @@ def resolve_character(
     manifest = bundle_dir / "bundle.json"
     if manifest.is_file():
         bundle = json.loads(manifest.read_text())
-        face = bundle["face"]
+        face = bundle.get("face")
         voice = bundle.get("voice")
         preview = bundle.get("preview")
+        face_path = (
+            str(bundle_dir / face["path"])
+            if (face and isinstance(face, dict) and face.get("path") and (bundle_dir / face["path"]).exists())
+            else None
+        )
+        audio_lora_path = (
+            str(bundle_dir / voice["path"])
+            if (voice and isinstance(voice, dict) and voice.get("path") and (bundle_dir / voice["path"]).exists())
+            else None
+        )
+        voice_clip_path = (
+            str(bundle_dir / voice["voice_clip"])
+            if (voice and isinstance(voice, dict) and voice.get("voice_clip") and (bundle_dir / voice["voice_clip"]).exists())
+            else (
+                str(bundle_dir / bundle["voice_clip"])
+                if (bundle.get("voice_clip") and (bundle_dir / bundle["voice_clip"]).exists())
+                else None
+            )
+        )
         return CharacterBundle(
             id=bundle["id"],
             name=bundle.get("name", bundle["id"]),
             pronoun=bundle.get("pronoun", "they"),
             subject_noun=bundle.get("subject_noun", "person"),
             default_action=bundle.get("default_action", "smiles softly"),
-            face_lora_path=str(bundle_dir / face["path"]),
-            face_strength=float(face.get("recommended_strength", 1.0)),
-            audio_lora_path=str(bundle_dir / voice["path"]) if voice else None,
+            face_lora_path=face_path,
+            face_strength=float(face.get("recommended_strength", 1.0)) if face else 0.0,
+            audio_lora_path=audio_lora_path,
             audio_strength=float(voice.get("recommended_strength", 1.0)) if voice else 0.0,
-            voice_clip_path=(
-                str(bundle_dir / voice["voice_clip"])
-                if (voice and voice.get("voice_clip"))
-                else None
-            ),
+            voice_clip_path=voice_clip_path,
             preview_path=(
                 str(bundle_dir / preview["path"])
-                if (preview and preview.get("path"))
+                if (preview and isinstance(preview, dict) and preview.get("path") and (bundle_dir / preview["path"]).exists())
                 else None
             ),
             bundle_json=bundle,

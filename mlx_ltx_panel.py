@@ -3052,70 +3052,117 @@ def list_characters() -> list[dict]:
     render appropriately.
     """
     loras_dir = _safe_loras_dir()
-    if not loras_dir.is_dir():
-        return []
     voice_exts = sorted(TRAIN_VOICE_EXTS)
     out: list[dict] = []
-    for face_path in sorted(loras_dir.glob("*_v2.safetensors")):
-        trigger = face_path.name[: -len("_v2.safetensors")]
-        if not _CHARACTERS_ID_RE.match(trigger):
-            continue
-        audio_path = loras_dir / f"{trigger}.audio.safetensors"
-        has_audio = audio_path.is_file()
-        # Look for any voice sample with a supported extension; pick the
-        # first match in TRAIN_VOICE_EXTS order. The Train tab writes
-        # whatever extension the user uploaded.
-        voice_sample_path: Path | None = None
-        for ext in voice_exts:
-            candidate = loras_dir / f"{trigger}.voice{ext}"
-            if candidate.is_file():
-                voice_sample_path = candidate
-                break
-        bundle = _character_bundle(trigger)
-        sample = _character_dataset_image(trigger)
-        compat_parts = [_ltx_lora_compatibility(face_path)]
-        if has_audio:
-            compat_parts.append(_ltx_lora_compatibility(audio_path))
-        incompatible = next(
-            (part for part in compat_parts if part["ltx_compatible"] is False),
-            None,
-        )
-        compatibility_known = all(
-            part["ltx_compatible"] is not None for part in compat_parts
-        )
-        out.append({
-            "id": trigger,
-            "trigger": trigger,
-            "name": bundle.get("name") or trigger.replace("trn", "").title() or trigger,
-            "pronoun": bundle.get("pronoun") or "they",
-            "subject_noun": bundle.get("subject_noun") or "person",
-            "default_action": bundle.get("default_action") or "",
-            "sexy_directive": bool(bundle.get("sexy_directive", False)),
-            "face_lora_path": str(face_path),
-            # Legacy field — present iff the audio LoRA exists. New callers
-            # should prefer `audio_lora` + `has_voice` for clarity.
-            "audio_lora_path": str(audio_path) if has_audio else None,
-            "audio_lora": str(audio_path) if has_audio else None,
-            "voice_sample": str(voice_sample_path) if voice_sample_path else None,
-            # Back-compat alias — some older calls used `voice_wav_path`
-            # specifically (assumed .wav). New callers should use
-            # `voice_sample`.
-            "voice_wav_path": str(voice_sample_path) if voice_sample_path else None,
-            "has_voice": has_audio,
-            "sample_image_path": str(sample) if sample else None,
-            "sample_image_url": (f"/characters/{trigger}/preview"
-                                 if sample else None),
-            "ltx_compatible": (
-                False if incompatible else (True if compatibility_known else None)
-            ),
-            "ltx_compat_reason": (
-                incompatible["ltx_compat_reason"] if incompatible else ""
-            ),
-            "ltx_fusion_tallies": [
-                part["ltx_fusion_tally"] for part in compat_parts
-                if part.get("ltx_fusion_tally")
-            ],
-        })
+    found_triggers: set[str] = set()
+
+    if loras_dir.is_dir():
+        for face_path in sorted(loras_dir.glob("*_v2.safetensors")):
+            trigger = face_path.name[: -len("_v2.safetensors")]
+            if not _CHARACTERS_ID_RE.match(trigger):
+                continue
+            found_triggers.add(trigger)
+            audio_path = loras_dir / f"{trigger}.audio.safetensors"
+            has_audio = audio_path.is_file()
+            voice_sample_path: Path | None = None
+            for ext in voice_exts:
+                candidate = loras_dir / f"{trigger}.voice{ext}"
+                if candidate.is_file():
+                    voice_sample_path = candidate
+                    break
+            bundle = _character_bundle(trigger)
+            sample = _character_dataset_image(trigger)
+            compat_parts = [_ltx_lora_compatibility(face_path)]
+            if has_audio:
+                compat_parts.append(_ltx_lora_compatibility(audio_path))
+            incompatible = next(
+                (part for part in compat_parts if part["ltx_compatible"] is False),
+                None,
+            )
+            compatibility_known = all(
+                part["ltx_compatible"] is not None for part in compat_parts
+            )
+            out.append({
+                "id": trigger,
+                "trigger": trigger,
+                "name": bundle.get("name") or trigger.replace("trn", "").title() or trigger,
+                "pronoun": bundle.get("pronoun") or "they",
+                "subject_noun": bundle.get("subject_noun") or "person",
+                "default_action": bundle.get("default_action") or "",
+                "sexy_directive": bool(bundle.get("sexy_directive", False)),
+                "face_lora_path": str(face_path),
+                "audio_lora_path": str(audio_path) if has_audio else None,
+                "audio_lora": str(audio_path) if has_audio else None,
+                "voice_sample": str(voice_sample_path) if voice_sample_path else None,
+                "voice_wav_path": str(voice_sample_path) if voice_sample_path else None,
+                "has_voice": has_audio,
+                "sample_image_path": str(sample) if sample else None,
+                "sample_image_url": (f"/characters/{trigger}/preview"
+                                     if sample else None),
+                "ltx_compatible": (
+                    False if incompatible else (True if compatibility_known else None)
+                ),
+                "ltx_compat_reason": (
+                    incompatible["ltx_compat_reason"] if incompatible else ""
+                ),
+                "ltx_fusion_tallies": [
+                    part["ltx_fusion_tally"] for part in compat_parts
+                    if part.get("ltx_fusion_tally")
+                ],
+            })
+
+    # Scan _CHARACTERS_CACHE_PATH for custom created bundles (without LoRA)
+    if _CHARACTERS_CACHE_PATH.is_dir():
+        for char_dir in sorted(_CHARACTERS_CACHE_PATH.iterdir()):
+            if not char_dir.is_dir():
+                continue
+            trigger = char_dir.name
+            if trigger in found_triggers or not _CHARACTERS_ID_RE.match(trigger):
+                continue
+            bundle = _character_bundle(trigger)
+            if not bundle or bundle.get("schema") != "phosphene/character_bundle@1":
+                continue
+            sample = _character_dataset_image(trigger)
+            voice_sample_path: Path | None = None
+            for ext in voice_exts:
+                candidate = char_dir / f"voice_clip{ext}"
+                if candidate.is_file():
+                    voice_sample_path = candidate
+                    break
+                candidate_orig = char_dir / f"{trigger}.voice{ext}"
+                if candidate_orig.is_file():
+                    voice_sample_path = candidate_orig
+                    break
+
+            if not voice_sample_path and bundle.get("voice_clip"):
+                vpath = char_dir / bundle["voice_clip"]
+                if vpath.is_file():
+                    voice_sample_path = vpath
+
+            found_triggers.add(trigger)
+            out.append({
+                "id": trigger,
+                "trigger": trigger,
+                "name": bundle.get("name") or trigger,
+                "pronoun": bundle.get("pronoun") or "they",
+                "subject_noun": bundle.get("subject_noun") or "person",
+                "default_action": bundle.get("default_action") or "",
+                "sexy_directive": bool(bundle.get("sexy_directive", False)),
+                "face_lora_path": None,
+                "audio_lora_path": None,
+                "audio_lora": None,
+                "voice_sample": str(voice_sample_path) if voice_sample_path else None,
+                "voice_wav_path": str(voice_sample_path) if voice_sample_path else None,
+                "has_voice": bool(voice_sample_path),
+                "sample_image_path": str(sample) if sample else None,
+                "sample_image_url": (f"/characters/{trigger}/preview"
+                                     if sample else None),
+                "ltx_compatible": True,
+                "ltx_compat_reason": "",
+                "ltx_fusion_tallies": [],
+                "source": "bundle_no_lora",
+            })
+
     return out
 
 
@@ -28212,6 +28259,121 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         # ===== Character management (2026-05-18) =====================
+        # POST /characters/save — Save/create a character profile without LoRA.
+        if path == "/characters/save" or path == "/characters/create":
+            MAX_UPLOAD_BYTES = 64 * 1024 * 1024
+            try:
+                clen = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                clen = 0
+            
+            form = {}
+            if ctype.startswith("multipart/form-data"):
+                try:
+                    form = _parse_multipart_form(self.rfile, ctype, clen)
+                except Exception as exc:
+                    return self._json({"ok": False, "error": f"multipart parse failed: {exc}"}, 400)
+            elif ctype.startswith("application/json"):
+                try:
+                    raw_body = self.rfile.read(clen).decode("utf-8")
+                    form = json.loads(raw_body) if raw_body else {}
+                except Exception as exc:
+                    return self._json({"ok": False, "error": f"json parse failed: {exc}"}, 400)
+            else:
+                try:
+                    raw_body = self.rfile.read(clen).decode("utf-8")
+                    parsed_qs = parse_qs(raw_body)
+                    for k, v in parsed_qs.items():
+                        form[k] = v[0] if len(v) == 1 else v
+                except Exception:
+                    pass
+
+            def _get_val(k, default=""):
+                v = form.get(k, default)
+                if isinstance(v, list):
+                    return v[0] if v else default
+                if hasattr(v, "value"):
+                    return v.value
+                return str(v or default)
+
+            name = _get_val("name").strip()
+            if not name:
+                return self._json({"ok": False, "error": "character name is required"}, 400)
+
+            cid_raw = _get_val("id") or _get_val("trigger")
+            if not cid_raw:
+                cid_raw = re.sub(r"[^A-Za-z0-9_-]", "_", name.lower()).strip("_")
+                if not cid_raw:
+                    cid_raw = f"char_{int(time.time())}"
+            try:
+                cid = _character_safe_id(cid_raw)
+            except ValueError:
+                return self._json({"ok": False, "error": "invalid character id"}, 400)
+
+            pronoun = _get_val("pronoun", "they").lower().strip()
+            if pronoun not in ("he", "she", "they"):
+                pronoun = "they"
+            subject_noun = _get_val("subject_noun", "person").lower().strip()
+            if subject_noun not in ("man", "woman", "person"):
+                subject_noun = "person"
+            description = _get_val("description") or _get_val("default_action")
+
+            char_dir = _CHARACTERS_CACHE_PATH / cid
+            char_dir.mkdir(parents=True, exist_ok=True)
+
+            avatar_filename = None
+            if "avatar_file" in form:
+                fld = form["avatar_file"]
+                filename = getattr(fld, "filename", None) or "avatar.png"
+                ext = Path(filename).suffix.lower() or ".png"
+                if ext not in (".png", ".jpg", ".jpeg", ".webp"):
+                    ext = ".png"
+                avatar_filename = f"avatar{ext}"
+                if hasattr(fld, "file"):
+                    (char_dir / avatar_filename).write_bytes(fld.file.read())
+                elif isinstance(fld, (bytes, bytearray)):
+                    (char_dir / avatar_filename).write_bytes(fld)
+
+            voice_filename = None
+            if "voice_file" in form:
+                fld = form["voice_file"]
+                filename = getattr(fld, "filename", None) or "voice_clip.mp3"
+                ext = Path(filename).suffix.lower() or ".mp3"
+                if ext not in (".mp3", ".wav", ".m4a", ".flac"):
+                    ext = ".mp3"
+                voice_filename = f"voice_clip{ext}"
+                if hasattr(fld, "file"):
+                    (char_dir / voice_filename).write_bytes(fld.file.read())
+                elif isinstance(fld, (bytes, bytearray)):
+                    (char_dir / voice_filename).write_bytes(fld)
+
+            bundle_path = char_dir / "bundle.json"
+            existing = {}
+            if bundle_path.is_file():
+                try:
+                    existing = json.loads(bundle_path.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+
+            prev_path = avatar_filename or (existing.get("preview", {}).get("path") if isinstance(existing.get("preview"), dict) else None)
+            v_clip_path = voice_filename or existing.get("voice_clip")
+
+            payload = {
+                "schema": "phosphene/character_bundle@1",
+                "id": cid,
+                "name": name,
+                "pronoun": pronoun,
+                "subject_noun": subject_noun,
+                "default_action": description or existing.get("default_action", ""),
+            }
+            if prev_path:
+                payload["preview"] = {"path": prev_path}
+            if v_clip_path:
+                payload["voice_clip"] = v_clip_path
+
+            bundle_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            return self._json({"ok": True, "id": cid, "bundle": payload})
+
         # POST /characters/<id>/delete and /characters/<id>/rename
         # power the "Manage characters" modal in the Manual tab. Delete
         # removes the entire character bundle (face + audio LoRAs +
@@ -43174,6 +43336,7 @@ HTML = r"""<!doctype html>
   <div class="models-card" style="width: min(640px, 96vw)">
     <div class="models-head">
       <h2 id="charactersManageTitle">Manage characters</h2>
+      <button class="ghost-btn" style="margin-left:auto; margin-right:8px;" onclick="openCreateCharacterModal()">+ Add Character (No LoRA)</button>
       <button class="ghost-btn" onclick="closeCharactersManageModal()">Close</button>
     </div>
     <div class="models-hint">
@@ -43185,6 +43348,62 @@ HTML = r"""<!doctype html>
     <div class="chars-manage-list" id="charactersManageList">
       <div class="hint">Loading…</div>
     </div>
+  </div>
+</div>
+
+<!-- ============== CREATE CHARACTER MODAL (NO LORA) ============== -->
+<div id="createCharacterModal" class="models-modal" style="display:none"
+     role="dialog" aria-modal="true" aria-labelledby="createCharacterTitle"
+     onclick="if(event.target===this) closeCreateCharacterModal()">
+  <div class="models-card" style="width: min(560px, 96vw)">
+    <div class="models-head">
+      <h2 id="createCharacterTitle">Create Character Profile (Without LoRA)</h2>
+      <button class="ghost-btn" onclick="closeCreateCharacterModal()">Close</button>
+    </div>
+    <div class="models-hint">
+      Add a character profile by providing a name, description, reference photo, and voice clip without running hours of LoRA training.
+    </div>
+    <form id="createCharacterForm" onsubmit="handleCreateCharacter(event)" style="display:flex; flex-direction:column; gap:12px; margin-top:12px;">
+      <div>
+        <label style="display:block; font-size:12px; font-weight:600; margin-bottom:4px;">Character Name</label>
+        <input type="text" id="charNameInput" placeholder="e.g. Elena Vance" required style="width:100%; padding:8px; border-radius:6px; border:1px solid rgba(255,255,255,0.15); background:rgba(0,0,0,0.3); color:#fff;" />
+      </div>
+      <div style="display:flex; gap:12px;">
+        <div style="flex:1;">
+          <label style="display:block; font-size:12px; font-weight:600; margin-bottom:4px;">Pronoun</label>
+          <select id="charPronounSelect" style="width:100%; padding:8px; border-radius:6px; border:1px solid rgba(255,255,255,0.15); background:rgba(0,0,0,0.3); color:#fff;">
+            <option value="she">She / Her</option>
+            <option value="he">He / Him</option>
+            <option value="they">They / Them</option>
+          </select>
+        </div>
+        <div style="flex:1;">
+          <label style="display:block; font-size:12px; font-weight:600; margin-bottom:4px;">Type / Subject</label>
+          <select id="charSubjectSelect" style="width:100%; padding:8px; border-radius:6px; border:1px solid rgba(255,255,255,0.15); background:rgba(0,0,0,0.3); color:#fff;">
+            <option value="woman">Woman</option>
+            <option value="man">Man</option>
+            <option value="person">Person</option>
+          </select>
+        </div>
+      </div>
+      <div>
+        <label style="display:block; font-size:12px; font-weight:600; margin-bottom:4px;">Description / Appearance Prompt</label>
+        <textarea id="charDescInput" rows="3" placeholder="e.g. A young woman with sharp features, long dark hair, wearing a red leather jacket, cinematic lighting" style="width:100%; padding:8px; border-radius:6px; border:1px solid rgba(255,255,255,0.15); background:rgba(0,0,0,0.3); color:#fff; font-family:inherit;"></textarea>
+      </div>
+      <div>
+        <label style="display:block; font-size:12px; font-weight:600; margin-bottom:4px;">Reference Photo (Avatar / Image-to-Video)</label>
+        <input type="file" id="charAvatarFileInput" accept="image/*" style="width:100%; font-size:12px;" />
+      </div>
+      <div>
+        <label style="display:block; font-size:12px; font-weight:600; margin-bottom:4px;">Voice Clip / Audio Sample (Optional)</label>
+        <input type="file" id="charVoiceFileInput" accept="audio/*" style="width:100%; font-size:12px;" />
+      </div>
+      <div id="createCharStatus" style="font-size:12px; color:#ff9800; min-height:16px;"></div>
+      <div style="display:flex; justify:flex-end; gap:8px; margin-top:8px;">
+        <button type="button" class="ghost-btn" onclick="closeCreateCharacterModal()">Cancel</button>
+        <button type="submit" class="accent-btn" id="saveCharSubmitBtn">Save Character</button>
+      </div>
+    </form>
   </div>
 </div>
 
@@ -57872,14 +58091,78 @@ function openCharactersManageModal() {
   const modal = document.getElementById('charactersManageModal');
   if (!modal) return;
   modal.style.display = 'flex';
-  // Use a fresh /characters fetch so deletes/renames in another tab
-  // are reflected immediately.
   _renderCharactersManageList();
 }
 
 function closeCharactersManageModal() {
   const modal = document.getElementById('charactersManageModal');
   if (modal) modal.style.display = 'none';
+}
+
+function openCreateCharacterModal() {
+  closeCharactersManageModal();
+  const modal = document.getElementById('createCharacterModal');
+  if (!modal) return;
+  modal.style.display = 'flex';
+  const status = document.getElementById('createCharStatus');
+  if (status) status.textContent = '';
+}
+
+function closeCreateCharacterModal() {
+  const modal = document.getElementById('createCharacterModal');
+  if (modal) modal.style.display = 'none';
+}
+
+async function handleCreateCharacter(e) {
+  e.preventDefault();
+  const status = document.getElementById('createCharStatus');
+  const submitBtn = document.getElementById('saveCharSubmitBtn');
+  const name = (document.getElementById('charNameInput')?.value || '').trim();
+  const pronoun = document.getElementById('charPronounSelect')?.value || 'they';
+  const subject_noun = document.getElementById('charSubjectSelect')?.value || 'person';
+  const description = (document.getElementById('charDescInput')?.value || '').trim();
+  const avatarFile = document.getElementById('charAvatarFileInput')?.files[0];
+  const voiceFile = document.getElementById('charVoiceFileInput')?.files[0];
+
+  if (!name) {
+    if (status) status.textContent = 'Character name is required.';
+    return;
+  }
+
+  const fd = new FormData();
+  fd.append('name', name);
+  fd.append('pronoun', pronoun);
+  fd.append('subject_noun', subject_noun);
+  fd.append('description', description);
+  if (avatarFile) fd.append('avatar_file', avatarFile);
+  if (voiceFile) fd.append('voice_file', voiceFile);
+
+  if (submitBtn) submitBtn.disabled = true;
+  if (status) status.textContent = 'Saving character profile…';
+
+  try {
+    const r = await fetch('/characters/save', {
+      method: 'POST',
+      body: fd
+    });
+    const data = await r.json();
+    if (!r.ok || !data.ok) {
+      if (status) status.textContent = 'Error: ' + (data.error || `HTTP ${r.status}`);
+      if (submitBtn) submitBtn.disabled = false;
+      return;
+    }
+
+    if (status) status.textContent = 'Character saved!';
+    setTimeout(() => {
+      closeCreateCharacterModal();
+      if (submitBtn) submitBtn.disabled = false;
+      try { refreshManualCharacters(); } catch (_) {}
+      try { applyCharacterSelection(data.id); } catch (_) {}
+    }, 600);
+  } catch (err) {
+    if (status) status.textContent = 'Failed to save: ' + (err.message || err);
+    if (submitBtn) submitBtn.disabled = false;
+  }
 }
 
 async function _renderCharactersManageList() {
@@ -57891,7 +58174,7 @@ async function _renderCharactersManageList() {
     const chars = (data && Array.isArray(data.characters)) ? data.characters : [];
     if (!chars.length) {
       list.innerHTML = `<div class="hint" style="padding:18px 4px">
-        No trained characters yet — train one in the
+        No characters yet — <a href="#" onclick="openCreateCharacterModal(); return false;">Create one without LoRA</a> or train one in the
         <a href="#" onclick="closeCharactersManageModal(); workflowSwitch('train'); return false;">Train tab</a>.
       </div>`;
       return;
