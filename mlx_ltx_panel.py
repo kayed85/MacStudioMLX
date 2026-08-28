@@ -42695,6 +42695,23 @@ HTML = r"""<!doctype html>
         <select id="sbAddSelect" class="po-finish-select" style="display:none"
                 title="Which film should this clip join?"
                 onchange="sbAddActiveToBoard(this.value)"></select>
+        <button id="useAsImageRefBtn" class="po-act" type="button"
+                onclick="useActiveAsImageRef()" title="Extract frame and use as Image Reference for Image-to-Video">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M2 12 L6 8 L10 12 M9 10 L11 8 L14 11 M4 5 A 1 1 0 1 0 4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          <span class="po-act-label">Use as I2V Ref</span>
+        </button>
+
+        <select id="exportSelect" class="po-finish-select"
+                title="Export clip for social media or GIF"
+                onchange="if(this.value){exportActive(this.value); this.value='';}">
+          <option value="">Export ▾</option>
+          <option value="vertical_916">📱 Vertical 9:16 (TikTok/Reels)</option>
+          <option value="gif">🎞️ Animated GIF</option>
+          <option value="h265">⚡ HEVC H.265 (Compact)</option>
+        </select>
+
         <button id="animateBtn" class="po-act" type="button"
                 onclick="animateActive()" style="display:none" title="Animate this still as an i2v render">
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -54132,6 +54149,51 @@ function useAsExtendSourcePath(path) {
   document.querySelector('aside.form-pane').scrollTop = 0;
 }
 function useAsExtendSource() { if (!activePath) return alert('Pick an output first.'); useAsExtendSourcePath(activePath); }
+
+async function useActiveAsImageRef() {
+  if (!activePath) return alert('Pick an output first.');
+  try {
+    if (typeof phosToast === 'function') phosToast('Extracting frame for I2V reference…', { kind: 'info' });
+    const fd = new URLSearchParams();
+    fd.set('video_path', activePath);
+    fd.set('time_offset', '0');
+    const r = await fetch('/extract_frame', { method: 'POST', body: fd });
+    const data = await r.json();
+    if (!r.ok || !data.ok) {
+      alert('Failed to extract frame: ' + (data.error || 'unknown error'));
+      return;
+    }
+    const imgPath = data.image_path;
+    const imgEl = document.getElementById('image');
+    if (imgEl) imgEl.value = imgPath;
+    try { setMode('i2v'); } catch (_) {}
+    if (typeof phosToast === 'function') phosToast('Frame set as Image Reference! Switched to I2V mode.', { kind: 'success', duration: 4000 });
+  } catch (err) {
+    alert('Error: ' + (err.message || err));
+  }
+}
+
+async function exportActive(fmt) {
+  if (!activePath) return alert('Pick an output first.');
+  try {
+    if (typeof phosToast === 'function') phosToast(`Exporting clip as ${fmt}…`, { kind: 'info', duration: 5000 });
+    const fd = new URLSearchParams();
+    fd.set('video_path', activePath);
+    fd.set('format', fmt);
+    const r = await fetch('/export_video', { method: 'POST', body: fd });
+    const data = await r.json();
+    if (!r.ok || !data.ok) {
+      alert('Export failed: ' + (data.error || 'unknown error'));
+      return;
+    }
+    if (typeof phosToast === 'function') phosToast('Export completed successfully!', { kind: 'success', duration: 5000 });
+    if (data.export_url) {
+      window.open(data.export_url, '_blank');
+    }
+  } catch (err) {
+    alert('Error: ' + (err.message || err));
+  }
+}
 
 async function loadParams() {
   if (!activePath) return;
