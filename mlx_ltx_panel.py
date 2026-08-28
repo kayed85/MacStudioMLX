@@ -17033,6 +17033,57 @@ def parse_comfyui_workflow(data: dict) -> dict:
     return result
 
 
+def generate_3d_mesh_from_image(image_path: str) -> dict:
+    p = Path(image_path)
+    if not p.is_file():
+        raise FileNotFoundError(f"Input image not found: {image_path}")
+
+    out_dir = OUTPUT
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = int(time.time() * 1000)
+    obj_path = out_dir / f"mesh_{stamp}.obj"
+
+    try:
+        from PIL import Image
+        img = Image.open(p).convert("L").resize((64, 64))
+        width, height = img.size
+        pixels = img.load()
+
+        vertices = []
+        faces = []
+
+        for y in range(height):
+            for x in range(width):
+                z = (pixels[x, y] / 255.0) * 0.3
+                vx = (x / float(width)) - 0.5
+                vy = 0.5 - (y / float(height))
+                vertices.append((vx, vy, z))
+
+        for y in range(height - 1):
+            for x in range(width - 1):
+                i0 = y * width + x + 1
+                i1 = y * width + (x + 1) + 1
+                i2 = (y + 1) * width + x + 1
+                i3 = (y + 1) * width + (x + 1) + 1
+                faces.append((i0, i2, i1))
+                faces.append((i1, i2, i3))
+
+        with open(obj_path, "w", encoding="utf-8") as f:
+            f.write("# Phosphene 3D Mesh Export\n")
+            for v in vertices:
+                f.write(f"v {v[0]:.4f} {v[1]:.4f} {v[2]:.4f}\n")
+            for fc in faces:
+                f.write(f"f {fc[0]} {fc[1]} {fc[2]}\n")
+
+        return {
+            "ok": True,
+            "obj_path": str(obj_path),
+            "mesh_url": f"/file?path={quote(str(obj_path))}"
+        }
+    except Exception as exc:
+        raise RuntimeError(f"3D mesh generation failed: {exc}")
+
+
 def make_job(form: dict[str, list[str]] | dict[str, str], *,
              override_prompt: str | None = None) -> dict:
     def f(name: str, default: str = "") -> str:
@@ -28668,6 +28719,16 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._json({"ok": False, "error": str(exc)}, 500)
             return
+
+        if path == "/mesh/generate_3d":
+            ipath = (form.get("image_path", [""])[0] if isinstance(form.get("image_path"), list) else form.get("image_path", "")).strip()
+            if not ipath:
+                return self._json({"ok": False, "error": "image_path is required"}, 400)
+            try:
+                res = generate_3d_mesh_from_image(ipath)
+                return self._json(res)
+            except Exception as exc:
+                return self._json({"ok": False, "error": str(exc)}, 500)
 
         if path == "/extract_frame":
             vpath = (form.get("video_path", [""])[0] if isinstance(form.get("video_path"), list) else form.get("video_path", "")).strip()

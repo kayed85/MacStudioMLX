@@ -54,5 +54,15 @@ class TestPresets(unittest.TestCase):
         self.assertEqual(len(matches), 1)
         self.assertEqual(matches[0], "يا سلام شو هذا")
 
+    def test_generate_3d_mesh(self):
+        from PIL import Image
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+            img = Image.new("RGB", (32, 32), color="red")
+            img.save(tf.name)
+            res = P.generate_3d_mesh_from_image(tf.name)
+            self.assertTrue(res["ok"])
+            self.assertTrue(res["obj_path"].endswith(".obj"))
+
 if __name__ == "__main__":
     unittest.main()
