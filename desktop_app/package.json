@@ -1,8 +1,8 @@
 {
-  "name": "phosphene-studio",
-  "version": "3.5.0",
-  "description": "Phosphene Studio Native Desktop App",
-  "author": "Phosphene Team",
+  "name": "macstudio-mlx",
+  "version": "4.6.0",
+  "description": "MacStudio MLX Native Desktop App",
+  "author": "MacStudio Team",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -15,8 +15,8 @@
     "electron-packager": "^17.1.2"
   },
   "build": {
-    "appId": "studio.phosphene.app",
-    "productName": "Phosphene Studio",
+    "appId": "studio.macstudio.app",
+    "productName": "MacStudio MLX",
     "asar": false,
     "mac": {
       "category": "public.app-category.graphics-design",
