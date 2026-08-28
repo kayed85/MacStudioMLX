@@ -30189,35 +30189,20 @@ HTML = r"""<!doctype html>
   <link rel="icon" type="image/png" sizes="256x256" href="/assets/favicon.png">
   <style>
     :root {
-      /* Phosphene void = #00061a body. Mr Bizarro flagged the panel reads
-         "too dark, hard to fathom" — every surface above body bg was
-         lifted noticeably so the eye actually catches the panel /
-         input boundaries instead of squinting through the navy. New
-         scale (light → dark): text > muted > border-strong > border >
-         panel-2 > panel > bg-2 > bg. Each step ~one Lstar unit clearer
-         than before. Muted text bumped from #8b949e (4.7:1 on bg) to
-         #b6bfd1 (~7.4:1) so secondary copy stops disappearing. */
-      --bg: #00061a; --bg-2: #0a1130; --panel: #131b3f; --panel-2: #1d2752;
-      --border: #2c3563; --border-strong: #3d477a; --text: #f0f4fb; --muted: #b6bfd1;
-      --accent: #2f81f7; --accent-bright: #58a6ff; --accent-dim: rgba(47,129,247,0.18);
-      --success: #3fb950; --warning: #d29922; --danger: #f85149;
-      --radius: 10px;
-      /* Polish tokens — adopted across the app for one consistent
-         elevation + radius + motion language. Pre-token, every component
-         hand-rolled its own shadow / radius / transition so the chrome
-         drifted into "Pythonic" territory. */
-      --shadow-1: 0 1px 2px rgba(0,0,0,0.30), 0 1px 0 rgba(255,255,255,0.02) inset;
-      --shadow-2: 0 8px 24px rgba(0,0,0,0.40);
+      /* macOS Glassmorphism Luxury Theme */
+      --bg: #060913; --bg-2: #0e162a;
+      --panel: rgba(18, 25, 45, 0.72); --panel-2: rgba(28, 38, 66, 0.65);
+      --border: rgba(255, 255, 255, 0.12); --border-strong: rgba(255, 255, 255, 0.22);
+      --text: #f8fafc; --muted: #94a3b8;
+      --accent: #6366f1; --accent-bright: #38bdf8; --accent-dim: rgba(99, 102, 241, 0.25);
+      --success: #10b981; --warning: #f59e0b; --danger: #ef4444;
+      --radius: 12px;
+      --glass-blur: blur(20px) saturate(180%);
+      --shadow-1: 0 4px 16px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+      --shadow-2: 0 12px 40px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.15);
       --ring: 0 0 0 3px var(--accent-dim);
-      --r-xs: 6px; --r-sm: 8px; --r-md: 10px; --r-lg: 14px; --r-pill: 999px;
-      /* TWO RUNGS FOR CONTROLS AND FIVE FOR TYPE, because the Editor had
-         eight control heights and eleven type sizes on one screen — four of
-         them half a pixel apart, which is below the threshold where a
-         difference reads as hierarchy and above the one where it reads as
-         sloppiness. Half-pixel sizes also land on non-integer line boxes,
-         which is why rows in the rail and the drafts panel came out a pixel
-         off each other. Anything new picks a rung; nothing declares its own. */
-      --ctl-h: 32px; --ctl-h-sm: 28px; --ctl-h-lg: 36px;
+      --r-xs: 8px; --r-sm: 10px; --r-md: 14px; --r-lg: 18px; --r-pill: 999px;
+      --ctl-h: 36px; --ctl-h-sm: 30px; --ctl-h-lg: 40px;
       --fs-2xs: 10px; --fs-xs: 11px; --fs-sm: 12px; --fs-md: 13px;
       --fs-lg: 15px;
       --t-fast: 120ms cubic-bezier(.2,.8,.2,1);
@@ -30230,13 +30215,6 @@ HTML = r"""<!doctype html>
     }
     html, body { margin: 0; height: 100%; }
 
-    /* Phase 0 a11y floor —
-       (a) Visible focus ring on every interactive element when reached
-           via keyboard (mouse-click clears via :focus-visible). Today's
-           inputs had ad-hoc focus styling but buttons/links had none.
-       (b) Honor reduced-motion. Animations / transitions across the app
-           use ms-scale durations; this collapses them to ~zero so motion-
-           sensitive users don't get pulse / slide / fade. */
     :focus-visible {
       outline: 2px solid var(--accent-bright);
       outline-offset: 2px;
@@ -30251,20 +30229,18 @@ HTML = r"""<!doctype html>
       }
     }
     body {
-      background: var(--bg); color: var(--text);
-      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      background: radial-gradient(circle at 50% 0%, #171f3a 0%, #060913 75%);
+      background-attachment: fixed; color: var(--text);
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", system-ui, sans-serif;
       display: flex; flex-direction: column; min-height: 100vh;
     }
 
-    /* ===== HEADER =====
-       Logo is a transparent-bg SVG (no painted-in dark rectangle) so
-       the wordmark reads as part of the header strip rather than
-       sitting inside a "box". Bumped to 124px (was 104) so the brand
-       holds the eye without competing with the status pills. */
     header {
       display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
       padding: 10px 18px; border-bottom: 1px solid var(--border);
-      background: var(--bg);
+      background: rgba(10, 15, 30, 0.75);
+      backdrop-filter: var(--glass-blur);
+      -webkit-backdrop-filter: var(--glass-blur);
     }
     header h1 {
       margin: 0; font-size: 15px; font-weight: 700; letter-spacing: -0.01em;
