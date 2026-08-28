@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="assets/phosphene_banner.png" alt="Phosphene" width="100%">
+  <img src="assets/phosphene_logo_transparent.png" alt="MacStudio MLX Logo" width="220">
 </p>
 
-# 🚀 Phosphene Studio - Native macOS Desktop Edition
+# 🚀 MacStudio MLX - Native macOS Studio Edition
 
 > **Maintained & Enhanced by [@kayed85](https://github.com/kayed85)**  
 > **Optimized for Apple Silicon Macs (MacBook Pro M1 Pro / M1 / M2 / M3 / M4)**  
@@ -13,7 +13,15 @@
   </a>
 </p>
 
-### 📥 [Click Here to Download Phosphene Studio for Mac (.dmg)](https://github.com/kayed85/MacStudioMLX/releases/latest)
+### 📥 [Click Here to Download MacStudio MLX for Mac (.dmg)](https://github.com/kayed85/MacStudioMLX/releases/latest)
+
+---
+
+## 📸 Application Screenshot
+
+<p align="center">
+  <img src="assets/screenshots/macstudio_mlx_ui.png" alt="MacStudio MLX UI" width="100%" style="border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,0.5);">
+</p>
 
 ---
 
