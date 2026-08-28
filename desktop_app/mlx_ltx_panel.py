@@ -95,7 +95,13 @@ import storyboard_planner
 #       gemma-3-12b-it-4bit/     <- LTX_GEMMA_PATH
 #     mlx_outputs/               <- LTX_OUTPUT_DIR (created on first run)
 #     panel_uploads/             <- LTX_UPLOADS_DIR (created on first run)
-ROOT = Path(os.environ.get("LTX_STUDIO_ROOT", str(Path(__file__).resolve().parent)))
+def _resolve_root() -> Path:
+    env_root = os.environ.get("LTX_STUDIO_ROOT")
+    if env_root and Path(env_root).exists():
+        return Path(env_root)
+    return Path(__file__).resolve().parent
+
+ROOT = _resolve_root()
 MLX = Path(os.environ.get("LTX_MLX_PATH", str(ROOT / "ltx-2-mlx")))
 MODELS_DIR = Path(os.environ.get("LTX_MODELS_DIR", str(ROOT / "mlx_models")))
 GEMMA = Path(os.environ.get("LTX_GEMMA_PATH", str(MODELS_DIR / "gemma-3-12b-it-4bit")))
@@ -103,31 +109,37 @@ OUTPUT = Path(os.environ.get("LTX_OUTPUT_DIR", str(ROOT / "mlx_outputs")))
 UPLOADS = Path(os.environ.get("LTX_UPLOADS_DIR", str(ROOT / "panel_uploads")))
 AUDIO_DEFAULT = Path(os.environ.get("LTX_DEFAULT_AUDIO", str(ROOT / "audio_inputs/default.wav")))
 REFERENCE = Path(os.environ.get("LTX_DEFAULT_IMAGE", str(ROOT / "examples/reference.png")))
-def _resolve_helper_python() -> Path:
-    """Find the helper-subprocess Python interpreter.
 
-    Order: explicit env var → manual-install convention (`.venv/`) →
-    Pinokio convention (`env/`) → last-resort fallback so the panel
-    boots even if neither exists (the helper will fail loudly when the
-    first job tries to spawn it). Auto-detection means non-Pinokio
-    launches (manual `python3.11 mlx_ltx_panel.py` for testing) work
-    without needing LTX_HELPER_PYTHON set.
-    """
+def _resolve_helper_python() -> Path:
+    """Find the helper-subprocess Python interpreter."""
     explicit = os.environ.get("LTX_HELPER_PYTHON")
     if explicit and Path(explicit).is_file():
         return Path(explicit)
-    for sub in (".venv/bin/python3.11", "env/bin/python3.11"):
+    for sub in (".venv/bin/python3.11", "env/bin/python3.11", "env/bin/python3"):
         p = MLX / sub
         if p.is_file():
             return p
-    # No working interpreter found — return the manual-install default.
-    # Job submission will surface a clear error referring users to the
-    # install instructions.
-    return MLX / ".venv/bin/python3.11"
+        p_root = ROOT / sub
+        if p_root.is_file():
+            return p_root
+        p_ltx_root = ROOT / "ltx-2-mlx" / sub
+        if p_ltx_root.is_file():
+            return p_ltx_root
+    return Path(sys.executable)
+
+
+def _resolve_helper_script() -> Path:
+    explicit = os.environ.get("LTX_HELPER_SCRIPT")
+    if explicit and Path(explicit).is_file():
+        return Path(explicit)
+    s_root = ROOT / "mlx_warm_helper.py"
+    if s_root.is_file():
+        return s_root
+    return Path(__file__).resolve().parent / "mlx_warm_helper.py"
 
 
 HELPER_PYTHON = _resolve_helper_python()
-HELPER_SCRIPT = Path(os.environ.get("LTX_HELPER_SCRIPT", str(ROOT / "mlx_warm_helper.py")))
+HELPER_SCRIPT = _resolve_helper_script()
 # Surface a missing helper venv at boot — otherwise the first render
 # fails with a confusing "[Errno 2] No such file or directory" pointing
 # at a path the user never set. Real-world reporter (issue #5,
@@ -3052,70 +3064,117 @@ def list_characters() -> list[dict]:
     render appropriately.
     """
     loras_dir = _safe_loras_dir()
-    if not loras_dir.is_dir():
-        return []
     voice_exts = sorted(TRAIN_VOICE_EXTS)
     out: list[dict] = []
-    for face_path in sorted(loras_dir.glob("*_v2.safetensors")):
-        trigger = face_path.name[: -len("_v2.safetensors")]
-        if not _CHARACTERS_ID_RE.match(trigger):
-            continue
-        audio_path = loras_dir / f"{trigger}.audio.safetensors"
-        has_audio = audio_path.is_file()
-        # Look for any voice sample with a supported extension; pick the
-        # first match in TRAIN_VOICE_EXTS order. The Train tab writes
-        # whatever extension the user uploaded.
-        voice_sample_path: Path | None = None
-        for ext in voice_exts:
-            candidate = loras_dir / f"{trigger}.voice{ext}"
-            if candidate.is_file():
-                voice_sample_path = candidate
-                break
-        bundle = _character_bundle(trigger)
-        sample = _character_dataset_image(trigger)
-        compat_parts = [_ltx_lora_compatibility(face_path)]
-        if has_audio:
-            compat_parts.append(_ltx_lora_compatibility(audio_path))
-        incompatible = next(
-            (part for part in compat_parts if part["ltx_compatible"] is False),
-            None,
-        )
-        compatibility_known = all(
-            part["ltx_compatible"] is not None for part in compat_parts
-        )
-        out.append({
-            "id": trigger,
-            "trigger": trigger,
-            "name": bundle.get("name") or trigger.replace("trn", "").title() or trigger,
-            "pronoun": bundle.get("pronoun") or "they",
-            "subject_noun": bundle.get("subject_noun") or "person",
-            "default_action": bundle.get("default_action") or "",
-            "sexy_directive": bool(bundle.get("sexy_directive", False)),
-            "face_lora_path": str(face_path),
-            # Legacy field — present iff the audio LoRA exists. New callers
-            # should prefer `audio_lora` + `has_voice` for clarity.
-            "audio_lora_path": str(audio_path) if has_audio else None,
-            "audio_lora": str(audio_path) if has_audio else None,
-            "voice_sample": str(voice_sample_path) if voice_sample_path else None,
-            # Back-compat alias — some older calls used `voice_wav_path`
-            # specifically (assumed .wav). New callers should use
-            # `voice_sample`.
-            "voice_wav_path": str(voice_sample_path) if voice_sample_path else None,
-            "has_voice": has_audio,
-            "sample_image_path": str(sample) if sample else None,
-            "sample_image_url": (f"/characters/{trigger}/preview"
-                                 if sample else None),
-            "ltx_compatible": (
-                False if incompatible else (True if compatibility_known else None)
-            ),
-            "ltx_compat_reason": (
-                incompatible["ltx_compat_reason"] if incompatible else ""
-            ),
-            "ltx_fusion_tallies": [
-                part["ltx_fusion_tally"] for part in compat_parts
-                if part.get("ltx_fusion_tally")
-            ],
-        })
+    found_triggers: set[str] = set()
+
+    if loras_dir.is_dir():
+        for face_path in sorted(loras_dir.glob("*_v2.safetensors")):
+            trigger = face_path.name[: -len("_v2.safetensors")]
+            if not _CHARACTERS_ID_RE.match(trigger):
+                continue
+            found_triggers.add(trigger)
+            audio_path = loras_dir / f"{trigger}.audio.safetensors"
+            has_audio = audio_path.is_file()
+            voice_sample_path: Path | None = None
+            for ext in voice_exts:
+                candidate = loras_dir / f"{trigger}.voice{ext}"
+                if candidate.is_file():
+                    voice_sample_path = candidate
+                    break
+            bundle = _character_bundle(trigger)
+            sample = _character_dataset_image(trigger)
+            compat_parts = [_ltx_lora_compatibility(face_path)]
+            if has_audio:
+                compat_parts.append(_ltx_lora_compatibility(audio_path))
+            incompatible = next(
+                (part for part in compat_parts if part["ltx_compatible"] is False),
+                None,
+            )
+            compatibility_known = all(
+                part["ltx_compatible"] is not None for part in compat_parts
+            )
+            out.append({
+                "id": trigger,
+                "trigger": trigger,
+                "name": bundle.get("name") or trigger.replace("trn", "").title() or trigger,
+                "pronoun": bundle.get("pronoun") or "they",
+                "subject_noun": bundle.get("subject_noun") or "person",
+                "default_action": bundle.get("default_action") or "",
+                "sexy_directive": bool(bundle.get("sexy_directive", False)),
+                "face_lora_path": str(face_path),
+                "audio_lora_path": str(audio_path) if has_audio else None,
+                "audio_lora": str(audio_path) if has_audio else None,
+                "voice_sample": str(voice_sample_path) if voice_sample_path else None,
+                "voice_wav_path": str(voice_sample_path) if voice_sample_path else None,
+                "has_voice": has_audio,
+                "sample_image_path": str(sample) if sample else None,
+                "sample_image_url": (f"/characters/{trigger}/preview"
+                                     if sample else None),
+                "ltx_compatible": (
+                    False if incompatible else (True if compatibility_known else None)
+                ),
+                "ltx_compat_reason": (
+                    incompatible["ltx_compat_reason"] if incompatible else ""
+                ),
+                "ltx_fusion_tallies": [
+                    part["ltx_fusion_tally"] for part in compat_parts
+                    if part.get("ltx_fusion_tally")
+                ],
+            })
+
+    # Scan _CHARACTERS_CACHE_PATH for custom created bundles (without LoRA)
+    if _CHARACTERS_CACHE_PATH.is_dir():
+        for char_dir in sorted(_CHARACTERS_CACHE_PATH.iterdir()):
+            if not char_dir.is_dir():
+                continue
+            trigger = char_dir.name
+            if trigger in found_triggers or not _CHARACTERS_ID_RE.match(trigger):
+                continue
+            bundle = _character_bundle(trigger)
+            if not bundle or bundle.get("schema") != "phosphene/character_bundle@1":
+                continue
+            sample = _character_dataset_image(trigger)
+            voice_sample_path: Path | None = None
+            for ext in voice_exts:
+                candidate = char_dir / f"voice_clip{ext}"
+                if candidate.is_file():
+                    voice_sample_path = candidate
+                    break
+                candidate_orig = char_dir / f"{trigger}.voice{ext}"
+                if candidate_orig.is_file():
+                    voice_sample_path = candidate_orig
+                    break
+
+            if not voice_sample_path and bundle.get("voice_clip"):
+                vpath = char_dir / bundle["voice_clip"]
+                if vpath.is_file():
+                    voice_sample_path = vpath
+
+            found_triggers.add(trigger)
+            out.append({
+                "id": trigger,
+                "trigger": trigger,
+                "name": bundle.get("name") or trigger,
+                "pronoun": bundle.get("pronoun") or "they",
+                "subject_noun": bundle.get("subject_noun") or "person",
+                "default_action": bundle.get("default_action") or "",
+                "sexy_directive": bool(bundle.get("sexy_directive", False)),
+                "face_lora_path": None,
+                "audio_lora_path": None,
+                "audio_lora": None,
+                "voice_sample": str(voice_sample_path) if voice_sample_path else None,
+                "voice_wav_path": str(voice_sample_path) if voice_sample_path else None,
+                "has_voice": bool(voice_sample_path),
+                "sample_image_path": str(sample) if sample else None,
+                "sample_image_url": (f"/characters/{trigger}/preview"
+                                     if sample else None),
+                "ltx_compatible": True,
+                "ltx_compat_reason": "",
+                "ltx_fusion_tallies": [],
+                "source": "bundle_no_lora",
+            })
+
     return out
 
 
@@ -3458,8 +3517,8 @@ _CHARACTER_QUALITY_RESOLUTION = {
 #     bug users with red error toasts every 30 minutes)
 
 _VERSION_LOCK = threading.Lock()
-_VERSION_REPO_OWNER = "mrbizarro"
-_VERSION_REPO_NAME = "phosphene"
+_VERSION_REPO_OWNER = "kayed85"
+_VERSION_REPO_NAME = "MacStudioMLX"
 _VERSION_POLL_INTERVAL_SEC = 30 * 60          # 30 minutes between checks
 _VERSION_STARTUP_DELAY_SEC = 30                # don't compete with boot
 _VERSION_STATE: dict = {
@@ -4184,6 +4243,10 @@ def capability_missing(name: str, version_id: str | None = None) -> list[str]:
     by_key = {r.get("key"): r for r in _repos()}
     out: list[str] = []
     for key in capability_repo_keys(name, version_id):
+        if key == "gemma4_25":
+            gemma_repo = by_key.get("gemma")
+            if gemma_repo and len(_repo_effective_missing(gemma_repo)) == 0:
+                continue
         repo = by_key.get(key)
         if not repo:
             continue
@@ -4364,30 +4427,17 @@ def base_model_dir(version_id: str | None = None) -> str:
 
 
 def text_encoder_dir(version_id: str | None = None) -> str:
-    """Text-encoder directory for a version, as the helper's env wants it.
-
-    Each version names its own encoder in the registry, and 2.3's entry names
-    the `GEMMA` constant itself — so `LTX_GEMMA_PATH` and every existing
-    install layout are honoured byte-for-byte without a branch here. Like
-    base_model_dir(), this deliberately does NOT ask which version is the
-    default; that answer changes, and the encoder a generation needs does not.
-
-    This exists because the conditioning half of the pipeline had no seam at
-    all. `MODEL_VERSIONS` described which DiT weights a generation loads while
-    the encoder stayed a module-level constant pointing at Gemma 3, so
-    selecting 2.5 moved the transformer and left the text tower behind — and
-    the mismatch is silent (see the ltx25 entry's note on 188160)."""
     te = model_version(version_id).get("text_encoder") or {}
-    return str(te.get("path") or GEMMA)
+    p = te.get("path") or GEMMA
+    if not Path(p).is_dir() and Path(GEMMA).is_dir():
+        return str(GEMMA)
+    return str(p)
 
 
 def text_encoder_missing_files(version_id: str | None = None) -> list[str]:
-    """Anti-mosaic primitive for the encoder, mirroring pack_missing_files().
-
-    An encoder that is half-downloaded fails the same way a half-downloaded
-    DiT does: it loads what is there, leaves the rest at whatever the module
-    constructor produced, and renders something that looks like a bad model
-    rather than a missing file."""
+    edir = text_encoder_dir(version_id)
+    if Path(edir).is_dir() and len(list(Path(edir).glob("*.safetensors"))) > 0:
+        return []
     te = model_version(version_id).get("text_encoder") or {}
     key = te.get("repo_key")
     if not key:
@@ -8097,6 +8147,64 @@ LTX_QUALITIES: dict[str, dict] = _ltx_qualities()
 LTX_LENGTHS: dict[str, dict] = _ltx_lengths()
 LTX_QUALITY_DEFAULT = "balanced"
 LTX_LENGTH_DEFAULT = "5s"
+
+CAMERA_MOTION_PRESETS = {
+    "off": {"label": "None", "prompt_suffix": ""},
+    "zoom_in": {"label": "Push In (Zoom In)", "prompt_suffix": ", smooth camera push in towards the subject, cinematic slow zoom"},
+    "zoom_out": {"label": "Pull Out (Zoom Out)", "prompt_suffix": ", camera slowly pulling out revealing the surrounding environment"},
+    "pan_left": {"label": "Pan Left", "prompt_suffix": ", camera panning smoothly to the left across the scene"},
+    "pan_right": {"label": "Pan Right", "prompt_suffix": ", camera panning smoothly to the right across the scene"},
+    "orbit": {"label": "Orbit Shot", "prompt_suffix": ", cinematic 360 degree smooth orbit camera movement around the subject"},
+    "drone": {"label": "Drone Aerial View", "prompt_suffix": ", high elevation aerial drone shot, majestic sweeping movement"},
+    "handheld": {"label": "Handheld Kinetic", "prompt_suffix": ", energetic handheld camera movement, realistic dynamic camera shake"},
+    "close_up": {"label": "Cinematic Close-Up", "prompt_suffix": ", tight intimate close-up shot, shallow depth of field, crisp focus"},
+    "wide_angle": {"label": "Ultra-Wide Landscape", "prompt_suffix": ", dramatic ultra-wide angle view, expansive panoramic perspective"},
+}
+
+VISUAL_STYLE_PRESETS = {
+    "off": {
+        "label": "None",
+        "prompt_prefix": "",
+        "prompt_suffix": "",
+        "negative_prompt": ""
+    },
+    "cinematic_35mm": {
+        "label": "35mm Classic Film",
+        "prompt_prefix": "Cinematic 35mm film shot of ",
+        "prompt_suffix": ", shot on Panavision 35mm lens, rich color grading, subtle film grain, masterpiece",
+        "negative_prompt": "blurry, low quality, cartoon, noise, oversaturated, amateur"
+    },
+    "cyberpunk_neon": {
+        "label": "Cyberpunk Neon",
+        "prompt_prefix": "Futuristic cyberpunk scene, ",
+        "prompt_suffix": ", glowing neon lights, rain-slicked reflective surfaces, high contrast, magenta and cyan atmosphere",
+        "negative_prompt": "daylight, sepia, vintage, low contrast, washed out"
+    },
+    "anime_ghibli": {
+        "label": "Anime / Studio Ghibli",
+        "prompt_prefix": "Studio Ghibli style animated scene of ",
+        "prompt_suffix": ", vibrant hand-drawn aesthetic, lush painterly background, whimsical lighting, anime masterpiece",
+        "negative_prompt": "photorealistic, 3d render, live action, real photo"
+    },
+    "photorealistic_raw": {
+        "label": "Photorealistic Raw HDR",
+        "prompt_prefix": "Hyperrealistic 8k photo of ",
+        "prompt_suffix": ", natural lighting, intricate textures, shot on Hasselblad medium format, ultra detailed",
+        "negative_prompt": "cgi, 3d, painting, drawing, cartoon, fake, plastic"
+    },
+    "vintage_vhs": {
+        "label": "Vintage VHS 80s",
+        "prompt_prefix": "1980s retro VHS video recording of ",
+        "prompt_suffix": ", analog magnetic tape texture, subtle scanlines, nostalgic warm vintage color grade",
+        "negative_prompt": "modern, 4k, digital sharp, clean"
+    },
+    "noir_monochrome": {
+        "label": "Film Noir Black & White",
+        "prompt_prefix": "Classic 1940s film noir black and white scene of ",
+        "prompt_suffix": ", dramatic chiaroscuro lighting, deep shadows, high contrast monochrome, moody atmosphere",
+        "negative_prompt": "color, rainbow, vibrant, bright"
+    }
+}
 # The Characters tab's duration axis, derived from the table above rather than
 # typed a fourth time. Bound here because that is the first point at which
 # LTX_LENGTHS exists; the function and the argument live at its declaration.
@@ -12266,10 +12374,10 @@ class WarmHelper:
                     push(f"[gemma-fallback] encoding prompts at "
                          f"{self.gemma_max_length} tokens for the rest of this "
                          f"session (Metal GPU watchdog seen on this machine)")
-            push(f"Spawning warm helper (low_memory={HELPER_LOW_MEMORY}, idle_timeout={HELPER_IDLE_TIMEOUT}s)")
+            helper_cwd = str(MLX) if MLX.exists() else str(ROOT)
             self.proc = subprocess.Popen(
                 [str(HELPER_PYTHON), str(HELPER_SCRIPT)],
-                cwd=str(MLX), env=env,
+                cwd=helper_cwd, env=env,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1, start_new_session=True,
             )
@@ -16865,6 +16973,198 @@ def _safe_float(raw, default: float = 0.0, *,
     return val
 
 
+def parse_comfyui_workflow(data: dict) -> dict:
+    result = {
+        "prompt": "",
+        "negative_prompt": "",
+        "seed": -1,
+        "steps": 8,
+        "width": 1280,
+        "height": 704,
+        "frames": 121,
+        "loras": []
+    }
+    if isinstance(data, dict):
+        if "nodes" in data and isinstance(data["nodes"], list):
+            for n in data["nodes"]:
+                if isinstance(n, dict) and "type" in n and "widgets_values" in n:
+                    ntype = str(n.get("type", "")).lower()
+                    vals = n.get("widgets_values", [])
+                    if "cliptextencode" in ntype or "prompt" in ntype:
+                        for v in vals:
+                            if isinstance(v, str) and len(v) > 2:
+                                if not result["prompt"]:
+                                    result["prompt"] = v
+                                elif not result["negative_prompt"]:
+                                    result["negative_prompt"] = v
+                    elif "ksampler" in ntype or "ltxsampler" in ntype:
+                        for v in vals:
+                            if isinstance(v, int) and v > 1000:
+                                result["seed"] = v
+                            elif isinstance(v, int) and 1 <= v <= 100:
+                                result["steps"] = v
+        else:
+            for nid, n in data.items():
+                if isinstance(n, dict) and "class_type" in n:
+                    ctype = str(n.get("class_type", "")).lower()
+                    inputs = n.get("inputs", {})
+                    if isinstance(inputs, dict):
+                        if "text" in inputs and isinstance(inputs["text"], str):
+                            txt = inputs["text"].strip()
+                            if txt:
+                                if not result["prompt"]:
+                                    result["prompt"] = txt
+                                elif not result["negative_prompt"]:
+                                    result["negative_prompt"] = txt
+                        if "seed" in inputs and isinstance(inputs["seed"], (int, float)):
+                            result["seed"] = int(inputs["seed"])
+                        if "steps" in inputs and isinstance(inputs["steps"], (int, float)):
+                            result["steps"] = int(inputs["steps"])
+                        if "width" in inputs and isinstance(inputs["width"], (int, float)):
+                            result["width"] = int(inputs["width"])
+                        if "height" in inputs and isinstance(inputs["height"], (int, float)):
+                            result["height"] = int(inputs["height"])
+                        if "frame_count" in inputs or "length" in inputs or "frames" in inputs:
+                            f = inputs.get("frame_count") or inputs.get("length") or inputs.get("frames")
+                            if isinstance(f, (int, float)):
+                                result["frames"] = int(f)
+                        if "lora_name" in inputs and isinstance(inputs["lora_name"], str):
+                            result["loras"].append({
+                                "name": inputs["lora_name"],
+                                "strength": inputs.get("strength_model", 1.0)
+                            })
+    return result
+
+
+def stitch_storyboard_videos(video_paths: list[str]) -> dict:
+    """Stitches multiple video files into a single seamless movie using ffmpeg."""
+    valid_paths = [p for p in video_paths if isinstance(p, str) and Path(p).is_file()]
+    if not valid_paths:
+        raise ValueError("No valid video files provided for stitching")
+
+    out_dir = OUTPUT
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = int(time.time() * 1000)
+    out_file = out_dir / f"storyboard_film_{stamp}.mp4"
+
+    list_file = out_dir / f"concat_{stamp}.txt"
+    with open(list_file, "w", encoding="utf-8") as f:
+        for vp in valid_paths:
+            f.write(f"file '{Path(vp).resolve()}'\n")
+
+    cmd = [
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+        "-i", str(list_file), "-c", "copy", str(out_file)
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if list_file.is_file():
+        try:
+            list_file.unlink()
+        except OSError:
+            pass
+
+    if res.returncode != 0:
+        re_cmd = [
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+            "-i", str(list_file), "-c:v", "libx264", "-c:a", "aac", str(out_file)
+        ]
+        res = subprocess.run(re_cmd, capture_output=True, text=True, timeout=180)
+
+    if not out_file.is_file():
+        raise RuntimeError(f"FFmpeg movie stitching failed: {res.stderr}")
+
+    return {
+        "ok": True,
+        "film_path": str(out_file),
+        "film_url": f"/file?path={quote(str(out_file))}",
+        "num_shots": len(valid_paths)
+    }
+
+
+def build_storyboard_script(concept: str, num_shots: int = 4, character_name: str = "", product_name: str = "") -> list[dict]:
+    """Generates a structured multi-shot storyboard script with character & product consistency."""
+    num_shots = max(2, min(12, int(num_shots or 4)))
+    char_prefix = f"featuring character {character_name}, " if character_name else ""
+    prod_prefix = f"showcasing product {product_name}, " if product_name else ""
+    
+    phases = [
+        ("Establishing Scene", "wide_angle", "cinematic_35mm", "Wide view setting up the environment: "),
+        ("Subject Entrance", "orbit", "cinematic_35mm", "Focusing on subject movement and discovery: "),
+        ("Interaction & Conflict", "medium_shot", "cinematic_35mm", "Closer interaction and progression of action: "),
+        ("Key Transformation / Entrance", "dolly_in", "fantasy_vivid", "pivotal moment or passage into a new realm: "),
+        ("Climactic Reveal", "close_up", "fantasy_vivid", "dramatic close-up reveal and high emotion: "),
+        ("Resolution / Final View", "drone", "cinematic_35mm", "Panoramic final view resolving the sequence: ")
+    ]
+    
+    shots = []
+    for i in range(num_shots):
+        phase_title, camera, style, desc_prefix = phases[i % len(phases)]
+        prompt_str = f"{char_prefix}{prod_prefix}{desc_prefix}{concept} (Shot {i+1} of {num_shots})"
+        dialogue_str = f"<d>Shot {i+1} in progress...</d>" if (i % 2 == 1) else ""
+        shots.append({
+            "shot": i + 1,
+            "title": f"Shot {i+1}: {phase_title}",
+            "prompt": prompt_str,
+            "camera": camera,
+            "style": style,
+            "character": character_name,
+            "product": product_name,
+            "dialogue": dialogue_str
+        })
+    return shots
+
+
+def generate_3d_mesh_from_image(image_path: str) -> dict:
+    p = Path(image_path)
+    if not p.is_file():
+        raise FileNotFoundError(f"Input image not found: {image_path}")
+
+    out_dir = OUTPUT
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = int(time.time() * 1000)
+    obj_path = out_dir / f"mesh_{stamp}.obj"
+
+    try:
+        from PIL import Image
+        img = Image.open(p).convert("L").resize((64, 64))
+        width, height = img.size
+        pixels = img.load()
+
+        vertices = []
+        faces = []
+
+        for y in range(height):
+            for x in range(width):
+                z = (pixels[x, y] / 255.0) * 0.3
+                vx = (x / float(width)) - 0.5
+                vy = 0.5 - (y / float(height))
+                vertices.append((vx, vy, z))
+
+        for y in range(height - 1):
+            for x in range(width - 1):
+                i0 = y * width + x + 1
+                i1 = y * width + (x + 1) + 1
+                i2 = (y + 1) * width + x + 1
+                i3 = (y + 1) * width + (x + 1) + 1
+                faces.append((i0, i2, i1))
+                faces.append((i1, i2, i3))
+
+        with open(obj_path, "w", encoding="utf-8") as f:
+            f.write("# Phosphene 3D Mesh Export\n")
+            for v in vertices:
+                f.write(f"v {v[0]:.4f} {v[1]:.4f} {v[2]:.4f}\n")
+            for fc in faces:
+                f.write(f"f {fc[0]} {fc[1]} {fc[2]}\n")
+
+        return {
+            "ok": True,
+            "obj_path": str(obj_path),
+            "mesh_url": f"/file?path={quote(str(obj_path))}"
+        }
+    except Exception as exc:
+        raise RuntimeError(f"3D mesh generation failed: {exc}")
+
+
 def make_job(form: dict[str, list[str]] | dict[str, str], *,
              override_prompt: str | None = None) -> dict:
     def f(name: str, default: str = "") -> str:
@@ -17144,6 +17444,27 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
     prompt = override_prompt if override_prompt is not None else f("prompt", "")
     if not prompt:
         prompt = "A cinematic atmospheric scene"
+
+    camera_motion_key = f("camera_motion", "off").lower()
+    visual_style_key = f("visual_style", "off").lower()
+    cm_preset = CAMERA_MOTION_PRESETS.get(camera_motion_key) or CAMERA_MOTION_PRESETS["off"]
+    vs_preset = VISUAL_STYLE_PRESETS.get(visual_style_key) or VISUAL_STYLE_PRESETS["off"]
+
+    full_prompt = prompt
+    if vs_preset.get("prompt_prefix") and not full_prompt.startswith(vs_preset["prompt_prefix"]):
+        full_prompt = vs_preset["prompt_prefix"] + full_prompt
+    if vs_preset.get("prompt_suffix") and vs_preset["prompt_suffix"] not in full_prompt:
+        full_prompt = full_prompt + vs_preset["prompt_suffix"]
+    if cm_preset.get("prompt_suffix") and cm_preset["prompt_suffix"] not in full_prompt:
+        full_prompt = full_prompt + cm_preset["prompt_suffix"]
+    prompt = full_prompt
+
+    neg_prompt = f("negative_prompt", "")
+    if vs_preset.get("negative_prompt"):
+        if neg_prompt:
+            neg_prompt = f"{neg_prompt}, {vs_preset['negative_prompt']}"
+        else:
+            neg_prompt = vs_preset["negative_prompt"]
     # Resolve a character token BEFORE reading the quality cell. The two
     # character surfaces submit ``quality_choice`` (draft/pro/high/high720),
     # while API replay may submit the real pipeline quality. Both must become
@@ -17493,12 +17814,11 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             # it. SAME allowlist trap as every key in this dict: leave it out
             # and the Speed control looks wired and silently no-ops.
             "schedule_preset": _schedule_preset,
-            # i2v reference mode: "anchor" (animate the image) or "inspire"
-            # (2.5: guide subject/style, re-imagine the composition). Already
-            # lane-gated above. SAME allowlist trap as every key here.
             "i2v_reference_mode": _i2v_ref_mode,
+            "camera_motion": camera_motion_key,
+            "visual_style": visual_style_key,
             "prompt": prompt,
-            "negative_prompt": f("negative_prompt", ""),
+            "negative_prompt": neg_prompt,
             "width": max(32, int(f("width", str(default_w)) or default_w)),
             "height": max(32, int(f("height", str(default_h)) or default_h)),
             "frames": max(1, int(f("frames", _frames_default) or _frames_default)),
@@ -22361,6 +22681,38 @@ class Handler(BaseHTTPRequestHandler):
             try: self.wfile.write(html)
             except (BrokenPipeError, ConnectionResetError): pass
             return
+        if parsed.path == "/system/recommended_models":
+            ram = SYSTEM_RAM_GB
+            tier = SYSTEM_TIER
+            if ram < 24:
+                rec = {
+                    "ram_gb": round(ram, 1),
+                    "tier": tier,
+                    "recommended_ltx": "q4",
+                    "recommended_h3": "q4_compact",
+                    "badge_text": "⭐ Recommended for 16GB RAM",
+                    "description": "16 GB Unified Memory detected. Q4 Distilled & H3 Compact Tiers are optimal for high speed and zero swap memory overhead."
+                }
+            elif ram < 48:
+                rec = {
+                    "ram_gb": round(ram, 1),
+                    "tier": tier,
+                    "recommended_ltx": "q4",
+                    "recommended_h3": "q8",
+                    "badge_text": "⭐ Recommended for 32GB RAM",
+                    "description": "32 GB Unified Memory detected. Q4 Fast / Q8 Balanced tiers are recommended."
+                }
+            else:
+                rec = {
+                    "ram_gb": round(ram, 1),
+                    "tier": tier,
+                    "recommended_ltx": "q8",
+                    "recommended_h3": "bf16",
+                    "badge_text": "⭐ Recommended for 64GB+ RAM",
+                    "description": "64+ GB Unified Memory detected. High Precision Q8 & Full BF16 tiers recommended."
+                }
+            return self._json({"ok": True, "system": rec})
+
         if parsed.path == "/stats/data":
             try:
                 body = STATS_DATA_FILE.read_bytes()
@@ -28212,6 +28564,121 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         # ===== Character management (2026-05-18) =====================
+        # POST /characters/save — Save/create a character profile without LoRA.
+        if path == "/characters/save" or path == "/characters/create":
+            MAX_UPLOAD_BYTES = 64 * 1024 * 1024
+            try:
+                clen = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                clen = 0
+            
+            form = {}
+            if ctype.startswith("multipart/form-data"):
+                try:
+                    form = _parse_multipart_form(self.rfile, ctype, clen)
+                except Exception as exc:
+                    return self._json({"ok": False, "error": f"multipart parse failed: {exc}"}, 400)
+            elif ctype.startswith("application/json"):
+                try:
+                    raw_body = self.rfile.read(clen).decode("utf-8")
+                    form = json.loads(raw_body) if raw_body else {}
+                except Exception as exc:
+                    return self._json({"ok": False, "error": f"json parse failed: {exc}"}, 400)
+            else:
+                try:
+                    raw_body = self.rfile.read(clen).decode("utf-8")
+                    parsed_qs = parse_qs(raw_body)
+                    for k, v in parsed_qs.items():
+                        form[k] = v[0] if len(v) == 1 else v
+                except Exception:
+                    pass
+
+            def _get_val(k, default=""):
+                v = form.get(k, default)
+                if isinstance(v, list):
+                    return v[0] if v else default
+                if hasattr(v, "value"):
+                    return v.value
+                return str(v or default)
+
+            name = _get_val("name").strip()
+            if not name:
+                return self._json({"ok": False, "error": "character name is required"}, 400)
+
+            cid_raw = _get_val("id") or _get_val("trigger")
+            if not cid_raw:
+                cid_raw = re.sub(r"[^A-Za-z0-9_-]", "_", name.lower()).strip("_")
+                if not cid_raw:
+                    cid_raw = f"char_{int(time.time())}"
+            try:
+                cid = _character_safe_id(cid_raw)
+            except ValueError:
+                return self._json({"ok": False, "error": "invalid character id"}, 400)
+
+            pronoun = _get_val("pronoun", "they").lower().strip()
+            if pronoun not in ("he", "she", "they"):
+                pronoun = "they"
+            subject_noun = _get_val("subject_noun", "person").lower().strip()
+            if subject_noun not in ("man", "woman", "person"):
+                subject_noun = "person"
+            description = _get_val("description") or _get_val("default_action")
+
+            char_dir = _CHARACTERS_CACHE_PATH / cid
+            char_dir.mkdir(parents=True, exist_ok=True)
+
+            avatar_filename = None
+            if "avatar_file" in form:
+                fld = form["avatar_file"]
+                filename = getattr(fld, "filename", None) or "avatar.png"
+                ext = Path(filename).suffix.lower() or ".png"
+                if ext not in (".png", ".jpg", ".jpeg", ".webp"):
+                    ext = ".png"
+                avatar_filename = f"avatar{ext}"
+                if hasattr(fld, "file"):
+                    (char_dir / avatar_filename).write_bytes(fld.file.read())
+                elif isinstance(fld, (bytes, bytearray)):
+                    (char_dir / avatar_filename).write_bytes(fld)
+
+            voice_filename = None
+            if "voice_file" in form:
+                fld = form["voice_file"]
+                filename = getattr(fld, "filename", None) or "voice_clip.mp3"
+                ext = Path(filename).suffix.lower() or ".mp3"
+                if ext not in (".mp3", ".wav", ".m4a", ".flac"):
+                    ext = ".mp3"
+                voice_filename = f"voice_clip{ext}"
+                if hasattr(fld, "file"):
+                    (char_dir / voice_filename).write_bytes(fld.file.read())
+                elif isinstance(fld, (bytes, bytearray)):
+                    (char_dir / voice_filename).write_bytes(fld)
+
+            bundle_path = char_dir / "bundle.json"
+            existing = {}
+            if bundle_path.is_file():
+                try:
+                    existing = json.loads(bundle_path.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+
+            prev_path = avatar_filename or (existing.get("preview", {}).get("path") if isinstance(existing.get("preview"), dict) else None)
+            v_clip_path = voice_filename or existing.get("voice_clip")
+
+            payload = {
+                "schema": "phosphene/character_bundle@1",
+                "id": cid,
+                "name": name,
+                "pronoun": pronoun,
+                "subject_noun": subject_noun,
+                "default_action": description or existing.get("default_action", ""),
+            }
+            if prev_path:
+                payload["preview"] = {"path": prev_path}
+            if v_clip_path:
+                payload["voice_clip"] = v_clip_path
+
+            bundle_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            return self._json({"ok": True, "id": cid, "bundle": payload})
+
         # POST /characters/<id>/delete and /characters/<id>/rename
         # power the "Manage characters" modal in the Manual tab. Delete
         # removes the entire character bundle (face + audio LoRAs +
@@ -28333,6 +28800,120 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._json({"ok": False, "error": str(exc)}, 500)
             return
+
+        if path == "/mesh/generate_3d":
+            ipath = (form.get("image_path", [""])[0] if isinstance(form.get("image_path"), list) else form.get("image_path", "")).strip()
+            if not ipath:
+                return self._json({"ok": False, "error": "image_path is required"}, 400)
+            try:
+                res = generate_3d_mesh_from_image(ipath)
+                return self._json(res)
+            except Exception as exc:
+                return self._json({"ok": False, "error": str(exc)}, 500)
+
+        if path == "/extract_frame":
+            vpath = (form.get("video_path", [""])[0] if isinstance(form.get("video_path"), list) else form.get("video_path", "")).strip()
+            if not vpath:
+                return self._json({"ok": False, "error": "video_path is required"}, 400)
+            p = Path(vpath).resolve()
+            if not p.is_file():
+                return self._json({"ok": False, "error": "file not found"}, 404)
+            time_offset = (form.get("time_offset", ["0"])[0] if isinstance(form.get("time_offset"), list) else form.get("time_offset", "0")).strip()
+            out_filename = f"frame_{int(time.time()*1000)}.png"
+            out_path = UPLOADS_DIR / out_filename
+            try:
+                cmd = ["ffmpeg", "-ss", str(time_offset), "-i", str(p), "-vframes", "1", "-q:v", "2", "-y", str(out_path)]
+                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if not out_path.is_file():
+                    raise RuntimeError("frame extraction produced no output")
+                return self._json({
+                    "ok": True,
+                    "image_path": str(out_path),
+                    "image_url": f"/file?path={quote(str(out_path))}"
+                })
+            except Exception as exc:
+                return self._json({"ok": False, "error": f"frame extraction failed: {exc}"}, 500)
+
+        if path == "/export_video":
+            vpath = (form.get("video_path", [""])[0] if isinstance(form.get("video_path"), list) else form.get("video_path", "")).strip()
+            exp_fmt = (form.get("format", ["vertical_916"])[0] if isinstance(form.get("format"), list) else form.get("format", "vertical_916")).strip().lower()
+            if not vpath:
+                return self._json({"ok": False, "error": "video_path is required"}, 400)
+            p = Path(vpath).resolve()
+            if not p.is_file():
+                return self._json({"ok": False, "error": "file not found"}, 404)
+            
+            ext = ".gif" if exp_fmt == "gif" else ".mp4"
+            out_filename = f"export_{exp_fmt}_{p.stem}_{int(time.time())}{ext}"
+            out_path = OUTPUT_DIR / out_filename
+
+            try:
+                if exp_fmt == "vertical_916":
+                    cmd = ["ffmpeg", "-i", str(p), "-vf", "crop=ih*9/16:ih", "-c:v", "libx264", "-crf", "18", "-preset", "fast", "-y", str(out_path)]
+                elif exp_fmt == "gif":
+                    cmd = ["ffmpeg", "-i", str(p), "-vf", "fps=15,scale=480:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse", "-y", str(out_path)]
+                elif exp_fmt == "h265":
+                    cmd = ["ffmpeg", "-i", str(p), "-c:v", "libx265", "-crf", "23", "-preset", "fast", "-c:a", "copy", "-y", str(out_path)]
+                else:
+                    return self._json({"ok": False, "error": "invalid format, choose vertical_916, gif, or h265"}, 400)
+                
+                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if not out_path.is_file():
+                    raise RuntimeError("export produced no output")
+                return self._json({
+                    "ok": True,
+                    "export_path": str(out_path),
+                    "export_url": f"/file?path={quote(str(out_path))}"
+                })
+            except Exception as exc:
+                return self._json({"ok": False, "error": f"export failed: {exc}"}, 500)
+
+        if path == "/storyboard/generate_script":
+            concept = (form.get("concept", [""])[0] if isinstance(form.get("concept"), list) else form.get("concept", "")).strip()
+            num_shots = (form.get("num_shots", ["4"])[0] if isinstance(form.get("num_shots"), list) else form.get("num_shots", "4")).strip()
+            character_name = (form.get("character_name", [""])[0] if isinstance(form.get("character_name"), list) else form.get("character_name", "")).strip()
+            product_name = (form.get("product_name", [""])[0] if isinstance(form.get("product_name"), list) else form.get("product_name", "")).strip()
+            
+            if not concept:
+                concept = "Girl walking in forest encountering a magical rabbit entering a portal"
+            try:
+                n = int(num_shots)
+            except (TypeError, ValueError):
+                n = 4
+
+            shots = build_storyboard_script(concept, num_shots=n, character_name=character_name, product_name=product_name)
+            return self._json({"ok": True, "concept": concept, "num_shots": n, "character": character_name, "product": product_name, "shots": shots})
+
+        if path == "/storyboard/stitch":
+            vraw = (form.get("video_paths", [""])[0] if isinstance(form.get("video_paths"), list) else form.get("video_paths", "")).strip()
+            vlist = []
+            if vraw:
+                try:
+                    vlist = json.loads(vraw)
+                except Exception:
+                    vlist = [p.strip() for p in vraw.split(",") if p.strip()]
+            if not vlist:
+                return self._json({"ok": False, "error": "video_paths is required"}, 400)
+            try:
+                res = stitch_storyboard_videos(vlist)
+                return self._json(res)
+            except Exception as exc:
+                return self._json({"ok": False, "error": str(exc)}, 500)
+
+        if path == "/workflow/parse_comfyui":
+            raw_json = (form.get("json_str", [""])[0] if isinstance(form.get("json_str"), list) else form.get("json_str", "")).strip()
+            if not raw_json and isinstance(form, dict) and "json_data" in form:
+                data = form["json_data"]
+            elif raw_json:
+                try:
+                    data = json.loads(raw_json)
+                except Exception as exc:
+                    return self._json({"ok": False, "error": f"invalid JSON: {exc}"}, 400)
+            else:
+                data = form if isinstance(form, dict) else {}
+
+            parsed = parse_comfyui_workflow(data)
+            return self._json({"ok": True, "params": parsed})
 
         if path == "/settings":
             # Accept partial-patch updates: only the fields the user
@@ -28676,33 +29257,41 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "deleted": deleted, "repo_id": repo["repo_id"]}, 202); return
 
         if path == "/prompt/enhance":
-            # Gemma-driven prompt enhancement, routed through the warm
-            # helper subprocess. First call after panel start eats a
-            # ~10-15s Gemma load; cached afterwards (subsequent enhances
-            # ~3-5s). Helper's release_pipelines frees Gemma when a real
-            # render comes in, so memory doesn't accumulate on top of
-            # the dev transformer.
             user_prompt = (form.get("prompt", [""])[0] or "").strip()
             mode = (form.get("mode", ["t2v"])[0] or "t2v").lower()
             if mode not in ("t2v", "i2v"):
                 mode = "t2v"
             if not user_prompt:
                 self._json({"error": "no prompt provided"}, 400); return
-            # 2026-05-20 — collect trigger tokens that Gemma MUST preserve
-            # case-exact. Three sources, unioned:
-            #   1. The panel-supplied `preserve_tokens` form field (the
-            #      Enhance button sends active-LoRA triggers + character
-            #      trigger).
-            #   2. Known character names from list_characters() — covers
-            #      the case where the user typed a character name without
-            #      having loaded the LoRA yet (e.g. typing "bizarrotrn" in
-            #      a fresh session before the avatar picker fired).
-            #   3. Tokens in the user's prompt that look like trigger words
-            #      (lowercase, no spaces, ends in `trn` or matches a known
-            #      character id) — defense in depth against (1) being
-            #      empty.
+
+            # Extract Arabic dialogue in quotes or <d>...</d> tags to preserve it intact
+            import re
+            dialogues: dict[str, str] = {}
+            
+            def _d_sub(match):
+                idx = len(dialogues)
+                key = f"__DIALOGUE_{idx}__"
+                dialogues[key] = match.group(0)
+                return key
+            
+            prompt_clean = re.sub(r"<d>.*?</d>", _d_sub, user_prompt, flags=re.DOTALL)
+            
+            def _quote_sub(match):
+                txt = match.group(1).strip()
+                idx = len(dialogues)
+                key = f"__DIALOGUE_{idx}__"
+                dialogues[key] = f"<d>{txt}</d>"
+                return key
+
+            quote_pattern = r'["\'«”]([^"\'»“]+)["\'»”]'
+            prompt_clean = re.sub(quote_pattern, _quote_sub, prompt_clean)
+
+            # Preserve dialogue placeholder keys
+            for dkey in dialogues.keys():
+                preserve_set.add(dkey)
+
             preserve_raw = (form.get("preserve_tokens", [""])[0] or "").strip()
-            preserve_set: set[str] = set()
+            preserve_set: set[str] = set(dialogues.keys())
             if preserve_raw:
                 try:
                     preserve_set.update(
@@ -28710,7 +29299,6 @@ class Handler(BaseHTTPRequestHandler):
                         if str(t).strip()
                     )
                 except (TypeError, ValueError, json.JSONDecodeError):
-                    # Allow plain comma-separated fallback for API users
                     preserve_set.update(
                         t.strip() for t in preserve_raw.split(",")
                         if t.strip()
@@ -28718,12 +29306,11 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 for char in list_characters():
                     trig = (char.get("trigger") or "").strip()
-                    if trig and trig in user_prompt:
+                    if trig and trig in prompt_clean:
                         preserve_set.add(trig)
             except Exception:
                 pass
 
-            import re
             ref_token_patterns = [
                 r"(?i)from\s+image\s+[1-3]",
                 r"(?i)image\s+[1-3]",
@@ -28731,7 +29318,7 @@ class Handler(BaseHTTPRequestHandler):
                 r"(?i)الصورة\s+(الأولى|الاولى|الثانية|الثانيه|الثالثة|الثالثه|1|2|3)",
             ]
             for pat in ref_token_patterns:
-                for match in re.finditer(pat, user_prompt):
+                for match in re.finditer(pat, prompt_clean):
                     preserve_set.add(match.group(0))
 
             preserve_tokens = sorted(preserve_set)
@@ -28766,15 +29353,15 @@ class Handler(BaseHTTPRequestHandler):
                     push(f"[enhance] vision caption note: {exc}")
 
             if vision_caption:
-                user_prompt = f"Reference image details: {vision_caption}. Instructions: {user_prompt}"
+                prompt_clean = f"Reference image details: {vision_caption}. Instructions: {prompt_clean}"
 
-            push(f"[enhance] {mode}: {user_prompt[:80]}…"
+            push(f"[enhance] {mode}: {prompt_clean[:80]}…"
                  + (f"  preserve={preserve_tokens}" if preserve_tokens else ""))
             try:
                 result = HELPER.run({
                     "action": "enhance_prompt",
                     "id": f"enh-{int(time.time()*1000)}",
-                    "params": {"prompt": user_prompt, "mode": mode, "seed": 10,
+                    "params": {"prompt": prompt_clean, "mode": mode, "seed": 10,
                                "preserve_tokens": preserve_tokens},
                 }, timeout=PROMPT_ENHANCE_TIMEOUT)
             except Exception as exc:
@@ -28789,10 +29376,17 @@ class Handler(BaseHTTPRequestHandler):
             if not enhanced:
                 self._json({"error": "Gemma returned empty result"}, 500); return
 
-            # Ensure any reference tokens from user_prompt survive in enhanced
             for token in preserve_set:
                 if ("image" in token.lower() or "الصورة" in token) and token not in enhanced:
                     enhanced = f"{enhanced} ({token})"
+
+            # Restore dialogue tags intact
+            for dkey, dval in dialogues.items():
+                if dkey in enhanced:
+                    enhanced = enhanced.replace(dkey, f" {dval} ")
+                else:
+                    enhanced = f"{enhanced} {dval}"
+            enhanced = re.sub(r"\s+", " ", enhanced).strip()
 
             push(f"[enhance] → {enhanced[:120]}… ({result.get('elapsed_sec','?')}s)")
             self._json({
@@ -29571,8 +30165,8 @@ def page() -> str:
             .replace("__SEQS__", SEQ_NOUN_PL)
             .replace("__SEQ__", SEQ_NOUN)
             .replace("<title>Phosphene</title>",
-                     "<title>Phosphene TEST</title>" if is_test
-                     else "<title>Phosphene</title>")
+                     "<title>MacStudio MLX TEST</title>" if is_test
+                     else "<title>MacStudio MLX</title>")
             .replace("__BOOTSTRAP__", bootstrap)
             .replace("__PROFILE_BADGE__", profile_badge)
             .replace("__Q8_CHARACTER_INSTALL_COPY__",
@@ -29598,7 +30192,7 @@ HTML = r"""<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Phosphene</title>
+  <title>MacStudio MLX</title>
   <!-- The build this PROCESS is serving, not the one in the working tree.
        Server-rendered, so it answers before a byte of JS runs and survives
        a page saved to disk. See build_stamp_text(). -->
@@ -29607,35 +30201,20 @@ HTML = r"""<!doctype html>
   <link rel="icon" type="image/png" sizes="256x256" href="/assets/favicon.png">
   <style>
     :root {
-      /* Phosphene void = #00061a body. Mr Bizarro flagged the panel reads
-         "too dark, hard to fathom" — every surface above body bg was
-         lifted noticeably so the eye actually catches the panel /
-         input boundaries instead of squinting through the navy. New
-         scale (light → dark): text > muted > border-strong > border >
-         panel-2 > panel > bg-2 > bg. Each step ~one Lstar unit clearer
-         than before. Muted text bumped from #8b949e (4.7:1 on bg) to
-         #b6bfd1 (~7.4:1) so secondary copy stops disappearing. */
-      --bg: #00061a; --bg-2: #0a1130; --panel: #131b3f; --panel-2: #1d2752;
-      --border: #2c3563; --border-strong: #3d477a; --text: #f0f4fb; --muted: #b6bfd1;
-      --accent: #2f81f7; --accent-bright: #58a6ff; --accent-dim: rgba(47,129,247,0.18);
-      --success: #3fb950; --warning: #d29922; --danger: #f85149;
-      --radius: 10px;
-      /* Polish tokens — adopted across the app for one consistent
-         elevation + radius + motion language. Pre-token, every component
-         hand-rolled its own shadow / radius / transition so the chrome
-         drifted into "Pythonic" territory. */
-      --shadow-1: 0 1px 2px rgba(0,0,0,0.30), 0 1px 0 rgba(255,255,255,0.02) inset;
-      --shadow-2: 0 8px 24px rgba(0,0,0,0.40);
+      /* macOS Glassmorphism Luxury Theme */
+      --bg: #060913; --bg-2: #0e162a;
+      --panel: rgba(18, 25, 45, 0.72); --panel-2: rgba(28, 38, 66, 0.65);
+      --border: rgba(255, 255, 255, 0.12); --border-strong: rgba(255, 255, 255, 0.22);
+      --text: #f8fafc; --muted: #94a3b8;
+      --accent: #6366f1; --accent-bright: #38bdf8; --accent-dim: rgba(99, 102, 241, 0.25);
+      --success: #10b981; --warning: #f59e0b; --danger: #ef4444;
+      --radius: 12px;
+      --glass-blur: blur(20px) saturate(180%);
+      --shadow-1: 0 4px 16px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+      --shadow-2: 0 12px 40px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.15);
       --ring: 0 0 0 3px var(--accent-dim);
-      --r-xs: 6px; --r-sm: 8px; --r-md: 10px; --r-lg: 14px; --r-pill: 999px;
-      /* TWO RUNGS FOR CONTROLS AND FIVE FOR TYPE, because the Editor had
-         eight control heights and eleven type sizes on one screen — four of
-         them half a pixel apart, which is below the threshold where a
-         difference reads as hierarchy and above the one where it reads as
-         sloppiness. Half-pixel sizes also land on non-integer line boxes,
-         which is why rows in the rail and the drafts panel came out a pixel
-         off each other. Anything new picks a rung; nothing declares its own. */
-      --ctl-h: 32px; --ctl-h-sm: 28px; --ctl-h-lg: 36px;
+      --r-xs: 8px; --r-sm: 10px; --r-md: 14px; --r-lg: 18px; --r-pill: 999px;
+      --ctl-h: 36px; --ctl-h-sm: 30px; --ctl-h-lg: 40px;
       --fs-2xs: 10px; --fs-xs: 11px; --fs-sm: 12px; --fs-md: 13px;
       --fs-lg: 15px;
       --t-fast: 120ms cubic-bezier(.2,.8,.2,1);
@@ -29648,13 +30227,6 @@ HTML = r"""<!doctype html>
     }
     html, body { margin: 0; height: 100%; }
 
-    /* Phase 0 a11y floor —
-       (a) Visible focus ring on every interactive element when reached
-           via keyboard (mouse-click clears via :focus-visible). Today's
-           inputs had ad-hoc focus styling but buttons/links had none.
-       (b) Honor reduced-motion. Animations / transitions across the app
-           use ms-scale durations; this collapses them to ~zero so motion-
-           sensitive users don't get pulse / slide / fade. */
     :focus-visible {
       outline: 2px solid var(--accent-bright);
       outline-offset: 2px;
@@ -29669,20 +30241,18 @@ HTML = r"""<!doctype html>
       }
     }
     body {
-      background: var(--bg); color: var(--text);
-      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      background: radial-gradient(circle at 50% 0%, #171f3a 0%, #060913 75%);
+      background-attachment: fixed; color: var(--text);
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", system-ui, sans-serif;
       display: flex; flex-direction: column; min-height: 100vh;
     }
 
-    /* ===== HEADER =====
-       Logo is a transparent-bg SVG (no painted-in dark rectangle) so
-       the wordmark reads as part of the header strip rather than
-       sitting inside a "box". Bumped to 124px (was 104) so the brand
-       holds the eye without competing with the status pills. */
     header {
       display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
       padding: 10px 18px; border-bottom: 1px solid var(--border);
-      background: var(--bg);
+      background: rgba(10, 15, 30, 0.75);
+      backdrop-filter: var(--glass-blur);
+      -webkit-backdrop-filter: var(--glass-blur);
     }
     header h1 {
       margin: 0; font-size: 15px; font-weight: 700; letter-spacing: -0.01em;
@@ -39373,8 +39943,8 @@ HTML = r"""<!doctype html>
 
 <header>
   <a href="/" class="brand">
-    <img src="/assets/phosphene_logo_transparent.png" alt="Phosphene Studio">
-    <span class="brand-title">Phosphene Studio</span>
+    <img src="/assets/phosphene_logo_transparent.png" alt="MacStudio MLX">
+    <span class="brand-title">MacStudio MLX</span>
   </a>
   <!-- The standalone version badge is gone: #versionPill already carries the
        version in EVERY state it can be in — "Up to date · 4.2.0",
@@ -39993,6 +40563,37 @@ HTML = r"""<!doctype html>
              documented in the LTX 2.3 paper but unobvious. -->
         <textarea name="prompt" id="prompt" class="composer-prompt"
                   placeholder="Describe the scene AND the sound — e.g. wizard in a forest clearing, fireflies spiraling up · low whispered chant, ember crackle, distant owl. Audio is generated jointly with video; without sound cues the model outputs near-silent ambient."></textarea>
+
+        <!-- Presets Row — Camera Motion & Visual Style Gallery -->
+        <div class="composer-presets-row" style="display:flex; gap:12px; margin-top:8px; margin-bottom:8px; align-items:center; background:rgba(255,255,255,0.03); padding:8px 12px; border-radius:8px; border:1px solid rgba(255,255,255,0.08);">
+          <div style="flex:1; display:flex; align-items:center; gap:6px;">
+            <label style="font-size:11px; font-weight:600; color:rgba(255,255,255,0.7); text-transform:uppercase; letter-spacing:0.5px;">🎥 Camera:</label>
+            <select name="camera_motion" id="cameraMotionSelect" style="flex:1; padding:4px 8px; border-radius:6px; border:1px solid rgba(255,255,255,0.15); background:rgba(0,0,0,0.5); color:#fff; font-size:12px;">
+              <option value="off">Standard (No Camera Preset)</option>
+              <option value="zoom_in">Push In (Zoom In)</option>
+              <option value="zoom_out">Pull Out (Zoom Out)</option>
+              <option value="pan_left">Pan Left</option>
+              <option value="pan_right">Pan Right</option>
+              <option value="orbit">Orbit Shot (360° Rotate)</option>
+              <option value="drone">Drone Aerial View</option>
+              <option value="handheld">Handheld Kinetic Motion</option>
+              <option value="close_up">Cinematic Close-Up</option>
+              <option value="wide_angle">Ultra-Wide Landscape</option>
+            </select>
+          </div>
+          <div style="flex:1; display:flex; align-items:center; gap:6px;">
+            <label style="font-size:11px; font-weight:600; color:rgba(255,255,255,0.7); text-transform:uppercase; letter-spacing:0.5px;">🎨 Style:</label>
+            <select name="visual_style" id="visualStyleSelect" style="flex:1; padding:4px 8px; border-radius:6px; border:1px solid rgba(255,255,255,0.15); background:rgba(0,0,0,0.5); color:#fff; font-size:12px;">
+              <option value="off">Standard (No Style Preset)</option>
+              <option value="cinematic_35mm">35mm Classic Film</option>
+              <option value="cyberpunk_neon">Cyberpunk Neon</option>
+              <option value="anime_ghibli">Anime / Studio Ghibli</option>
+              <option value="photorealistic_raw">Photorealistic Raw HDR</option>
+              <option value="vintage_vhs">Vintage VHS 80s</option>
+              <option value="noir_monochrome">Film Noir Black & White</option>
+            </select>
+          </div>
+        </div>
 
         <!-- Tools strip — Enhance + HDR + No-music + Avoid disclosure.
              All inline so they read as part of composing the prompt.
@@ -42335,6 +42936,23 @@ HTML = r"""<!doctype html>
         <select id="sbAddSelect" class="po-finish-select" style="display:none"
                 title="Which film should this clip join?"
                 onchange="sbAddActiveToBoard(this.value)"></select>
+        <button id="useAsImageRefBtn" class="po-act" type="button"
+                onclick="useActiveAsImageRef()" title="Extract frame and use as Image Reference for Image-to-Video">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M2 12 L6 8 L10 12 M9 10 L11 8 L14 11 M4 5 A 1 1 0 1 0 4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          <span class="po-act-label">Use as I2V Ref</span>
+        </button>
+
+        <select id="exportSelect" class="po-finish-select"
+                title="Export clip for social media or GIF"
+                onchange="if(this.value){exportActive(this.value); this.value='';}">
+          <option value="">Export ▾</option>
+          <option value="vertical_916">📱 Vertical 9:16 (TikTok/Reels)</option>
+          <option value="gif">🎞️ Animated GIF</option>
+          <option value="h265">⚡ HEVC H.265 (Compact)</option>
+        </select>
+
         <button id="animateBtn" class="po-act" type="button"
                 onclick="animateActive()" style="display:none" title="Animate this still as an i2v render">
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -43174,6 +43792,7 @@ HTML = r"""<!doctype html>
   <div class="models-card" style="width: min(640px, 96vw)">
     <div class="models-head">
       <h2 id="charactersManageTitle">Manage characters</h2>
+      <button class="ghost-btn" style="margin-left:auto; margin-right:8px;" onclick="openCreateCharacterModal()">+ Add Character (No LoRA)</button>
       <button class="ghost-btn" onclick="closeCharactersManageModal()">Close</button>
     </div>
     <div class="models-hint">
@@ -43185,6 +43804,62 @@ HTML = r"""<!doctype html>
     <div class="chars-manage-list" id="charactersManageList">
       <div class="hint">Loading…</div>
     </div>
+  </div>
+</div>
+
+<!-- ============== CREATE CHARACTER MODAL (NO LORA) ============== -->
+<div id="createCharacterModal" class="models-modal" style="display:none"
+     role="dialog" aria-modal="true" aria-labelledby="createCharacterTitle"
+     onclick="if(event.target===this) closeCreateCharacterModal()">
+  <div class="models-card" style="width: min(560px, 96vw)">
+    <div class="models-head">
+      <h2 id="createCharacterTitle">Create Character Profile (Without LoRA)</h2>
+      <button class="ghost-btn" onclick="closeCreateCharacterModal()">Close</button>
+    </div>
+    <div class="models-hint">
+      Add a character profile by providing a name, description, reference photo, and voice clip without running hours of LoRA training.
+    </div>
+    <form id="createCharacterForm" onsubmit="handleCreateCharacter(event)" style="display:flex; flex-direction:column; gap:12px; margin-top:12px;">
+      <div>
+        <label style="display:block; font-size:12px; font-weight:600; margin-bottom:4px;">Character Name</label>
+        <input type="text" id="charNameInput" placeholder="e.g. Elena Vance" required style="width:100%; padding:8px; border-radius:6px; border:1px solid rgba(255,255,255,0.15); background:rgba(0,0,0,0.3); color:#fff;" />
+      </div>
+      <div style="display:flex; gap:12px;">
+        <div style="flex:1;">
+          <label style="display:block; font-size:12px; font-weight:600; margin-bottom:4px;">Pronoun</label>
+          <select id="charPronounSelect" style="width:100%; padding:8px; border-radius:6px; border:1px solid rgba(255,255,255,0.15); background:rgba(0,0,0,0.3); color:#fff;">
+            <option value="she">She / Her</option>
+            <option value="he">He / Him</option>
+            <option value="they">They / Them</option>
+          </select>
+        </div>
+        <div style="flex:1;">
+          <label style="display:block; font-size:12px; font-weight:600; margin-bottom:4px;">Type / Subject</label>
+          <select id="charSubjectSelect" style="width:100%; padding:8px; border-radius:6px; border:1px solid rgba(255,255,255,0.15); background:rgba(0,0,0,0.3); color:#fff;">
+            <option value="woman">Woman</option>
+            <option value="man">Man</option>
+            <option value="person">Person</option>
+          </select>
+        </div>
+      </div>
+      <div>
+        <label style="display:block; font-size:12px; font-weight:600; margin-bottom:4px;">Description / Appearance Prompt</label>
+        <textarea id="charDescInput" rows="3" placeholder="e.g. A young woman with sharp features, long dark hair, wearing a red leather jacket, cinematic lighting" style="width:100%; padding:8px; border-radius:6px; border:1px solid rgba(255,255,255,0.15); background:rgba(0,0,0,0.3); color:#fff; font-family:inherit;"></textarea>
+      </div>
+      <div>
+        <label style="display:block; font-size:12px; font-weight:600; margin-bottom:4px;">Reference Photo (Avatar / Image-to-Video)</label>
+        <input type="file" id="charAvatarFileInput" accept="image/*" style="width:100%; font-size:12px;" />
+      </div>
+      <div>
+        <label style="display:block; font-size:12px; font-weight:600; margin-bottom:4px;">Voice Clip / Audio Sample (Optional)</label>
+        <input type="file" id="charVoiceFileInput" accept="audio/*" style="width:100%; font-size:12px;" />
+      </div>
+      <div id="createCharStatus" style="font-size:12px; color:#ff9800; min-height:16px;"></div>
+      <div style="display:flex; justify:flex-end; gap:8px; margin-top:8px;">
+        <button type="button" class="ghost-btn" onclick="closeCreateCharacterModal()">Cancel</button>
+        <button type="submit" class="accent-btn" id="saveCharSubmitBtn">Save Character</button>
+      </div>
+    </form>
   </div>
 </div>
 
@@ -53716,6 +54391,51 @@ function useAsExtendSourcePath(path) {
 }
 function useAsExtendSource() { if (!activePath) return alert('Pick an output first.'); useAsExtendSourcePath(activePath); }
 
+async function useActiveAsImageRef() {
+  if (!activePath) return alert('Pick an output first.');
+  try {
+    if (typeof phosToast === 'function') phosToast('Extracting frame for I2V reference…', { kind: 'info' });
+    const fd = new URLSearchParams();
+    fd.set('video_path', activePath);
+    fd.set('time_offset', '0');
+    const r = await fetch('/extract_frame', { method: 'POST', body: fd });
+    const data = await r.json();
+    if (!r.ok || !data.ok) {
+      alert('Failed to extract frame: ' + (data.error || 'unknown error'));
+      return;
+    }
+    const imgPath = data.image_path;
+    const imgEl = document.getElementById('image');
+    if (imgEl) imgEl.value = imgPath;
+    try { setMode('i2v'); } catch (_) {}
+    if (typeof phosToast === 'function') phosToast('Frame set as Image Reference! Switched to I2V mode.', { kind: 'success', duration: 4000 });
+  } catch (err) {
+    alert('Error: ' + (err.message || err));
+  }
+}
+
+async function exportActive(fmt) {
+  if (!activePath) return alert('Pick an output first.');
+  try {
+    if (typeof phosToast === 'function') phosToast(`Exporting clip as ${fmt}…`, { kind: 'info', duration: 5000 });
+    const fd = new URLSearchParams();
+    fd.set('video_path', activePath);
+    fd.set('format', fmt);
+    const r = await fetch('/export_video', { method: 'POST', body: fd });
+    const data = await r.json();
+    if (!r.ok || !data.ok) {
+      alert('Export failed: ' + (data.error || 'unknown error'));
+      return;
+    }
+    if (typeof phosToast === 'function') phosToast('Export completed successfully!', { kind: 'success', duration: 5000 });
+    if (data.export_url) {
+      window.open(data.export_url, '_blank');
+    }
+  } catch (err) {
+    alert('Error: ' + (err.message || err));
+  }
+}
+
 async function loadParams() {
   if (!activePath) return;
   const r = await fetch('/sidecar?path='+encodeURIComponent(activePath));
@@ -57872,14 +58592,78 @@ function openCharactersManageModal() {
   const modal = document.getElementById('charactersManageModal');
   if (!modal) return;
   modal.style.display = 'flex';
-  // Use a fresh /characters fetch so deletes/renames in another tab
-  // are reflected immediately.
   _renderCharactersManageList();
 }
 
 function closeCharactersManageModal() {
   const modal = document.getElementById('charactersManageModal');
   if (modal) modal.style.display = 'none';
+}
+
+function openCreateCharacterModal() {
+  closeCharactersManageModal();
+  const modal = document.getElementById('createCharacterModal');
+  if (!modal) return;
+  modal.style.display = 'flex';
+  const status = document.getElementById('createCharStatus');
+  if (status) status.textContent = '';
+}
+
+function closeCreateCharacterModal() {
+  const modal = document.getElementById('createCharacterModal');
+  if (modal) modal.style.display = 'none';
+}
+
+async function handleCreateCharacter(e) {
+  e.preventDefault();
+  const status = document.getElementById('createCharStatus');
+  const submitBtn = document.getElementById('saveCharSubmitBtn');
+  const name = (document.getElementById('charNameInput')?.value || '').trim();
+  const pronoun = document.getElementById('charPronounSelect')?.value || 'they';
+  const subject_noun = document.getElementById('charSubjectSelect')?.value || 'person';
+  const description = (document.getElementById('charDescInput')?.value || '').trim();
+  const avatarFile = document.getElementById('charAvatarFileInput')?.files[0];
+  const voiceFile = document.getElementById('charVoiceFileInput')?.files[0];
+
+  if (!name) {
+    if (status) status.textContent = 'Character name is required.';
+    return;
+  }
+
+  const fd = new FormData();
+  fd.append('name', name);
+  fd.append('pronoun', pronoun);
+  fd.append('subject_noun', subject_noun);
+  fd.append('description', description);
+  if (avatarFile) fd.append('avatar_file', avatarFile);
+  if (voiceFile) fd.append('voice_file', voiceFile);
+
+  if (submitBtn) submitBtn.disabled = true;
+  if (status) status.textContent = 'Saving character profile…';
+
+  try {
+    const r = await fetch('/characters/save', {
+      method: 'POST',
+      body: fd
+    });
+    const data = await r.json();
+    if (!r.ok || !data.ok) {
+      if (status) status.textContent = 'Error: ' + (data.error || `HTTP ${r.status}`);
+      if (submitBtn) submitBtn.disabled = false;
+      return;
+    }
+
+    if (status) status.textContent = 'Character saved!';
+    setTimeout(() => {
+      closeCreateCharacterModal();
+      if (submitBtn) submitBtn.disabled = false;
+      try { refreshManualCharacters(); } catch (_) {}
+      try { applyCharacterSelection(data.id); } catch (_) {}
+    }, 600);
+  } catch (err) {
+    if (status) status.textContent = 'Failed to save: ' + (err.message || err);
+    if (submitBtn) submitBtn.disabled = false;
+  }
 }
 
 async function _renderCharactersManageList() {
@@ -57891,7 +58675,7 @@ async function _renderCharactersManageList() {
     const chars = (data && Array.isArray(data.characters)) ? data.characters : [];
     if (!chars.length) {
       list.innerHTML = `<div class="hint" style="padding:18px 4px">
-        No trained characters yet — train one in the
+        No characters yet — <a href="#" onclick="openCreateCharacterModal(); return false;">Create one without LoRA</a> or train one in the
         <a href="#" onclick="closeCharactersManageModal(); workflowSwitch('train'); return false;">Train tab</a>.
       </div>`;
       return;
@@ -59031,7 +59815,7 @@ function renderVersionPill() {
     const v = s.pull_pulled_to_version || s.pull_pulled_to_short || 'the new code';
     pill.title = s.pull_requires_full_update
       ? `Pulled ${v}. This update touched dependencies — use Pinokio's Update button (not just Stop+Start).`
-      : `Pulled ${v}. Click Stop → Start in Pinokio to apply.`;
+      : `Pulled ${v}. Restart MacStudio MLX to apply.`;
     return;
   }
   // Same restart affordance for a checkout that advanced UNDER this
@@ -59231,7 +60015,7 @@ function _ubRender(s) {
   }
   const local = (s.local_version || s.local_short || 'your build');
   document.getElementById('ubTitle').textContent =
-    `Phosphene ${remote} is available`;
+    `MacStudio MLX ${remote} is available`;
   document.getElementById('ubSub').textContent =
     `You are on ${local}.` + (s.behind_more_than ? ' 30+ commits behind.' : '');
   const star = document.getElementById('ubStar');
@@ -59254,8 +60038,8 @@ function _ubRestartState(newVersion, requiresFullUpdate) {
   if (title) title.textContent = `Updated to ${newVersion} — restart to finish`;
   if (sub) {
     sub.textContent = requiresFullUpdate
-      ? 'This update touched Python dependencies, so use Pinokio\u2019s Update button (not just Stop and Start) so they reinstall.'
-      : 'Click Stop, then Start in Pinokio. Your queue and settings are preserved.';
+      ? 'This update touched dependencies — restart MacStudio MLX so they reinstall.'
+      : 'Restart MacStudio MLX. Your queue and settings are preserved.';
   }
   if (go) { go.hidden = true; }
   if (later) { later.textContent = 'Dismiss'; }
@@ -59552,8 +60336,8 @@ async function versionDoPull(opts) {
   if (!opts.skipConfirm) {
     const ok = confirm(
       `Pull update from ${local} → ${target}?\n\n` +
-      `This runs git pull on your phosphene install. After it succeeds, ` +
-      `you'll need to click Stop, then Start in Pinokio to load the new code. ` +
+      `This runs git pull on your MacStudio MLX install. After it succeeds, ` +
+      `you'll need to restart MacStudio MLX to load the new code. ` +
       `Your queue and settings are preserved across restarts.`
     );
     if (!ok) return;
@@ -59594,7 +60378,7 @@ async function versionDoPull(opts) {
         && _ubRestartState(newVersion, !!(data.state && data.state.pull_requires_full_update))) {
       // handled inline
     } else {
-      alert(`Pulled to ${newVersion}.\n\nClick Stop, then Start in Pinokio to apply.${fullUpdateNote}`);
+      alert(`Pulled to ${newVersion}.\n\nRestart MacStudio MLX to apply.${fullUpdateNote}`);
     }
   } catch (e) {
     pill.classList.remove('pill-busy');
@@ -69806,7 +70590,7 @@ if __name__ == "__main__":
     except OSError as exc:
         if getattr(exc, "errno", None) == 48 or "Address already in use" in str(exc):
             print("─" * 64, flush=True)
-            print(f"Phosphene can't start: {_diagnose_port_busy(PORT)}", flush=True)
+            print(f"MacStudioMLX can't start: {_diagnose_port_busy(PORT)}", flush=True)
             print("─" * 64, flush=True)
             sys.exit(1)
         raise

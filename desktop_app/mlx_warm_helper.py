@@ -28,7 +28,15 @@ import threading
 import time
 import traceback
 from contextlib import contextmanager
-from pathlib import Path
+_ROOT = Path(__file__).resolve().parent
+for _p in [
+    _ROOT / "ltx-2-mlx" / "env" / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages",
+    _ROOT / "ltx-2-mlx" / "packages" / "ltx-core-mlx" / "src",
+    _ROOT / "ltx-2-mlx" / "packages" / "ltx-pipelines-mlx" / "src",
+    _ROOT / "env" / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages",
+]:
+    if _p.exists() and str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 try:
     import mlx_lm.utils
@@ -1579,7 +1587,13 @@ _gemma_lm = None
 def get_gemma_lm():
     global _gemma_lm
     if _gemma_lm is None:
-        from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
+        try:
+            from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
+        except ImportError as err:
+            raise RuntimeError(
+                "ltx_core_mlx package is missing in the Python environment. "
+                "Please click 'Install' or 'Resume Install' in Pinokio to complete model setup."
+            ) from err
         emit({"event": "log", "line": "Loading Gemma language model for prompt enhancement (~10-15s)…"})
         target_path = ENHANCE_GEMMA_PATH
         if target_path.startswith("/") and not os.path.exists(target_path):
@@ -2433,8 +2447,7 @@ emit({
     # on reporting live preview as ON. Zero frames, zero errors, zero
     # explanation. The panel can only tell the user the truth if the helper
     # tells the panel.
-    "live_preview_supported": (
-        importlib.util.find_spec("ltx_pipelines_mlx.live_preview") is not None),
+    "live_preview_supported": _live_preview_supported(),
     "mlx_version": _RUNTIME_ENV.get("mlx"),
     "mlx_metal_version": _RUNTIME_ENV.get("mlx_metal"),
     "chip": _RUNTIME_ENV.get("chip"),

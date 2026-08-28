@@ -31,7 +31,7 @@ module.exports = {
       when: "{{platform !== 'darwin' || arch !== 'arm64'}}",
       method: "notify",
       params: {
-        html: "<b>Phosphene requires an Apple Silicon Mac (M1 or newer).</b><br>It will not run on Intel Macs, Linux, or Windows."
+        html: "<b>MacStudioMLX requires an Apple Silicon Mac (M1 or newer).</b><br>It will not run on Intel Macs, Linux, or Windows."
       },
       next: null
     },
@@ -101,7 +101,7 @@ module.exports = {
       when: "{{!exists('ltx-2-mlx/.git')}}",
       method: "notify",
       params: {
-        html: "<b>Install stopped: the video engine could not be downloaded.</b><br>Phosphene needs to download <code>github.com/dgrauet/ltx-2-mlx</code> and that step did not finish.<br><br>This is almost always a network problem (no connection, a VPN or proxy, or GitHub blocked) or a full disk. Check your connection and free space, then click <b>Install</b> again — anything already downloaded is kept and will not be downloaded twice."
+        html: "<b>Install stopped: the video engine could not be downloaded.</b><br>MacStudioMLX needs to download <code>github.com/dgrauet/ltx-2-mlx</code> and that step did not finish.<br><br>This is almost always a network problem (no connection, a VPN or proxy, or GitHub blocked) or a full disk. Check your connection and free space, then click <b>Install</b> again — anything already downloaded is kept and will not be downloaded twice."
       },
       next: null
     },
@@ -595,7 +595,7 @@ module.exports = {
     {
       method: "notify",
       params: {
-        html: "<b>Phosphene installed</b> — video + image generation (incl. Ideogram 4).<br>Click <b>Start</b> to launch the panel, then <b>Open Panel</b>."
+        html: "<b>MacStudioMLX installed</b> — video + image generation (incl. Ideogram 4).<br>Click <b>Start</b> to launch the panel, then <b>Open Panel</b>."
       }
     }
   ]

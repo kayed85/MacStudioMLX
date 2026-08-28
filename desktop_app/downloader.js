@@ -27,9 +27,8 @@ class ModelDownloader {
       const relDir = model.local_dir.replace(/^mlx_models\/?/, '');
       const candidates = [
         path.join(this.modelsDir, relDir),
-        path.join('/Users/mk/MacStudioMLX/mlx_models', relDir),
         path.join(home, 'Library/Application Support/macstudio-mlx/mlx_models', relDir),
-        path.join(home, 'Library/Application Support/phosphene-studio/mlx_models', relDir)
+        path.join(home, 'MacStudioMLX/mlx_models', relDir)
       ];
       let isDownloaded = false;
       let targetPath = candidates[0];

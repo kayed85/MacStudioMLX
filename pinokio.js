@@ -82,7 +82,7 @@ function repoComplete(installRoot, repo, minBytes) {
 
 module.exports = {
   version: "7.0",
-  title: "Phosphene",
+  title: "MacStudioMLX",
   // The Pinokio store listing. It still said "via LTX 2.3 (MLX)" three weeks after 2.5
   // became the generation a fresh install renders with — the first sentence a prospective
   // user reads, naming the wrong engine, while a confused existing user hunting a "why

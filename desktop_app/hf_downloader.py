@@ -13,7 +13,7 @@ def download_hf_repo(repo_id, local_dir):
     os.makedirs(local_dir, exist_ok=True)
     
     api_url = f"https://huggingface.co/api/models/{repo_id}"
-    req = urllib.request.Request(api_url, headers={"User-Agent": "Phosphene/1.0"})
+    req = urllib.request.Request(api_url, headers={"User-Agent": "MacStudioMLX/1.0"})
     
     try:
         with urllib.request.urlopen(req) as resp:
@@ -41,7 +41,7 @@ def download_hf_repo(repo_id, local_dir):
             
         print(f"[{idx}/{total_files}] Downloading {filename}...", flush=True)
         try:
-            file_req = urllib.request.Request(file_url, headers={"User-Agent": "Phosphene/1.0"})
+            file_req = urllib.request.Request(file_url, headers={"User-Agent": "MacStudioMLX/1.0"})
             with urllib.request.urlopen(file_req) as response, open(dest_path, "wb") as out_file:
                 sharded_bytes = 0
                 while True:

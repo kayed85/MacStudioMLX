@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu } = require('electron');
 const { spawn, execSync } = require('child_process');
 const http = require('http');
 const path = require('path');
@@ -12,12 +12,10 @@ let lastPythonLogs = '';
 
 function getPhospheneRoot() {
   const candidates = [
-    '/Users/mk/MacStudioMLX',
-    path.join(app.getPath('home'), 'MacStudioMLX'),
-    '/Users/mk/Phosphene',
-    path.join(app.getPath('home'), 'Phosphene'),
     path.resolve(__dirname, '..'),
-    __dirname
+    process.cwd(),
+    path.join(app.getPath('home'), 'EtherReel-releases'),
+    path.join(app.getPath('home'), 'MacStudioMLX')
   ];
   for (const cand of candidates) {
     if (fs.existsSync(path.join(cand, 'mlx_ltx_panel.py')) && fs.existsSync(path.join(cand, 'ltx-2-mlx/env/bin/python3.11'))) {
@@ -29,7 +27,7 @@ function getPhospheneRoot() {
       return cand;
     }
   }
-  return '/Users/mk/MacStudioMLX';
+  return path.resolve(__dirname, '..');
 }
 
 const projectRoot = getPhospheneRoot();
@@ -41,10 +39,8 @@ const defaultModelsDir = fs.existsSync(path.join(projectRoot, 'mlx_models'))
 function getPythonBin() {
   const envCandidates = [
     path.join(projectRoot, 'ltx-2-mlx/env/bin/python3.11'),
-    '/Users/mk/Phosphene/ltx-2-mlx/env/bin/python3.11',
     path.join(projectRoot, 'ltx-2-mlx/env/bin/python3'),
-    '/Users/mk/Phosphene/ltx-2-mlx/env/bin/python3',
-    path.join(app.getPath('home'), 'Phosphene/ltx-2-mlx/env/bin/python3.11')
+    path.join(projectRoot, 'env/bin/python3.11')
   ];
   for (const cand of envCandidates) {
     if (fs.existsSync(cand)) {
@@ -93,7 +89,7 @@ function checkServerReady(cb, retries = 180) {
 function startPythonServerIfNeeded(onReady) {
   checkServerReady((alreadyRunning) => {
     if (alreadyRunning) {
-      console.log('Phosphene server is already running on port 8198.');
+      console.log('MacStudioMLX server is already running on port 8198.');
       onReady();
       return;
     }
@@ -107,18 +103,17 @@ function startPythonServerIfNeeded(onReady) {
       return;
     }
 
-    console.log('Starting Phosphene Python server...');
+    console.log('Starting MacStudioMLX Python server...');
     startedByUs = true;
-    lastPythonLogs = `[00:00:00] 🚀 Initializing Phosphene Studio Environment...\n[00:00:01] 🐍 Spawning Python server at ${projectRoot}...\n`;
+    lastPythonLogs = `[00:00:00] 🚀 Initializing MacStudioMLX Environment...\n[00:00:01] 🐍 Spawning Python server at ${projectRoot}...\n`;
     if (mainWindow) {
       mainWindow.webContents.send('server-log', lastPythonLogs);
     }
 
     const pythonPathEnv = [
       path.join(projectRoot, 'ltx-2-mlx/env/lib/python3.11/site-packages'),
-      '/Users/mk/Phosphene/ltx-2-mlx/env/lib/python3.11/site-packages',
-      projectRoot,
-      '/Users/mk/Phosphene'
+      path.join(projectRoot, 'ltx-2-mlx/env/lib/python3/site-packages'),
+      projectRoot
     ].join(':');
 
     const extendedPath = [
@@ -211,7 +206,66 @@ function startPythonServerIfNeeded(onReady) {
   });
 }
 
+function setupApplicationMenu() {
+  const template = [
+    {
+      label: 'MacStudio MLX',
+      submenu: [
+        { role: 'about' },
+        { type: 'separator' },
+        { role: 'services' },
+        { type: 'separator' },
+        { role: 'hide' },
+        { role: 'hideOthers' },
+        { role: 'unhide' },
+        { type: 'separator' },
+        { role: 'quit' }
+      ]
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' }
+      ]
+    },
+    {
+      label: 'View',
+      submenu: [
+        { role: 'reload', accelerator: 'CmdOrCtrl+R' },
+        { role: 'forceReload', accelerator: 'CmdOrCtrl+Shift+R' },
+        { role: 'toggleDevTools', accelerator: 'CmdOrCtrl+Option+I' },
+        { type: 'separator' },
+        { role: 'resetZoom' },
+        { role: 'zoomIn' },
+        { role: 'zoomOut' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' }
+      ]
+    },
+    {
+      label: 'Window',
+      submenu: [
+        { role: 'minimize' },
+        { role: 'zoom' },
+        { type: 'separator' },
+        { role: 'front' }
+      ]
+    }
+  ];
+
+  const menu = Menu.buildFromTemplate(template);
+  Menu.setApplicationMenu(menu);
+}
+
 function createMainWindow() {
+  setupApplicationMenu();
+
   const iconPath = path.join(__dirname, 'icon.png');
   if (process.platform === 'darwin' && app.dock && app.dock.setIcon) {
     try { app.dock.setIcon(iconPath); } catch (e) {}
@@ -222,13 +276,20 @@ function createMainWindow() {
     height: 920,
     minWidth: 1024,
     minHeight: 720,
-    title: 'Phosphene Studio',
+    title: 'MacStudioMLX Studio',
     icon: iconPath,
     backgroundColor: '#0b0f19',
     titleBarStyle: 'hiddenInset',
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false
+    }
+  });
+
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type === 'keyDown' && (input.meta || input.control) && input.key.toLowerCase() === 'r') {
+      mainWindow.webContents.reload();
+      event.preventDefault();
     }
   });
 
@@ -268,7 +329,7 @@ ipcMain.on('get-models-status', (event) => {
 });
 
 ipcMain.on('get-server-logs', (event) => {
-  event.reply('server-log', lastPythonLogs || '[00:00:00] 🚀 Initializing Phosphene Studio Live Terminal Console...\n[00:00:01] 🐍 Loading Apple Silicon MLX Environment...');
+  event.reply('server-log', lastPythonLogs || '[00:00:00] 🚀 Initializing MacStudioMLX Live Terminal Console...\n[00:00:01] 🐍 Loading Apple Silicon MLX Environment...');
 });
 
 ipcMain.on('start-download', (event, modelId) => {

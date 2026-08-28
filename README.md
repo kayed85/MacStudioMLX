@@ -28,7 +28,7 @@
 ## ✨ What's New in This Fork?
 
 
-* **📱 Native macOS App & DMG Installer:** No command line or external browser runners required. Double-click the `.dmg` file to install `Phosphene Studio.app` directly into `/Applications`.
+* **📱 Native macOS App & DMG Installer:** No command line or external browser runners required. Double-click the `.dmg` file to install `MacStudioMLX.app` directly into `/Applications`.
 * **🎛️ Interactive Model Hub (Manager):** Lightweight 120 MB installer. Select and download only the AI models you want (`LTX-Video 2.5 4-bit`, `Gemma 3 4-bit`, `FLUX.2 Edit`, `IC-LoRAs`) directly into your local Mac application data directory.
 * **💻 Tailored for MacBook Pro M1 Pro (16GB RAM+):** Pre-tuned low-memory precision profiles and TeaCache acceleration for high-speed local generation on M1 Pro chips.
 * **🎨 Custom macOS Futuristic Icon:** High-resolution 3D Apple squircle app icon.
@@ -38,7 +38,7 @@
 ## Overview
 
 
-Phosphene is a local generative-media panel for Apple Silicon. It runs **two video engines as peers** — [LTX-Video 2.5](https://github.com/Lightricks/LTX-Video) (MLX port) and [Hailuo H3](https://github.com/MiniMax-AI) (MiniMax-H3 FL2VA) — both doing joint audio-and-video synthesis, plus [Qwen-Image-Edit-2509](https://huggingface.co/Qwen/Qwen-Image-Edit-2509) (with a Lightning 4-step fast tier) for stills, and an in-panel LoRA training pipeline for character identity (face + voice from a single dataset). Everything runs on-device: no cloud, no API keys, and no prompt, image, video or filename ever leaves your Mac. It does send anonymous usage counts (version, hardware class, render stats) — every field is listed in [docs/ANALYTICS.md](docs/ANALYTICS.md), and one click in Settings turns it off.
+MacStudio MLX is a local generative-media panel for Apple Silicon. It runs **two video engines as peers** — [LTX-Video 2.5](https://github.com/Lightricks/LTX-Video) (MLX port) and [Hailuo H3](https://github.com/MiniMax-AI) (MiniMax-H3 FL2VA) — both doing joint audio-and-video synthesis, plus [Qwen-Image-Edit-2509](https://huggingface.co/Qwen/Qwen-Image-Edit-2509) (with a Lightning 4-step fast tier) for stills, and an in-panel LoRA training pipeline for character identity (face + voice from a single dataset). Everything runs on-device: no cloud, no API keys, and no prompt, image, video or filename ever leaves your Mac. It does send anonymous usage counts (version, hardware class, render stats) — every field is listed in [docs/ANALYTICS.md](docs/ANALYTICS.md), and one click in Settings turns it off.
 
 3.0 introduces in-panel character training (face + voice LoRA from one dataset), the Audio-to-Video workflow, the Image Studio tab, hardware capability tiering, and an agentic prompt enhancer driven by the same local Gemma 3 12B used for auto-captioning.
 

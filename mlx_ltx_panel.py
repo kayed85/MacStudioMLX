@@ -95,7 +95,13 @@ import storyboard_planner
 #       gemma-3-12b-it-4bit/     <- LTX_GEMMA_PATH
 #     mlx_outputs/               <- LTX_OUTPUT_DIR (created on first run)
 #     panel_uploads/             <- LTX_UPLOADS_DIR (created on first run)
-ROOT = Path(os.environ.get("LTX_STUDIO_ROOT", str(Path(__file__).resolve().parent)))
+def _resolve_root() -> Path:
+    env_root = os.environ.get("LTX_STUDIO_ROOT")
+    if env_root and Path(env_root).exists():
+        return Path(env_root)
+    return Path(__file__).resolve().parent
+
+ROOT = _resolve_root()
 MLX = Path(os.environ.get("LTX_MLX_PATH", str(ROOT / "ltx-2-mlx")))
 MODELS_DIR = Path(os.environ.get("LTX_MODELS_DIR", str(ROOT / "mlx_models")))
 GEMMA = Path(os.environ.get("LTX_GEMMA_PATH", str(MODELS_DIR / "gemma-3-12b-it-4bit")))
@@ -103,31 +109,37 @@ OUTPUT = Path(os.environ.get("LTX_OUTPUT_DIR", str(ROOT / "mlx_outputs")))
 UPLOADS = Path(os.environ.get("LTX_UPLOADS_DIR", str(ROOT / "panel_uploads")))
 AUDIO_DEFAULT = Path(os.environ.get("LTX_DEFAULT_AUDIO", str(ROOT / "audio_inputs/default.wav")))
 REFERENCE = Path(os.environ.get("LTX_DEFAULT_IMAGE", str(ROOT / "examples/reference.png")))
-def _resolve_helper_python() -> Path:
-    """Find the helper-subprocess Python interpreter.
 
-    Order: explicit env var → manual-install convention (`.venv/`) →
-    Pinokio convention (`env/`) → last-resort fallback so the panel
-    boots even if neither exists (the helper will fail loudly when the
-    first job tries to spawn it). Auto-detection means non-Pinokio
-    launches (manual `python3.11 mlx_ltx_panel.py` for testing) work
-    without needing LTX_HELPER_PYTHON set.
-    """
+def _resolve_helper_python() -> Path:
+    """Find the helper-subprocess Python interpreter."""
     explicit = os.environ.get("LTX_HELPER_PYTHON")
     if explicit and Path(explicit).is_file():
         return Path(explicit)
-    for sub in (".venv/bin/python3.11", "env/bin/python3.11"):
+    for sub in (".venv/bin/python3.11", "env/bin/python3.11", "env/bin/python3"):
         p = MLX / sub
         if p.is_file():
             return p
-    # No working interpreter found — return the manual-install default.
-    # Job submission will surface a clear error referring users to the
-    # install instructions.
-    return MLX / ".venv/bin/python3.11"
+        p_root = ROOT / sub
+        if p_root.is_file():
+            return p_root
+        p_ltx_root = ROOT / "ltx-2-mlx" / sub
+        if p_ltx_root.is_file():
+            return p_ltx_root
+    return Path(sys.executable)
+
+
+def _resolve_helper_script() -> Path:
+    explicit = os.environ.get("LTX_HELPER_SCRIPT")
+    if explicit and Path(explicit).is_file():
+        return Path(explicit)
+    s_root = ROOT / "mlx_warm_helper.py"
+    if s_root.is_file():
+        return s_root
+    return Path(__file__).resolve().parent / "mlx_warm_helper.py"
 
 
 HELPER_PYTHON = _resolve_helper_python()
-HELPER_SCRIPT = Path(os.environ.get("LTX_HELPER_SCRIPT", str(ROOT / "mlx_warm_helper.py")))
+HELPER_SCRIPT = _resolve_helper_script()
 # Surface a missing helper venv at boot — otherwise the first render
 # fails with a confusing "[Errno 2] No such file or directory" pointing
 # at a path the user never set. Real-world reporter (issue #5,
@@ -12362,10 +12374,10 @@ class WarmHelper:
                     push(f"[gemma-fallback] encoding prompts at "
                          f"{self.gemma_max_length} tokens for the rest of this "
                          f"session (Metal GPU watchdog seen on this machine)")
-            push(f"Spawning warm helper (low_memory={HELPER_LOW_MEMORY}, idle_timeout={HELPER_IDLE_TIMEOUT}s)")
+            helper_cwd = str(MLX) if MLX.exists() else str(ROOT)
             self.proc = subprocess.Popen(
                 [str(HELPER_PYTHON), str(HELPER_SCRIPT)],
-                cwd=str(MLX), env=env,
+                cwd=helper_cwd, env=env,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1, start_new_session=True,
             )
@@ -70578,7 +70590,7 @@ if __name__ == "__main__":
     except OSError as exc:
         if getattr(exc, "errno", None) == 48 or "Address already in use" in str(exc):
             print("─" * 64, flush=True)
-            print(f"Phosphene can't start: {_diagnose_port_busy(PORT)}", flush=True)
+            print(f"MacStudioMLX can't start: {_diagnose_port_busy(PORT)}", flush=True)
             print("─" * 64, flush=True)
             sys.exit(1)
         raise
