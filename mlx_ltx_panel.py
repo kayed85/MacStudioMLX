@@ -3505,8 +3505,8 @@ _CHARACTER_QUALITY_RESOLUTION = {
 #     bug users with red error toasts every 30 minutes)
 
 _VERSION_LOCK = threading.Lock()
-_VERSION_REPO_OWNER = "mrbizarro"
-_VERSION_REPO_NAME = "phosphene"
+_VERSION_REPO_OWNER = "kayed85"
+_VERSION_REPO_NAME = "MacStudioMLX"
 _VERSION_POLL_INTERVAL_SEC = 30 * 60          # 30 minutes between checks
 _VERSION_STARTUP_DELAY_SEC = 30                # don't compete with boot
 _VERSION_STATE: dict = {
