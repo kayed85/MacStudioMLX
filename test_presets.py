@@ -21,5 +21,9 @@ class TestPresets(unittest.TestCase):
         self.assertIn("magenta and cyan atmosphere", params["prompt"])
         self.assertIn("daylight, sepia", params["negative_prompt"])
 
+    def test_presets_keys(self):
+        self.assertIn("drone", P.CAMERA_MOTION_PRESETS)
+        self.assertIn("anime_ghibli", P.VISUAL_STYLE_PRESETS)
+
 if __name__ == "__main__":
     unittest.main()

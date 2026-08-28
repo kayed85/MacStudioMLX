@@ -28574,6 +28574,95 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": False, "error": str(exc)}, 500)
             return
 
+        if path == "/extract_frame":
+            vpath = (form.get("video_path", [""])[0] if isinstance(form.get("video_path"), list) else form.get("video_path", "")).strip()
+            if not vpath:
+                return self._json({"ok": False, "error": "video_path is required"}, 400)
+            p = Path(vpath).resolve()
+            if not p.is_file():
+                return self._json({"ok": False, "error": "file not found"}, 404)
+            time_offset = (form.get("time_offset", ["0"])[0] if isinstance(form.get("time_offset"), list) else form.get("time_offset", "0")).strip()
+            out_filename = f"frame_{int(time.time()*1000)}.png"
+            out_path = UPLOADS_DIR / out_filename
+            try:
+                cmd = ["ffmpeg", "-ss", str(time_offset), "-i", str(p), "-vframes", "1", "-q:v", "2", "-y", str(out_path)]
+                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if not out_path.is_file():
+                    raise RuntimeError("frame extraction produced no output")
+                return self._json({
+                    "ok": True,
+                    "image_path": str(out_path),
+                    "image_url": f"/file?path={quote(str(out_path))}"
+                })
+            except Exception as exc:
+                return self._json({"ok": False, "error": f"frame extraction failed: {exc}"}, 500)
+
+        if path == "/export_video":
+            vpath = (form.get("video_path", [""])[0] if isinstance(form.get("video_path"), list) else form.get("video_path", "")).strip()
+            exp_fmt = (form.get("format", ["vertical_916"])[0] if isinstance(form.get("format"), list) else form.get("format", "vertical_916")).strip().lower()
+            if not vpath:
+                return self._json({"ok": False, "error": "video_path is required"}, 400)
+            p = Path(vpath).resolve()
+            if not p.is_file():
+                return self._json({"ok": False, "error": "file not found"}, 404)
+            
+            ext = ".gif" if exp_fmt == "gif" else ".mp4"
+            out_filename = f"export_{exp_fmt}_{p.stem}_{int(time.time())}{ext}"
+            out_path = OUTPUT_DIR / out_filename
+
+            try:
+                if exp_fmt == "vertical_916":
+                    cmd = ["ffmpeg", "-i", str(p), "-vf", "crop=ih*9/16:ih", "-c:v", "libx264", "-crf", "18", "-preset", "fast", "-y", str(out_path)]
+                elif exp_fmt == "gif":
+                    cmd = ["ffmpeg", "-i", str(p), "-vf", "fps=15,scale=480:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse", "-y", str(out_path)]
+                elif exp_fmt == "h265":
+                    cmd = ["ffmpeg", "-i", str(p), "-c:v", "libx265", "-crf", "23", "-preset", "fast", "-c:a", "copy", "-y", str(out_path)]
+                else:
+                    return self._json({"ok": False, "error": "invalid format, choose vertical_916, gif, or h265"}, 400)
+                
+                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if not out_path.is_file():
+                    raise RuntimeError("export produced no output")
+                return self._json({
+                    "ok": True,
+                    "export_path": str(out_path),
+                    "export_url": f"/file?path={quote(str(out_path))}"
+                })
+            except Exception as exc:
+                return self._json({"ok": False, "error": f"export failed: {exc}"}, 500)
+
+        if path == "/storyboard/generate_script":
+            concept = (form.get("concept", [""])[0] if isinstance(form.get("concept"), list) else form.get("concept", "")).strip()
+            if not concept:
+                concept = "Cinematic adventure scene"
+            shots = [
+                {
+                    "shot": 1,
+                    "title": "Establishing Shot",
+                    "prompt": f"Wide establishing view of {concept}, atmosphere and mood set",
+                    "camera": "wide_angle",
+                    "style": "cinematic_35mm",
+                    "dialogue": ""
+                },
+                {
+                    "shot": 2,
+                    "title": "Subject Entrance & Action",
+                    "prompt": f"Character moving through {concept}, dynamic action unfolding",
+                    "camera": "orbit",
+                    "style": "cinematic_35mm",
+                    "dialogue": "<d>We don't have much time, follow me!</d>"
+                },
+                {
+                    "shot": 3,
+                    "title": "Climactic Reaction",
+                    "prompt": f"Close-up reaction shot in {concept}, dramatic expression and lighting",
+                    "camera": "close_up",
+                    "style": "cinematic_35mm",
+                    "dialogue": "<d>Look ahead, it's finally starting.</d>"
+                }
+            ]
+            return self._json({"ok": True, "concept": concept, "shots": shots})
+
         if path == "/settings":
             # Accept partial-patch updates: only the fields the user
             # actually changed need to be present. Validation lives in
