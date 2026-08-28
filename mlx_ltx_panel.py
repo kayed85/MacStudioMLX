@@ -17033,6 +17033,39 @@ def parse_comfyui_workflow(data: dict) -> dict:
     return result
 
 
+def build_storyboard_script(concept: str, num_shots: int = 4, character_name: str = "", product_name: str = "") -> list[dict]:
+    """Generates a structured multi-shot storyboard script with character & product consistency."""
+    num_shots = max(2, min(12, int(num_shots or 4)))
+    char_prefix = f"featuring character {character_name}, " if character_name else ""
+    prod_prefix = f"showcasing product {product_name}, " if product_name else ""
+    
+    phases = [
+        ("Establishing Scene", "wide_angle", "cinematic_35mm", "Wide view setting up the environment: "),
+        ("Subject Entrance", "orbit", "cinematic_35mm", "Focusing on subject movement and discovery: "),
+        ("Interaction & Conflict", "medium_shot", "cinematic_35mm", "Closer interaction and progression of action: "),
+        ("Key Transformation / Entrance", "dolly_in", "fantasy_vivid", "pivotal moment or passage into a new realm: "),
+        ("Climactic Reveal", "close_up", "fantasy_vivid", "dramatic close-up reveal and high emotion: "),
+        ("Resolution / Final View", "drone", "cinematic_35mm", "Panoramic final view resolving the sequence: ")
+    ]
+    
+    shots = []
+    for i in range(num_shots):
+        phase_title, camera, style, desc_prefix = phases[i % len(phases)]
+        prompt_str = f"{char_prefix}{prod_prefix}{desc_prefix}{concept} (Shot {i+1} of {num_shots})"
+        dialogue_str = f"<d>Shot {i+1} in progress...</d>" if (i % 2 == 1) else ""
+        shots.append({
+            "shot": i + 1,
+            "title": f"Shot {i+1}: {phase_title}",
+            "prompt": prompt_str,
+            "camera": camera,
+            "style": style,
+            "character": character_name,
+            "product": product_name,
+            "dialogue": dialogue_str
+        })
+    return shots
+
+
 def generate_3d_mesh_from_image(image_path: str) -> dict:
     p = Path(image_path)
     if not p.is_file():
@@ -28789,35 +28822,19 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/storyboard/generate_script":
             concept = (form.get("concept", [""])[0] if isinstance(form.get("concept"), list) else form.get("concept", "")).strip()
+            num_shots = (form.get("num_shots", ["4"])[0] if isinstance(form.get("num_shots"), list) else form.get("num_shots", "4")).strip()
+            character_name = (form.get("character_name", [""])[0] if isinstance(form.get("character_name"), list) else form.get("character_name", "")).strip()
+            product_name = (form.get("product_name", [""])[0] if isinstance(form.get("product_name"), list) else form.get("product_name", "")).strip()
+            
             if not concept:
-                concept = "Cinematic adventure scene"
-            shots = [
-                {
-                    "shot": 1,
-                    "title": "Establishing Shot",
-                    "prompt": f"Wide establishing view of {concept}, atmosphere and mood set",
-                    "camera": "wide_angle",
-                    "style": "cinematic_35mm",
-                    "dialogue": ""
-                },
-                {
-                    "shot": 2,
-                    "title": "Subject Entrance & Action",
-                    "prompt": f"Character moving through {concept}, dynamic action unfolding",
-                    "camera": "orbit",
-                    "style": "cinematic_35mm",
-                    "dialogue": "<d>We don't have much time, follow me!</d>"
-                },
-                {
-                    "shot": 3,
-                    "title": "Climactic Reaction",
-                    "prompt": f"Close-up reaction shot in {concept}, dramatic expression and lighting",
-                    "camera": "close_up",
-                    "style": "cinematic_35mm",
-                    "dialogue": "<d>Look ahead, it's finally starting.</d>"
-                }
-            ]
-            return self._json({"ok": True, "concept": concept, "shots": shots})
+                concept = "Girl walking in forest encountering a magical rabbit entering a portal"
+            try:
+                n = int(num_shots)
+            except (TypeError, ValueError):
+                n = 4
+
+            shots = build_storyboard_script(concept, num_shots=n, character_name=character_name, product_name=product_name)
+            return self._json({"ok": True, "concept": concept, "num_shots": n, "character": character_name, "product": product_name, "shots": shots})
 
         if path == "/workflow/parse_comfyui":
             raw_json = (form.get("json_str", [""])[0] if isinstance(form.get("json_str"), list) else form.get("json_str", "")).strip()

@@ -64,5 +64,13 @@ class TestPresets(unittest.TestCase):
             self.assertTrue(res["ok"])
             self.assertTrue(res["obj_path"].endswith(".obj"))
 
+    def test_build_storyboard_script(self):
+        shots = P.build_storyboard_script("Girl walking in forest with rabbit", num_shots=6, character_name="Alice", product_name="Magic Bottle")
+        self.assertEqual(len(shots), 6)
+        self.assertIn("Alice", shots[0]["prompt"])
+        self.assertIn("Magic Bottle", shots[0]["prompt"])
+        self.assertEqual(shots[0]["shot"], 1)
+        self.assertEqual(shots[5]["shot"], 6)
+
 if __name__ == "__main__":
     unittest.main()
