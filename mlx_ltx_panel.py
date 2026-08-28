@@ -60003,7 +60003,7 @@ function _ubRender(s) {
   }
   const local = (s.local_version || s.local_short || 'your build');
   document.getElementById('ubTitle').textContent =
-    `Phosphene ${remote} is available`;
+    `MacStudio MLX ${remote} is available`;
   document.getElementById('ubSub').textContent =
     `You are on ${local}.` + (s.behind_more_than ? ' 30+ commits behind.' : '');
   const star = document.getElementById('ubStar');
@@ -60026,8 +60026,8 @@ function _ubRestartState(newVersion, requiresFullUpdate) {
   if (title) title.textContent = `Updated to ${newVersion} — restart to finish`;
   if (sub) {
     sub.textContent = requiresFullUpdate
-      ? 'This update touched Python dependencies, so use Pinokio\u2019s Update button (not just Stop and Start) so they reinstall.'
-      : 'Click Stop, then Start in Pinokio. Your queue and settings are preserved.';
+      ? 'This update touched dependencies — restart MacStudio MLX so they reinstall.'
+      : 'Restart MacStudio MLX. Your queue and settings are preserved.';
   }
   if (go) { go.hidden = true; }
   if (later) { later.textContent = 'Dismiss'; }
