@@ -1635,6 +1635,31 @@ def free_gemma_lm():
             pass
 
 
+def _fallback_enhance_prompt(prompt: str, mode: str = "t2v", preserve_tokens: list = None) -> str:
+    """Built-in cinematic prompt enhancer fallback when Gemma model/packages are missing."""
+    clean = prompt.strip()
+    if not clean:
+        return clean
+
+    camera_styles = [
+        "cinematic 35mm film shot, slow panning camera, soft natural lighting, 8k detail",
+        "handheld camera movement, shallow depth of field, natural illumination, 8k resolution",
+        "wide-angle cinematic frame, gentle camera push-in, rich color grading, 8k detail",
+        "dramatic lighting, crisp focus, photorealistic 8k detail, smooth camera motion"
+    ]
+    has_camera = any(t in clean.lower() for t in ["camera", "shot", "lens", "mm", "pan", "zoom", "angle", "lighting"])
+    if not has_camera:
+        style = camera_styles[abs(hash(clean)) % len(camera_styles)]
+        enhanced = f"{clean}. {style}."
+    else:
+        enhanced = clean
+
+    for tok in (preserve_tokens or []):
+        if tok and tok.lower() not in enhanced.lower():
+            enhanced = f"{enhanced} ({tok})"
+    return enhanced
+
+
 # ---- image preprocessing -----------------------------------------------------
 
 def cover_crop_to_size(src_path: str, w: int, h: int) -> str:
@@ -3612,47 +3637,55 @@ for line in sys.__stdin__:
         _is_busy = True
         try:
             t0 = time.time()
-            lm = get_gemma_lm()
-            # Build augmented system prompt: official + Phosphene addendum.
-            base_sys = (lm.default_gemma_t2v_system_prompt if mode == "t2v"
-                        else lm.default_gemma_i2v_system_prompt)
-            addendum_lines = [
-                "",
-                "#### Phosphene addendum (overrides any conflict above):",
-                "- Preserve every camera-move and shot description the user",
-                "  wrote verbatim. Do not add invented camera motion.",
-                "- If the user said 'cool bike' / 'a guy' / vague nouns,",
-                "  keep them generic. DO NOT invent specific brands, model",
-                "  numbers, or location styles (no 'futuristic', 'neon-lit',",
-                "  'polished chrome' unless the user said so).",
-                "- Color and lighting: prefer one or two concrete words",
-                "  ('warm afternoon sun', 'overcast sky') over flowery",
-                "  cascades ('shimmering golden hour bathed in...').",
-                "- Audio sentence stays as one trailing line that begins",
-                "  with 'Audio:'.",
-            ]
-            if preserve_tokens:
-                addendum_lines += [
+            lm = None
+            try:
+                lm = get_gemma_lm()
+            except Exception as lm_err:
+                emit({"event": "log", "line": f"  [enhance] Gemma model not loaded ({lm_err}) — using built-in prompt enhancer."})
+
+            if lm is not None:
+                # Build augmented system prompt: official + Phosphene addendum.
+                base_sys = (lm.default_gemma_t2v_system_prompt if mode == "t2v"
+                            else lm.default_gemma_i2v_system_prompt)
+                addendum_lines = [
                     "",
-                    "#### LoRA trigger tokens — PRESERVE CASE-EXACT:",
-                    ("The user's prompt contains LoRA trigger tokens that "
-                     "MUST appear in the output exactly as written, "
-                     "lowercase, no spelling changes, no capitalization "
-                     "changes, no substitutions:"),
-                    "  " + ", ".join(preserve_tokens),
-                    ("These tokens identify trained character / style LoRAs. "
-                     "Re-casing or rewording them breaks tokenization and "
-                     "the LoRA will not fire. If you would normally rephrase "
-                     "(e.g. 'Bizarrotrn the man' → 'a man named Bizarro'), "
-                     "DO NOT — emit the token verbatim, in lowercase."),
+                    "#### Phosphene addendum (overrides any conflict above):",
+                    "- Preserve every camera-move and shot description the user",
+                    "  wrote verbatim. Do not add invented camera motion.",
+                    "- If the user said 'cool bike' / 'a guy' / vague nouns,",
+                    "  keep them generic. DO NOT invent specific brands, model",
+                    "  numbers, or location styles (no 'futuristic', 'neon-lit',",
+                    "  'polished chrome' unless the user said so).",
+                    "- Color and lighting: prefer one or two concrete words",
+                    "  ('warm afternoon sun', 'overcast sky') over flowery",
+                    "  cascades ('shimmering golden hour bathed in...').",
+                    "- Audio sentence stays as one trailing line that begins",
+                    "  with 'Audio:'.",
                 ]
-            augmented_sys = base_sys + "\n" + "\n".join(addendum_lines)
-            if mode == "t2v":
-                enhanced = lm.enhance_t2v(user_prompt, seed=seed,
-                                           system_prompt=augmented_sys)
+                if preserve_tokens:
+                    addendum_lines += [
+                        "",
+                        "#### LoRA trigger tokens — PRESERVE CASE-EXACT:",
+                        ("The user's prompt contains LoRA trigger tokens that "
+                         "MUST appear in the output exactly as written, "
+                         "lowercase, no spelling changes, no capitalization "
+                         "changes, no substitutions:"),
+                        "  " + ", ".join(preserve_tokens),
+                        ("These tokens identify trained character / style LoRAs. "
+                         "Re-casing or rewording them breaks tokenization and "
+                         "the LoRA will not fire. If you would normally rephrase "
+                         "(e.g. 'Bizarrotrn the man' → 'a man named Bizarro'), "
+                         "DO NOT — emit the token verbatim, in lowercase."),
+                    ]
+                augmented_sys = base_sys + "\n" + "\n".join(addendum_lines)
+                if mode == "t2v":
+                    enhanced = lm.enhance_t2v(user_prompt, seed=seed,
+                                               system_prompt=augmented_sys)
+                else:
+                    enhanced = lm.enhance_i2v(user_prompt, seed=seed,
+                                               system_prompt=augmented_sys)
             else:
-                enhanced = lm.enhance_i2v(user_prompt, seed=seed,
-                                           system_prompt=augmented_sys)
+                enhanced = _fallback_enhance_prompt(user_prompt, mode=mode, preserve_tokens=preserve_tokens)
             # Post-hoc safety: case-exact restore for any preserve token
             # that Gemma still managed to mutate. Catches "Bizarrotrn" →
             # restore "bizarrotrn".
