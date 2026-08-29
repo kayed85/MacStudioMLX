@@ -60623,7 +60623,7 @@ const SB_ERR_COPY = {
   refs_not_list:       { html: (e) => `<b>Shot ${e.n}'s reference images are damaged.</b>`, fix: 'clearrefs', label: 'Clear them' },
   ref_missing:         { html: (e) => `<b>Shot ${e.n} wants a reference image that isn't there any more:</b> <code>${escapeHtml(e.data.name || '')}</code>`, fix: 'clearrefs', label: 'Clear them' },
   remix_needs_ref:     { html: (e) => `<b>Shot ${e.n} is a Remix shot with no reference image.</b>`, fix: 'text', label: 'Make it Text' },
-  over_cap:            { html: (e) => `<b>${e.data.pass_name === 'final' ? 'Delivery' : 'Draft'} is set to ${e.data.width}×${e.data.height}; this Mac caps at ${e.data.max_dim}.</b> It'll shrink to fit unless you lower it.`, fix: 'cap', label: 'Use 1024×576' },
+  over_cap:            { html: (e) => `<b>${e.data.pass_name === 'final' ? 'Delivery' : 'Draft'} is set to ${e.data.width}×${e.data.height}; this Mac caps at ${e.data.max_dim}.</b> It'll shrink to fit unless you lower it.`, fix: 'cap', label: (e) => `Use ${(e.data.max_dim || 768) <= 768 ? '768×432' : '1024×576'}` },
 };
 
 function sbEl(id) { return document.getElementById(id); }
@@ -61679,8 +61679,9 @@ function sbErrRow(e) {
   const copy = SB_ERR_COPY[e.code];
   const html = !copy ? escapeHtml(e.message)
              : (typeof copy.html === 'function' ? copy.html(e) : copy.html);
+  const errLabel = !copy ? '' : (typeof copy.label === 'function' ? copy.label(e) : (copy.label || 'Fix'));
   const fix = copy && copy.fix
-    ? `<button type="button" class="sb-err-fix" onclick="sbFixError('${copy.fix}',${e.n || 0},'${escapeHtml(e.code)}')">${escapeHtml(copy.label)}</button>`
+    ? `<button type="button" class="sb-err-fix" onclick="sbFixError('${copy.fix}',${e.n || 0},'${escapeHtml(e.code)}')">${escapeHtml(errLabel)}</button>`
     : '';
   return `<div class="sb-err-row"><span class="sb-err-dot"></span><span>${html}</span>${fix}</div>`;
 }
@@ -62154,10 +62155,15 @@ function sbFixError(fix, n, code) {
   } else if (fix === 'clearrefs' && s) {
     s.refs = [];
   } else if (fix === 'cap') {
+    const maxDim = (SB.payload || {}).max_dim || 768;
     ['draft', 'final'].forEach(k => {
       const p = (board.policy || {})[k];
-      if (p && Math.max(p.width, p.height) > 1024) { p.width = 1024; p.height = 576; }
+      if (p) {
+        if (maxDim <= 768) { p.width = 768; p.height = 432; }
+        else { p.width = 1024; p.height = 576; }
+      }
     });
+    sbQueueSave(true);
   }
   sbRenderPlan(SB.payload);
   sbQueueSave(true);
