@@ -28,6 +28,7 @@ import threading
 import time
 import traceback
 from contextlib import contextmanager
+from pathlib import Path
 _ROOT = Path(__file__).resolve().parent
 for _p in [
     _ROOT / "ltx-2-mlx" / "env" / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages",
