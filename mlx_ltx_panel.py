@@ -1257,6 +1257,10 @@ def get_settings_public() -> dict:
         "spicy_mode": bool(s.get("spicy_mode", False)),
         "memory_policy": s.get("memory_policy", DEFAULT_MEMORY_POLICY),
         "live_preview": str(s.get("live_preview", "on")),
+        # Write-only until now: `update_settings` validated and stored it, but
+        # the GET never returned it, so any control would open showing "auto"
+        # no matter what the user had chosen.
+        "h3_dit": str(s.get("h3_dit", "auto") or "auto"),
         "update_banner_dismissed": str(s.get("update_banner_dismissed", "") or ""),
         "star_prompt_done": bool(s.get("star_prompt_done", False)),
         # Analytics. Same has_X-boolean treatment as the other secrets —
@@ -6977,6 +6981,37 @@ def _detect_total_ram_gb() -> float:
 
 SYSTEM_RAM_GB = _detect_total_ram_gb()
 
+# The RAM floor of each tier, in GB. `_detect_tier()` gates on these AND
+# `min_ram_gb_for()` quotes them, so a refusal can no longer name a number the
+# gate does not use.
+#
+# THE BUG THIS CLOSES (@fiction, Pinokio, 2026-08-29 — "the high720P Q8 is not
+# clickable"): four separate refusals told the user to "bump to 64+ GB" for
+# High, Extend, FFLF and the HQ chip. All four are `allows_*` flags that the
+# table grants on `standard`, whose floor is 48 — and the tier modal three
+# clicks away says so in its own words ("48-79 GB ... Every video mode works").
+# So the app simultaneously told a 36 GB owner to buy 64 and told them 48 was
+# enough, and 16 GB of unnecessary hardware is an expensive way to find out
+# which sentence was maintained.
+TIER_MIN_RAM_GB: dict[str, int] = {
+    "base": 0,
+    "standard": 48,
+    "high": 80,
+    "pro": 120,
+}
+
+
+def min_ram_gb_for(capability: str) -> int | None:
+    """Lowest RAM in GB at which `capability` is True in CAPABILITIES.
+
+    Returns None if no tier offers it — callers fall back to prose rather than
+    printing "None GB", because a capability nothing serves is a bug in the
+    table, not something to quote a number for.
+    """
+    floors = [TIER_MIN_RAM_GB[k] for k, caps in CAPABILITIES.items()
+              if caps.get(capability) and k in TIER_MIN_RAM_GB]
+    return min(floors) if floors else None
+
 
 def _detect_tier() -> str:
     """Pick a tier based on `hw.memsize`. Cached at module load — RAM is
@@ -6988,9 +7023,9 @@ def _detect_tier() -> str:
     gb = SYSTEM_RAM_GB
     if gb <= 0:
         return "standard"   # safe default
-    if gb < 48:  return "base"
-    if gb < 80:  return "standard"
-    if gb < 120: return "high"
+    if gb < TIER_MIN_RAM_GB["standard"]: return "base"
+    if gb < TIER_MIN_RAM_GB["high"]:     return "standard"
+    if gb < TIER_MIN_RAM_GB["pro"]:      return "high"
     return "pro"
 
 
@@ -7107,7 +7142,31 @@ H3_MIN_RAM_GB = 60.0
 # calls measured-safe) the render peak drops from 42.8 to 27.3 GiB measured at
 # 1024x576/124f — which puts H3 in reach of 48 GB Macs. 46 leaves the same
 # ~4 GB guard band under the marketing number that 60-under-64 does.
-H3_MIN_RAM_GB_Q8 = 46.0
+# LOWERED 46 -> 36 on 2026-08-29, on measurement rather than on a guard band.
+#
+# 46 was picked to sit ~4 GB under a 48 GB Mac's marketing number, back when the
+# only number anyone had was "27.3 GiB peak". The full phase profile since then:
+#
+#     text_encode    25.63 GiB   <- the run peak, a 7-second phase
+#     dit_load       20.22
+#     joint_denoise  21.26 (5 s) / 24.68 (10 s)
+#     video_vae      8.42
+#
+# 25.63 GiB is 27.5 GB. The panel now also caps H3's memory budget so the render
+# leaves the user real headroom (h3_memory_budget: the larger of 6 GB and RAM/8),
+# where before it took everything but one gigabyte. 27.5 + 6 = 33.5, so a 36 GB
+# Mac clears it with room; 48 GB was never the real requirement.
+#
+# EVIDENCE: Q8 rendered clean at a simulated 36 GB budget (--memory-gb 30
+# --wired-gb 26) AND at a simulated 32 GB budget (26/22), both rc=0 and both
+# byte-identical (sha256 ba65bc6a...) to the unconstrained render.
+#
+# 32 IS DELIBERATELY NOT THE FLOOR. 27.5 GB of peak on a 32 GB Mac leaves ~4.5
+# GB for macOS and everything else, which is the "it's tight so you can't use
+# your Mac" state the owner explicitly rejected. Those runs also simulated the
+# limit on a 64 GB machine, which caps MLX without reproducing real pressure
+# from the rest of the system. Moving to 32 needs a real 32 GB Mac, not a flag.
+H3_MIN_RAM_GB_Q8 = 36.0
 H3_DIT_Q8_DIRNAME = "h3-dit-q8"
 H3_DIT_FILENAME = "MiniMax-H3-FL2VA-pruned_bf16.safetensors"
 H3_COMPACT_FILES = ("text_encoder.safetensors", "video_vae.safetensors",
@@ -8886,7 +8945,8 @@ def ltx_tiers_payload() -> dict:
                     f"Not available on the {SYSTEM_CAPS['label']} hardware "
                     f"tier — the Q8 dev transformer (~19 GB) plus the "
                     f"upscaler stage doesn't fit in this Mac's memory. "
-                    f"Standard and Quick run here; High needs 64+ GB.")
+                    f"Standard and Quick run here; High needs "
+                    f"{min_ram_gb_for('allows_q8') or 48} GB or more.")
     return {
         "tiers": tiers,
         "qualities": [dict(q) for q in sorted(
@@ -9033,6 +9093,99 @@ def _h3_venv_present() -> bool:
     return (venv / "pyvenv.cfg").is_file() or (venv / "bin" / "activate").is_file()
 
 
+# =============================================================================
+# H3 PROMPT-EMBEDDING CACHE — the 26 GB model that sets H3's memory ceiling
+# =============================================================================
+#
+# MEASURED 2026-08-29, and it is not where anyone was looking. Per-phase peaks
+# from the staged runner, identical across every arm to two decimals:
+#
+#   text_encode_q8      25.71 GiB   <- the RUN PEAK on the Q8 path
+#   dit_load            20.22 GiB   (Q8)      38.56 GiB (bf16)
+#   joint_denoise       21.28 GiB   (5 s)     24.68 GiB (10 s)
+#   video_vae_decode     8.04 GiB
+#
+# On the Q8 path H3's memory requirement is therefore set by a SEVEN-SECOND
+# phase at the start of a twenty-minute render, not by the render. The cause is
+# `ddalcu-q8/text_encoder.safetensors` — 26.28 GB, a ~23B-parameter LLM that is
+# already 88% 8-bit (439 quantized tensors, 23.13 GB) with only 3.15 GB left
+# dense. There is no easy win inside the file.
+#
+# The win is not loading it. The runner has always accepted `--prompt-cache`:
+# a read-through .npz of the prompt embedding, with NO draft-only restriction
+# (unlike `--draft-cache-dir`, which the runner refuses outside `--draft-decode
+# tae`). The panel never passed it, so every H3 render re-encoded the same
+# prompt from a 26 GB model — paying both the peak and the seconds.
+#
+# KEYING. The runner validates the cache against the prompt AND the first-frame
+# key, and RAISES on a mismatch rather than rendering the wrong thing. Its own
+# first-frame key is the PATH STRING, so a file edited in place would pass its
+# check while carrying different pixels. This key includes the first frame's
+# size and mtime as well, which is strictly finer: a changed file lands on a
+# different cache entry and re-encodes, instead of hitting a stale embedding.
+H3_PROMPT_CACHE_KEEP = 40
+
+
+def h3_prompt_cache_dir() -> Path:
+    return STATE_DIR / "h3_prompt_cache"
+
+
+def h3_prompt_cache_path(prompt: str, first_frame) -> Path | None:
+    """Cache file for this (prompt, first frame), or None if it cannot be keyed.
+
+    Returns None for an empty prompt: the chained shot-list path drives windows
+    from `--chain-prompts` and passes no positional prompt, and the runner
+    already disables the cache for every window after the first.
+    """
+    if not (prompt or "").strip():
+        return None
+    ff_key = ""
+    if first_frame:
+        ff = Path(str(first_frame))
+        ff_key = str(ff)
+        try:
+            st = ff.stat()
+            ff_key = f"{ff}|{st.st_size}|{int(st.st_mtime)}"
+        except OSError:
+            # An unreadable first frame is not a reason to fail the render; it
+            # only means this key is the path alone, exactly like the runner's.
+            pass
+    digest = hashlib.sha256(
+        (prompt + "\x00" + ff_key).encode("utf-8")).hexdigest()[:32]
+    path = h3_prompt_cache_dir() / f"{digest}.npz"
+    # A POISONED ENTRY WOULD BE PERMANENT. `np.savez_compressed` writes to the
+    # destination directly, so a render stopped mid-write (the /stop button, a
+    # crash, a full disk) leaves a truncated file — and the runner's loader
+    # would then raise on THAT prompt for every future render, with no way for
+    # the user to know why one prompt had stopped working. An .npz is a zip, so
+    # a torn one is cheap to spot and cheaper to throw away: the only cost of
+    # deleting it is re-encoding once, which is what happened before the cache
+    # existed anyway.
+    if path.exists() and not zipfile.is_zipfile(path):
+        try:
+            path.unlink()
+        except OSError:
+            return None
+    return path
+
+
+def h3_prune_prompt_cache(keep: int = H3_PROMPT_CACHE_KEEP) -> int:
+    """Drop the oldest entries. Embeddings are megabytes, not gigabytes, but an
+    unbounded cache in the user's state dir is a slow leak either way."""
+    d = h3_prompt_cache_dir()
+    if not d.is_dir():
+        return 0
+    files = sorted(d.glob("*.npz"), key=lambda f: f.stat().st_mtime, reverse=True)
+    dropped = 0
+    for f in files[keep:]:
+        try:
+            f.unlink()
+            dropped += 1
+        except OSError:
+            pass
+    return dropped
+
+
 def h3_paths() -> dict:
     """Resolve every H3 component. Never raises — reports what's missing so
     the UI can render an honest install card instead of a stack trace."""
@@ -9161,7 +9314,26 @@ def h3_dit_choice() -> tuple[str, Path | None]:
         return "bf16", None
     if pref == "q8" and q8 is None:
         pref = "auto"      # fall through, surfaced via /status
-    if SYSTEM_RAM_GB < H3_MIN_RAM_GB and q8 is not None:
+    # AUTO NOW MEANS Q8 WHEREVER IT EXISTS, not just on small Macs.
+    #
+    # Until 2026-08-29 a 64 GB machine was handed the bf16 master because "its
+    # peak fits". It does fit, and it also leaves nothing behind it: measured on
+    # one prompt and seed at 640x384/73f,
+    #
+    #     bf16   dit_load 38.56 GiB   denoise peak 38.89 GiB   196.9 s
+    #     q8     dit_load 20.22 GiB   denoise peak 21.38 GiB   200.1 s
+    #
+    # 45% less memory for 1.6% more time. The campaign note that priced Q8 at
+    # "~12% slower" was seven times too pessimistic, and that number is why the
+    # heavy default went unquestioned for so long.
+    #
+    # The owner watched H3 sit at ~50 GB, asked for the memory back, and graded
+    # the pair himself: "b look fine they are slightly different but quality is
+    # good." Faces are his metric, so that grade is the authority here — not the
+    # fact that bf16 technically fits.
+    #
+    # `h3_dit: bf16` still forces the master for anyone who wants it.
+    if q8 is not None:
         return "q8", q8
     return "bf16", None
 
@@ -10392,6 +10564,69 @@ def h3_supports_chain_prompts() -> bool:
     the control rather than dying on an argparse error 30 s into a render, and
     keep the honest warning on the cell for that user."""
     return _h3_runner_has_flag("--chain-prompts")
+
+
+def h3_supports_memory_limits() -> bool:
+    """Whether the INSTALLED runner accepts `--memory-gb` / `--wired-gb`."""
+    return (_h3_runner_has_flag("--memory-gb")
+            and _h3_runner_has_flag("--wired-gb"))
+
+
+def h3_memory_budget(total_ram_gb: float | None = None) -> tuple[float, float]:
+    """(memory_gb, wired_gb) for THIS Mac, leaving the user room to keep using it.
+
+    THE BUG THIS FIXES. The runner's defaults are `--wired-gb 50` and
+    `--memory-gb 58`, and it clamps them with
+
+        memory_bytes = min(memory_gb * GiB, device.memory_size - 1 GiB)
+
+    so on ANY Mac below 59 GB the 58 never binds and the clamp does: MLX is
+    allowed everything except ONE gigabyte. Measured across the sizes people
+    actually own:
+
+        32 GB Mac -> limit 31.0 GB, 1.0 GB left for the user
+        36 GB Mac -> limit 35.0 GB, 1.0 GB left
+        48 GB Mac -> limit 47.0 GB, 1.0 GB left
+        64 GB Mac -> limit 58.0 GB, 6.0 GB left   (the dev machine, where it was tuned)
+
+    One gigabyte is not enough to keep a browser open, which is exactly the
+    owner's complaint: "when it's tight, you cannot use your Mac, so this is
+    bad." The defaults were shaped by the machine they were written on.
+
+    This costs no render speed and changes no output, because H3 does not need
+    the memory it was being handed: the measured Q8 peak is 25.63 GiB and bf16
+    is 42.17 GiB. The smallest Mac we serve H3 on (the 46 GB Q8 floor, i.e. a
+    48 GB machine) keeps 42 GB of budget against a 25.63 GiB peak — a limit
+    that was never the binding constraint, standing in front of headroom that
+    was.
+
+    Headroom is the larger of 6 GB and an eighth of RAM: a fixed number starves
+    a big machine of nothing and a proportional one leaves a small machine too
+    little, so take whichever is kinder.
+    """
+    ram = float(total_ram_gb if total_ram_gb is not None else SYSTEM_RAM_GB)
+    if ram <= 0:
+        return (0.0, 0.0)
+    headroom = max(6.0, ram / 8.0)
+    memory_gb = max(8.0, ram - headroom)
+    # Wired memory cannot be paged out at all, so it gets a wider margin than
+    # the overall limit. The runner clamps this again to the device's own
+    # max_recommended_working_set_size, which is the real ceiling.
+    wired_gb = max(4.0, memory_gb - max(4.0, ram / 16.0))
+    return (round(memory_gb, 1), round(wired_gb, 1))
+
+
+def h3_supports_prompt_cache() -> bool:
+    """Whether the INSTALLED runner accepts `--prompt-cache`.
+
+    Same discipline as --chain-prompts / --draft-decode: PROBE, never assume.
+    The flag is present on `codex/h3-engine-v2` (the branch install_h3.js
+    clones, verified 2026-08-29 at scripts/generate_staged.py:831), but a pack
+    cloned before it renders perfectly well and would die on an argparse error
+    thirty seconds in. Without the cache such a user simply re-encodes the
+    prompt, which is exactly what every user did until today.
+    """
+    return _h3_runner_has_flag("--prompt-cache")
 
 
 def h3_supports_tae_draft() -> bool:
@@ -20632,6 +20867,24 @@ def run_h3_job_inner(job: dict) -> None:
             cmd += ["--chain-prompts", str(chain_prompts_path)]
     if first_frame is not None:
         cmd += ["--first-frame", str(first_frame)]
+    # Skip the 26 GB text encoder when this exact prompt+first-frame has been
+    # encoded before. On the Q8 path that phase IS the run peak (25.71 GiB vs
+    # 21.28-24.68 GiB for denoise), so a hit lowers the ceiling as well as
+    # saving the 7-8 s. On bf16 the ceiling stays the DiT and only the seconds
+    # come back. Read-through: the runner writes the entry on a miss.
+    if h3_supports_memory_limits():
+        _mem_gb, _wired_gb = h3_memory_budget()
+        if _mem_gb > 0:
+            cmd += ["--memory-gb", str(_mem_gb), "--wired-gb", str(_wired_gb)]
+    _pc = h3_prompt_cache_path(prompt, first_frame) if h3_supports_prompt_cache() else None
+    if _pc is not None:
+        # Prune BEFORE the render, so the entry this run is about to write is
+        # never the one evicted.
+        try:
+            h3_prune_prompt_cache()
+        except Exception:                                            # noqa: BLE001
+            pass
+        cmd += ["--prompt-cache", str(_pc)]
     # ---- Fast draft decode (TAE) --------------------------------------------
     # H3's video decoder is a 36-layer ViT and it is the single largest FIXED
     # cost in a render: 88 s of a 501 s clip, 77% of everything that is not
@@ -21114,7 +21367,8 @@ def run_job_inner(job: dict) -> None:
                 "hardware_tier",
                 f"Extend isn't supported on the {SYSTEM_CAPS['label']} hardware "
                 f"tier — the dev transformer needs more headroom than this Mac "
-                f"has. Bump to 64+ GB or render the longer clip in one shot."
+                f"has. It works from {min_ram_gb_for('allows_extend') or 48} GB "
+                f"— or render the longer clip in one shot."
             )
         # Y1.036 — Extend always loads the Q8 `transformer-dev.safetensors`
         # weights (CFG-guided dev transformer, not the 8-step distilled).
@@ -21754,7 +22008,7 @@ def run_job_inner(job: dict) -> None:
                 f"FFLF (keyframe interpolation) isn't supported on the "
                 f"{SYSTEM_CAPS['label']} hardware tier — Q8 + the dev "
                 f"transformer's two-stage memory peak doesn't fit. "
-                f"Bump to 64+ GB."
+                f"It works from {min_ram_gb_for('allows_keyframe') or 48} GB."
             )
         # Check the SAME file list the menu + /status report on. The old
         # "directory exists and non-empty" check let half-downloaded Q8
@@ -22300,7 +22554,8 @@ def run_job_inner(job: dict) -> None:
                 f"High quality (Q8 two-stage) isn't supported on the "
                 f"{SYSTEM_CAPS['label']} hardware tier — Q8 dev transformer "
                 f"(~19 GB) plus the upscaler stage doesn't fit. "
-                f"Use Standard or Quick instead, or upgrade to 64+ GB."
+                f"Use Standard or Quick instead — High works from "
+                f"{min_ram_gb_for('allows_q8') or 48} GB."
             )
         # Route to TwoStageHQPipeline (Q8 dev model + res_2s sampler + CFG anchor + TeaCache).
         # Defaults from ltx-2-mlx CLAUDE.md LTX_2_3_PARAMS.
@@ -44606,6 +44861,29 @@ HTML = r"""<!doctype html>
           <option value="off">Off</option>
         </select>
       </div>
+      <!-- H3 DiT. The setting has been honoured by `h3_dit_choice()` and
+           validated by the settings handler since it was added, and its own
+           docstring says "`h3_dit` in Settings" — but no control was ever
+           built, so the only way to reach it was a hand-written POST. The
+           owner watched H3 sit at ~50 GB and asked why we could not reduce it;
+           the answer was a setting he could not see. Numbers here are measured,
+           not estimated (640x384/73f, seed 424242, same-seed A/B). -->
+      <div class="settings-row" style="margin-top:10px" id="settingsH3DitRow" hidden>
+        <label>Hailuo H3 model</label>
+        <select id="settingsH3Dit" style="flex:1">
+          <option value="auto">Automatic — best quality this Mac can hold</option>
+          <option value="bf16">Full (bf16) — 42 GiB peak</option>
+          <option value="q8">Compact (Q8) — 21 GiB peak, half the memory</option>
+        </select>
+      </div>
+      <div class="hint" id="settingsH3DitHint" style="margin-top:6px" hidden>
+        Measured on the same prompt and seed: <b>Full 38.9 GiB</b> peak in 196.9 s
+        versus <b>Compact 21.4 GiB</b> in 200.1 s — <b>45 % less memory for 1.6 %
+        more time</b>. Automatic gives a 64 GB Mac the full model and anything
+        smaller the compact one. Choose Compact if you want to keep using the Mac
+        while it renders; the memory it gives back is memory H3 was holding, not
+        memory it needed.
+      </div>
       <div class="hint" style="margin-top:6px">
         Never changes the result — the clip is byte-for-byte the same either way.
         Costs a fraction of the render: about 0.2 % on High, a few per cent on a
@@ -57020,6 +57298,18 @@ async function openSettingsModal() {
     lpSelect.value = (cur.live_preview === 'off') ? 'off' : 'on';
     renderMemoryPolicyHint();
   }
+  // H3 model. Hidden entirely when H3 is not installed — an install that
+  // cannot render H3 has no use for a control that only changes how it does.
+  const ditRow = document.getElementById('settingsH3DitRow');
+  const ditHint = document.getElementById('settingsH3DitHint');
+  const ditSelect = document.getElementById('settingsH3Dit');
+  if (ditRow && ditSelect) {
+    const haveH3 = !!(LAST_STATUS && LAST_STATUS.h3 && LAST_STATUS.h3.available);
+    ditRow.hidden = !haveH3;
+    if (ditHint) ditHint.hidden = !haveH3;
+    const v = String(cur.h3_dit || 'auto').toLowerCase();
+    ditSelect.value = ['auto', 'bf16', 'q8'].includes(v) ? v : 'auto';
+  }
 
   // Token rows. We never receive the actual key from the server (the
   // /settings GET returns has_X booleans only), so we display either
@@ -57419,6 +57709,8 @@ async function applySettings() {
   }
   fd.set('memory_policy', document.getElementById('settingsMemoryPolicy')?.value || 'auto');
   fd.set('live_preview', document.getElementById('settingsLivePreview')?.value || 'on');
+  const _dit = document.getElementById('settingsH3Dit')?.value;
+  if (_dit) fd.set('h3_dit', _dit);
   // Tokens — only send a key when the input has a value. Empty input
   // means "leave as-is" (clearing is explicit via the Clear button).
   // This protects against accidentally wiping a saved key by clicking

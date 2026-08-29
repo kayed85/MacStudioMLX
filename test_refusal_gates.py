@@ -297,8 +297,15 @@ class TestH3RamRefusalStatesTheRealFloor(unittest.TestCase):
         return P.h3_ram_verdict()
 
     def test_the_two_floors_are_the_ones_the_product_believes(self):
+        # The Q8 floor moved 46 -> 36 on 2026-08-29, when the full phase profile
+        # replaced the single "27.3 GiB" figure it had been guessed from and the
+        # panel started leaving the user real headroom. The bf16 floor is
+        # unchanged. These are asserted as ORDER and RELATION, not as literals:
+        # pinning the number is what made this test fail for a correct change,
+        # and a stale literal here is the same defect the class exists to catch.
         self.assertEqual(P.H3_MIN_RAM_GB, 60.0)
-        self.assertEqual(P.H3_MIN_RAM_GB_Q8, 46.0)
+        self.assertLess(P.H3_MIN_RAM_GB_Q8, P.H3_MIN_RAM_GB)
+        self.assertGreater(P.H3_MIN_RAM_GB_Q8, 32.0)
 
     def test_a_big_mac_is_not_blocked(self):
         v = self._band(64.0, False)
@@ -318,12 +325,13 @@ class TestH3RamRefusalStatesTheRealFloor(unittest.TestCase):
         self.assertIn("runs on this Mac", v["message"])
         self.assertIn("Install Hailuo H3", v["message"])
 
-    def test_a_small_mac_is_told_46_not_64(self):
+    def test_a_small_mac_is_told_the_real_floor_not_64(self):
+        """The message must quote the floor the code actually gates on."""
         v = self._band(32.0, False)
         self.assertIsNone(v["lane"])
         self.assertTrue(v["blocked"])
         self.assertFalse(v["needs_q8_dit"])
-        self.assertIn("46", v["message"])
+        self.assertIn(str(int(P.H3_MIN_RAM_GB_Q8)), v["message"])
         self.assertNotIn("about 64", v["message"])
         self.assertIn("LTX", v["message"])
 

@@ -129,6 +129,75 @@ def _log_memory_pressure() -> None:
         pass
 
 
+# =============================================================================
+# PER-PHASE MLX MEMORY — the number that decides whether a render fits
+# =============================================================================
+#
+# WHY THIS EXISTS
+# ---------------
+# `_log_memory_pressure()` above measures the whole MACHINE via vm_stat. That
+# answers "is this Mac under pressure", which is not the same question as
+# "which part of OUR render is the spike". H3's staged runner has printed a
+# per-phase peak since the port, and that is exactly why its memory questions
+# get answered in minutes; LTX had no equivalent, so the 2026-08 allocator-cache
+# win (a third of peak, free) was found by a global A/B rather than by looking
+# at a profile. 38.8% of the fleet renders below 48 GB, where the peak phase is
+# the difference between a finished clip and a swap storm — those users deserve
+# a log line that names the phase, and so do we.
+#
+# Peak is RESET at each phase boundary so every line is that phase's own high
+# water mark rather than a running maximum that only ever reports the worst
+# phase. The run maximum is tracked separately and emitted once at the end.
+
+_MLX_RUN_PEAK_GIB = 0.0
+
+
+def _mlx_mem_reset_run() -> None:
+    """Start a fresh per-run memory profile."""
+    global _MLX_RUN_PEAK_GIB
+    _MLX_RUN_PEAK_GIB = 0.0
+    try:
+        import mlx.core as mx                                    # noqa: PLC0415
+        mx.reset_peak_memory()
+    except Exception:                                            # noqa: BLE001
+        pass
+
+
+def _mlx_phase_mem(label: str) -> float | None:
+    """Log this phase's MLX peak, then reset so the next phase stands alone.
+
+    Returns the phase peak in GiB, or None when MLX cannot be queried (an old
+    library, or a build without the memory API) — callers treat it as optional
+    telemetry and never branch on it.
+    """
+    global _MLX_RUN_PEAK_GIB
+    try:
+        import mlx.core as mx                                    # noqa: PLC0415
+        gib = 1024.0 ** 3
+        peak = mx.get_peak_memory() / gib
+        active = mx.get_active_memory() / gib
+        cache = mx.get_cache_memory() / gib
+    except Exception:                                            # noqa: BLE001
+        return None
+    if peak > _MLX_RUN_PEAK_GIB:
+        _MLX_RUN_PEAK_GIB = peak
+    emit({"event": "log",
+          "line": f"[mlx] {label}: peak {peak:.2f} GiB · active {active:.2f} · cache {cache:.2f}"})
+    try:
+        mx.reset_peak_memory()
+    except Exception:                                            # noqa: BLE001
+        pass
+    return peak
+
+
+def _mlx_mem_summary() -> float:
+    """Emit the whole run's peak — the one number a Compact Mac cares about."""
+    if _MLX_RUN_PEAK_GIB > 0:
+        emit({"event": "log",
+              "line": f"[mlx] run peak {_MLX_RUN_PEAK_GIB:.2f} GiB"})
+    return _MLX_RUN_PEAK_GIB
+
+
 def _aggressive_cleanup_before_generate() -> None:
     """Minimize Metal heap fragmentation before pipeline generation."""
     try:
@@ -2595,6 +2664,7 @@ for line in sys.__stdin__:
         _is_busy = True
         try:
             t0 = time.time()
+            _mlx_mem_reset_run()
             # Granular breadcrumbs so a silent helper death is traceable:
             # if the panel's last log line is "step:get_pipe" then we died
             # during pipeline init (likely OOM or weight-load issue). If
@@ -2621,6 +2691,12 @@ for line in sys.__stdin__:
                             model_dir=p.get("model_dir"))
             emit({"event": "log", "line": "step:get_pipe done"})
             _log_memory_pressure()
+            # NOT "weights": measured on a live 4.7.0 render, this reads
+            # 0.00 GiB because `get_pipe` is lazy — the pack is faulted in
+            # during generate, so its residency lands in the denoise figure.
+            # Labelling it "weights" would have every reader conclude the
+            # model is free.
+            _mlx_phase_mem("pipeline init")
             accel_mode = configure_acceleration(p.get("accel", "off"))
             negative_prompt = _clean_text(p.get("negative_prompt"))
             effective_prompt = _prompt_with_soft_negative(p["prompt"], negative_prompt)
@@ -2716,6 +2792,7 @@ for line in sys.__stdin__:
                 # Step 1: generate latents (no save)
                 video_latent, audio_latent = _generate_latents(pipe, needs_image=needs_image, kwargs=kwargs)
                 emit({"event": "log", "line": "step:generate done"})
+                _mlx_phase_mem("denoise")
                 # Free DiT + text encoder before the upscale + VAE decode peak.
                 emit({"event": "log", "line": "step:free_generation_modules start"})
                 _free_pipe_for_decode(pipe)
@@ -2724,6 +2801,7 @@ for line in sys.__stdin__:
                 emit({"event": "log", "line": "step:latent_upscale_x2 start"})
                 video_latent = _model_upscale_video_latent(pipe, video_latent)
                 emit({"event": "log", "line": f"step:latent_upscale_x2 done — latent {video_latent.shape[-2]}×{video_latent.shape[-1]}"})
+                _mlx_phase_mem("latent upscale")
                 # Free the upscaler before VAE decode (can be ~2-3 GB peak).
                 _free_upscaler()
                 # Step 3: VAE decode + save (decoder loads inside _decode_and_save_video).
@@ -2734,11 +2812,14 @@ for line in sys.__stdin__:
                 # panel's wait_done while MLX tears down ~10 GB of Metal
                 # buffers + lazy graph nodes synchronously.
                 emit({"event": "log", "line": "step:decode_and_save done"})
+                _mlx_phase_mem("decode+save")
+                _mlx_mem_summary()
             _aggressive_cleanup_before_generate()
             if not use_model_upscale:
                 emit({"event": "log", "line": f"step:generate mode={mode} {kwargs['width']}x{kwargs['height']} {kwargs['num_frames']}f @{kwargs['frame_rate']:.1f}fps steps={kwargs['num_steps']} accel={accel_mode}"})
                 video_latent, audio_latent = _generate_latents(pipe, needs_image=needs_image, kwargs=kwargs)
                 emit({"event": "log", "line": "step:generate done"})
+                _mlx_phase_mem("denoise")
                 emit({"event": "log", "line": "step:free_generation_modules start"})
                 _free_pipe_for_decode(pipe)
                 emit({"event": "log", "line": "step:free_generation_modules done"})
@@ -2757,6 +2838,8 @@ for line in sys.__stdin__:
                 # FIX 2026-05-14: upstream renamed fps= → frame_rate= (keyword-only).
                 out_path = pipe._decode_and_save_video(video_latent, audio_latent, kwargs["output_path"], frame_rate=kwargs["frame_rate"])
                 emit({"event": "log", "line": "step:decode_and_save done"})
+                _mlx_phase_mem("decode+save")
+                _mlx_mem_summary()
             elapsed = round(time.time() - t0, 2)
             _last_activity = time.time()
             done_event = {
@@ -2833,6 +2916,7 @@ for line in sys.__stdin__:
         _is_busy = True
         try:
             t0 = time.time()
+            _mlx_mem_reset_run()
             configure_acceleration("off")
             # Extend supports LoRAs via the same _pending_loras hook;
             # the dev transformer picks them up at load time just like T2V/I2V.
@@ -2938,6 +3022,7 @@ for line in sys.__stdin__:
         _is_busy = True
         try:
             t0 = time.time()
+            _mlx_mem_reset_run()
             configure_acceleration("off")
             # LoRAs flow through the same wire shape as t2v/i2v. HQ is the
             # only path where dev-base character LoRAs actually transfer
@@ -3131,6 +3216,7 @@ for line in sys.__stdin__:
         _is_busy = True
         try:
             t0 = time.time()
+            _mlx_mem_reset_run()
             configure_acceleration("off")
             num_frames = int(p["frames"])
 
@@ -3248,6 +3334,7 @@ for line in sys.__stdin__:
         _is_busy = True
         try:
             t0 = time.time()
+            _mlx_mem_reset_run()
             configure_acceleration("off")
             audio_path = p.get("audio_path") or ""
             if not audio_path:
@@ -3356,6 +3443,7 @@ for line in sys.__stdin__:
         _is_busy = True
         try:
             t0 = time.time()
+            _mlx_mem_reset_run()
             configure_acceleration("off")
             audio_path = p.get("audio_path") or ""
             if not audio_path:
@@ -3442,6 +3530,7 @@ for line in sys.__stdin__:
         _is_busy = True
         try:
             t0 = time.time()
+            _mlx_mem_reset_run()
             configure_acceleration("off")
             from ltx_pipelines_mlx.hdr_ic_lora import HDRICLoraPipeline
             loras = p.get("loras") or []
@@ -3554,6 +3643,7 @@ for line in sys.__stdin__:
         _is_busy = True
         try:
             t0 = time.time()
+            _mlx_mem_reset_run()
             configure_acceleration("off")
             from ltx_pipelines_mlx.ic_lora import ICLoraPipeline
             loras = p.get("loras") or []
@@ -3707,6 +3797,7 @@ for line in sys.__stdin__:
         _is_busy = True
         try:
             t0 = time.time()
+            _mlx_mem_reset_run()
             lm = get_gemma_lm()
             # Build augmented system prompt: official + Phosphene addendum.
             base_sys = (lm.default_gemma_t2v_system_prompt if mode == "t2v"
