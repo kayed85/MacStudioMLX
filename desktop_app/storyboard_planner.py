@@ -2491,6 +2491,68 @@ def _parse_feedback(feedback: Any) -> Tuple[str, Optional[int], str]:
     return "film", None, text
 
 
+def _fallback_plan_film(
+    concept: str,
+    n_shots: int = 6,
+    style: str = "",
+    cast: list = None,
+    board_id: Optional[str] = None,
+    engine: str = "auto",
+    tier: str = "draft",
+    duration_s: float = 5.0,
+    seed_base: int = 42
+) -> Dict[str, Any]:
+    """Built-in fallback film planner when MLX / Gemma model is not available."""
+    created = int(time.time())
+    bid = board_id or ("sb-%d-%s" % (created, hashlib.sha1(("%s|%d" % (concept, seed_base)).encode("utf-8")).hexdigest()[:6]))
+
+    shots = []
+    camera_motions = [
+        "cinematic 35mm film shot, slow panning camera",
+        "medium tracking shot, handheld camera movement",
+        "close-up shot, shallow depth of field",
+        "wide-angle cinematic frame, gentle camera push-in",
+        "over-the-shoulder shot, natural illumination",
+        "dramatic lighting, smooth camera motion"
+    ]
+
+    sentences = [s.strip() for s in re.split(r"[.!?\n]", concept) if s.strip()]
+    if not sentences:
+        sentences = [concept.strip() or "Cinematic scene"]
+
+    for i in range(n_shots):
+        base_desc = sentences[i % len(sentences)]
+        cam = camera_motions[i % len(camera_motions)]
+        shot_prompt = "%s. %s" % (base_desc, cam)
+        if style:
+            shot_prompt += ", %s" % style
+
+        shots.append({
+            "id": "shot-%02d" % (i + 1),
+            "shot_index": i + 1,
+            "duration_sec": duration_s,
+            "prompt": shot_prompt,
+            "camera": cam,
+            "engine": engine if engine in ("h3", "ltx") else "ltx",
+            "seed": (seed_base + i * 100) % 1000000,
+        })
+
+    return {
+        "schema": 1,
+        "id": bid,
+        "title": concept.strip()[:60] or "Untitled Storyboard",
+        "created_at": created,
+        "cast": cast or [],
+        "policy": {"engine": engine, "tier": tier},
+        "shots": shots,
+        "_planner": {
+            "model": "built-in fallback planner",
+            "concept": concept,
+            "shots_requested": n_shots,
+        }
+    }
+
+
 def plan_film(
     concept: str,
     n_shots: int = 6,
@@ -2753,11 +2815,13 @@ def _plan_with_session(sess, *, system, user, fb_mode, fb_shot, previous, valida
     try:
         resp = sess.generate(system, user, max_tokens=budget,
                              temperature=temperature, seed=seed_base % 100000)
-    except PlannerError as exc:
-        return _error("model_unavailable", str(exc),
-                      hint="Check that the planner model exists and that ltx-2-mlx/env "
-                           "has mlx-lm installed.",
-                      meta=dict(meta, elapsed_s=round(time.time() - t_start, 2)))
+    except Exception as exc:
+        sys.stderr.write("[planner] model generate failed (%s) — using fallback plan\n" % exc)
+        return _fallback_plan_film(
+            concept=concept, n_shots=n_shots, style=style, cast=cast,
+            board_id=board_id, engine=engine, tier=tier, duration_s=duration_s,
+            seed_base=seed_base
+        )
     meta["attempts"] = 1
     raw_text = resp.get("text") or ""
     obj = extract_json_object(raw_text)
