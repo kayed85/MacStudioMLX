@@ -26,12 +26,14 @@ import select
 import shlex
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import threading
 import time
 import zipfile
 from email import policy
+from email.message import Message as _EmailMessage
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -96,6 +98,35 @@ OUTPUT = Path(os.environ.get("LTX_OUTPUT_DIR", str(ROOT / "mlx_outputs")))
 UPLOADS = Path(os.environ.get("LTX_UPLOADS_DIR", str(ROOT / "panel_uploads")))
 AUDIO_DEFAULT = Path(os.environ.get("LTX_DEFAULT_AUDIO", str(ROOT / "audio_inputs/default.wav")))
 REFERENCE = Path(os.environ.get("LTX_DEFAULT_IMAGE", str(ROOT / "examples/reference.png")))
+
+
+def default_reference_image() -> str:
+    """What the `image` form field falls back to — usually EMPTY.
+
+    THE WIDEST-SPREAD REAL FAILURE IN THE FLEET WAS THIS DEFAULT. `make_job`
+    used to write `f("image", str(REFERENCE))`, and `REFERENCE` points at
+    `examples/reference.png` — a demo file that has never existed on any
+    install: it is not in git, not in `required_files.json`, and no installer
+    creates it. When the image control became a picker, the CLIENT-side
+    pre-fill was deliberately removed ("pre-filling examples/reference.png
+    surprised users into rendering the demo image when they meant to leave it
+    blank"); the SERVER-side default was left behind. So an Image render
+    submitted with an empty picker posted `image=`, `f()` swapped in the
+    phantom, nothing on the way down checked it, and ~30 s later the helper
+    raised `image not found: <install>/examples/reference.png`.
+
+    35 events, 22 distinct people, 14 days — about 1.6 each, which is the
+    signature of a first-encounter mistake everybody makes once. The A2V lane
+    had already noticed and filtered the same default back out at its own
+    call site (see run_job_inner's a2v branch); every other lane inherited it.
+
+    `LTX_DEFAULT_IMAGE` is still honoured when it points at a file that is
+    really there — an explicit opt-in is a different thing from a phantom.
+    """
+    try:
+        return str(REFERENCE) if REFERENCE.is_file() else ""
+    except OSError:
+        return ""
 def _resolve_helper_python() -> Path:
     """Find the helper-subprocess Python interpreter.
 
@@ -1605,13 +1636,20 @@ TRAIN_PRESETS = {
                # put a rank-8 result in front of the owner's eye and called
                # the identity good. Saying "fast" and letting the user infer
                # "as good, sooner" is the pill doing the lying.
-               "subtitle": "~30 epochs · rank 8 · 512px · fast, identity ungraded",
+               #
+               # Two independent users have now measured a Quick run with
+               # `lora_compat.py` (#62): 15 images → 1.54e-04, 18 images →
+               # 1.98e-04. Both sit UNDER `WEAK_DELTA_RMS` (2.0e-04), the
+               # floor no adapter that has carried an identity here has ever
+               # been below. So this is not "weaker", it is "below the line",
+               # and the pill says which of the two jobs it can do.
+               "subtitle": "~30 epochs · rank 8 · 512px · a look, not a face · identity ungraded",
                "checkpoint_interval": 500,
                "max_steps": 8000},
     "medium": {"epochs":  60, "rank": 16, "lr": 1e-4, "resolution": 576,
                "seconds_per_step": 2.2,  "ram_peak_gb": 18,
                "label": "Medium",
-               "subtitle": "~60 epochs · rank 16 · 576px · identity ungraded",
+               "subtitle": "~60 epochs · rank 16 · 576px · more capacity · identity ungraded",
                "checkpoint_interval": 500,
                "max_steps": 12000},
     # high tier mirrors the validated CLI recipe (rank 32 / 100 epochs /
@@ -1622,10 +1660,27 @@ TRAIN_PRESETS = {
     "high":   {"epochs": 100, "rank": 32, "lr": 1e-4, "resolution": 512,
                "seconds_per_step": 2.0,  "ram_peak_gb": 28,
                "label": "High",
-               "subtitle": "~100 epochs · rank 32 · 512px (validated v2 recipe)",
+               # Measured band for this recipe: 5.4e-04 (a third-party rank-32
+               # adapter that works) through 1.6e-03 (elontrn_v2). Everything
+               # that has ever carried a face here was trained this way.
+               "subtitle": "~100 epochs · rank 32 · 512px · validated for identity",
                "checkpoint_interval": 250,
                "max_steps": 20000},
 }
+
+#: Which preset the panel pre-selects AND badges "Recommended", per train type.
+#:
+#: For two months the answer was "quick" for both, and the Train tab both
+#: pre-selected it and badged it — while rank 8 is the one tier that has never
+#: carried an identity. A first-time user took the label at its word, spent the
+#: GPU hours and got a 1.98e-04 adapter, i.e. a dead LoRA (#62). The default IS
+#: the recommendation to most people, so moving the badge without moving the
+#: default would have fixed nothing.
+#:
+#: Character → `high`, the only recipe ever graded on a face. Style → `quick`,
+#: which is what rank 8/16 is genuinely good for: a look, cheaply, so the user
+#: can iterate. No style preset has been graded either, and the pills say so.
+TRAIN_DEFAULT_PRESET = {"character": "high", "style": "quick"}
 
 # Style LoRA presets — parallel to TRAIN_PRESETS but tuned for aesthetic
 # transfers rather than identity. Targets the same to_q/to_k/to_v/to_out
@@ -1708,6 +1763,18 @@ def _select_train_profile(total_ram_gb: float, tier_key: str) -> dict:
         # verdict is most likely looking at their machine and not at their
         # photos. The preset NAMES do not change, so the subtitle is the only
         # place this can be said.
+        #
+        # AND IT IS WORSE THAN "THE SAME REGIME" (#62, measured from this
+        # table, not guessed). Compact High is rank 8 / 500 steps / 448px on
+        # `TRAIN_TARGET_MODULES_COMPACT` — to_q and to_v only, i.e. HALF the
+        # projections the >=64 GB table adapts. The >=64 GB *Quick* — rank 8,
+        # 512px, all four projections, 450-540 steps on a real dataset — is
+        # strictly more adapter than that, and it has measured 1.54e-04 and
+        # 1.98e-04 in the field: both under WEAK_DELTA_RMS. So on a sub-64 GB
+        # Mac there is NO menu choice that reaches the graded rank-32 recipe,
+        # and "use High" is not advice that can be honoured here. Saying "use
+        # High" to these users without saying that would be a lie; the
+        # subtitle and the Train tab's preset note both say it.
         compact_modules = list(TRAIN_TARGET_MODULES_COMPACT)
         TRAIN_PRESETS.update({
             "quick":  {"epochs": 2,  "rank": 4, "lr": 1e-4, "resolution": 384,
@@ -1727,7 +1794,7 @@ def _select_train_profile(total_ram_gb: float, tier_key: str) -> dict:
             "high":   {"epochs": 10, "rank": 8, "lr": 1e-4, "resolution": 448,
                        "seconds_per_step": 20.0, "ram_peak_gb": 44,
                        "label": "High",
-                       "subtitle": "~10 epochs · rank 8 · 448px · max 500 steps · identity ungraded",
+                       "subtitle": "~10 epochs · rank 8 · 448px · max 500 steps · NOT the rank-32 recipe · identity ungraded",
                        "checkpoint_interval": 100,
                        "max_steps": 500, "max_rank": 8, "max_resolution": 448,
                        "target_modules": compact_modules},
@@ -1880,6 +1947,181 @@ def _parse_multipart_form(rfile, ctype: str, content_length: int) -> _MultipartF
         else:
             form.set(name, payload.decode(part.get_content_charset() or "utf-8", "replace"))
     return form
+
+
+class MultipartTooLarge(ValueError):
+    """A streamed part exceeded the caller's byte cap. Distinct from a plain
+    ValueError so the handler can answer 413 instead of 400."""
+
+
+def _multipart_boundary(ctype: str) -> bytes:
+    """The boundary token of a multipart Content-Type, as bytes."""
+    probe = _EmailMessage()
+    probe["Content-Type"] = ctype
+    boundary = probe.get_param("boundary")
+    if isinstance(boundary, tuple):           # RFC 2231 (charset, lang, value)
+        boundary = boundary[2]
+    if not boundary:
+        raise ValueError("multipart/form-data body has no boundary")
+    return b"--" + str(boundary).encode("ascii", "replace")
+
+
+def _stream_multipart_file_part(rfile, ctype: str, content_length: int,
+                                field_name: str,
+                                chunk: int = 1024 * 1024):
+    """Advance a multipart body to one file field WITHOUT buffering it.
+
+    Returns `(filename, drain, fields)`:
+      filename  the part's declared filename (never trusted as a path)
+      drain     `drain(fh, max_bytes) -> int` copies exactly that part's
+                payload into the open binary file `fh` and returns the count
+      fields    the plain text fields seen before it, if any
+
+    Why this exists rather than `_parse_multipart_form`: that function reads
+    the body into `bytes`, hands it to the email parser (copy), calls
+    `get_payload(decode=True)` (copy), wraps the result in a BytesIO (copy) and
+    the caller then does `.read()` (copy). Measured on this panel, importing a
+    310 MB adapter that way cost **+1.88 GB of RSS** — about 6x the file — and
+    the peak lands next to H3's ~40 GiB render footprint. It is fine for the
+    reference images and caption bundles it was written for; it is the wrong
+    shape for a multi-gigabyte weight file. This walks the same wire format
+    with a bounded window instead: the resident cost is one `chunk` plus the
+    boundary tail, whatever the adapter weighs.
+
+    Deliberately narrow. It reads the ONE file field the caller names and does
+    not pretend to be a general parser — no nested multipart, no base64
+    Content-Transfer-Encoding (browsers do not send it for file inputs, and
+    silently mis-decoding weights is worse than refusing).
+    """
+    delim = _multipart_boundary(ctype)
+    remaining = max(0, int(content_length))
+    buf = bytearray()
+
+    def pull() -> bool:
+        nonlocal remaining
+        if remaining <= 0:
+            return False
+        got = rfile.read(min(chunk, remaining))
+        if not got:
+            remaining = 0
+            return False
+        remaining -= len(got)
+        buf.extend(got)
+        return True
+
+    def read_line(limit: int = 8192) -> bytes:
+        while True:
+            i = buf.find(b"\r\n")
+            if i >= 0:
+                line = bytes(buf[:i])
+                del buf[: i + 2]
+                return line
+            if len(buf) > limit:
+                raise ValueError("malformed multipart/form-data body")
+            if not pull():
+                raise ValueError("truncated multipart/form-data body")
+
+    needle = b"\r\n" + delim
+    keep = len(needle) - 1
+
+    def drain_into(sink) -> None:
+        """Copy this part's payload to `sink` up to the closing boundary."""
+        while True:
+            i = buf.find(needle)
+            if i >= 0:
+                if i:
+                    sink(bytes(buf[:i]))
+                del buf[: i + len(needle)]
+                return
+            if len(buf) > keep:
+                cut = len(buf) - keep
+                sink(bytes(buf[:cut]))
+                del buf[:cut]
+            if not pull():
+                raise ValueError(
+                    "truncated multipart/form-data body — no closing boundary")
+
+    def discard_rest() -> None:
+        """Leave the socket at the end of the body. The response is written
+        after this returns, and a connection with unread request bytes on it
+        is a connection the next request reads garbage from."""
+        nonlocal remaining
+        buf.clear()
+        while remaining > 0:
+            got = rfile.read(min(chunk, remaining))
+            if not got:
+                break
+            remaining -= len(got)
+
+    # Preamble, then the opening delimiter.
+    while True:
+        if read_line().rstrip() == delim:
+            break
+
+    fields: dict[str, str] = {}
+    while True:
+        raw_headers = bytearray()
+        while True:
+            line = read_line()
+            if not line:
+                break
+            raw_headers.extend(line + b"\r\n")
+        part = BytesParser(policy=policy.default).parsebytes(
+            bytes(raw_headers) + b"\r\n")
+        name = part.get_param("name", header="content-disposition")
+        filename = part.get_filename()
+        cte = str(part.get("content-transfer-encoding") or "").strip().lower()
+        if cte and cte not in ("binary", "8bit", "7bit"):
+            raise ValueError(
+                f"unsupported Content-Transfer-Encoding {cte!r} on {name!r}")
+
+        if filename is not None and name == field_name:
+            def drain(fh, max_bytes: int | None = None) -> int:
+                written = 0
+
+                def sink(block: bytes) -> None:
+                    nonlocal written
+                    written += len(block)
+                    if max_bytes is not None and written > max_bytes:
+                        raise MultipartTooLarge(
+                            f"upload exceeds {max_bytes // (1024 * 1024)} MB")
+                    fh.write(block)
+
+                try:
+                    drain_into(sink)
+                finally:
+                    discard_rest()
+                return written
+
+            # A caller may refuse the upload BEFORE draining it — a wrong
+            # extension, a name already in the library — and would then leave
+            # the whole adapter sitting unread on the socket. Today that is
+            # survivable only because this handler never sets
+            # `protocol_version`, so HTTP/1.0 closes after every response; the
+            # storyboard-edit docstring in do_GET already names that same
+            # dependency ("turning on keep-alive would make those bytes the
+            # head of the next response"). This route would make that latent
+            # hazard a multi-gigabyte one, so it does not lean on it.
+            drain.discard = discard_rest
+            return str(filename), drain, fields
+
+        # Not the field we were asked for: consume it, keeping only a small
+        # head of a text field so ordinary form values still reach the caller.
+        collected = bytearray()
+
+        def skip(block: bytes, _c=collected) -> None:
+            if len(_c) < 64 * 1024:
+                _c.extend(block[: 64 * 1024 - len(_c)])
+
+        drain_into(skip)
+        if filename is None and name:
+            fields[str(name)] = collected.decode("utf-8", "replace")
+
+        while len(buf) < 2 and pull():
+            pass
+        if bytes(buf[:2]) == b"--":
+            raise ValueError(f"no {field_name!r} file field in the upload")
+        read_line()
 
 
 # User-provided captions. Industry convention: `image_001.png` pairs with
@@ -2222,6 +2464,7 @@ def _train_list_completed() -> list[dict]:
                 stat = p.stat()
             except OSError:
                 continue
+            verdict = _adapter_verdict(meta)
             out.append({
                 "id": meta.get("job_id") or p.stem,
                 "name": meta.get("name") or p.stem,
@@ -2241,7 +2484,20 @@ def _train_list_completed() -> list[dict]:
                 # render finding out. "unknown" for anything trained by a
                 # build that did not measure — silence is not weakness, and a
                 # chip on every older LoRA would be noise nobody could act on.
-                "adapter_verdict": _adapter_verdict(meta),
+                "adapter_verdict": verdict,
+                # AND WHAT TO DO ABOUT IT. A verdict the user cannot act on
+                # sends them to a GitHub thread to find out what their own
+                # number meant (#62); the remedy travels with the verdict, and
+                # is hardware-aware because on a sub-64 GB Mac "use High" is
+                # not a thing that machine can do.
+                "adapter_advice": (
+                    _train_weak_advice(
+                        verdict,
+                        str(meta.get("preset") or ""),
+                        kind == "train_style",
+                    )
+                    if verdict not in ("ok", "unknown") else ""
+                ),
             })
     return out
 
@@ -2259,6 +2515,68 @@ def _adapter_verdict(meta: dict) -> str:
         v = str(a.get("verdict") or "unknown").lower()
         return v if v else "unknown"
     return "unknown"
+
+
+def _train_weak_advice(verdict: str, preset: str = "", is_style: bool = False) -> str:
+    """One sentence a user can ACT on when their adapter measures weak/inert.
+
+    The measurement shipped in v4.6.0 and the number was correct; what it did
+    not do was tell anyone what to do about it. A first-time user on the Quick
+    preset read "1.98e-04", found nothing in the panel that explained it, and
+    ended up reading a 21-comment GitHub thread to learn that rank 8 has never
+    carried a face (#62). The verdict without the remedy is the actual product
+    failure in that issue.
+
+    The remedy is hardware-dependent, which is why this is a function and not
+    a constant: on a Mac under 64 GB `_select_train_profile` rewrites the whole
+    table and *High is rank 8 at 500 steps on two projections*, so "train again
+    on High" would be advice that machine cannot honour.
+    """
+    verdict = (verdict or "").lower()
+    if verdict == "inert":
+        return (
+            "This adapter carries no weight delta at all — every low-rank "
+            "product is exactly zero, so it cannot change a single pixel. "
+            "Treat the run as failed rather than as a weak result: nothing "
+            "was learned. Check the Logs for a trainer error, then train "
+            "again."
+        )
+    compact = bool(TRAIN_PROFILE.get("compact"))
+    if is_style:
+        head = ("This style adapter came out weak: the deltas it learned may "
+                "be too small to visibly change a render.")
+    else:
+        head = ("This character came out weak: the deltas it learned are "
+                "below the level any adapter that has carried a face here "
+                "has ever measured, so renders will most likely look "
+                "LoRA-free.")
+    if compact:
+        ram = TRAIN_PROFILE.get("ram_gb")
+        where = f"{ram} GB" if ram else "under 64 GB"
+        return (
+            f"{head} This Mac has {where}, so training runs the compact "
+            "profile — even High is rank 8 / 500 steps / 448px on two of the "
+            "four attention projections, not the rank-32 recipe that was "
+            "graded on a face. No preset on this machine reaches that recipe, "
+            "so this is the hardware and not your photos. More images and "
+            "sharper, more varied ones still help; a 64 GB-class Mac is what "
+            "unlocks the graded recipe."
+        )
+    if (preset or "").lower() != "high":
+        return (
+            f"{head} Train again on the High preset — rank 8 (Quick) and "
+            "rank 16 (Medium) have never carried an identity here, and High "
+            "is the only recipe that has. Raising the character strength "
+            "toward 2.0 helps a weak adapter a little; it cannot rescue one "
+            "this far under the floor."
+        )
+    return (
+        f"{head} This was already the High preset, so the next levers are the "
+        "dataset rather than the recipe: more images (20-40), sharper and more "
+        "varied in pose and lighting, and captions that name the trigger plainly. "
+        "Please attach the training log to https://github.com/mrbizarro/phosphene/issues/62 "
+        "— a weak High run is the case that issue is still open on."
+    )
 
 
 def _train_required_models() -> list[dict]:
@@ -4468,6 +4786,22 @@ def hq_surface_missing(version_id: str | None = None) -> list[str]:
         if fname not in missing:
             missing.append(fname)
     return missing
+
+
+def ltx_floor_canvas(width, height) -> tuple[int, int]:
+    """Floor a canvas onto the engine's /64 grid.
+
+    The rule make_job applies to every LTX lane, extracted so the two lanes
+    that derive their canvas from a SOURCE CLIP — Motion Control and Colorize,
+    both computed inside run_job_inner, after make_job has already run — get
+    the same answer instead of their own /32 copy of it. Every registered LTX
+    lane is two-stage, stage 1 runs at half resolution, and the pipeline snaps
+    to multiples of 64 on its own: /32 dims are a claim the render does not
+    honour, and on a source-derived lane they also squash the picture, because
+    the reference is resized onto whatever canvas we name.
+    """
+    return (max(64, (int(width) // 64) * 64),
+            max(64, (int(height) // 64) * 64))
 
 
 def ltx_model_dir(quant: str, version_id: str | None = None) -> str:
@@ -7015,6 +7349,31 @@ LTX_PREVIEW_HELP = (
 # a lane that cannot fulfil it.
 LTX_LIVE_PREVIEW_MODES = frozenset(("t2v", "i2v", "i2v_clean_audio"))
 
+# Motion Control's own generation sentence, server-owned like every other `?`
+# on this surface — one place to correct the day Lightricks publishes a 2.5
+# Union adapter, rather than a paragraph copied into markup.
+#
+# MEASURED, 2026-08-28, not projected. Same control clip (a 4 s crane-out from
+# a face to an aerial), same prompt, same seed 4242, ref/follow 1.0, both
+# generations' own text encoders:
+#   * ltx23 — the camera choreography transferred AND the prompt repainted the
+#     world (a monk on a salt flat, as asked).
+#   * ltx25 — the camera choreography still transferred, because the reference
+#     latent is PINNED at follow 1.0 whether or not the adapter contributes;
+#     the PROMPT did not. The render came back as a warped re-tell of the
+#     control clip's own content, with visible smear through the middle.
+# So on 2.5 this is not silently inert the way Ingredients is — it is worse to
+# diagnose, because it looks like it worked. Say which half stops working.
+LTX_CONTROL_GENERATION_NOTE = (
+    "The Union Control adapter is trained against LTX-2.3, and Lightricks has "
+    "published exactly one LTX-2.5 IC-LoRA to date (a pixel spatial upscaler). "
+    "On 2.5 the motion and framing still transfer — the control clip is pinned "
+    "either way — but the prompt has much weaker control over the new subject, "
+    "and the picture can smear. Measured on this machine, same seed, both "
+    "generations. For a full repaint, run the LTX-2.3 generation: install the "
+    "2.3 pack from the Train tab, or start the panel with LTX_MODEL_VERSION="
+    "ltx23.")
+
 LTX_Q8_CHARACTER_HELP = (
     "Trained characters need the Q8 weights. The 4-bit base pack rounds most of "
     "a trained delta away before the first frame — about nineteen twentieths of "
@@ -8498,11 +8857,38 @@ def ltx_tiers_payload() -> dict:
     `default_quality` / `default_length`), because the client renderer is one
     generalised function serving both engines. A second shape here would mean a
     second renderer, which is the fork this whole area exists to avoid."""
+    tiers = [dict(t) for t in sorted(
+        LTX_TIERS.values(),
+        key=lambda t: (LTX_QUALITIES[t["quality"]]["order"],
+                       LTX_LENGTHS[t["length"]]["order"]))]
+    # HARDWARE GATE, applied at the page boundary rather than baked into
+    # LTX_TIERS: "can this Mac run the Q8 two-stage pipeline" is a fact about
+    # the machine, not about the tier table, and the table is a module
+    # constant shared by every generation.
+    #
+    # Why this is here at all (2026-08-23). run_job_inner refuses HQ on a
+    # Compact Mac — correctly, it does not fit — and 23 of those refusals
+    # from 6 people showed up in the fleet's failure list. The UI was
+    # supposed to prevent them and had two holes: `applyTierGates` looked up
+    # an element id (`#qualityHigh`) that no markup has ever carried, so its
+    # High branch was dead code; and the CSS that hides High on the q4 cap
+    # tier matches `high` exactly, so `high_720p` — added in v4.0.2 on the
+    # same `hq` pipeline — stayed clickable. Marking the CELL unavailable
+    # fixes both at once and needs no new UI: `.unavailable` +
+    # aria-disabled + the reason in the title is the state the shared chip
+    # factory already renders, and _ltxApplyShape already refuses to act on
+    # a cell whose `available` is false.
+    if not SYSTEM_CAPS["allows_q8"]:
+        for t in tiers:
+            if t.get("pipeline") == "hq":
+                t["available"] = False
+                t["unavailable_reason"] = (
+                    f"Not available on the {SYSTEM_CAPS['label']} hardware "
+                    f"tier — the Q8 dev transformer (~19 GB) plus the "
+                    f"upscaler stage doesn't fit in this Mac's memory. "
+                    f"Standard and Quick run here; High needs 64+ GB.")
     return {
-        "tiers": [dict(t) for t in sorted(
-            LTX_TIERS.values(),
-            key=lambda t: (LTX_QUALITIES[t["quality"]]["order"],
-                           LTX_LENGTHS[t["length"]]["order"]))],
+        "tiers": tiers,
         "qualities": [dict(q) for q in sorted(
             LTX_QUALITIES.values(), key=lambda x: x["order"]) if q["offered"]],
         "lengths": [dict(l) for l in sorted(
@@ -8521,6 +8907,14 @@ def ltx_tiers_payload() -> dict:
         # (owner-reproduced 2026-08-15). Offered only where it works; the
         # 2.5 adapter swap is one registry row the day Lightricks ships it.
         "ingredients_available": ltx_generation_serves_ingredients(),
+        # Motion Control is NOT gated — unlike Ingredients it still does half
+        # of what it promises on 2.5, and refusing it would take a working
+        # camera-transfer away from the default lane. What it gets instead is
+        # the sentence, shown only where it is true. The flag and the note
+        # travel together so the client never has to decide which generation
+        # the caveat belongs to.
+        "control_full_repaint": ltx_control_full_repaint(),
+        "control_generation_note": LTX_CONTROL_GENERATION_NOTE,
         # The `?` copy the LTX help-dots fill from, on the same four-hop
         # Python-owned path H3's chain-prompt help takes. It rides the LTX
         # bootstrap block rather than a top-level one so everything the LTX
@@ -8789,6 +9183,71 @@ def h3_capable() -> bool:
     return SYSTEM_RAM_GB >= H3_MIN_RAM_GB_Q8 and _h3_q8_dit_dir() is not None
 
 
+def h3_ram_verdict() -> dict:
+    """What this Mac's memory says about H3 — and, when it says no, WHY and
+    WHAT TO DO. Three bands, and only one of them is a dead end.
+
+    THE DEFECT THIS ENDS. Every RAM sentence in the panel said "about 64 GB",
+    a number the product stopped believing on two separate occasions: the
+    bf16 floor is `H3_MIN_RAM_GB` = 60 (a 64 GB Mac reports ~63.x after
+    firmware reservations), and the Q8 DiT lane's floor is
+    `H3_MIN_RAM_GB_Q8` = 46 — the whole point of building that pack was to
+    "put H3 in reach of 48 GB Macs". So a 48 GB Mac, which CAN render H3, was
+    told it needed 64 GB. That is not a slightly-off number; it is the kind
+    of wrong that makes somebody give up on a feature their hardware runs,
+    permanently, because a refusal reads as a fact about the machine.
+
+    `scripts/pinokio/h3_build_q8.sh` builds that pack locally in ~5 min /
+    ~22 GB as part of "Install Hailuo H3", and its own header already names
+    this dead end ("a 48 GB Mac with no pack gets no Engine switcher"). The
+    door exists; the message never mentioned it.
+
+    Bands:
+      * >= 60 GB                      → lane "bf16", not blocked.
+      * >= 46 GB, Q8 DiT pack present → lane "q8",   not blocked.
+      * >= 46 GB, no Q8 DiT pack      → lane "q8",   blocked, `needs_q8_dit`.
+        NOT a hardware verdict — a missing local build with a named step.
+      * <  46 GB                      → lane None,   blocked for real. State
+        46, the real floor, not 64.
+
+    The peaks behind the floors are per-tier, not per-render: measured on the
+    staged loader at 243 frames / 10.125 s the Q8 DiT peaks at 32.6 GB and
+    bf16 at 50.8 GB, against the 27.3 / 42.8 GiB the floors were set from at
+    1024x576 / 124f. Peaks scale with length; the floors are the tier's, not
+    a promise at every length. See docs/H3_ENGINE.md.
+    """
+    ram = f"this Mac reports {SYSTEM_RAM_GB:.0f} GB"
+    if SYSTEM_RAM_GB >= H3_MIN_RAM_GB:
+        return {"lane": "bf16", "blocked": False, "needs_q8_dit": False,
+                "floor_gb": H3_MIN_RAM_GB, "message": ""}
+    if SYSTEM_RAM_GB >= H3_MIN_RAM_GB_Q8:
+        if _h3_q8_dit_dir() is not None:
+            return {"lane": "q8", "blocked": False, "needs_q8_dit": False,
+                    "floor_gb": H3_MIN_RAM_GB_Q8, "message": ""}
+        return {
+            "lane": "q8", "blocked": True, "needs_q8_dit": True,
+            "floor_gb": H3_MIN_RAM_GB_Q8,
+            "message": (
+                f"Hailuo H3 runs on this Mac — on its reduced-RAM lane. The "
+                f"bf16 engine needs {H3_MIN_RAM_GB:.0f} GB and "
+                f"{ram}, but the Q8 engine's floor is "
+                f"{H3_MIN_RAM_GB_Q8:.0f} GB and it is not built here yet. "
+                f"Run 'Install Hailuo H3' from the Phosphene sidebar in "
+                f"Pinokio — it builds that engine locally (~5 minutes, "
+                f"~22 GB on disk, no extra download) and skips everything "
+                f"already present. Render on LTX until then."),
+        }
+    return {
+        "lane": None, "blocked": True, "needs_q8_dit": False,
+        "floor_gb": H3_MIN_RAM_GB_Q8,
+        "message": (
+            f"Hailuo H3 needs at least {H3_MIN_RAM_GB_Q8:.0f} GB of unified "
+            f"memory on its reduced-RAM Q8 engine "
+            f"({H3_MIN_RAM_GB:.0f} GB on the full bf16 one), and {ram}. "
+            f"Render on the LTX engine instead — it serves every mode here."),
+    }
+
+
 _H3_FLAG_CACHE: dict[str, bool] = {}
 
 
@@ -8817,6 +9276,30 @@ def _h3_runner_has_flag(flag: str) -> bool:
         _H3_FLAG_CACHE.pop(stale, None)
     _H3_FLAG_CACHE[key] = supported
     return supported
+
+
+#: The one phrase every "your H3 clone is older than this panel" fault says.
+#:
+#: There are three of them — `--lora`, `--first-frame`, `--chain-windows` —
+#: and until now each wrote its own sentence, so all three landed in the
+#: analytics taxonomy's `other` bucket alongside genuine unknown crashes.
+#: They are not unknowns: they are one well-understood fault (an install that
+#: fell behind the code), with one remedy, and the owner's ruling is that they
+#: get `model_missing`. Matching on a shared phrase rather than on three
+#: hand-written sentences means a fourth flag added later is classified for
+#: free — the previous shape is exactly how these three drifted apart.
+#: `_ANALYTICS_ERROR_CLASSES` carries the needle; keep the two in step.
+H3_RUNNER_BEHIND = "the installed Hailuo H3 runner is behind this panel"
+
+
+def _h3_runner_behind(flag: str, runner: str | Path, remedy: str = "") -> str:
+    """The message for a render that needs a runner flag this clone lacks."""
+    tail = f" {remedy}" if remedy else ""
+    return (
+        f"{H3_RUNNER_BEHIND}: it has no `{flag}` ({runner}). Re-run "
+        f"'Install Hailuo H3' from the Phosphene sidebar to update the clone "
+        f"— every weight already on disk is kept.{tail}"
+    )
 
 
 def h3_supports_first_frame() -> bool:
@@ -9000,6 +9483,26 @@ H3_LORAS_DIRNAME = "loras"
 H3_LORA_MAX_STACK = 1
 H3_LORA_SLOTS = ("turbo", "user")
 H3_LORA_SLOT_DEFAULT = "turbo"
+# The import endpoint STREAMS its multipart body to the staging file
+# (`_stream_multipart_file_part`), so this cap is a disk guard, not a memory
+# guard, and it can finally be honest about the files people want. Measured on
+# this machine: larryvrh's turbo v4 — the community flagship — is 780 MB,
+# drbaph's repack 620 MB, and the lightx2v adapters run 1.38–1.96 GB. A
+# 512 MiB cap returned a flat 413 to every one of them. 4 GiB clears the
+# largest real H3 adapter with headroom while still refusing a body that could
+# only be a mistake.
+#
+# The old cap was not merely too low, it was simultaneously too HIGH for the
+# path it guarded: `_parse_multipart_form` read the whole body, the email
+# parser copied it, `get_payload(decode=True)` copied it again, then a BytesIO,
+# then `.read()`. A 310 MB import cost +1.88 GB of panel RSS — about 6x — next
+# to H3's ~40 GiB render footprint. Streaming is what makes a bigger number
+# safe; do not raise this without keeping that property.
+H3_LORA_UPLOAD_MAX_BYTES = 4 * 1024 * 1024 * 1024
+# Chunk size for that stream. 1 MiB is the panel's ceiling on how much of an
+# import is ever resident.
+H3_LORA_STREAM_CHUNK = 1024 * 1024
+H3_LORA_IMPORT_LOCK = threading.Lock()
 H3_LORA_STACK_NOTE = (
     "H3's runner has ONE adapter slot (`--lora` takes a single path), so a "
     "LoRA and Turbo can't both run. Pick which one this render uses.")
@@ -9046,6 +9549,137 @@ def _safe_h3_loras_dir() -> Path:
     d = _h3_loras_dir()
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def _h3_lora_import_name(filename: str) -> str:
+    """The library filename an uploaded adapter will take, or raise saying why
+    it can't have one. Basename only — `Path(...).name` first, so a part header
+    claiming `../../etc/x.safetensors` reduces to `x.safetensors` before the
+    character filter ever runs."""
+    raw_name = Path(str(filename or "")).name
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", raw_name).strip("._")
+    if not safe_name or not safe_name.lower().endswith(".safetensors"):
+        raise ValueError("choose a .safetensors H3 LoRA file")
+    return safe_name
+
+
+def import_h3_lora_staged(filename: str, fill, *, size_hint: int = 0) -> dict:
+    """Stage, validate, and atomically install one user-selected H3 LoRA.
+
+    `fill(fh)` writes the adapter's bytes into an open staging file and returns
+    how many it wrote — a callback rather than a `bytes` argument because the
+    HTTP path streams the multipart body straight through it and never holds
+    the file in memory (see H3_LORA_UPLOAD_MAX_BYTES).
+
+    The browser chooser is intentionally not a generic file drop: accepting a
+    raw Kohya adapter would leave a permanently failing row in the library.
+    Stage under a hidden sibling DIRECTORY, run the same layout preparation the
+    CivitAI path and render path use, then `os.replace` into the visible
+    library only after that succeeds. A refusal leaves no misleading file.
+
+    The staging directory is what keeps the user's own filename in every
+    message. Staging as `.name.<pid>.<tid>.uploading` meant a refusal read
+    `.turbo_v4.safetensors.22850.6152073216.uploading has unmatched …` in an
+    alert() — `_h3_lora_prepare` and the payload checks all name `path.name`,
+    and that was the temp's. Inside a temp DIR the staged file simply IS
+    `<safe_name>`, so every sentence the user sees names the file they chose,
+    with no message-rewriting layer to keep in sync.
+    """
+    safe_name = _h3_lora_import_name(filename)
+    if size_hint and size_hint > H3_LORA_UPLOAD_MAX_BYTES:
+        raise ValueError(
+            f"the selected file is larger than "
+            f"{H3_LORA_UPLOAD_MAX_BYTES // (1024 * 1024)} MB")
+
+    # Handler instances run in parallel. Reserve the name across the complete
+    # stage → validate → publish sequence so a second request cannot replace a
+    # file whose first import checked `target.exists()` one instruction earlier.
+    with H3_LORA_IMPORT_LOCK:
+        base = _safe_h3_loras_dir()
+        target = base / safe_name
+        if target.exists():
+            raise FileExistsError(
+                f"{safe_name} is already in the H3 LoRA library; remove or rename "
+                "the existing file before importing another one")
+        stage_dir = base / f".import.{os.getpid()}.{threading.get_ident()}"
+        try:
+            stage_dir.mkdir(mode=0o700)
+        except FileExistsError:
+            shutil.rmtree(stage_dir, ignore_errors=True)
+            stage_dir.mkdir(mode=0o700)
+        tmp = stage_dir / safe_name
+        try:
+            with tmp.open("xb") as fh:
+                written = int(fill(fh) or 0)
+                fh.flush()
+                os.fsync(fh.fileno())
+            if written <= 0 or tmp.stat().st_size == 0:
+                raise ValueError("the selected file is empty")
+            # Order matters and is the whole point of the split: prepare FIRST
+            # (a ComfyUI repack comes out of it with bare keys), then the
+            # upload-only scrutiny, which compares those bare keys against the
+            # installed DiT.
+            layout = _h3_lora_prepare(tmp)
+            scale = _h3_lora_validate_for_import(tmp)
+            os.replace(tmp, target)
+        except Exception:
+            raise
+        finally:
+            shutil.rmtree(stage_dir, ignore_errors=True)
+
+    strength = float(scale["strength"])
+    if scale["evidence"]:
+        push(f"[h3:lora] {safe_name}: {scale['evidence']}")
+    if not math.isclose(strength, 1.0, rel_tol=1e-6, abs_tol=1e-6):
+        push(f"[h3:lora] {safe_name}: recommended strength {strength:.4g} — "
+             f"the H3 loader applies no alpha, so the picker's strength "
+             f"control is where that scale gets applied")
+    pairs = int(layout["pairs"])
+    push(f"[h3:lora] imported {safe_name} "
+         f"({pairs} module pair{'' if pairs == 1 else 's'})")
+
+    # Same sidecar the CivitAI path writes, so an imported row has a name and a
+    # strength like every other row instead of a bare filename at 1.0.
+    sidecar = target.with_suffix(".json")
+    sidecar_data = {
+        "name": target.stem.replace("_", " ").replace("-", " "),
+        "description": scale["evidence"],
+        "trigger_words": [],
+        "recommended_strength": strength,
+        "base_model": "MiniMax H3",
+        "downloaded_at": iso_now(),
+        "downloaded_size_bytes": target.stat().st_size,
+        "kind": "import",
+        "lora_layout": layout.get("layout"),
+        "lora_converted_prefix": (layout.get("prefix") or None
+                                  if layout.get("converted") else None),
+    }
+    try:
+        atomic_write_text(sidecar, json.dumps(sidecar_data, indent=2))
+    except Exception as exc:
+        push(f"[h3:lora] WARN: could not write sidecar ({exc})")
+    return {
+        "path": str(target),
+        "filename": target.name,
+        "name": sidecar_data["name"],
+        "layout": layout["layout"],
+        "converted": bool(layout["converted"]),
+        "pairs": pairs,
+        "recommended_strength": strength,
+        "scale_source": scale["source"],
+        "scale_evidence": scale["evidence"],
+    }
+
+
+def import_h3_lora_file(filename: str, data: bytes) -> dict:
+    """`import_h3_lora_staged` for callers that already hold the whole file.
+
+    Kept because it is the readable shape for tests and for any future
+    non-HTTP caller. The endpoint does NOT use it — it streams."""
+    if not data:
+        raise ValueError("the selected file is empty")
+    return import_h3_lora_staged(
+        filename, lambda fh: fh.write(data), size_hint=len(data))
 
 
 def _lora_is_h3_lane(path_str) -> bool:
@@ -9101,6 +9735,160 @@ def _safetensors_header(path: Path) -> tuple[dict, int]:
     return header, 8 + n
 
 
+def _validate_h3_lora_payload(path: Path, header: dict, buf_start: int) -> None:
+    """Reject a structurally incomplete adapter before it reaches the runner.
+
+    Header-only inspection is deliberately cheap, but it is not enough for an
+    upload endpoint: a forged header can advertise A/B tensors whose byte
+    ranges do not exist.  Validate only the tensors that make an H3 adapter
+    loadable, without loading them into MLX.  This keeps malformed files out
+    of the library and turns a late runner failure into an actionable import
+    error.
+    """
+    widths = {
+        "BOOL": 1, "U8": 1, "I8": 1, "U16": 2, "I16": 2,
+        "U32": 4, "I32": 4, "F16": 2, "BF16": 2, "U64": 8,
+        "I64": 8, "F32": 4, "F64": 8,
+        "F8_E4M3FN": 1, "F8_E4M3FNUZ": 1, "F8_E5M2": 1,
+        "F8_E5M2FNUZ": 1,
+    }
+    try:
+        buffer_bytes = path.stat().st_size - buf_start
+    except OSError as exc:
+        raise RuntimeError(f"{path.name} cannot be read ({exc}).")
+    if buffer_bytes < 0:
+        raise RuntimeError(f"{path.name} is truncated before its tensor buffer.")
+
+    entries = {k: v for k, v in header.items() if k != "__metadata__"}
+    a_names = {k[: -len(_H3_LORA_A_SUFFIX)] for k in entries
+               if k.endswith(_H3_LORA_A_SUFFIX)}
+    b_names = {k[: -len(_H3_LORA_B_SUFFIX)] for k in entries
+               if k.endswith(_H3_LORA_B_SUFFIX)}
+    paired = a_names & b_names
+    # NOT all-or-nothing. `lora_compat` has answered this question for the LTX
+    # lane since it was written: a real adapter is allowed a few tensors the
+    # matcher does not recognise, and _H3_LORA_MIN_MATCH_RATIO is the same
+    # 0.90 threshold for the same reason. A single stray half-pair — one
+    # `lora_A` an exporter emitted without its `lora_B` — is a tensor the
+    # runner ignores, not a file worth refusing. A file where most pairs are
+    # broken is a different thing and still gets refused.
+    widest = max(len(a_names), len(b_names))
+    if not paired or (widest and len(paired) / widest < _H3_LORA_MIN_MATCH_RATIO):
+        missing_a = sorted(b_names - a_names)
+        missing_b = sorted(a_names - b_names)
+        detail = (f"missing lora_A for {missing_a[0]}" if missing_a else
+                  f"missing lora_B for {missing_b[0]}")
+        raise RuntimeError(
+            f"{path.name} has unmatched H3 LoRA tensors — only {len(paired)} of "
+            f"{widest} modules form a complete lora_A/lora_B pair ({detail}).")
+    orphans = (a_names | b_names) - paired
+    if orphans:
+        push(f"[h3:lora] {path.name}: ignoring {len(orphans)} unpaired tensor(s) "
+             f"(e.g. {sorted(orphans)[0]}) — the runner skips them too")
+    a_names = paired
+
+    def validate_tensor(key: str, entry: object) -> list[int]:
+        if not isinstance(entry, dict):
+            raise RuntimeError(f"{path.name} has an invalid tensor entry for {key!r}.")
+        dtype = str(entry.get("dtype") or "")
+        width = widths.get(dtype)
+        shape = entry.get("shape")
+        offsets = entry.get("data_offsets")
+        if width is None or not isinstance(shape, list) or len(shape) != 2:
+            raise RuntimeError(f"{path.name} has an unsupported H3 LoRA tensor {key!r}.")
+        try:
+            dims = [int(dim) for dim in shape]
+            start, end = [int(off) for off in offsets]
+        except (TypeError, ValueError):
+            raise RuntimeError(f"{path.name} has invalid offsets for {key!r}.")
+        if (len(offsets) != 2 or any(dim <= 0 for dim in dims) or start < 0 or
+                end < start or end > buffer_bytes):
+            raise RuntimeError(f"{path.name} is truncated or has invalid offsets for {key!r}.")
+        expected = width * dims[0] * dims[1]
+        if end - start != expected:
+            raise RuntimeError(f"{path.name} has inconsistent shape or offsets for {key!r}.")
+        return dims
+
+    for module in sorted(a_names):
+        a_shape = validate_tensor(module + _H3_LORA_A_SUFFIX,
+                                  entries[module + _H3_LORA_A_SUFFIX])
+        b_shape = validate_tensor(module + _H3_LORA_B_SUFFIX,
+                                  entries[module + _H3_LORA_B_SUFFIX])
+        if a_shape[0] != b_shape[1]:
+            raise RuntimeError(
+                f"{path.name} has incompatible LoRA rank for {module!r}.")
+
+    # A declared alpha must be readable.  The runner ignores alpha entirely,
+    # so silently skipping a malformed entry would recreate the wrong-strength
+    # failure this endpoint is meant to prevent.
+    scalar_widths = {"F64": 8, "F32": 4, "F16": 2, "BF16": 2,
+                     "I64": 8, "I32": 4}
+    for key, entry in entries.items():
+        if not key.endswith(".alpha"):
+            continue
+        if not isinstance(entry, dict):
+            raise RuntimeError(f"{path.name} has an invalid alpha entry for {key!r}.")
+        dtype = str(entry.get("dtype") or "")
+        shape, offsets = entry.get("shape"), entry.get("data_offsets")
+        try:
+            start, end = [int(off) for off in offsets]
+        except (TypeError, ValueError):
+            raise RuntimeError(f"{path.name} has invalid alpha offsets for {key!r}.")
+        scalar = shape == [] or shape == [1]
+        if (dtype not in scalar_widths or not scalar or len(offsets) != 2 or
+                start < 0 or end > buffer_bytes or
+                end - start != scalar_widths[dtype]):
+            raise RuntimeError(f"{path.name} has an unreadable alpha value for {key!r}.")
+
+    targets = _h3_lora_target_modules()
+    if targets is not None and a_names:
+        known = {m for m in a_names if m in targets}
+        ratio = len(known) / len(a_names)
+        if ratio < _H3_LORA_MIN_MATCH_RATIO:
+            unknown = sorted(a_names - known)
+            raise RuntimeError(
+                f"{path.name} targets modules the installed H3 transformer does "
+                f"not have — only {len(known)} of {len(a_names)} match "
+                f"(e.g. {unknown[0]!r}). It is probably built for a different "
+                f"MiniMax variant.")
+        if len(known) < len(a_names):
+            skipped = sorted(a_names - known)
+            push(f"[h3:lora] {path.name}: {len(a_names) - len(known)} module(s) "
+                 f"are not in this H3 transformer and will be skipped "
+                 f"(e.g. {skipped[0]})")
+
+
+def _h3_lora_target_modules() -> set[str] | None:
+    """Return installed H3 DiT module names, or None until its weights exist.
+
+    A syntactically valid A/B pair is still a silent no-op if its module name
+    belongs to another MiniMax variant.  Compare module stems against the
+    installed DiT; a machine without H3 weights can still curate its library
+    for a later model download.
+
+    The header read goes through `lora_compat.read_tensor_header`, which is
+    LRU-cached on (path, size, mtime_ns) — the H3 DiT is a ~26 GB checkpoint
+    whose JSON header is not small, and this is called once per import. The
+    panel already routes the LTX lane's identical question through that module
+    (`_ltx_lora_compatibility`); there is no reason for the H3 lane to keep a
+    second, uncached copy of the same read.
+    """
+    from lora_compat import LoraCompatibilityError, read_tensor_header
+
+    for root in _h3_model_roots():
+        dit = root / "deepbeep-pruned-bf16" / H3_DIT_FILENAME
+        if not dit.is_file():
+            continue
+        try:
+            header = read_tensor_header(dit)
+        except (LoraCompatibilityError, OSError, ValueError) as exc:
+            raise RuntimeError(
+                f"could not inspect the installed H3 transformer ({exc}).")
+        return {key[: -len(".weight")] for key in header
+                if key.endswith(".weight")}
+    return None
+
+
 def _h3_lora_effective_alpha(path: Path, header: dict,
                              buf_start: int) -> tuple[float | None, str]:
     """The adapter's effective scale (alpha/rank), or None when it declares none.
@@ -9108,30 +9896,32 @@ def _h3_lora_effective_alpha(path: Path, header: dict,
     THE H3 LOADER APPLIES `B @ A` AND NOTHING ELSE. PEFT applies
     `B @ A * (alpha / rank)`, and that scalar is a TRAINING-CONFIG value that
     most exporters do not put in the file — which is why the diffusers branch
-    below refuses outright. But some repacks DO ship it, as one tiny `.alpha`
-    scalar per module, and those files sail through the checks above: they have
-    real `lora_A` / `lora_B` pairs, so `not a_names` is False and the kohya
-    refusal never fires. The alphas are then silently dropped and the adapter
-    runs at whatever `alpha/rank` happened to be — 16x hot in the case that
-    actually bit us, which renders as coloured noise.
+    refuses outright. But some repacks DO ship it, as one tiny `.alpha` scalar
+    PER MODULE, and those files sail through the layout checks: they have real
+    `lora_A` / `lora_B` pairs, so `not a_names` is False and the kohya refusal
+    never fires. The alphas are then silently dropped and the adapter runs at
+    whatever `alpha/rank` happened to be — 16x hot in the case that actually
+    bit us, which renders as coloured noise.
+
+    PER-MODULE SCALARS ONLY, deliberately. An earlier revision fell back to
+    pairing a single `__metadata__["alpha"]` with the rank of whichever
+    `lora_A` `for k in header` happened to reach first. On the adapters people
+    actually install that is not an approximation, it is a coin flip: Kijai's
+    two repacks carry per-module ranks from 2 to 173 (72 and 88 distinct
+    values), so the same file yields a different "alpha/rank" depending on
+    dict order. A number nobody can reproduce is worse than no number, and it
+    was being used to REFUSE files. `_h3_lora_scale_report` handles the
+    metadata spellings, where the ambiguity can be named instead of guessed.
 
     The values are F32 scalars, so this reads a handful of BYTES, not tensors:
     the header already gives every offset, and rank is `lora_A`'s first
     dimension. Returns (effective_scale, evidence) or (None, "") when the file
-    declares no alpha at all — which is the common, already-handled case.
+    declares no per-module alpha at all — the common, already-handled case.
     """
     _WIDTH = {"F64": 8, "F32": 4, "F16": 2, "BF16": 2, "I64": 8, "I32": 4}
     alpha_keys = [k for k in header
                   if k != "__metadata__" and k.endswith(".alpha")]
-    # An exporter may also state it once, in the metadata blob.
-    meta = header.get("__metadata__") or {}
-    meta_alpha = None
-    if isinstance(meta, dict) and meta.get("alpha") is not None:
-        try:
-            meta_alpha = float(str(meta["alpha"]))
-        except (TypeError, ValueError):
-            meta_alpha = None
-    if not alpha_keys and meta_alpha is None:
+    if not alpha_keys:
         return None, ""
 
     def _rank_for(module: str) -> int | None:
@@ -9170,20 +9960,132 @@ def _h3_lora_effective_alpha(path: Path, header: dict,
             rank = _rank_for(k[: -len(".alpha")])
             if rank:
                 ratios.append(float(val) / float(rank))
-    if not ratios and meta_alpha is not None:
-        # One declared alpha and no per-module scalars: pair it with any rank.
-        for k in header:
-            if k.endswith(_H3_LORA_A_SUFFIX):
-                shape = (header[k].get("shape") or [])
-                if shape:
-                    ratios.append(meta_alpha / float(shape[0]))
-                break
     if not ratios:
         return None, ""
     lo, hi = min(ratios), max(ratios)
     ev = (f"{len(ratios)} module(s), alpha/rank "
           + (f"{lo:.4g}" if abs(hi - lo) < 1e-6 else f"{lo:.4g}–{hi:.4g}"))
     return (hi if abs(hi - lo) < 1e-6 else max(ratios, key=lambda r: abs(r - 1.0))), ev
+
+
+# Metadata keys an exporter uses to say "the PEFT alpha/rank multiplier is
+# ALREADY multiplied into lora_B, so load me at 1.0". Every converted H3
+# adapter on the shelf carries one of these three spellings, and they are the
+# ONLY trustworthy statement about scale a file can make besides per-module
+# `.alpha` scalars:
+#   Kijai's repacks       "baked_scale": "0.0625" / "1.0"
+#   our own conversions   "peft_scale_folded_into_B": "0.0625" / "1"
+#   lightx2v v1.1 comfy   "training_scale": "1.0"
+_H3_LORA_FOLDED_SCALE_KEYS = ("baked_scale", "peft_scale_folded_into_B",
+                              "training_scale")
+# One converter writes the same claim as prose in the `alpha` field instead of
+# a number. Accept that exact sentence; anything else in `alpha` is advisory.
+_H3_LORA_FOLDED_ALPHA_NOTE = re.compile(
+    r"\s*alpha\s*==\s*rank\s*;\s*scale\s*=\s*1(?:\.0+)?\s*", re.IGNORECASE)
+# Same 0.90 that `lora_compat.MIN_MATCH_RATIO` has used on the LTX lane since
+# it was written. A real adapter is allowed a few tensors the matcher does not
+# recognise; an adapter for a different model is not.
+_H3_LORA_MIN_MATCH_RATIO = 0.90
+
+
+def _h3_lora_scale_report(path: Path, header: dict, buf_start: int) -> dict:
+    """What strength this adapter wants, and the sentence that justifies it.
+
+    NEVER REFUSES. That is the whole point of this function, and it is a
+    correction of an earlier draft that did. The H3 loader applies `B @ A` and
+    no alpha, so an adapter whose PEFT scale is not folded in needs the user's
+    strength slider set to `alpha/rank` — and the picker HAS a per-LoRA
+    strength control. "alpha != rank" is therefore a number to write into the
+    sidecar, not a reason to reject a file: this project's own shipped
+    position is that lightx2v's 8-step adapter (alpha 8 / rank 128) is correct
+    and is loaded at 0.0625.
+
+    Returns {"strength": float, "source": str, "evidence": str} where source is
+      "folded"     an exporter states the scale is already inside lora_B
+      "per_module" read from the file's own per-module `.alpha` scalars
+      "uniform"    a single metadata alpha over a single, unambiguous rank
+      "advisory"   a metadata alpha we can see but cannot safely divide
+      "none"       the file says nothing about scale (the common case)
+    """
+    meta = header.get("__metadata__") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+
+    for key in _H3_LORA_FOLDED_SCALE_KEYS:
+        raw = meta.get(key)
+        if raw is None:
+            continue
+        try:
+            val = float(str(raw))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(val):
+            continue
+        return {"strength": 1.0, "source": "folded",
+                "evidence": (f"`{key}` = {val:g}: the exporter already folded "
+                             f"the PEFT scale into lora_B, so 1.0 is the "
+                             f"correct strength")}
+    if meta.get("alpha") is not None and _H3_LORA_FOLDED_ALPHA_NOTE.fullmatch(
+            str(meta["alpha"])):
+        return {"strength": 1.0, "source": "folded",
+                "evidence": ("the converter recorded alpha == rank; scale = 1.0, "
+                             "so 1.0 is the correct strength")}
+
+    scale, evidence = _h3_lora_effective_alpha(path, header, buf_start)
+    if scale is not None:
+        return {"strength": float(scale), "source": "per_module",
+                "evidence": f"{evidence} read from the file's own .alpha scalars"}
+
+    # A single metadata alpha. Divisible only when the file has ONE rank —
+    # otherwise which rank it refers to is genuinely unknown and we say so
+    # rather than inventing a quotient (see _h3_lora_effective_alpha).
+    meta_alpha = None
+    for key in ("alpha", "lora_alpha", "ss_network_alpha"):
+        if meta.get(key) is None:
+            continue
+        try:
+            cand = float(str(meta[key]))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(cand):
+            meta_alpha, meta_key = cand, key
+            break
+    if meta_alpha is None:
+        return {"strength": 1.0, "source": "none", "evidence": ""}
+    ranks = {int(v["shape"][0]) for k, v in header.items()
+             if k != "__metadata__" and k.endswith(_H3_LORA_A_SUFFIX)
+             and isinstance(v, dict) and (v.get("shape") or [])}
+    if len(ranks) == 1:
+        rank = ranks.pop()
+        if rank:
+            return {"strength": meta_alpha / float(rank), "source": "uniform",
+                    "evidence": (f"metadata `{meta_key}` {meta_alpha:g} over a "
+                                 f"uniform rank {rank}")}
+    return {"strength": 1.0, "source": "advisory",
+            "evidence": (f"metadata `{meta_key}` is {meta_alpha:g} but this file "
+                         f"has {len(ranks)} different ranks, so alpha/rank is "
+                         f"ambiguous — starting at 1.0")}
+
+
+def _h3_lora_validate_for_import(path: Path) -> dict:
+    """The extra scrutiny an UPLOADED adapter gets, on top of `_h3_lora_prepare`.
+
+    Split out from `_h3_lora_prepare` on purpose, and called AFTER it. Prepare
+    runs on the CivitAI install path and again on every render dispatch, where
+    its job is narrow: make a file the runner can load, or say why not. Folding
+    upload-shaped checks into it made the render path reject four of the five
+    ComfyUI repacks on this machine, because the payload check ran BEFORE
+    `_h3_lora_strip_prefix` and compared still-namespaced
+    `diffusion_model.blocks.0.…` keys against bare DiT module stems. Most H3
+    LoRAs on CivitAI are ComfyUI repacks — see the note above
+    H3_LORAS_DIRNAME — and the CivitAI path deletes the file after a refusal.
+
+    So: prepare first (keys are bare afterwards), then this. Returns the scale
+    report so the caller can put `recommended_strength` in the sidecar.
+    """
+    header, buf_start = _safetensors_header(path)
+    _validate_h3_lora_payload(path, header, buf_start)
+    return _h3_lora_scale_report(path, header, buf_start)
 
 
 def _h3_lora_layout(path: Path) -> dict:
@@ -9690,12 +10592,33 @@ def h3_visible_lengths() -> list[dict]:
 def h3_status() -> dict:
     """Compact H3 snapshot for /status + the page bootstrap."""
     paths = h3_paths()
-    capable = h3_capable()
-    available = not paths["missing"]
+    verdict = h3_ram_verdict()
+    needs_q8_dit = bool(verdict["needs_q8_dit"])
+    # `capable` is the switcher's own gate: not-capable is not rendered at all,
+    # so a Mac that is one local build away from running H3 must NOT be
+    # not-capable — that is how a 48 GB owner never learns the engine exists.
+    # It is capable-and-not-available, which is the state the chrome already
+    # knows how to draw: a dashed segment whose click opens the install card.
+    capable = h3_capable() or needs_q8_dit
+    # …and `available` must be false in the same breath, or a 48 GB Mac that
+    # installed H3 before the Q8 build step existed would be offered a ready
+    # engine that the server then refuses. The weights ARE on disk, so this is
+    # `repairable` — a named 5-minute step, not a 75 GB download.
+    available = (not paths["missing"]) and not needs_q8_dit
     return {
         "capable": capable,
         "available": available,
         "installed": available,
+        # The band this Mac is in, and the sentence that goes with it. One
+        # server-side answer, so the refusal, the make_job fallback, the
+        # switcher tooltip and the install card cannot state four different
+        # numbers the way they stated one wrong one.
+        "needs_q8_dit": needs_q8_dit,
+        "ram_lane": verdict["lane"],
+        "ram_note": verdict["message"],
+        # The LOWEST floor that exists, for the "needs N GB" chrome. It said
+        # 64 while the product's own floors were 60 and 46.
+        "ram_floor_gb": verdict["floor_gb"],
         "first_frame": available and h3_supports_first_frame(),
         "chain": available and h3_supports_chain(),
         # Per-window prompts — a SECOND probe, not a synonym for `chain`:
@@ -9786,8 +10709,12 @@ def h3_status() -> dict:
         # so the UI can offer "Repair H3" (minutes) instead of lying about a
         # 75 GB download the user already did. `venv_broken` narrows it
         # further to the dangling shared-uv-Python case.
-        "reason": paths["reason"],
-        "repairable": paths["repairable"],
+        "reason": ("missing_q8_dit" if (needs_q8_dit and not paths["missing"])
+                   else paths["reason"]),
+        # A pack whose only absence is the local Q8 build is repairable by
+        # definition: nothing has to be downloaded again.
+        "repairable": bool(paths["repairable"]
+                           or (needs_q8_dit and not paths["missing"])),
         "venv_broken": paths["venv_broken"],
         "weights_ok": paths["weights_ok"],
         # The (quality × length) matrix, and the two axes it is rendered from.
@@ -10520,6 +11447,28 @@ def _analytics_deliver(payload: dict) -> None:
         pass   # network down, endpoint 500, bad key, offline Mac — all fine
 
 
+# Every event name the panel can capture, in one place.
+#
+# docs/ANALYTICS.md promises "if the panel ever sends something that isn't
+# listed here, that's a bug", and the dry-run suite makes that promise
+# executable. It used to do so by regexing the source for a quoted event
+# name at the capture call site — which worked only for as long as every
+# call site passed a literal. The render call site stopped doing that when
+# refusals got their own event name (the name is now chosen by a branch),
+# and a regex guard that silently starts matching nothing is worse than no
+# guard at all. So the list is declared, the test reads it, and the test
+# also checks that every literal it CAN still see is a member.
+_ANALYTICS_EVENTS = (
+    "app_installed",
+    "app_boot",
+    "render_completed",
+    "render_failed",
+    "render_refused",
+    "pack_state_change",
+    "star_prompt",
+)
+
+
 def _analytics_capture(event: str, props: dict | None = None) -> None:
     """Record one event. Returns immediately; never raises; never blocks.
 
@@ -10686,13 +11635,84 @@ def _analytics_canvas_class(width: int, height: int) -> str:
     return "native+"
 
 
+# ---- Refusals: the panel saying no, on purpose --------------------------
+#
+# A REFUSAL is not a failure. It is the panel declining a request it
+# understood perfectly, because THIS INSTALL cannot serve that capability —
+# the hardware tier, the engine, or the model generation. Nothing broke, no
+# GPU time was spent, and the message names the way out.
+#
+# Why this table exists (2026-08-23). The 14-day fleet read found that the
+# single largest `render_failed` signature in the entire fleet was our own
+# Ingredients-on-2.5 refusal — 65 events, 16 people — sitting at the top of
+# the crash leaderboard wearing `error_class: other`, because a refusal is
+# raised with `raise RuntimeError` like everything else and the taxonomy had
+# nowhere to put it. Refusals were ~11% of all failures. That inflates the
+# published failure rate and buries the real crashes underneath, which is
+# the opposite of what the number is for.
+#
+# Refusals are matched TWICE, on purpose:
+#   1. STRUCTURALLY — the raise sites use `RenderRefused(reason, msg)` and
+#      worker_loop stamps `job["refused_reason"]`. This is the real path.
+#   2. TEXTUALLY — this table, so a refusal that arrives as a bare string
+#      (replayed from an older usage log, re-raised across the helper
+#      boundary, or a raise site a future edit forgets to convert) still
+#      lands as `refused` rather than silently rejoining `other`.
+# The slugs are a closed vocabulary and only the slug leaves the machine.
+_ANALYTICS_REFUSAL_REASONS = (
+    # The generation gate: the Ingredients IC-LoRA is 2.3-trained and
+    # Lightricks has published exactly one 2.5 IC-LoRA (the Pixel Spatial
+    # Upscaler, 2026-08-11) — still no 2.5 Ingredients adapter. Re-checked
+    # 2026-08-23. This refusal is CORRECT and must stay accurate.
+    ("ingredients_generation", ("needs the ltx-2.3 generation",)),
+    # The three hardware-tier gates share one phrase because they share one
+    # cause: the Q8 dev transformer does not fit on a Compact Mac.
+    ("hardware_tier", ("hardware tier",)),
+    # THREE needles, because this refusal now says three different things —
+    # one per RAM band (see h3_ram_verdict). The first is the retired
+    # "about 64 GB" sentence, kept ONLY so replayed usage logs from before
+    # 2026-08-28 still classify; nothing raises it any more. docs/ANALYTICS.md
+    # records that the wording moved without the series moving.
+    ("h3_ram", ("needs about 64 gb of unified memory",
+                "on its reduced-ram lane",
+                "gb of unified memory on its reduced-ram q8 engine")),
+    ("h3_mode", ("doesn't serve mode",)),
+    ("h3_lora_slots", ("adapter slot",)),
+)
+
+_ANALYTICS_REFUSAL_SLUGS = tuple(s for s, _ in _ANALYTICS_REFUSAL_REASONS)
+
+
+def _analytics_refusal_reason(raw) -> str | None:
+    """Which deliberate refusal this error text is, or None if it is a
+    genuine fault. Text is the fallback path — see the table's note."""
+    s = str(raw or "").strip().lower()
+    if not s:
+        return None
+    for slug, needles in _ANALYTICS_REFUSAL_REASONS:
+        if any(n in s for n in needles):
+            return slug
+    return None
+
+
 # Closed error taxonomy (spec 2.7). Classification runs on the ORIGINAL
 # error string, locally; only the class leaves the machine. Order is
-# load-bearing: the watchdog marker must win over the generic signal names
+# load-bearing: `refused` must win over everything (the Ingredients refusal
+# says "install the 2.3 pack", which would otherwise read as model_missing,
+# and the H3 memory refusal says "needs about 64 GB", which reads as
+# bad_params), the watchdog marker must win over the generic signal names
 # (issue #44 must never be merged into native_crash), cancel races must win
 # over broad matches, and download failures must win over corrupt-weights
 # so a failed fetch's checksum line doesn't count against installed packs.
+# One more, added 2026-08-23: `input_missing` must win over the loose half of
+# `download_failed`, because the text being matched CONTAINS THE USER'S PATH
+# and a great many missing reference images live in `~/Downloads`.
 _ANALYTICS_ERROR_CLASSES = (
+    # Derived from the refusal table above so there is ONE source of truth
+    # for what counts as a refusal. `refused` never rides on a
+    # `render_failed` event — it is the routing decision that sends the
+    # event to `render_refused` instead. See _analytics_render_event.
+    ("refused", tuple(n for _, ns in _ANALYTICS_REFUSAL_REASONS for n in ns)),
     ("metal_watchdog", ("kiogpucommandbuffercallbackerrortimeout",
                         "caused gpu timeout error")),
     ("cancelled_race", ("cancel",)),
@@ -10701,17 +11721,51 @@ _ANALYTICS_ERROR_CLASSES = (
     ("helper_start_timeout", ("helper failed to start", "handshake")),
     ("helper_exit", ("pipe closed", "broken pipe", "helper exited",
                      "exited mid-job")),
+    # ONE NEEDLE HOISTED, so the row below cannot claim it: a hub
+    # "repo not found" is a fetch fault about something that was never local.
+    # The rest of `download_failed` stays in its original place, BELOW
+    # `input_missing` but still above `model_corrupt`, because a failed
+    # fetch's own checksum line must not count against installed packs.
+    ("download_failed", ("repo not found",)),
+    # ABOVE THE REST OF `download_failed` ON PURPOSE, and the reason is the
+    # user's own filesystem. Classification runs on the RAW error text, path
+    # included, and `download_failed` matches the bare word "download" — so a
+    # missing reference image living in `~/Downloads`, which is where a great
+    # many of them live, classified as a failed fetch. The input question is
+    # the more specific one, so it is asked first.
+    #
+    # AND THE NEEDLES USED TO MATCH NO RAISE SITE IN THIS CODEBASE. Every one
+    # of them says "not found"; none says "does not exist". So the
+    # widest-spread real failure in the fleet ("image not found: <path>" — 35
+    # events across 22 people in 14 days) sat in `other` wearing a
+    # fingerprint. `not found:` is colon-anchored so it cannot swallow
+    # "ffmpeg not found" (an export fault) or a hub "Entry Not Found for
+    # url:". See docs/ANALYTICS.md — this moves an existing series.
+    # "needs a reference image" covers the empty-slot half of the same gate on
+    # both engines: an Image render submitted with nothing picked is the same
+    # fleet story as one whose file has gone, and splitting them across two
+    # classes would hide half of it.
+    ("input_missing", ("does not exist", "no longer exists",
+                       "not found:", "no longer on disk",
+                       "needs a reference image")),
     ("download_failed", ("download", "urlopen", "http error", "gated",
                          "401", "403", "fetch")),
     ("model_corrupt", ("corrupt", "checksum", "integrity",
                        "safetensors header", "hash mismatch")),
+    # `H3_RUNNER_BEHIND` — an H3 clone older than the panel, missing one of
+    # `--lora` / `--first-frame` / `--chain-windows`. Four raise sites, one
+    # cause, one remedy (re-run Install Hailuo H3). They used to land in
+    # `other` alongside genuine unknown crashes, which is exactly backwards:
+    # this is the most understood fault we have. Owner ruling 2026-08-23 —
+    # they are `model_missing`. Matched on the shared phrase, so a fifth flag
+    # is classified for free. Keep in step with `H3_RUNNER_BEHIND`.
     ("model_missing", ("isn't fully installed", "not downloaded",
                        "weights are missing", "pack is missing",
-                       "resume install", "hq add-on", "missing (")),
+                       "resume install", "hq add-on", "missing (",
+                       "runner is behind this panel")),
     ("venv_broken", ("venv", "dangling", "runner missing",
                      "no module named")),
     ("disk_full", ("enospc", "no space left")),
-    ("input_missing", ("does not exist", "no longer exists")),
     ("export_failed", ("ffmpeg", "pipersr")),
     ("bad_params", ("required", "invalid", "unknown mode",
                     "unsupported mode", "must be", "out of range")),
@@ -10774,6 +11828,21 @@ def ltx_generation_serves_ingredients(version_id: str | None = None) -> bool:
     return (version_id or ACTIVE_MODEL_VERSION) != "ltx25"
 
 
+def ltx_control_full_repaint(version_id: str | None = None) -> bool:
+    """Does Motion Control do BOTH of its jobs on this generation?
+
+    Its own predicate rather than a second caller of the Ingredients one,
+    because the two features fail differently and will be fixed on different
+    days. Ingredients is inert on 2.5 and is refused; Motion Control still
+    transfers the motion (the control clip rides a pinned reference latent,
+    adapter or no adapter) and loses only the prompt's grip on the new
+    subject — so it is offered, with `LTX_CONTROL_GENERATION_NOTE` beside it.
+    Same answer today, same reason (one 2.5 IC-LoRA exists and it is a pixel
+    upscaler), and one line to change per feature when that stops being true.
+    """
+    return (version_id or ACTIVE_MODEL_VERSION) != "ltx25"
+
+
 def _analytics_render_tier(params: dict, engine: str) -> str:
     """The user-facing quality/tier selector for this job, per engine.
     LTX calls it `quality` (quick/balanced/standard/high); H3 calls it
@@ -10787,7 +11856,8 @@ def _analytics_render_tier(params: dict, engine: str) -> str:
 
 
 def _analytics_render_event(job: dict) -> None:
-    """Emit render_completed / render_failed for a finished queue job.
+    """Emit render_completed / render_failed / render_refused for a finished
+    queue job.
 
     Wired at the single point in worker_loop's `finally` where every job
     from every engine lands, so LTX, H3, image and training jobs are all
@@ -10854,20 +11924,37 @@ def _analytics_render_event(job: dict) -> None:
             # persisted-flag shape as analytics_install_reported.
             props["first_render"] = True
             _settings_set_internal(analytics_first_render_reported=True)
+        event = "render_completed" if status == "done" else "render_failed"
         if status == "failed":
-            # The closed class is the leaderboard dimension; the scrubbed
-            # free-text signature ships ONE more transition release (spec
-            # 2.4) and then goes. `other` carries a 12-hex fingerprint of
-            # the scrubbed line so unknown-unknowns can be counted without
-            # transmitting their text.
-            scrubbed = _analytics_scrub_text(
-                job.get("error"), _analytics_job_secrets(job))
-            props["error_class"] = _analytics_error_class(job.get("error"))
-            props["error_signature"] = scrubbed
-            if props["error_class"] == "other":
-                props["error_fingerprint"] = _analytics_error_fingerprint(scrubbed)
-        _analytics_capture(
-            "render_completed" if status == "done" else "render_failed", props)
+            # REFUSAL OR FAULT — the fork that keeps the failure rate honest.
+            # A refusal is a render the panel declined on purpose, so it is
+            # NOT a render_failed and must never be counted as one. The
+            # structural stamp (worker_loop, from RenderRefused.reason) is
+            # the real signal; the text classifier is the fallback for a
+            # refusal that lost its exception type on the way here.
+            reason = (str(job.get("refused_reason") or "").strip()
+                      or _analytics_refusal_reason(job.get("error")))
+            if reason in _ANALYTICS_REFUSAL_SLUGS:
+                # One closed-vocabulary field instead of error_class /
+                # error_signature / error_fingerprint: there is no fault to
+                # classify, no unknown-unknown to fingerprint, and the text
+                # is our own copy — the only open question is WHICH guard,
+                # which the slug answers as a one-click breakdown.
+                props["refusal"] = reason
+                event = "render_refused"
+            else:
+                # The closed class is the leaderboard dimension; the scrubbed
+                # free-text signature ships ONE more transition release (spec
+                # 2.4) and then goes. `other` carries a 12-hex fingerprint of
+                # the scrubbed line so unknown-unknowns can be counted without
+                # transmitting their text.
+                scrubbed = _analytics_scrub_text(
+                    job.get("error"), _analytics_job_secrets(job))
+                props["error_class"] = _analytics_error_class(job.get("error"))
+                props["error_signature"] = scrubbed
+                if props["error_class"] == "other":
+                    props["error_fingerprint"] = _analytics_error_fingerprint(scrubbed)
+        _analytics_capture(event, props)
     except Exception:
         pass
 
@@ -10946,8 +12033,10 @@ def _usage_local_report() -> dict:
     chips: dict[str, int] = {}
     rams: dict[str, int] = {}
     flips: dict[tuple, int] = {}
+    refusals: dict[str, int] = {}
     renders_7d = ok_14d = fail_14d = 0
     h3_14d = tot_14d = 0
+    refused_7d = 0
     active_7d = False
 
     for rec in recs:
@@ -10985,6 +12074,17 @@ def _usage_local_report() -> dict:
             if ev == "render_failed" and ts >= d7:
                 sig = str(props.get("error_signature") or "unknown error")
                 errors[sig] = errors.get(sig, 0) + 1
+        elif ev == "render_refused":
+            # DELIBERATELY OUTSIDE every render number above. A refusal did
+            # not render, did not fail and cost no GPU time, so it belongs
+            # in neither the numerator nor the denominator of the error
+            # rate — counting it in either is the bug this branch exists to
+            # prevent. It gets its own tile because "how often do we send
+            # someone into a wall" is a real question, just a different one.
+            if ts >= d7:
+                refused_7d += 1
+                slug = str(props.get("refusal") or "unknown")
+                refusals[slug] = refusals.get(slug, 0) + 1
         elif ev == "pack_state_change" and ts >= d7:
             k = (str(props.get("pack") or "?"),
                  bool(props.get("from")), bool(props.get("to")))
@@ -11008,12 +12108,16 @@ def _usage_local_report() -> dict:
             "h3_share_pct": round(100.0 * h3_14d / tot_14d, 1) if tot_14d else None,
             "error_rate_pct": (round(100.0 * fail_14d / (ok_14d + fail_14d), 1)
                                if (ok_14d + fail_14d) else None),
+            "refusals_7d": refused_7d,
         },
         "boots_by_day": [{"date": d, "count": boots_by_day[d]}
                          for d in sorted(boots_by_day)],
         "engines": _usage_rank(engines, "engine", 8),
         "top_errors": [{"signature": k, "count": v} for k, v in
                        sorted(errors.items(), key=lambda kv: (-kv[1], kv[0]))[:5]],
+        "top_refusals": [{"refusal": k, "count": v} for k, v in
+                         sorted(refusals.items(),
+                                key=lambda kv: (-kv[1], kv[0]))[:5]],
         "versions": _usage_rank(versions, "version"),
         "chips": _usage_rank(chips, "chip"),
         "ram": _usage_rank(rams, "ram_gb"),
@@ -11024,7 +12128,7 @@ def _usage_local_report() -> dict:
 
 # HogQL fragments for the fleet view. Kept as a table (not inline strings)
 # so the whole surface the personal API key touches is auditable in one
-# place: eight read-only aggregate SELECTs over `events`, nothing else.
+# place: eleven read-only aggregate SELECTs over `events`, nothing else.
 # `properties['x']` bracket form throughout — `properties.from` would
 # collide with the SQL keyword in the pack_state_change query.
 _USAGE_FLEET_QUERIES = {
@@ -11048,6 +12152,16 @@ _USAGE_FLEET_QUERIES = {
         "SELECT properties['error_signature'] AS sig, count() AS c FROM events "
         "WHERE event = 'render_failed' AND timestamp > now() - INTERVAL 7 DAY "
         "GROUP BY sig ORDER BY c DESC LIMIT 5",
+    # Refusals are a SEPARATE event, which is why none of the queries above
+    # needed an `error_class != 'refused'` clause bolted on. That was the
+    # deciding argument for a new event name over a new class: an exclusion
+    # has to be remembered by every query anyone writes later, here and in
+    # PostHog; a separate event is right by default and cannot be forgotten.
+    "refusals":
+        "SELECT properties['refusal'] AS r, count() AS c, "
+        "count(DISTINCT distinct_id) AS people FROM events "
+        "WHERE event = 'render_refused' AND timestamp > now() - INTERVAL 7 DAY "
+        "GROUP BY r ORDER BY c DESC LIMIT 8",
     "versions":
         "SELECT properties['version'] AS v, count(DISTINCT distinct_id) AS c "
         "FROM events WHERE event = 'app_boot' "
@@ -11120,6 +12234,13 @@ def _usage_fleet_report() -> dict | None:
 
     outcomes = {str(r[0]): int(r[1]) for r in (res.get("outcomes") or [])
                 if isinstance(r, (list, tuple)) and len(r) >= 2}
+    # `people` rides along because a refusal's whole question is "how many
+    # DIFFERENT people did we send into this wall" — 65 events from 16
+    # people is a product bug; 65 from one person is a bookmark.
+    refusals = [{"refusal": str(r[0] or "unknown"), "count": int(r[1]),
+                 "people": int(r[2]) if len(r) >= 3 else 0}
+                for r in (res.get("refusals") or [])
+                if isinstance(r, (list, tuple)) and len(r) >= 2]
     ok_n = outcomes.get("render_completed", 0)
     fail_n = outcomes.get("render_failed", 0)
     engines = [{"engine": str(r[0] or "unknown"), "count": int(r[1])}
@@ -11155,6 +12276,9 @@ def _usage_fleet_report() -> dict | None:
             "h3_share_pct": round(100.0 * h3 / tot, 1) if tot else None,
             "error_rate_pct": (round(100.0 * fail_n / (ok_n + fail_n), 1)
                                if (ok_n + fail_n) else None),
+            # Not in renders_7d and not in error_rate_pct — see the local
+            # aggregator's render_refused branch for why.
+            "refusals_7d": sum(r["count"] for r in refusals),
         },
         "boots_by_day": [{"date": str(r[0]), "count": int(r[1])}
                          for r in (res.get("boots_by_day") or [])
@@ -11163,6 +12287,7 @@ def _usage_fleet_report() -> dict | None:
         "top_errors": [{"signature": str(r[0] or "unknown error"), "count": int(r[1])}
                        for r in (res.get("top_errors") or [])
                        if isinstance(r, (list, tuple)) and len(r) >= 2],
+        "top_refusals": refusals,
         "versions": [{"version": str(r[0] or "unknown"), "count": int(r[1])}
                      for r in (res.get("versions") or [])
                      if isinstance(r, (list, tuple)) and len(r) >= 2],
@@ -12115,6 +13240,30 @@ class JobStopped(Exception):
     apart from "this crashed" without parsing a message, and a stopped take
     must not land in the UI wearing a failure's red card. Nothing was saved —
     the clip was never finished — but nothing went wrong."""
+
+
+class RenderRefused(RuntimeError):
+    """The panel declined this render on purpose. Not a fault.
+
+    Same argument as JobStopped, one step further out: "we said no" and
+    "it broke" are different events and must not be counted as one number.
+    A refusal means the request was understood and this install cannot
+    serve the capability — wrong hardware tier, wrong engine, wrong model
+    generation — so nothing was attempted and no GPU time was spent.
+
+    Still a RuntimeError so every existing `except Exception` in the render
+    path keeps behaving exactly as before (the job lands as failed, the
+    panel shows the message, the queue moves on). The ONLY thing the type
+    adds is `reason`, a slug from _ANALYTICS_REFUSAL_REASONS, which
+    worker_loop stamps onto the job so analytics can route the event
+    structurally instead of by re-reading our own prose.
+
+    `raise RenderRefused("hardware_tier", "High quality ... doesn't fit.")`
+    """
+
+    def __init__(self, reason: str, message: str):
+        super().__init__(message)
+        self.reason = str(reason or "")
 
 
 class WarmHelper:
@@ -16847,10 +17996,14 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         if train_type not in TRAIN_TYPES:
             train_type = "character"
         is_style = (train_type == "style")
-        preset = (f("preset", "quick") or "quick").lower()
+        # The default a caller gets when it names no preset must be the same
+        # one the pill pre-selects, or the two drift and a hand-written POST
+        # silently trains the tier that cannot carry a face (#62).
+        default_preset = TRAIN_DEFAULT_PRESET.get(train_type, "high")
+        preset = (f("preset", default_preset) or default_preset).lower()
         preset_table = TRAIN_STYLE_PRESETS if is_style else TRAIN_PRESETS
         if preset not in preset_table:
-            preset = "quick"
+            preset = default_preset
         trigger = (f("trigger", "") or "").strip() or _suggest_trigger_token()
         try:
             image_count = max(0, int(f("image_count", "0") or "0"))
@@ -17260,9 +18413,10 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                  f"serves {', '.join(H3_MODES)}; falling back to LTX.")
             _engine = "ltx"
         elif not h3_capable():
-            push(f"engine=h3 requested but this Mac reports "
-                 f"{SYSTEM_RAM_GB:.0f} GB unified memory (needs "
-                 f"{H3_MIN_RAM_GB:.0f}+) — falling back to LTX.")
+            # Same verdict the refusal raises: the floor depends on the lane,
+            # and on a 46-60 GB Mac the answer is a build step, not a number.
+            push("engine=h3 requested — falling back to LTX. "
+                 + h3_ram_verdict()["message"])
             _engine = "ltx"
         elif h3_available() and not h3_cell_gate(H3_TIERS[_h3_tier])[0]:
             # The cell can't run here — a 10 s / 15 s length on a pack whose
@@ -17453,7 +18607,9 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             "frames": max(1, int(f("frames", _frames_default) or _frames_default)),
             "steps": max(1, int(f("steps", "8") or 8)),
             "seed": f("seed", "-1") or "-1",
-            "image": f("image", str(REFERENCE)),
+            # Empty unless LTX_DEFAULT_IMAGE names a file that exists — see
+            # default_reference_image() for why this used to be a phantom.
+            "image": f("image", default_reference_image()),
             "audio": f("audio", str(AUDIO_DEFAULT)),
             # extend mode params
             "video_path": f("video_path", ""),
@@ -17649,8 +18805,8 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         # on the cell's own pipeline instead of relaxing it everywhere.
         _req_w, _req_h = job["params"]["width"], job["params"]["height"]
         _req_f = job["params"]["frames"]
-        job["params"]["width"] = max(64, (_req_w // 64) * 64)
-        job["params"]["height"] = max(64, (_req_h // 64) * 64)
+        job["params"]["width"], job["params"]["height"] = ltx_floor_canvas(
+            _req_w, _req_h)
         if _req_f > 1:
             job["params"]["frames"] = ((_req_f - 1) // 8) * 8 + 1
         if (job["params"]["width"], job["params"]["height"]) != (_req_w, _req_h):
@@ -18844,11 +20000,16 @@ def run_train_job_inner(job: dict) -> None:
     # "done" is the one word that would hide it. The file is kept — it may
     # still be worth something at a higher strength — but the job says what it
     # is, in the place the user is already looking when it finishes.
+    #
+    # NAMING THE FIX IS THE POINT (#62). The number existed for four days and
+    # a first-time user still had to read a 21-comment GitHub thread to learn
+    # what "1.98e-04" meant for him. A verdict the user cannot act on is a
+    # measurement, not an answer, so the sentence says what to do next — and
+    # says something different on a sub-64 GB Mac, where "train again on High"
+    # is advice the hardware cannot honour.
     if train_verdict not in ("ok", "unknown"):
-        job["warning"] = (
-            f"The adapter came out weak ({train_verdict}): its learned deltas "
-            f"may be too small to visibly change anything. Train longer, raise "
-            f"the rank, or check the captions.")
+        job["warning"] = _train_weak_advice(train_verdict, preset, is_style)
+        push("[train] " + job["warning"])
         push("[train] finished with a WARNING — see the adapter strength line "
              "above. The file was kept.")
     job["output_path"] = str(final_lora_path)
@@ -19140,9 +20301,12 @@ def run_h3_job_inner(job: dict) -> None:
 
     # ---- gates ----------------------------------------------------------
     if not h3_capable():
-        raise RuntimeError(
-            f"Hailuo H3 needs about 64 GB of unified memory; this Mac reports "
-            f"{SYSTEM_RAM_GB:.0f} GB. Render on the LTX engine instead.")
+        # One sentence per BAND, from h3_ram_verdict — a 48 GB Mac is told it
+        # can run H3 and which step gets it there, not that it needs 64 GB.
+        raise RenderRefused("h3_ram", h3_ram_verdict()["message"]
+                            or f"Hailuo H3 can't run here "
+                               f"({SYSTEM_RAM_GB:.0f} GB unified memory). "
+                               f"Render on the LTX engine instead.")
     if paths["missing"]:
         raise RuntimeError(
             ("The Hailuo H3 weights are on disk but the engine needs repair — "
@@ -19157,7 +20321,8 @@ def run_h3_job_inner(job: dict) -> None:
                "('Install Hailuo H3'), or point LTX_H3_ROOT / LTX_H3_MODELS at "
                "an existing checkout."))
     if mode not in H3_MODES:
-        raise RuntimeError(
+        raise RenderRefused(
+            "h3_mode",
             f"Hailuo H3 doesn't serve mode {mode!r} — only "
             f"{', '.join(H3_MODES)}. Switch the engine back to LTX.")
 
@@ -19183,10 +20348,11 @@ def run_h3_job_inner(job: dict) -> None:
     if chain_windows > 1:
         if not h3_supports_chain():
             raise RuntimeError(
-                f"{tier['label']} renders as {chain_windows} chained windows, "
-                f"but this H3 checkout has no `--chain-windows` "
-                f"({paths['runner']}). Update the H3 pack, or pick 3s / 5s — "
-                f"the Quality you chose is available at both.")
+                f"{tier['label']} renders as {chain_windows} chained windows: "
+                + _h3_runner_behind(
+                    "--chain-windows", paths["runner"],
+                    "Or pick 3s / 5s — the Quality you chose is available at "
+                    "both."))
         _max_frames = window_frames + (chain_windows - 1) * (window_frames - 1)
         if not 1 <= frames <= _max_frames:
             # Belt and braces: the runner rejects an out-of-range trim with a
@@ -19289,12 +20455,12 @@ def run_h3_job_inner(job: dict) -> None:
     if _picked:
         if not h3_supports_lora():
             raise RuntimeError(
-                "This Hailuo H3 checkout's runner has no `--lora` support "
-                f"({paths['runner']}), so it can't take a LoRA. Re-run 'Install "
-                "Hailuo H3' from the Phosphene sidebar to update the clone — it "
-                "keeps every weight already on disk.")
+                "This render picks a LoRA, and "
+                + _h3_runner_behind("--lora", paths["runner"],
+                                    "Or un-pick the LoRA and render again."))
         if len(_picked) > H3_LORA_MAX_STACK:
-            raise RuntimeError(
+            raise RenderRefused(
+                "h3_lora_slots",
                 f"H3's runner has {H3_LORA_MAX_STACK} adapter slot — `--lora` "
                 f"takes a single path — and {len(_picked)} LoRAs are picked "
                 f"({', '.join(pp.name for pp, _ in _picked)}). Stacking is an "
@@ -19332,7 +20498,8 @@ def run_h3_job_inner(job: dict) -> None:
                  f"Rendering at this shape's own {steps} sigma points "
                  f"({steps - 1} forwards).")
         else:
-            raise RuntimeError(
+            raise RenderRefused(
+                "h3_lora_slots",
                 f"Turbo and the LoRA {user_lora.name} both want H3's single "
                 f"adapter slot — its runner's `--lora` takes one path, so they "
                 f"cannot both run. Turn Turbo off, or switch the LoRA control "
@@ -19342,10 +20509,9 @@ def run_h3_job_inner(job: dict) -> None:
     if turbo:
         if not h3_supports_lora():
             raise RuntimeError(
-                "Turbo needs `--lora` support, which this Hailuo H3 checkout "
-                f"doesn't have ({paths['runner']}). Re-run 'Install Hailuo H3' "
-                "from the Phosphene sidebar to update the clone — it keeps "
-                "every weight already on disk.")
+                "Turbo needs `--lora` support: "
+                + _h3_runner_behind("--lora", paths["runner"],
+                                    "Or turn Turbo off."))
         turbo_paths = h3_turbo_paths()
         if not turbo_paths["files_ok"]:
             raise RuntimeError(
@@ -19369,8 +20535,9 @@ def run_h3_job_inner(job: dict) -> None:
                 "switch to Text mode.")
         if not h3_supports_first_frame():
             raise RuntimeError(
-                "This Hailuo H3 checkout has no `--first-frame` support "
-                f"({paths['runner']}). Update the H3 pack, or use Text mode.")
+                "Image mode conditions on a first frame: "
+                + _h3_runner_behind("--first-frame", paths["runner"],
+                                    "Or use Text mode."))
         # Pre-fit to the canvas so upstream's first-keyframe STRETCH never
         # runs (#53). See _h3_fit_first_frame for the mechanism; it returns
         # the original path unchanged when the image is already the canvas
@@ -19918,10 +21085,33 @@ def run_job_inner(job: dict) -> None:
 
     stamp = time.strftime("%Y%m%d_%H%M%S")
 
+    # THE ONE MODE THAT NEVER CHECKED ITS OWN INPUT. Every other mode that
+    # conditions on a file validates it right here — extend, control, restore,
+    # ingredients, keyframe, a2v, and H3's own i2v all do — and the two plain
+    # image-conditioned LTX modes did not. So a path that had moved, been
+    # emptied out of the Trash by the gallery's delete, or was replayed by Load
+    # Params from a sidecar whose source is gone, travelled all the way into the
+    # helper and came back as a bare `image not found: <path>` after ~30 s of
+    # Gemma load and denoise. The refusal is the same shape as its neighbours:
+    # instant, free, and it names what to do.
+    if mode in ("i2v", "i2v_clean_audio"):
+        _img = (p.get("image") or "").strip()
+        if not _img:
+            raise RuntimeError(
+                "Image mode needs a reference image — drop one into the Image "
+                "slot, or switch to Text mode and render from the prompt alone.")
+        if not Path(_img).exists():
+            raise RuntimeError(
+                f"The reference image is no longer on disk: {_img}. It was "
+                "moved, renamed or deleted after it was picked (a Load Params "
+                "replay of an older render is the usual way this happens). "
+                "Pick it again, or choose another image.")
+
     if mode == "extend":
         # Extend: input video → longer video
         if not SYSTEM_CAPS["allows_extend"]:
-            raise RuntimeError(
+            raise RenderRefused(
+                "hardware_tier",
                 f"Extend isn't supported on the {SYSTEM_CAPS['label']} hardware "
                 f"tier — the dev transformer needs more headroom than this Mac "
                 f"has. Bump to 64+ GB or render the longer clip in one shot."
@@ -20108,9 +21298,16 @@ def run_job_inner(job: dict) -> None:
         req_h = int(p.get("height") or 0)
         req_frames = int(p.get("frames") or 0) or 49
         sw, sh = _probe_video_dims(src)
-        # LTX requires width/height multiples of 32 and frames % 8 == 1.
-        ctl_w = max(32, (int(sw) // 32) * 32) if sw else max(32, req_w)
-        ctl_h = max(32, (int(sh) // 32) * 32) if sh else max(32, req_h)
+        # The /64 GRID, not /32 — the same rule make_job applies to every other
+        # LTX lane, which these source-derived dims bypassed because they are
+        # computed here, after make_job has run. Control is two-stage, stage 1
+        # runs at half resolution, and the pipeline snaps to multiples of 64 on
+        # its own: a 768×416 control clip rendered 768×384 while the log line
+        # and the sidecar both said 416. That is the CUSTOMIZE audit's "Width ×
+        # Height LIES" row, and here it also SQUASHES the picture — the
+        # reference is resized onto the canvas we name, so an 8% vertical
+        # crush was landing on every off-grid control clip. Frames % 8 == 1.
+        ctl_w, ctl_h = ltx_floor_canvas(sw or req_w, sh or req_h)
         ctl_frames = req_frames
         if ctl_frames % 8 != 1:
             ctl_frames = max(9, ctl_frames - (ctl_frames % 8) + 1)
@@ -20230,9 +21427,9 @@ def run_job_inner(job: dict) -> None:
         req_h = int(p.get("height") or 0)
         req_frames = int(p.get("frames") or 0) or 49
         sw, sh = _probe_video_dims(src)
-        # LTX requires width/height multiples of 32 and frames % 8 == 1.
-        col_w = max(32, (int(sw) // 32) * 32) if sw else max(32, req_w)
-        col_h = max(32, (int(sh) // 32) * 32) if sh else max(32, req_h)
+        # Same /64 grid as Control above — Colorize is the other two-stage
+        # source-derived lane and carried the identical /32 defect.
+        col_w, col_h = ltx_floor_canvas(sw or req_w, sh or req_h)
         col_frames = req_frames
         if col_frames % 8 != 1:
             col_frames = max(9, col_frames - (col_frames % 8) + 1)
@@ -20319,7 +21516,8 @@ def run_job_inner(job: dict) -> None:
         # unrelated subject, produced at two-stage cost. Refuse at the door
         # with the reason instead of burning ~11 GPU-minutes on noise.
         if not ltx_generation_serves_ingredients():
-            raise RuntimeError(
+            raise RenderRefused(
+                "ingredients_generation",
                 "Ingredients needs the LTX-2.3 generation. Its IC-LoRA is "
                 "2.3-trained and Lightricks has not published a 2.5 one, so "
                 "on "
@@ -20551,7 +21749,8 @@ def run_job_inner(job: dict) -> None:
     # tier (which doesn't really apply — there's no "Q4 keyframe" path).
     if mode == "keyframe":
         if not SYSTEM_CAPS["allows_keyframe"]:
-            raise RuntimeError(
+            raise RenderRefused(
+                "hardware_tier",
                 f"FFLF (keyframe interpolation) isn't supported on the "
                 f"{SYSTEM_CAPS['label']} hardware tier — Q8 + the dev "
                 f"transformer's two-stage memory peak doesn't fit. "
@@ -21096,7 +22295,8 @@ def run_job_inner(job: dict) -> None:
 
     if ltx_quality_uses_hq(quality):
         if not SYSTEM_CAPS["allows_q8"]:
-            raise RuntimeError(
+            raise RenderRefused(
+                "hardware_tier",
                 f"High quality (Q8 two-stage) isn't supported on the "
                 f"{SYSTEM_CAPS['label']} hardware tier — Q8 dev transformer "
                 f"(~19 GB) plus the upscaler stage doesn't fit. "
@@ -21542,6 +22742,16 @@ def worker_loop() -> None:
             else:
                 job["status"] = "failed"
                 job["error"] = str(exc)
+                # A REFUSAL still lands as `failed` for the queue and the UI
+                # — nothing was produced, so the history card is honest as
+                # it is, and inventing a fourth job status would ripple
+                # through the queue, the persisted state and every JS
+                # branch that reads it. What the stamp buys is the one
+                # thing that was wrong: analytics can now tell "we said no"
+                # apart from "the engine broke" without parsing our own
+                # copy. See _analytics_render_event.
+                if isinstance(exc, RenderRefused) and exc.reason:
+                    job["refused_reason"] = exc.reason
                 push(f"ERROR: {exc}")
         finally:
             job["finished_at"] = iso_now()
@@ -22522,6 +23732,7 @@ class Handler(BaseHTTPRequestHandler):
             payload["train_profile"] = TRAIN_PROFILE
             payload["train_presets"] = TRAIN_PRESETS
             payload["train_style_presets"] = TRAIN_STYLE_PRESETS
+            payload["train_default_preset"] = TRAIN_DEFAULT_PRESET
             payload["generation_profile"] = GENERATION_PROFILE
             # Active model-download status — UI shows a progress strip when
             # this is set. last_line is the most recent hf output line so the
@@ -25623,6 +26834,62 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "status": "downloading"}, 202)
             return
 
+        # H3 LoRA import. This is deliberately a separate endpoint from
+        # /upload: reference media can be any image/audio, whereas an H3
+        # adapter must pass its model-layout gate BEFORE it lands in the picker.
+        if path == "/h3/loras/import" and ctype.startswith("multipart/form-data"):
+            try:
+                clen = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                clen = 0
+            if clen <= 0:
+                self._json({"ok": False, "error": "Content-Length required"}, 411)
+                return
+            if clen > H3_LORA_UPLOAD_MAX_BYTES:
+                self._json({"ok": False,
+                            "error": f"upload too large (max "
+                                     f"{H3_LORA_UPLOAD_MAX_BYTES // (1024 * 1024)} MB)"}, 413)
+                return
+            # The response is composed FIRST and written LAST, because the
+            # request body has to leave the socket before the reply goes onto
+            # it. Answering a refusal early and returning would strand the
+            # remaining megabytes unread — harmless under the HTTP/1.0 close
+            # this handler happens to run today, the head of the next response
+            # the day anyone turns keep-alive on.
+            drain = None
+            status, payload = 500, {"ok": False, "error": "import failed"}
+            try:
+                # STREAMED, not buffered: `_parse_multipart_form` would put the
+                # whole adapter in memory several times over (see
+                # H3_LORA_UPLOAD_MAX_BYTES). This walks to the file part and
+                # hands back a drain that writes straight into the staging
+                # file, so a 2 GB import costs one 1 MiB chunk of RSS.
+                filename, drain, _ = _stream_multipart_file_part(
+                    self.rfile, ctype, clen, "file",
+                    chunk=H3_LORA_STREAM_CHUNK)
+                payload = {"ok": True, **import_h3_lora_staged(
+                    filename,
+                    lambda fh: drain(fh, H3_LORA_UPLOAD_MAX_BYTES),
+                    size_hint=clen)}
+                status = 200
+            except MultipartTooLarge as exc:
+                status, payload = 413, {"ok": False, "error": str(exc)}
+            except (ValueError, FileExistsError, RuntimeError) as exc:
+                status, payload = 400, {"ok": False, "error": str(exc)}
+            except Exception as exc:
+                status = 500
+                payload = {"ok": False, "error": f"import failed: {exc}"}
+            try:
+                if drain is None:
+                    # The framing itself was unreadable, so there is no safe
+                    # resynchronisation point. Close rather than guess.
+                    raise RuntimeError("no drain")
+                drain.discard()
+            except Exception:
+                self.close_connection = True
+            self._json(payload, status)
+            return
+
         # Multipart upload
         if path == "/upload" and ctype.startswith("multipart/form-data"):
             # Hard cap on body size so a misbehaving / malicious caller can't
@@ -25728,7 +26995,16 @@ class Handler(BaseHTTPRequestHandler):
             if clen <= 0:
                 self._json({"error": "Content-Length required"}, 411); return
             if clen > MAX_UPLOAD_BYTES:
-                self._json({"error": f"upload too large (max {MAX_UPLOAD_BYTES} bytes per file)"}, 413)
+                # The cap is on the REQUEST, and this route takes ONE image per
+                # request. Saying "per file" sent a caller hunting for an
+                # oversized image that did not exist — their largest was 2.4 MB
+                # and the 73 MB batch was the thing being refused.
+                self._json({
+                    "error": f"upload too large: this request is {clen} bytes and the "
+                             f"limit is {MAX_UPLOAD_BYTES} per request. This route takes "
+                             f"ONE image per request (field 'file') — send them one at a "
+                             f"time, passing the returned job_id on each subsequent call."
+                }, 413)
                 return
             try:
                 form = _parse_multipart_form(self.rfile, ctype, clen)
@@ -29390,6 +30666,10 @@ def page() -> str:
         "train_presets": TRAIN_PRESETS,
         "train_style_presets": TRAIN_STYLE_PRESETS,
         "train_profile": TRAIN_PROFILE,
+        # Which preset gets the "Recommended" badge and the pre-selection,
+        # per train type. Served rather than hardcoded in the JS so the pill
+        # and the server-side default can never drift apart again (#62).
+        "train_default_preset": TRAIN_DEFAULT_PRESET,
         "train_min_images": TRAIN_MIN_IMAGES,
         "train_max_images": TRAIN_MAX_IMAGES,
         "generation_profile": GENERATION_PROFILE,
@@ -32441,20 +33721,27 @@ HTML = r"""<!doctype html>
            into the wrong base on Q4)
          * Q8-Draft / Q8-Pro quality chips (HQ pipeline)
          * Skip-step toggle (res_2s sampler control, Q8-only)
-         * "High" quality chip in the default strip (HQ-only)
 
        Low-RAM users get a clean Text/Image surface: what they can
-       actually run, no disabled-but-visible controls. Q8 users see
-       everything (no display: none rules apply when cap_tier="q8").
-       Q4 path remains available to Q8 users via the Customize Compute
-       toggle (Pass 6) for quick non-character drafts. */
+       actually run. Q8 users see everything (no display: none rules
+       apply when cap_tier="q8"). Q4 path remains available to Q8 users
+       via the Customize Compute toggle (Pass 6) for quick non-character
+       drafts.
+
+       THE HQ QUALITY CHIPS ARE THE EXCEPTION, on the owner's ruling
+       (2026-08-23). They used to be `display: none` here too, and the
+       result was a Compact user who could not find out that High exists,
+       why it is missing, or what would bring it back — the strip simply
+       had three columns and no story. `ltx_tiers_payload()` now stamps
+       every `hq` cell `available: false` with a written reason naming the
+       hardware tier and the 64 GB threshold, so the honest state is
+       DISABLED-WITH-REASON rather than absent: greyed, struck through,
+       reason in the title, and the same reason into #engineRowNote if
+       they click. Hiding a capability is only kind when there is nothing
+       to say; there is something to say here. */
     body[data-cap-tier="q4"] #modeGroup [data-mode="keyframe"],
-    body[data-cap-tier="q4"] #modeGroup [data-mode="extend"],
-    body[data-cap-tier="q4"] #qualityGroup [data-quality="high"] { display: none !important; }
-    /* Quality strip becomes a 3-col grid (Quick/Balanced/Standard)
-       since the 4th column ("High") is gone. */
-    body[data-cap-tier="q4"] #qualityGroup.quality-strip {
-      grid-template-columns: repeat(3, 1fr);
+    body[data-cap-tier="q4"] #modeGroup [data-mode="extend"] {
+      display: none !important;
     }
 
     /* ===== FORM ===== */
@@ -34276,6 +35563,10 @@ HTML = r"""<!doctype html>
       border-radius: 4px;
       vertical-align: baseline;
     }
+    /* `display: inline-flex` above outranks the UA's `[hidden] {display:none}`,
+       so the training pills' hidden badge slots rendered anyway and all three
+       presets read "Recommended" — the exact confusion #62 is about. */
+    .rec-badge[hidden] { display: none; }
     .train-estimate {
       display: flex;
       gap: 18px;
@@ -34491,6 +35782,52 @@ HTML = r"""<!doctype html>
       border-color: rgba(47, 129, 247, 0.4);
       text-decoration: none;
     }
+    /* A measured-weak adapter reads amber in the list it lives in, so the
+       verdict is visible without opening a log (#62). `unknown` stays
+       undecorated — silence is not weakness. */
+    .train-lora-chip.is-weak {
+      color: var(--warning);
+      background: rgba(210, 153, 34, 0.10);
+      border-color: rgba(210, 153, 34, 0.34);
+    }
+    .train-lora-chip.is-weak:hover {
+      background: rgba(210, 153, 34, 0.18);
+      border-color: rgba(210, 153, 34, 0.52);
+    }
+    .train-lora-verdict {
+      margin-left: 6px;
+      padding: 0 5px;
+      font-size: 9px; font-weight: 700; letter-spacing: 0.06em;
+      font-family: var(--ph-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+      color: var(--warning);
+      border: 1px solid rgba(210, 153, 34, 0.48);
+      border-radius: 3px;
+    }
+    /* The verdict banner in the trained-characters card. Amber, quiet, and
+       it only exists when the newest run measured weak or inert. */
+    .train-verdict-banner {
+      margin-top: 10px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid rgba(210, 153, 34, 0.36);
+      background: rgba(210, 153, 34, 0.08);
+      font-size: 12px;
+      line-height: 1.55;
+    }
+    .train-verdict-head { color: var(--warning); margin-bottom: 4px; }
+    .train-verdict-body { color: var(--muted); }
+    .train-verdict-how { margin-top: 6px; opacity: 0.85; }
+    .train-verdict-how code {
+      font-size: 11px;
+      /* `anywhere`, not `break-all`: the command breaks at its spaces before
+         it will ever split `safetensors` down the middle. */
+      overflow-wrap: anywhere;
+    }
+    /* The sentence under the training preset pills. Wider than a pill
+       subtitle, so it can carry the measured numbers and the sub-64 GB
+       truth the preset NAME cannot say. */
+    .train-preset-note { line-height: 1.55; }
+    .train-preset-note strong { color: var(--text); }
 
     .pill-btn:disabled, .pill-btn.disabled {
       opacity: 0.45; cursor: not-allowed; pointer-events: none;
@@ -34820,6 +36157,13 @@ HTML = r"""<!doctype html>
        to LTX brings its modes with it. Driven entirely by the ENGINES
        registry, so a third engine scopes itself with no new CSS. */
     .mode-bar .mode-chip.eng-foreign { display: none; }
+
+    /* The Remix sub-row has THREE tools, not five. It inherited `.mode-bar`'s
+       5-column grid, so each tool got 3/5 of a column's worth of room and the
+       right two fifths of the row sat empty — which is why "Motion Control"
+       wrapped onto two lines inside a 91px chip while 40% of the row was
+       blank. Scoped to the id: the main mode bar keeps its five columns. */
+    #remixSubGroup .mode-bar { grid-template-columns: repeat(3, 1fr); }
 
     /* Composer card — the hero of the form. Wraps the reference picker(s)
        (mode-conditional) + prompt textarea + an inline tools footer
@@ -36585,6 +37929,12 @@ HTML = r"""<!doctype html>
       color: var(--danger, #f85149);
       font-weight: 500;
     }
+    /* A job that finished but produced something the panel cannot stand
+       behind — a training run measured WEAK is the case this exists for. */
+    .row-list li .warn-inline {
+      color: var(--warning);
+      font-weight: 500;
+    }
     /* Status badge — solid pill, color-coded. */
     .row-list li .badge {
       font-size: 9px;
@@ -36905,6 +38255,22 @@ HTML = r"""<!doctype html>
       background: var(--accent-bright, #58a6ff);
     }
     .loras-summary .loras-browse-btn:active { transform: translateY(1px); }
+    /* The H3 row has TWO buttons and only one of them is the call to action.
+       "Browse CivitAI" is where a user with no LoRAs goes; "Import H3 LoRA" is
+       for the smaller group who already has a file. Painting both in --accent
+       gave the header two competing primaries and made the row read as a
+       choice between equals. Ghost keeps the import affordance discoverable
+       and clearly secondary — same size, same rhythm, borrowed weight. */
+    .loras-summary .loras-browse-btn.is-ghost {
+      background: var(--panel);
+      border-color: var(--border-strong);
+      color: var(--text);
+    }
+    .loras-summary .loras-browse-btn.is-ghost:hover {
+      background: rgba(47,129,247,0.14);
+      border-color: var(--accent);
+      color: var(--accent-bright);
+    }
     /* Body padding + internal layout. All children get consistent
        spacing without each one declaring its own margin. */
     .loras-body {
@@ -39093,13 +40459,22 @@ HTML = r"""<!doctype html>
        is shown, not hidden — dropping it is how the old strip left a user with
        no way to learn that a pack update brings 10 s back. Dead-but-legible,
        with the reason in the tooltip. */
+    /* Same treatment on the LTX strips, and for the same reason. It used to
+       be H3-only because LTX hid its unrenderable chips with `display: none`
+       instead; the owner's 2026-08-23 ruling ends that, so the style has to
+       exist on both engines or the un-hidden High chip would look clickable
+       and simply not respond. */
     #h3LengthGroup .q-chip.unavailable,
-    #h3QualityGroup .q-chip.unavailable {
+    #h3QualityGroup .q-chip.unavailable,
+    #ltxLengthGroup .q-chip.unavailable,
+    #qualityGroup .q-chip.unavailable {
       opacity: 0.42; cursor: not-allowed;
       text-decoration-line: line-through;
       text-decoration-color: rgba(255,255,255,0.25);
     }
-    #h3LengthGroup .q-chip.unavailable .ql-tier { font-style: italic; }
+    #h3LengthGroup .q-chip.unavailable .ql-tier,
+    #ltxLengthGroup .q-chip.unavailable .ql-tier,
+    #qualityGroup .q-chip.unavailable .ql-tier { font-style: italic; }
 
     /* Per-window prompts. Same .cz-control grammar as Speed / Steps / Export,
        so the fourth H3 control reads as one of the family rather than as a
@@ -39507,7 +40882,15 @@ HTML = r"""<!doctype html>
            (default Ingredients). The backend modes stay ingredients/control/
            restore — this is PURE UI grouping (see REMIX_MODES + setMode + the
            #remixSubGroup click wiring). -->
-      <button type="button" class="mode-chip pill-btn" data-mode="remix">Remix<span class="mc-sub sub">your media → new video</span></button>
+      <!-- The sub-line NAMES THE TOOLS, and that is the whole point of it.
+           "your media → new video" described the group correctly and told
+           nobody what was inside, so Motion Control — shipped, official
+           weights, in this menu — was asked for twice as a missing feature
+           (@sohaibpp on Pinokio: "Motion control"; a long-time user on X:
+           "would love to see IC-LoRA support … exposed in the UI"). This is
+           the only Remix copy visible without a click, so it carries the
+           searchable words. -->
+      <button type="button" class="mode-chip pill-btn" data-mode="remix">Remix<span class="mc-sub sub">motion control · refs · color</span></button>
       <!-- "Train" used to live here as a mode chip; promoted 2026-05-15 to
            a workflow tier (top tab strip). "Studio" (image generation) also
            lived here until 2026-05-17 — Mr Bizarro flagged that mixing image gen
@@ -39523,11 +40906,15 @@ HTML = r"""<!doctype html>
          stays lit. Inline styles use var(--x, fallback) so they're safe whether
          or not the theme defines those vars. -->
     <div id="remixSubGroup" style="display:none;margin:-2px 0 12px;padding:9px 11px;border:1px solid var(--line,#262a33);border-left:3px solid var(--accent,#8b7bff);border-radius:11px;background:var(--accent-wash,rgba(139,123,255,.06))">
-      <div style="font-size:11px;letter-spacing:.13em;text-transform:uppercase;color:var(--dim,#7a8194);margin-bottom:7px">Remix tool · bring your own media</div>
+      <div style="font-size:11px;letter-spacing:.13em;text-transform:uppercase;color:var(--dim,#7a8194);margin-bottom:7px">Remix tool · bring your own media · IC-LoRA</div>
       <div class="mode-bar pill-group">
-        <button type="button" class="mode-chip pill-btn" data-remix="ingredients">Ingredients<span class="mc-sub sub">2–8 refs → one clip</span></button>
-        <button type="button" class="mode-chip pill-btn" data-remix="control">Control<span class="mc-sub sub">drive from a video</span></button>
-        <button type="button" class="mode-chip pill-btn" data-remix="restore">Colorize<span class="mc-sub sub">B&amp;W clip → color</span></button>
+        <button type="button" class="mode-chip pill-btn" data-remix="ingredients" title="Ingredients IC-LoRA — 2–8 reference images (a face, a prop, a location) composed into one new clip.">Ingredients<span class="mc-sub sub">2–8 refs → one clip</span></button>
+        <!-- "Control" said nothing about what it controls. The name people
+             actually search for is Motion Control / Union Control, and the
+             title carries the adapter's real name so a user who read about
+             LTX IC-LoRAs elsewhere recognises it here. -->
+        <button type="button" class="mode-chip pill-btn" data-remix="control" title="Union Control IC-LoRA — the render copies the motion, camera move, composition and pose of a clip you supply, while the prompt repaints the subject and scene. Feed it an ordinary video, or a pose / depth / canny sequence you already have.">Motion Control<span class="mc-sub sub">its motion → your scene</span></button>
+        <button type="button" class="mode-chip pill-btn" data-remix="restore" title="Colorize IC-LoRA — adds natural color to a black-and-white or desaturated clip.">Colorize<span class="mc-sub sub">B&amp;W clip → color</span></button>
       </div>
     </div>
 
@@ -39888,10 +41275,21 @@ HTML = r"""<!doctype html>
                prompt swaps the subject/scene. Q4 distilled (no Q8 needed).
                Shown/hidden by updateDerived() when currentMode === 'control'. -->
           <div class="mode-only" id="controlSection">
-            <h2>Control video</h2>
+            <h2>Motion Control <span class="hint" style="font-weight:400">· Union Control IC-LoRA · its motion, your subject</span></h2>
             <select id="controlSrcSelect" onchange="document.getElementById('control_video_path').value=this.value"></select>
             <input name="control_video_path" id="control_video_path" placeholder="/path/to/control.mp4" style="margin-top:6px">
-            <div class="hint" style="margin-top:6px">Pick a clip whose <strong>motion, structure, and composition</strong> you want to drive the render. The prompt below describes the NEW subject/scene to paint onto that structure (e.g. "a red origami crane unfolding"). Raw video works — a depth/pose map is an optional precision upgrade, not required. Output matches the control clip's resolution + length. Runs on Q4 — no Q8 needed.</div>
+            <div class="hint" style="margin-top:6px">Pick the clip whose <strong>motion, camera move, composition and pose</strong> the render should copy. The prompt describes the <strong>new subject and scene</strong> painted onto that structure — drive a crane-up off a man's face in a suburban street and you get a crane-up off a monk's face on a salt flat. Output matches the control clip's resolution and length, on the Q4 distilled checkpoint — no Q8 needed.</div>
+            <!-- THE HONEST HALF, and the reason the X request was half right.
+                 Union Control follows whatever control signal it is given, so
+                 a pose or depth SEQUENCE works today. What Phosphene does not
+                 have is a preprocessor to derive one from an ordinary clip.
+                 Say that plainly rather than letting "pose · depth" in a
+                 label imply a turnkey path that does not exist here. -->
+            <div class="hint" style="margin-top:6px"><strong>What you can feed it.</strong> An ordinary video is enough — the Union adapter reads raw RGB, so nothing has to be preprocessed, and it ships with the base install (public weights, no Hugging Face token). A <strong>pose, depth, canny or segmentation sequence</strong> works too and follows more tightly, but you have to bring your own: <strong>Phosphene ships no preprocessor</strong> that derives one from a normal clip.</div>
+            <!-- Shown only on a generation where the adapter is not native.
+                 The sentence is LTX_CONTROL_GENERATION_NOTE, server-owned —
+                 painted by _paintControlGenNote() at boot. -->
+            <div class="hint" id="controlGenNote" style="margin-top:6px;display:none;padding:7px 9px;border-left:2px solid var(--warn,#e0a94a);background:rgba(224,169,74,.07);border-radius:6px"></div>
           </div>
         </div>
 
@@ -40416,6 +41814,11 @@ HTML = r"""<!doctype html>
               <button type="button" class="loras-icon-btn"
                       title="Rescan mlx_models/loras/ for new files"
                       onclick="event.stopPropagation(); event.preventDefault(); refreshLoras()"><svg class="ph" aria-hidden="true"><use href="#ph-arrow-clockwise-bold"/></svg></button>
+              <input type="file" id="h3LoraImportFile" accept=".safetensors,application/octet-stream" hidden
+                     onchange="importH3Lora(this.files[0]); this.value = ''">
+              <button type="button" class="loras-browse-btn is-ghost" id="h3LoraImportBtn" hidden
+                      title="Import a .safetensors H3 LoRA you already have"
+                      onclick="event.stopPropagation(); event.preventDefault(); document.getElementById('h3LoraImportFile').click()"><svg class="ph" aria-hidden="true" style="margin-right:6px;vertical-align:-2px"><use href="#ph-folder-simple"/></svg>Import H3 LoRA</button>
               <button type="button" class="loras-browse-btn"
                       onclick="event.stopPropagation(); event.preventDefault(); openCivitaiModal()"><svg class="ph" aria-hidden="true" style="margin-right:6px;vertical-align:-2px"><use href="#ph-magnifying-glass"/></svg>Browse CivitAI</button>
             </span>
@@ -41545,11 +42948,23 @@ HTML = r"""<!doctype html>
         <h2 style="margin-top:14px">Quality preset
           <span class="h2-hint">trade time for fidelity</span>
         </h2>
+        <!-- THE BADGE AND THE PRE-SELECTION MOVED OFF QUICK (#62).
+             Quick was `active` AND badged "Recommended" while training at
+             rank 8 — the one tier that has never carried an identity. A
+             first-time user read the label, spent the hours and measured
+             1.98e-04, under the 2.0e-04 floor. Both the badge and the
+             default now live on the preset that was actually graded, and
+             trainUpdatePresetButtons() places them from the server's
+             TRAIN_DEFAULT_PRESET so the pill cannot drift from make_job. -->
         <div class="pill-group cols-3" id="trainPresetGroup">
-          <button type="button" class="pill-btn active" data-train-preset="quick"><span>Quick <span class="rec-badge">Recommended</span></span><span class="sub" id="trainPresetQuickSub">~30 min · rank 8 · 512px</span></button>
-          <button type="button" class="pill-btn" data-train-preset="medium"><span>Medium</span><span class="sub" id="trainPresetMediumSub">~2 h · rank 16 · 576px</span></button>
-          <button type="button" class="pill-btn" data-train-preset="high"><span>High</span><span class="sub" id="trainPresetHighSub">~2 h 50 min · rank 32 · 5000 steps · 512px</span></button>
+          <button type="button" class="pill-btn" data-train-preset="quick"><span>Quick <span class="rec-badge" data-rec-slot hidden>Recommended</span></span><span class="sub" id="trainPresetQuickSub">~30 epochs · rank 8 · 512px · a look, not a face · identity ungraded</span></button>
+          <button type="button" class="pill-btn" data-train-preset="medium"><span>Medium <span class="rec-badge" data-rec-slot hidden>Recommended</span></span><span class="sub" id="trainPresetMediumSub">~60 epochs · rank 16 · 576px · more capacity · identity ungraded</span></button>
+          <button type="button" class="pill-btn active" data-train-preset="high"><span>High <span class="rec-badge" data-rec-slot>Recommended</span></span><span class="sub" id="trainPresetHighSub">~100 epochs · rank 32 · 512px · validated for identity</span></button>
         </div>
+        <!-- The one line that says what the pills cannot: what the numbers
+             mean, and (on a sub-64 GB Mac) that no choice here reaches the
+             graded recipe. Filled by trainUpdatePresetNote(). -->
+        <div class="hint train-preset-note" id="trainPresetNote" style="margin-top:8px"></div>
 
         <!-- Crop strategy — primary control (not buried in Advanced) because
              it has a big visible effect on what the model learns. Mr Bizarro 2026-05-17:
@@ -41738,6 +43153,13 @@ HTML = r"""<!doctype html>
              onclick="workflowSwitch('manual'); return false;">on the Video tab</a>
           — the links below take you to each character's picker chip.
         </div>
+        <!-- THE LOOP THE MEASUREMENT DID NOT CLOSE (#62). The panel has
+             measured every finished adapter since v4.6.0, but the verdict
+             lived in a log line and a sidecar field — a user with a weak
+             LoRA had to find a GitHub thread to learn what his own number
+             meant. This banner says it in the tab where he is standing,
+             and names the fix. Filled by trainRefreshLoraList(). -->
+        <div class="train-verdict-banner" id="trainVerdictBanner" hidden></div>
         <div class="train-lora-link-row" id="trainLoraList" style="margin-top:8px;display:flex;flex-wrap:wrap;gap:8px;">
           <div class="hint" style="padding:4px 0">No trained characters yet. Start your first run above.</div>
         </div>
@@ -44262,11 +45684,60 @@ function syncAvoidRowFromValue() {
   }
 }
 
+// Is Ingredients servable by the generation this install is running?
+// One reader for the one server-owned flag, so the four places that now care
+// cannot drift apart. (BOOT.ltx.ingredients_available comes from
+// ltx_generation_serves_ingredients() — the same predicate the worker's gate
+// uses, so the UI and the server can never disagree about this.)
+function ingredientsServed() {
+  return (BOOT.ltx || {}).ingredients_available !== false;
+}
+// Motion Control on a generation the Union adapter was not trained against:
+// the motion still transfers, the prompt's grip on the new subject does not.
+// Not a gate — an honest line in the place the decision is made. The sentence
+// is the server's (LTX_CONTROL_GENERATION_NOTE); this only places it.
+function _paintControlGenNote() {
+  const el = document.getElementById('controlGenNote');
+  if (!el) return;
+  const ltx = BOOT.ltx || {};
+  if (ltx.control_full_repaint === false && ltx.control_generation_note) {
+    el.textContent = ltx.control_generation_note;
+    el.style.display = '';
+  } else {
+    el.style.display = 'none';
+  }
+}
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', _paintControlGenNote);
+} else { _paintControlGenNote(); }
+// Which Remix tool the parent pill opens when there is no remembered one.
+// Ingredients is the default where it works; on a generation that cannot
+// serve it, Control is — offering a door that only leads to a refusal is
+// the bug this exists to close.
+function defaultRemixMode() {
+  return ingredientsServed() ? 'ingredients' : 'control';
+}
+
 function setMode(mode) {
   // "remix" is a UI GROUP, not a backend mode — clicking the parent Remix pill
   // resumes the last-used Remix tool (default Ingredients). Everything below
   // (and the backend) only ever sees a real mode from REMIX_MODES.
-  if (mode === 'remix') mode = window._lastRemixMode || 'ingredients';
+  if (mode === 'remix') mode = window._lastRemixMode || defaultRemixMode();
+  // GENERATION GUARD, and the actual hole 16 people fell through: the
+  // Ingredients SUB-chip was disabled and its click handler blocked, but the
+  // parent "Remix" pill in the main mode bar was not — it called
+  // setMode('remix'), which resolved to 'ingredients' by default (and
+  // _lastRemixMode is never persisted, so every fresh page load took that
+  // default). One click on a fully-enabled pill and the hidden #mode input
+  // said `ingredients`; the server then refused after the submit. Same shape
+  // as the Q4 snap below, and for the same reason: the chips are only the
+  // polite half — this is the half that holds when something calls setMode
+  // directly.
+  if (mode === 'ingredients' && !ingredientsServed()) {
+    console.warn('setMode(ingredients): not served by this generation — '
+                 + 'snapping to ' + defaultRemixMode());
+    mode = defaultRemixMode();
+  }
   // Capability guard — Q4 (sub-48GB) tier can't run FFLF or Extend
   // (Q8-only pipelines). CSS already hides the chips, but a stale
   // localStorage, charactersLoadParams(), or a JS caller could still try
@@ -46633,7 +48104,17 @@ const TRAIN = {
   jobId: null,
   // Mirror of the server-side image list. Each: {filename, path, src}.
   images: [],
-  preset: 'quick',
+  // Mirrors the server's TRAIN_DEFAULT_PRESET. Character defaults to HIGH:
+  // it is the only recipe ever graded on a face, and for two months the panel
+  // pre-selected + badged Quick instead, which is how a first-time user spent
+  // his GPU hours on a 1.98e-04 adapter (#62). Style defaults to Quick — a
+  // look is what rank 8/16 is genuinely good at.
+  defaultPresets: BOOT.train_default_preset || { character: 'high', style: 'quick' },
+  preset: (BOOT.train_default_preset && BOOT.train_default_preset.character) || 'high',
+  // True once the user has clicked a preset pill themselves. Until then the
+  // train-type toggle is free to snap the preset to that type's default; once
+  // it is true, the panel never overrides a deliberate choice.
+  presetTouched: false,
   // Train type — 'character' (face + optional voice) or 'style' (no voice,
   // aesthetic LoRA). Drives the preset table lookup + UI visibility (Voice
   // card hides for style; guidance + labels swap). Mirrors the server-side
@@ -46700,16 +48181,33 @@ function trainActivePresets() {
   return TRAIN.trainType === 'style' ? TRAIN.stylePresets : TRAIN.presets;
 }
 
+// The preset this panel recommends for the active train type. Served by the
+// backend (TRAIN_DEFAULT_PRESET) so the badge, the pre-selection and make_job's
+// fallback are one decision in one place.
+function trainRecommendedPreset() {
+  const map = TRAIN.defaultPresets || {};
+  const key = map[TRAIN.trainType];
+  const table = trainActivePresets();
+  if (key && table && table[key]) return key;
+  return (table && table.high) ? 'high' : 'quick';
+}
+
 function trainActivePreset() {
   const table = trainActivePresets();
-  return table[TRAIN.preset] || table.quick || {};
+  return table[TRAIN.preset] || table[trainRecommendedPreset()] || {};
 }
 
 function trainUpdatePresetButtons() {
   const table = trainActivePresets();
+  const recommended = trainRecommendedPreset();
   document.querySelectorAll('#trainPresetGroup .pill-btn').forEach((b) => {
     const key = b.dataset.trainPreset;
     b.classList.toggle('active', key === TRAIN.preset);
+    // The badge follows the recommendation instead of being nailed to one
+    // pill in the HTML. A badge on a preset that cannot do the job the tab
+    // is for is the interface lying, and that is the whole of #62.
+    const badge = b.querySelector('[data-rec-slot]');
+    if (badge) badge.hidden = (key !== recommended);
   });
   const subIds = {
     quick: 'trainPresetQuickSub',
@@ -46721,6 +48219,37 @@ function trainUpdatePresetButtons() {
     const p = table[key];
     if (el && p && p.subtitle) el.textContent = p.subtitle;
   });
+  trainUpdatePresetNote();
+}
+
+// The sentence under the pills. Says what the number means, and on a sub-64 GB
+// Mac says the thing no pill NAME can say: "High" there is rank 8 / 500 steps /
+// 448px on two projections, so the graded rank-32 recipe is unreachable from
+// this menu and "just use High" is advice this machine cannot honour (#62).
+function trainUpdatePresetNote() {
+  const el = document.getElementById('trainPresetNote');
+  if (!el) return;
+  const profile = TRAIN.trainProfile || {};
+  const compact = !!profile.compact;
+  if (TRAIN.trainType === 'style') {
+    el.textContent = compact
+      ? 'This Mac trains on the compact profile (rank 4–8, 384–448px, capped steps), so a style adapter here will be a light touch. No style preset has been graded.'
+      : 'A style adapter teaches a look, not a person, so Quick is a fair place to start; Medium and High buy capacity for a more complex look. None of the style presets has been graded.';
+    return;
+  }
+  if (compact) {
+    const ram = profile.ram_gb ? `${profile.ram_gb} GB` : 'under 64 GB';
+    el.innerHTML =
+      `<strong>This Mac has ${escapeHtml(String(ram))}, so training runs the compact profile — and "High" here is not the graded recipe.</strong> ` +
+      'It trains rank 8 / 500 steps / 448px on two of the four attention projections. The recipe that has carried a face is rank 32 / ~100 epochs / 512px on all four, ' +
+      'and no preset on this machine can reach it. Expect a weak adapter and treat the result as a look rather than an identity — that is the hardware, not your photos.';
+    return;
+  }
+  el.innerHTML =
+    '<strong>High is the only recipe ever graded on a face.</strong> ' +
+    'Measured with <code>lora_compat.py</code>, rank-32 adapters that carry an identity sit at 5.4e-04 to 1.6e-03 delta_rms; ' +
+    'Quick\'s rank 8 has measured 1.54e-04 and 1.98e-04 on real datasets, at or under the 2.0e-04 floor no working adapter has been below. ' +
+    'Pick Quick for a fast look or a style, not for a person.';
 }
 
 function trainDisableSelectAbove(selectId, maxValue) {
@@ -47549,10 +49078,18 @@ window.setTrainType = function(t) {
   // 2. State
   if (typeof TRAIN === 'object' && TRAIN) {
     TRAIN.trainType = t;
-    // Reset preset to "quick" if the new type's table doesn't carry the
-    // current preset name. (Both tables have "quick" so this is safe.)
+    // Snap to the new type's recommended preset — but only while the user
+    // has not picked one themselves. Character wants High (the graded
+    // identity recipe), style wants Quick (a look, cheaply); silently
+    // carrying a 3-hour High over to a style run, or a rank-8 Quick over to
+    // a face, is the same class of mistake #62 is about.
     const table = (t === 'style') ? TRAIN.stylePresets : TRAIN.presets;
-    if (table && !table[TRAIN.preset]) TRAIN.preset = 'quick';
+    const want = (TRAIN.defaultPresets || {})[t];
+    if (!TRAIN.presetTouched && want && table && table[want]) {
+      TRAIN.preset = want;
+    } else if (table && !table[TRAIN.preset]) {
+      TRAIN.preset = (want && table[want]) ? want : 'quick';
+    }
   }
   // 3. Swap guidance bodies (both shipped in HTML; one starts hidden)
   const gc = document.getElementById('trainGuidanceBodyCharacter');
@@ -47781,6 +49318,7 @@ function trainWirePresetButtons() {
   document.querySelectorAll('#trainPresetGroup .pill-btn').forEach(b => {
     b.addEventListener('click', () => {
       TRAIN.preset = b.dataset.trainPreset;
+      TRAIN.presetTouched = true;
       document.querySelectorAll('#trainPresetGroup .pill-btn').forEach(x =>
         x.classList.toggle('active', x === b));
       trainUpdateAdvancedFields();
@@ -48616,6 +50154,7 @@ async function trainRefreshLoraList() {
     const r = await fetch('/train/list');
     const j = await r.json();
     const items = (j.loras || []);
+    trainRenderVerdictBanner(items);
     if (!items.length) {
       list.innerHTML = '<div class="hint" style="padding:12px 0">No trained LoRAs yet. Start your first run above.</div>';
       return;
@@ -48631,13 +50170,54 @@ async function trainRefreshLoraList() {
         ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'})[c]);
       const safePath = (it.path || '').replace(/'/g, "\\'");
       const displayName = it.name || it.filename;
-      const title = `"${safeTrig}" — ${it.size_mb} MB · ${trainFmtAge(Date.now() - (Number(it.created_at) || 0) * 1000)}`;
-      return `<a href="#" class="train-lora-chip" title="${title}"
-        onclick="trainUseInVideo('${safePath}','${safeTrig}','t2v'); return false;">${displayName}</a>`;
+      // The verdict rides on the chip so a dead LoRA is visible in the list,
+      // not only in the log of the run that made it (#62). `unknown` — every
+      // LoRA older than the measurement — is deliberately undecorated:
+      // silence is not weakness.
+      const verdict = String(it.adapter_verdict || 'unknown').toLowerCase();
+      const flagged = (verdict === 'weak' || verdict === 'inert');
+      const advice = it.adapter_advice || '';
+      const title = flagged
+        ? `"${safeTrig}" — ${verdict.toUpperCase()}: ${advice}`
+        : `"${safeTrig}" — ${it.size_mb} MB · ${trainFmtAge(Date.now() - (Number(it.created_at) || 0) * 1000)}`;
+      const badge = flagged
+        ? `<span class="train-lora-verdict">${verdict === 'inert' ? 'DEAD' : 'WEAK'}</span>`
+        : '';
+      return `<a href="#" class="train-lora-chip${flagged ? ' is-weak' : ''}" title="${escapeHtml(title)}"
+        onclick="trainUseInVideo('${safePath}','${safeTrig}','t2v'); return false;">${displayName}${badge}</a>`;
     }).join('');
   } catch (e) {
     list.innerHTML = '<div class="hint">Load failed: ' + (e.message || 'unknown') + '</div>';
   }
+}
+
+// The banner above the chips. Speaks only when the most recent training is
+// weak or inert — the moment a user is standing in this tab wondering why the
+// character they just spent hours on does nothing.
+function trainRenderVerdictBanner(items) {
+  const el = document.getElementById('trainVerdictBanner');
+  if (!el) return;
+  const rows = Array.isArray(items) ? items.slice() : [];
+  rows.sort((a, b) => (Number(b.created_at) || 0) - (Number(a.created_at) || 0));
+  const newest = rows[0];
+  const verdict = newest ? String(newest.adapter_verdict || 'unknown').toLowerCase() : 'unknown';
+  if (!newest || (verdict !== 'weak' && verdict !== 'inert')) {
+    el.hidden = true;
+    el.innerHTML = '';
+    return;
+  }
+  const name = escapeHtml(newest.name || newest.filename || 'this adapter');
+  const advice = escapeHtml(newest.adapter_advice ||
+    'Its learned deltas are too small to visibly change a render.');
+  const head = verdict === 'inert'
+    ? `<strong>${name} carries nothing.</strong>`
+    : `<strong>${name} came out weak.</strong>`;
+  el.innerHTML =
+    `<div class="train-verdict-head">${head}</div>` +
+    `<div class="train-verdict-body">${advice}</div>` +
+    `<div class="train-verdict-body train-verdict-how">Measured by Phosphene when the run finished. ` +
+    `You can re-check any adapter yourself: <code>./ltx-2-mlx/env/bin/python3.11 lora_compat.py &lt;file&gt;.safetensors</code></div>`;
+  el.hidden = false;
 }
 
 function trainFmtAge(ms) {
@@ -48994,7 +50574,9 @@ document.querySelectorAll('#remixSubGroup .pill-btn').forEach(b => b.onclick = (
     chip.classList.add('disabled');
     chip.title = 'Needs LTX-2.3 — the 2.5 reference adapter is not published '
                + 'yet. Use Image mode with Inspire for reference-guided work '
-               + 'on 2.5.';
+               + 'on 2.5, or install the 2.3 pack from the Train tab. '
+               + '(The same two routes the server names if you get here.)';
+    chip.setAttribute('aria-disabled', 'true');
     const sub = chip.querySelector('.mc-sub');
     if (sub) sub.textContent = 'needs LTX-2.3';
   };
@@ -49743,7 +51325,11 @@ function _engineTooltip(e, st, modeOk) {
              + ' · ' + (e.sublabel || '');
   if (st.announced) return name + ' — ' + (e.tagline || 'not released yet');
   if (!e.builtin && !st.capable) {
-    return name + ' — needs ' + (st.min_ram_gb || 64) + ' GB unified memory';
+    // The floor is the LOWEST lane's, served by the panel. This read
+    // `st.min_ram_gb || 64` — the bf16 number, or a literal 64 that no floor
+    // in this codebase has ever been — on a machine whose real bar is 46.
+    return name + ' — needs ' + (st.ram_floor_gb || st.min_ram_gb || 46)
+                + ' GB unified memory';
   }
   if (!e.builtin && !st.available) {
     return st.repairable
@@ -50092,7 +51678,24 @@ function _ltxApplyShape(qKey, lKey) {
   // chip is already greyed with the reason in its title, so a click that
   // quietly rendered something else would be worse than a click that does
   // nothing.
-  if (cell.available === false) return;
+  //
+  // ...but "does nothing" was the whole complaint on the HQ chips. Now that
+  // they are shown-disabled instead of hidden (owner ruling 2026-08-23), a
+  // click has to SAY the reason rather than swallow it — a tooltip is not
+  // discoverable on a chip a user has just tapped. Same #engineRowNote line
+  // _h3ApplyShape writes into, and it deliberately does not set
+  // `dataset.packNote`, so applyPackIncompleteGate never clears a note it
+  // did not write and never has this one clobbered.
+  if (cell.available === false) {
+    const note = document.getElementById('engineRowNote');
+    const reason = cell.unavailable_reason || '';
+    if (note && reason && note.dataset.packNote !== '1') {
+      note.textContent = reason;
+      note.hidden = false;
+    }
+    renderTierAxes('ltx');
+    return;
+  }
   const setv = (id, v) => { const el = document.getElementById(id); if (el && v != null) el.value = v; };
   // The DURATION half is ours. The CANVAS half is setQuality()'s — it has
   // owned #quality, #width, #height, the aspect row and the upscale default
@@ -50741,13 +52344,19 @@ function setEngine(engine, opts) {
       reason = e.label + " isn't released yet.";
     } else if (!st.capable) {
       target = fallback.id;
-      reason = e.label + ' needs ' + (st.min_ram_gb || 64) + ' GB unified memory.';
+      // The lowest lane's floor, not the bf16 one and not a literal 64.
+      reason = e.label + ' needs '
+             + (st.ram_floor_gb || st.min_ram_gb || 46) + ' GB unified memory.';
     } else if (!st.available) {
       target = fallback.id;
       // Distinguish "you never installed this" from "you DID install this and
       // something broke it". Telling a user with 75 GB of H3 weights on disk
       // that H3 "isn't installed" is the v3.4.0 regression report, verbatim.
-      reason = st.repairable
+      // A third case joined them: the Mac whose only gap is the local Q8
+      // engine build. The server writes that sentence; do not paraphrase it.
+      reason = st.needs_q8_dit
+        ? (st.ram_note || (e.label + ' needs its low-RAM engine built.'))
+        : st.repairable
         ? e.label + ' needs repair — your weights are still on disk. Click the chip.'
         : e.label + " isn't installed yet.";
     } else if (!engineServesMode(e, currentMode)) {
@@ -51430,6 +53039,31 @@ function pickerSetImage(key, path, opts = {}) {
   if (!els.hidden) return;
   els.hidden.value = path;
   if (path) {
+    // A DEAD PATH USED TO LOOK EXACTLY LIKE A LIVE ONE. The tile got
+    // `.has-image`, the × appeared, and the broken <img> read as "an image is
+    // selected" — so a Load Params replay, an Animate on a photo since
+    // deleted, or an H3 first-frame scratch file that was tidied away all
+    // submitted happily and failed 30 s into the render. The picker is the
+    // place that knows; validating here is the same shape as the refusal
+    // gates. Confirmed with a second request so a transient hiccup cannot
+    // throw away a good pick: only a 404 (the server saying the file is not
+    // there) clears it.
+    els.preview.onerror = () => {
+      const dead = els.hidden.value;
+      if (!dead || dead !== path) return;
+      fetch(`/image?path=${encodeURIComponent(path)}&w=16`)
+        .then(r => {
+          if (r.status !== 404) return;
+          if (els.hidden.value !== path) return;
+          pickerSetImage(key, '');
+          const name = path.split('/').pop();
+          if (typeof phosToast === 'function') {
+            phosToast(`${name} is no longer on disk — pick another image`,
+                      { kind: 'warning' });
+          }
+        })
+        .catch(() => {});
+    };
     els.preview.src = `/image?path=${encodeURIComponent(path)}&w=480`;
     els.preview.style.display = 'block';
     els.empty.style.display = 'none';
@@ -51451,6 +53085,9 @@ function pickerSetImage(key, path, opts = {}) {
       snapAspectToImage(path);
     }
   } else {
+    // Drop the handler with the pick, or a later `removeAttribute('src')`
+    // fires it against a path that is no longer selected.
+    els.preview.onerror = null;
     els.preview.removeAttribute('src');
     els.preview.style.display = 'none';
     els.empty.style.display = '';
@@ -52257,7 +53894,22 @@ async function poll() {
   // download trim exposed that Extend is structurally Q8-class.
   const genBtn = document.getElementById('genBtn');
   const q8GatedMode = (currentMode === 'keyframe' || currentMode === 'extend');
-  if (q8GatedMode && !s.q8_available) {
+  if (currentMode === 'ingredients' && !ingredientsServed()) {
+    // Belt to setMode's braces. setMode should make this unreachable, but
+    // this is the state the button is in if anything ever gets there again
+    // — and "Generate is lit, click it, get an error" is exactly the
+    // experience being removed.
+    genBtn.disabled = true;
+    genBtn.title = 'Ingredients needs the LTX-2.3 generation — its reference '
+                 + 'adapter has no 2.5 release. Use Image mode with Inspire, '
+                 + 'or install the 2.3 pack from the Train tab.';
+    genBtn.textContent = 'Generate · needs LTX-2.3';
+  } else if (genBtn.disabled
+             && genBtn.textContent.startsWith('Generate · needs LTX-2.3')) {
+    genBtn.disabled = false;
+    genBtn.title = '';
+    genBtn.textContent = 'Generate';
+  } else if (q8GatedMode && !s.q8_available) {
     genBtn.disabled = true;
     const modeName = currentMode === 'keyframe' ? 'Keyframe (FFLF)' : 'Extend';
     const left = (s.q8_missing || []).length;
@@ -52517,6 +54169,12 @@ async function poll() {
     if (j.status === 'failed' && j.error) {
       titleHtml = `${titleText} ` +
         `<span class="err-inline" title="${escapeHtml(j.error)}">— ${escapeHtml(snippet(j.error, 70))}</span>`;
+    } else if (j.status === 'done' && j.warning) {
+      // A training run that finished WEAK is "done" to the queue and a
+      // failure to the person. The row said "done" and nothing else, so the
+      // one number that explained it lived only in a log line (#62).
+      titleHtml = `${titleText} ` +
+        `<span class="warn-inline" title="${escapeHtml(j.warning)}">— ${escapeHtml(snippet(j.warning, 70))}</span>`;
     } else {
       titleHtml = titleText;
     }
@@ -54445,6 +56103,21 @@ document.getElementById('genForm').addEventListener('submit', async e => {
   const genBtn = document.getElementById('genBtn');
   const reenable = () => { if (genBtn) genBtn.disabled = false; };
 
+  // LAST LINE OF DEFENCE. FormData reads the hidden #mode input directly —
+  // it never consults currentMode — so every guard above this point is a
+  // guard on how #mode got its value, and this is the only one that reads
+  // what is actually about to be POSTed. Cheap, and it is the assertion the
+  // other three are trying to keep true.
+  if (fd.get('mode') === 'ingredients' && !ingredientsServed()) {
+    alert('Ingredients needs the LTX-2.3 generation — its reference adapter '
+        + 'has no 2.5 release yet, so on 2.5 the references are ignored and '
+        + 'the clip costs full two-stage time.\n\n'
+        + 'For reference-guided work on 2.5, use Image mode with Inspire — '
+        + 'or install the 2.3 pack from the Train tab.');
+    reenable();
+    return;
+  }
+
   // Safety net: if the prompt mentions a trigger word from a LoRA the user
   // has installed but NOT toggled active for this render, ask before
   // submitting. The #1 silent-failure mode is "I typed my LoRA's trigger
@@ -54813,6 +56486,22 @@ function updateModelsCard(s) {
   //
   // Gated on `repairable`, so a user who never installed H3 is never nagged.
   const h3s = s.h3 || {};
+  // ----- 46-60 GB Mac whose reduced-RAM engine was never built -------------
+  // Its own branch because the repair copy below is wrong here: nothing is
+  // missing or broken, the machine simply needs the Q8 engine that
+  // scripts/pinokio/h3_build_q8.sh produces. Before the `needs_q8_dit` band
+  // existed this Mac was `capable: false` and got no card, no switcher
+  // segment, and — if it ever reached a render — a refusal claiming it needed
+  // 64 GB. The server owns the sentence; this only places it.
+  if (h3s.needs_q8_dit) {
+    card.style.display = '';
+    card.classList.add('state-warn');
+    icon.innerHTML = '<svg class="ph" aria-hidden="true"><use href="#ph-warning-fill"/></svg>';
+    title.textContent = 'Hailuo H3 runs on this Mac — its low-RAM engine isn’t built yet';
+    sub.textContent = h3s.ram_note || '';
+    actions.innerHTML = `<button onclick="openH3InstallCard()">How to enable H3</button>`;
+    return;
+  }
   if (h3s.capable && !h3s.available && h3s.repairable) {
     card.style.display = '';
     card.classList.add('state-warn');
@@ -55981,11 +57670,48 @@ function _syncLoraPickerForEngine() {
       ? (_lorasDirs.h3 || 'the Hailuo H3 pack’s loras/ folder')
       : (_lorasDirs.ltx || 'mlx_models/loras/');
   }
+  const importBtn = document.getElementById('h3LoraImportBtn');
+  if (importBtn) importBtn.hidden = tag !== 'video:h3';
   if (typeof renderLorasList === 'function') { try { renderLorasList(); } catch (_) {} }
   // Re-serialize: the lane guard in _serializeLoras is what keeps the other
   // engine's chips off the wire, and it has to re-run when the lane changes.
   if (typeof _serializeLoras === 'function') { try { _serializeLoras(); } catch (_) {} }
   if (typeof renderH3LoraSlot === 'function') { try { renderH3LoraSlot(); } catch (_) {} }
+}
+
+async function importH3Lora(file) {
+  if (!file) return;
+  if (!/\.safetensors$/i.test(file.name || '')) {
+    alert('Choose a .safetensors Hailuo H3 LoRA file.');
+    return;
+  }
+  const btn = document.getElementById('h3LoraImportBtn');
+  // innerHTML, not textContent: the button carries an inline <svg> icon, and
+  // restoring a string would leave the icon permanently gone after the first
+  // import — a one-way UI decay that only shows up on the SECOND use.
+  const original = btn ? btn.innerHTML : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Importing…'; }
+  const fd = new FormData();
+  fd.append('file', file, file.name);
+  try {
+    const r = await fetch('/h3/loras/import', { method: 'POST', body: fd });
+    const data = await r.json();
+    if (!r.ok || !data.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    await refreshLoras();
+    const pairs = `${data.pairs} module pair${data.pairs === 1 ? '' : 's'}`;
+    const converted = data.converted ? ' Key namespace converted safely.' : '';
+    // The H3 loader applies no alpha, so when a file's own scale isn't 1.0 the
+    // strength control is where it gets applied — say the number rather than
+    // leaving it in the sidecar for nobody to find.
+    const strength = (typeof data.recommended_strength === 'number'
+                      && Math.abs(data.recommended_strength - 1) > 1e-6)
+      ? ` Recommended strength ${Number(data.recommended_strength.toFixed(4))}.` : '';
+    alert(`Imported ${data.filename} (${pairs}).${converted}${strength}`);
+  } catch (e) {
+    alert(`H3 LoRA import failed: ${e.message || e}`);
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = original || 'Import H3 LoRA'; }
+  }
 }
 
 // The H3-lane LoRA (at most one) currently picked, as a picker row — or null.
@@ -56492,12 +58218,18 @@ function renderLorasList() {
         </div>`;
     } else if (modeTag === 'video:h3') {
       // Its own empty state, not the LTX one: the two libraries are separate
-      // directories and the CivitAI filter to reach for is a different pill.
+      // directories. CivitAI is convenient, but a custom adapter someone
+      // already has must be just as discoverable: it only needs the runner's
+      // lora_A/lora_B layout in the H3 library. The layout gate below keeps a
+      // raw Kohya file visible with its conversion reason instead of letting a
+      // bad adapter reach a long render.
       wrap.innerHTML = `
         <div class="hint" style="padding:14px 8px;text-align:center;line-height:1.6;">
           <div style="margin-bottom:4px;color:var(--fg);"><strong>No Hailuo H3 LoRAs in your library.</strong></div>
           <div>H3 has its own library — your LTX LoRAs can't load here, and H3's can't load on LTX.</div>
-          <div style="margin-top:6px;">Install one via <strong>Browse CivitAI</strong> above (the <strong>Hailuo H3</strong> pill), and it lands in <code>${escapeHtml(_lorasDirs.h3 || 'the H3 pack’s loras/ folder')}</code>.</div>
+          <div style="margin-top:6px;">Already have one? <strong>Import H3 LoRA</strong> above takes a <code>.safetensors</code> file and checks it against your installed H3 transformer before it lands in the library.</div>
+          <div style="margin-top:6px;">Drop a converted H3 <code>.safetensors</code> with <code>lora_A</code> / <code>lora_B</code> tensors into <code>${escapeHtml(_lorasDirs.h3 || 'the H3 pack’s loras/ folder')}</code>, then press Rescan — same result, no size limit.</div>
+          <div style="margin-top:6px;">Or install one via <strong>Browse CivitAI</strong> above using the <strong>Hailuo H3</strong> CivitAI filter.</div>
         </div>`;
     } else {
       wrap.innerHTML = `<div class="hint" style="padding:8px 0;">No LoRAs available.</div>`;

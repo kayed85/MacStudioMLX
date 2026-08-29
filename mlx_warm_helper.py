@@ -2374,6 +2374,128 @@ emit({"event": "log",
                f"chip={_RUNTIME_ENV.get('chip')} | "
                f"macOS={_RUNTIME_ENV.get('macos')} ({_RUNTIME_ENV.get('arch')})")})
 
+# ---- MLX allocator cache policy ---------------------------------------------
+# MLX does not return freed Metal buffers to the driver; it keeps them in an
+# allocator cache so the next same-size allocation is free. The CEILING on that
+# cache is derived from the MACHINE, not the workload — MLX defaults it to
+# `0.95 * hw.memsize`, about 61 GB on a 64 GB Mac. Phosphene set no cache policy
+# at all, so a five-second clip's cache grew until it was near the machine's
+# ceiling and the footprint the render reported had nothing to do with what a
+# five-second clip needs. (`_base.py` and `a2vid_distilled.py` call
+# `set_cache_limit(0)`, but only on the low-memory/streaming paths the warm
+# helper does not take.)
+#
+# The cap is a FRACTION OF PHYSICAL RAM, so it scales with the Mac the way the
+# capability tiers do: ONE EIGHTH, floored at 2 GiB, ceilinged at 8 GiB.
+#
+#     16 GiB Compact      -> 2 GiB        64 GiB Comfortable -> 8 GiB
+#     32 GiB Compact      -> 4 GiB        96 GiB Roomy       -> 8 GiB (ceiling)
+#     48 GiB Comfortable  -> 6 GiB       128 GiB Studio      -> 8 GiB (ceiling)
+#
+# MEASURED, not chosen — mlx 0.31.1 (this repo's pin), Q4 768x432 121f, same
+# prompt and seed, `/usr/bin/time -l` peak memory footprint:
+#
+#     no cap (what shipped) ....... 25.53 GB / 71.45 s
+#     16 GB cap ................... 23.15 GB / 71.78 s
+#     8 GiB cap (THIS policy) ..... 16.50 GB / 68.84 s
+#
+# and Q8 1024x576 121f at the 48 GiB Comfortable tier's own ceiling, where the
+# policy asks for 6 GiB: 39.49 GB / 139.84 s -> 25.39 GB / 138.71 s. So about a
+# THIRD of the peak footprint goes away on both, and the wall time does not pay
+# for it. Output is sha256-identical to the uncapped render in both cases
+# (144da74a... and f47d4dc8...): the cap changes the allocator's bookkeeping,
+# never the arithmetic.
+#
+# The CEILING is measured too, not taste: on mlx 0.32.1, 8 GB -> 16 GB of cache
+# bought 0.5 s and cost 7.7 GB of footprint. So is the FLOOR: a cache of zero
+# gives back the most memory of all but pays ~1% wall, which makes it the
+# override, not the default.
+#
+# Override: `LTX_MLX_CACHE_GIB` — a number in GiB, `0` for no cache at all,
+# `off` to restore MLX's machine-sized default (the pre-policy behaviour).
+# Unset / empty / `auto` runs the policy. An unparseable value runs the policy
+# rather than failing a render over a typo in an env var.
+MLX_CACHE_RAM_DIVISOR = 8
+MLX_CACHE_FLOOR_BYTES = 2 * 1024**3
+MLX_CACHE_CEIL_BYTES = 8 * 1024**3
+
+
+def mlx_cache_limit_bytes(total_ram_bytes: int, override: str | None = None) -> int | None:
+    """Bytes MLX may hold in its allocator cache. `None` = leave MLX's default.
+
+    Pure on purpose: the policy for a 16 GB Mac has to be assertable from a
+    64 GB one, and the tier table this was measured against is a simulation of
+    exactly this number.
+    """
+    raw = (override or "").strip().lower()
+    if raw in ("off", "default", "unset"):
+        return None
+    if raw and raw != "auto":
+        try:
+            gib = float(raw)
+        except ValueError:
+            gib = -1.0
+        if gib >= 0:
+            return int(gib * 1024**3)
+        # Unparseable: fall through to the policy.
+    if total_ram_bytes <= 0:
+        # sysctl failed. Take the smallest cap rather than the machine's.
+        return MLX_CACHE_FLOOR_BYTES
+    return max(MLX_CACHE_FLOOR_BYTES,
+               min(MLX_CACHE_CEIL_BYTES, int(total_ram_bytes) // MLX_CACHE_RAM_DIVISOR))
+
+
+def _physical_ram_bytes() -> int:
+    try:
+        import subprocess as _sp
+        out = _sp.run(["sysctl", "-n", "hw.memsize"],
+                      capture_output=True, text=True, timeout=3).stdout.strip()
+        return int(out)
+    except Exception:
+        return 0
+
+
+_MLX_CACHE_RAM_BYTES = _physical_ram_bytes()
+_MLX_CACHE_LIMIT = mlx_cache_limit_bytes(
+    _MLX_CACHE_RAM_BYTES, os.environ.get("LTX_MLX_CACHE_GIB"))
+_MLX_CACHE_ANNOUNCED = False
+
+
+def apply_mlx_cache_policy() -> None:
+    """Set — or RE-assert — the allocator cache cap. Cheap and idempotent.
+
+    Re-asserted before every render, not only at startup, because the pipelines
+    move it themselves: the low-memory and streaming paths call
+    `mx.set_cache_limit(0)` and never put it back, so a policy applied once at
+    boot would silently become "no cache" for the rest of a warm helper's life
+    after a single A2V job.
+    """
+    global _MLX_CACHE_ANNOUNCED
+    if _MLX_CACHE_LIMIT is None:
+        return
+    try:
+        import mlx.core as mx
+        mx.set_cache_limit(int(_MLX_CACHE_LIMIT))
+    except Exception as exc:                          # noqa: BLE001
+        if not _MLX_CACHE_ANNOUNCED:
+            _MLX_CACHE_ANNOUNCED = True
+            emit({"event": "log",
+                  "line": f"[mlx] cache policy not applied: {exc}"})
+        return
+    if not _MLX_CACHE_ANNOUNCED:
+        _MLX_CACHE_ANNOUNCED = True
+        _ram_gib = _MLX_CACHE_RAM_BYTES / 1024**3
+        _default_gib = 0.95 * _ram_gib
+        emit({"event": "log",
+              "line": (f"[mlx] allocator cache capped at "
+                       f"{_MLX_CACHE_LIMIT / 1024**3:.1f} GiB "
+                       f"(1/{MLX_CACHE_RAM_DIVISOR} of {_ram_gib:.0f} GiB RAM; "
+                       f"MLX would default to {_default_gib:.1f} GiB here)")})
+
+
+apply_mlx_cache_policy()
+
+
 def _live_preview_supported() -> bool:
     """Does the INSTALLED engine carry the live-preview module?
 
@@ -2413,6 +2535,10 @@ emit({
         importlib.util.find_spec("ltx_pipelines_mlx.live_preview") is not None),
     "mlx_version": _RUNTIME_ENV.get("mlx"),
     "mlx_metal_version": _RUNTIME_ENV.get("mlx_metal"),
+    # None when the policy is off (LTX_MLX_CACHE_GIB=off) — i.e. MLX's own
+    # machine-sized default, which is what every install ran before v4.7.
+    "mlx_cache_limit_gib": (None if _MLX_CACHE_LIMIT is None
+                            else round(_MLX_CACHE_LIMIT / 1024**3, 3)),
     "chip": _RUNTIME_ENV.get("chip"),
     "macos": _RUNTIME_ENV.get("macos"),
 })
@@ -2446,6 +2572,13 @@ for line in sys.__stdin__:
     if action == "ping":
         emit({"event": "pong"})
         continue
+
+    # THE OTHER choke point, same reason as the one above: the MLX allocator
+    # cache cap is re-asserted here rather than in each generate_* lane,
+    # because the pipelines drop it to zero on their low-memory paths and a
+    # lane added tomorrow would otherwise inherit whatever the last job left.
+    if isinstance(action, str) and action.startswith(("generate", "extend")):
+        apply_mlx_cache_policy()
 
     if action == "generate":
         job_id = msg.get("id", "?")

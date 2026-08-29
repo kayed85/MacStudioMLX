@@ -31,7 +31,7 @@ out to the original ``mflux-generate-flux2`` CLI with the same argv. The
 user gets a working render every time; the only loss is the TeaCache
 speedup and a one-line stderr diagnostic explaining why.
 
-Compatibility: mflux==0.17.5 (pinned by install_qwen.js / update.js),
+Compatibility: mflux==0.18.0 (pinned by install_qwen.js / post_update.sh),
 mlx-teacache==0.4.1 (pinned alongside). The inline main() mirrors mflux's
 ``mflux/models/flux2/cli/flux2_generate.py`` — re-validate after any
 mflux bump that touches Flux2Klein construction or generate_image kwargs.

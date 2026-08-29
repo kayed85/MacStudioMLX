@@ -98,6 +98,12 @@ require "the vendored engine pin move" -- bash "$ROOT/scripts/pinokio/ltx_checko
 # mlx 0.31.2 attenuates the vocoder by ~22 dB (measured: max_volume -42.8 dB vs
 # -9.2 dB on 0.31.1, same weights, same seed). --reinstall --no-deps so ONLY
 # mlx moves and nothing that depends on it is re-resolved.
+#
+# --no-deps protects this step, but NOT the pin: step 7 below installs mflux
+# WITH deps and can walk mlx back down from under it. That coupling, and the
+# 2026-08-28 measurements behind holding at 0.31.1 rather than moving to
+# 0.32.x, are in scripts/check_post_update.js and install.js. Read them before
+# touching this line — and change both pins in one commit or not at all.
 require "the mlx 0.31.1 pin" -- uv pip install --python "$VENV_PY" --reinstall --no-deps 'mlx==0.31.1' 'mlx-lm==0.31.1' 'mlx-metal==0.31.1'
 
 # ---- 2b. THE TRANSFORMERS CAP — the one install.js has been promising -------

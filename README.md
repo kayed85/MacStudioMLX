@@ -46,6 +46,18 @@ Text-to-video, image-to-video, and audio-to-video, all delivered as MP4 with joi
 
 Neither engine is a fallback for the other. If only one is installed, the other appears in the switcher as an offer with its size on it — one click explains what it does and where to get it, and nothing about your existing renders changes when it lands.
 
+#### Remix — bring your own media
+
+Three IC-LoRA tools live under the **Remix** pill in the mode bar. All three run on the Q4 distilled checkpoint, so none of them needs the Q8 pack.
+
+| Tool | You give it | You get |
+|---|---|---|
+| **Motion Control** | a clip | a new render that copies its **motion, camera move, composition and pose** while your prompt repaints the subject and the scene |
+| **Ingredients** | 2–8 reference images (a face, a prop, a location) | one clip that composes them |
+| **Colorize** | a black-and-white or desaturated clip | the same clip in colour |
+
+**Motion Control** is the official [`Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control`](https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control) adapter — public, un-gated, no token, fetched with the base install. Feed it an ordinary video; it reads raw RGB, so nothing has to be preprocessed. A pose, depth, canny or segmentation **sequence** works too and follows more tightly, but you have to bring your own — **Phosphene ships no preprocessor** that derives one from a normal clip. Full write-up, including what makes a good control clip and what changes on LTX-2.5: **[`docs/MOTION_CONTROL.md`](docs/MOTION_CONTROL.md)**.
+
 ### Image Studio
 <img width="1920" height="843" alt="image" src="https://github.com/user-attachments/assets/8e2f52de-b34c-44cf-9283-df30c4079607" />
 
@@ -76,6 +88,23 @@ New workflow tab in 3.0. WAV or MP3 in, MP4 out — the audio drives motion in t
 ### LoRAs
 
 Drop `.safetensors` into `mlx_models/loras/` for immediate use, or browse and install LTX LoRAs from CivitAI inside the panel (per-row rename, download, companion-aware delete). Character bundles live alongside style LoRAs and are filtered out of the regular picker so they don't show up twice.
+
+**MiniMax H3 LoRAs use a separate library.** Switch the Video engine to
+**Hailuo H3** and the LoRAs panel gains an **Import H3 LoRA** button: pick a
+`.safetensors` and the panel checks it against your installed H3 transformer
+before it ever appears in the picker. You can still drop files into
+`mlx_models/hailuo-h3/loras/` by hand and press Rescan — same checks, same
+result. H3 accepts the runner layout with paired `lora_A` / `lora_B` tensors
+and lets you choose its strength in the picker. ComfyUI repacks are handled
+automatically: the `diffusion_model.` namespace is stripped in a header-only
+rewrite that leaves every tensor byte-identical. A raw Kohya file
+(`lora_down`, `lora_up`, and `.alpha`) is deliberately rejected: renaming it
+would ignore its required alpha/rank scaling. Where the adapter states a scale
+the H3 runner cannot apply on its own, the import records it as the row's
+recommended strength instead of refusing the file. The H3 CivitAI filter also
+routes compatible downloads to this library; H3 uses one adapter at a time. If
+Turbo is selected, turn it off or choose **My LoRA** in the Adapter control to
+spend that slot on your custom LoRA for the render.
 
 ### HTTP API
 
@@ -122,13 +151,13 @@ Working-memory footprint is non-negotiable: standard 1280×704 generation peaks 
 
 Pinokio handles the hardware gate, the vendored `ltx-2-mlx` clone at its pinned tag, the uv-managed Python 3.11 venv, the runtime patches, and the model download.
 
-**What a fresh install fetches (~37 GB):** LTX-2.5's engine (20.74 GB) and its Gemma 4 text encoder (6.73 GB) — the generation the panel renders with — plus the 22 MB live-preview decoder; Gemma 3 (~6 GB), which is what **Enhance** and the **Storyboard planner** run on; and three control LoRAs (~4 GB) for the **Colorize / Restore**, **Ingredients** and **Control** modes. Every step is resumable. (**HDR** uses a fourth, gated LoRA — add a Hugging Face token in Settings and the panel fetches it on first use.)
+**What a fresh install fetches (~37 GB):** LTX-2.5's engine (20.74 GB) and its Gemma 4 text encoder (6.73 GB) — the generation the panel renders with — plus the 22 MB live-preview decoder; Gemma 3 (~6 GB), which is what **Enhance** and the **Storyboard planner** run on; and three control LoRAs (~4 GB) for the **Colorize**, **Ingredients** and **Motion Control** modes — all three public and un-gated, no token needed. Every step is resumable. (**HDR** uses a fourth, *gated* LoRA — that one needs a Hugging Face token in Settings, and the panel fetches it on first use.)
 
-**LTX-2.3 is not downloaded.** It is needed only to *train* a character — the trainer runs against 2.3, not 2.5 — so the panel offers it (~20 GB, plus the ~21 GB full-precision dev transformer) the moment you open the **Train Character** tab, and in **Settings → Models** any time. Everything else, including all four control-LoRA modes, renders on LTX-2.5.
+**LTX-2.3 is not downloaded.** It is needed only to *train* a character — the trainer runs against 2.3, not 2.5 — so the panel offers it (~20 GB, plus the ~21 GB full-precision dev transformer) the moment you open the **Train Character** tab, and in **Settings → Models** any time. The three control LoRAs are 2.3-trained, and Lightricks has published exactly one LTX-2.5 IC-LoRA to date (a pixel spatial upscaler): **Ingredients** is therefore refused on 2.5 with the reason, and **Motion Control** still transfers the motion but loses most of the prompt's grip on the new subject — see [`docs/MOTION_CONTROL.md`](docs/MOTION_CONTROL.md). Everything else renders on LTX-2.5.
 
 For trained characters and voices, install the **LTX-2.5 Q8 weights** (30.02 GB) from **Settings → Models**. The **High** tier additionally needs the **High add-on** (29.50 GB), which installs into the same folder.
 
-If you have a Hugging Face token, paste it under **Settings** in the panel. Downloads run roughly 10x faster, and the same token unlocks the gated LoRAs (HDR and Lightricks Control).
+If you have a Hugging Face token, paste it under **Settings** in the panel. Downloads run roughly 10x faster, and the same token unlocks the one gated LoRA (HDR). **Motion Control does not need it** — the Union Control weight is public.
 
 ### Manual install
 
@@ -181,8 +210,8 @@ cd ..
 ./ltx-2-mlx/env/bin/python3.11 scripts/fetch_pack_release.py --repo-key q8_25
 
 # 6. (Optional) Image tab — install mflux + apply the FBCache patch.
-./ltx-2-mlx/env/bin/pip install 'mflux==0.17.5'
-./ltx-2-mlx/env/bin/pip install --force-reinstall --no-deps 'mflux==0.17.5'
+./ltx-2-mlx/env/bin/pip install 'mflux==0.18.0'
+./ltx-2-mlx/env/bin/pip install --force-reinstall --no-deps 'mflux==0.18.0'
 ./ltx-2-mlx/env/bin/python3.11 patch_mflux_fbcache.py
 
 # 7. (Optional) HiDream — separate one-time clone for the photoreal engine.
@@ -194,7 +223,7 @@ cd ..
 ./ltx-2-mlx/env/bin/python3.11 mlx_ltx_panel.py
 ```
 
-About the version pins: `mlx 0.31.2` attenuates the LTX vocoder by 22 dB. Stay on 0.31.1. `ltx-2-mlx` is pinned to the fork **tag** `v0.14.19+ltx25.6` (`mrbizarro/ltx-2-mlx`, commit `ee256f5`) — v0.14.19 plus the LTX-2.5 port, because upstream has no 2.5 branch. A tag, not a bare SHA: a force-push upstream would strand every install with an un-fetchable pin and a dead Update button. The installed packages report `0.14.19+ltx25.6` and `_LTX_EXPECTED_VERSION` must match that string exactly, or every render logs a VERSION SKEW warning. `scripts/pinokio/ltx_checkout.sh` holds the pin and `node scripts/check_ltx_pin.js` enforces the agreement. `mflux 0.17.5` is the version `patch_mflux_fbcache.py` is line-targeted against. `hatchling<1.32` (in `pip-build-constraints.txt`) is a *build-time* pin: 1.32 rejects the `readme = "../../README.md"` that all three upstream packages declare, which fails the wheel build on every tag.
+About the version pins: `mlx 0.31.2` attenuates the LTX vocoder by 22 dB. Stay on 0.31.1. `ltx-2-mlx` is pinned to the fork **tag** `v0.14.19+ltx25.6` (`mrbizarro/ltx-2-mlx`, commit `ee256f5`) — v0.14.19 plus the LTX-2.5 port, because upstream has no 2.5 branch. A tag, not a bare SHA: a force-push upstream would strand every install with an un-fetchable pin and a dead Update button. The installed packages report `0.14.19+ltx25.6` and `_LTX_EXPECTED_VERSION` must match that string exactly, or every render logs a VERSION SKEW warning. `scripts/pinokio/ltx_checkout.sh` holds the pin and `node scripts/check_ltx_pin.js` enforces the agreement. `mflux 0.18.0` is the version `patch_mflux_fbcache.py` is line-targeted against, and it is pinned TOGETHER with mlx — mflux declares its own mlx range, so installing it with deps after pinning mlx can silently move mlx (`node scripts/check_post_update.js` fails if either moves alone). `hatchling<1.32` (in `pip-build-constraints.txt`) is a *build-time* pin: 1.32 rejects the `readme = "../../README.md"` that all three upstream packages declare, which fails the wheel build on every tag.
 
 ## Interface
 
