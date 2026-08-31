@@ -56,6 +56,7 @@ const optional = [
   ["smolagents", /smolagents>=/],
   ["the mosaic upscaler fetch", /spatial_upscaler_x2_v1_1/],
   ["the LTX-2.5 weight fetch", /fetch_pack_release\.py/],
+  ["the H3 compact-engine build", /h3_build_q8\.sh/],
   ["the model trim", /^rm -f /],
 ]
 

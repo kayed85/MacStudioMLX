@@ -237,6 +237,22 @@ echo 'Ensuring the Control IC-LoRA is present (Union, control mode, optional)…
 "$HF" download Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control --local-dir "$ROOT/mlx_models/loras/ic" --include 'ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors' \
   || echo 'WARN: Control IC-LoRA fetch failed — the Control mode will fetch it on first use, or click Repair.'
 
+# ---- 8b. H3 compact (Q8) engine — the memory-halving default (optional) ----
+# v4.8.0 made the Q8 DiT H3's AUTO default on every machine, but installs made
+# before that never built the pack on 64 GB+ Macs — the install skipped it
+# when bf16 was their default — so Update-only users kept rendering bf16
+# silently at ~40-48 GB ("i updated but still getting this much memory").
+# Update ships code; this step ships the default's weights. Gated on H3
+# actually being installed here (pure-LTX installs skip in one stat call),
+# idempotent via the pack's own quant_config.json, ~5 min and ~22 GB disk on
+# the one run that builds. Cannot fail the update.
+if [ -f "$ROOT/mlx_models/hailuo-h3/models/deepbeep-pruned-bf16/MiniMax-H3-FL2VA-pruned_bf16.safetensors" ] \
+   && [ -d "$ROOT/minimax-h3-mlx" ]; then
+  echo 'Ensuring the H3 compact (Q8) engine is built (halves H3 render memory)…'
+  ( cd "$ROOT/minimax-h3-mlx" && bash "$ROOT/scripts/pinokio/h3_build_q8.sh" "$ROOT" ) \
+    || echo 'WARN: H3 Q8 build failed — H3 keeps the full bf16 engine for now; re-run the H3 engine Install to retry.'
+fi
+
 # ---- 9. Trim variants we never load ----------------------------------------
 # Pre-Y1.024 installs downloaded whole repos (Q4 56 GB instead of 20, Q8 82 GB
 # instead of 37). `rm -f` is a no-op when the file is already gone.

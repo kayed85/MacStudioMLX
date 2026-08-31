@@ -917,6 +917,11 @@ _IMPLIES_SPEECH_RE = re.compile(
     r"|murmur(?:s|ing)|mutter(?:s|ing)|whisper(?:s|ing)|mumbl(?:es|ing)"
     r"|ask(?:s|ing)|answer(?:s|ing)|repl(?:y|ies|ying)|shout(?:s|ing)"
     r"|order(?:s|ing) (?:him|her|them|the)|instruct(?:s|ing))\b"
+    # SUNG is a mouth producing words just as much as SPOKEN is — a "he sings"
+    # shot with no line renders the same babbling jaw a "he says" shot does.
+    # The lookbehinds keep birdsong out: "birds singing" is scenery, not a
+    # mouth this law owns (same caution as `brief` needing an object above).
+    r"|(?<!birds )(?<!bird )\b(?:sing(?:s|ing)|chant(?:s|ing))\b"
     r"|\b(?:his|her|their|its) voice\b"
     r"|\bin a (?:low|quiet|soft|hushed|loud|steady|calm|firm|gravelly|deep) voice\b"
     r"|\bmid-sentence\b|\bmid-speech\b", re.IGNORECASE)
@@ -959,12 +964,30 @@ _SLOW_READ_RE = re.compile(
     r"|\bunder (?:his|her|their) breath\b|\blazy half-smile\b"
     r"|\bdrawls?\b|\bwhispers?\b",
     re.IGNORECASE)
+# SUNG delivery is slower than speech but not half-tempo — a lyric stretches
+# over the beat. Measured on the AVRELIVS "Amor fati" joint takes (2026-08-30):
+# the owner-graded 121-frame take closed 6 sung words in 5.04 s, which needs
+# the budget to allow >= 1.49 w/s after settle, and the 241-frame take carries
+# 12 words in 10.04 s (>= 1.33). 1.5 admits both delivered cases; there is no
+# truncated-sung case yet to bracket the refusal side, so the constant hugs
+# the delivered evidence rather than guessing a ceiling. The 2.4 speaking
+# budget would approve 21 words in the 10 s shot — nearly double what a sung
+# mantra actually carries — which is why SUNG needs its own rate at all.
+SPEECH_WORDS_PER_SEC_SUNG = 1.5
+_SUNG_READ_RE = re.compile(
+    r"(?<!birds )(?<!bird )\b(?:sing(?:s|ing)|chant(?:s|ing)|sung)\b",
+    re.IGNORECASE)
 SPEECH_SETTLE_S = 1.0
 
 
 def is_slow_read(prompt: str) -> bool:
     """True when the voice descriptor asks for slow delivery."""
     return bool(_SLOW_READ_RE.search(prompt or ""))
+
+
+def is_sung(prompt: str) -> bool:
+    """True when the line is sung or chanted rather than spoken."""
+    return bool(_SUNG_READ_RE.search(prompt or ""))
 
 # Spoken spans, with their words, in both dialects. The single-quote form must
 # survive apostrophes: a quote FLANKED BY LETTERS is punctuation inside a word
@@ -985,9 +1008,12 @@ def spoken_spans(prompt: str) -> list[str]:
     return [s for s in out if s]
 
 
-def speech_fit_frames(word_count: int, fps: int = 24, slow: bool = False) -> int:
+def speech_fit_frames(word_count: int, fps: int = 24, slow: bool = False,
+                      sung: bool = False) -> int:
     """The smallest legal frame count (fps*n+1) that fits `word_count` words."""
-    rate = SPEECH_WORDS_PER_SEC_SLOW if slow else SPEECH_WORDS_PER_SEC
+    rate = (SPEECH_WORDS_PER_SEC_SUNG if sung
+            else SPEECH_WORDS_PER_SEC_SLOW if slow
+            else SPEECH_WORDS_PER_SEC)
     need_s = word_count / rate + SPEECH_SETTLE_S
     n = max(1, int((need_s * fps + fps - 1) // fps))
     return fps * n + 1
@@ -1012,15 +1038,20 @@ def shot_pacing_problem(prompt: str, duration_s: float) -> str | None:
     except (TypeError, ValueError):
         dur = 0.0
     if dur > 0:
+        sung = is_sung(prompt)
         slow = is_slow_read(prompt)
-        rate = SPEECH_WORDS_PER_SEC_SLOW if slow else SPEECH_WORDS_PER_SEC
+        rate = (SPEECH_WORDS_PER_SEC_SUNG if sung
+                else SPEECH_WORDS_PER_SEC_SLOW if slow
+                else SPEECH_WORDS_PER_SEC)
         allowed = max(0.0, (dur - SPEECH_SETTLE_S) * rate)
         if words > allowed:
-            pace = "at this SLOW delivery" if slow else "at speaking pace"
+            pace = ("at singing tempo" if sung
+                    else "at this SLOW delivery" if slow
+                    else "at speaking pace")
             return (f"{words} spoken words in a {dur:.1f}s shot — {pace} only "
                     f"~{int(allowed)} fit, so the line is cut off "
                     f"mid-sentence. Shorten the line, or lengthen the shot to "
-                    f"at least {speech_fit_frames(words, slow=slow)} frames")
+                    f"at least {speech_fit_frames(words, slow=slow, sung=sung)} frames")
     last = spans[-1].rstrip()
     if last and last[-1] not in ".!?":
         return (f"the line ends {last[-12:]!r} — no full stop, so it plays as "

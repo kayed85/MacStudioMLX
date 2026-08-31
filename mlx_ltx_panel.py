@@ -9298,14 +9298,13 @@ def _h3_q8_dit_dir() -> Path | None:
 def h3_dit_choice() -> tuple[str, Path | None]:
     """Which DiT this Mac should render with: ("bf16"|"q8", path).
 
-    The system decides from RAM, the same signal every other capability tier
-    uses — a 64 GB Mac keeps the bf16 master (max quality, its peak fits), a
-    sub-60 GB Mac gets the Q8 pack (27.3 vs 42.8 GiB measured peak, +3% wall,
-    faces held in the 2026-08-10 A/B). `h3_dit` in Settings overrides both
-    ways: "q8" lets a 64 GB machine reclaim ~15 GiB for the rest of the OS
-    (the mic-dies / video-stalls complaint), "bf16" forces max quality where
-    it fits. An override that names a pack that is not on disk falls back
-    loudly in /status rather than silently."""
+    AUTO prefers the compact Q8 engine wherever the pack exists, on every
+    size of Mac (owner-graded A/B; numbers in the comment below). `h3_dit`
+    in Settings overrides both ways: "bf16" forces the full master, "q8"
+    forces compact. Any resolution that lands on bf16 without the user
+    asking for it — the pre-v4.8.0-install case where the Q8 pack was never
+    built — is surfaced loudly in /status (`dit_choice.reason`) and in the
+    render log at dispatch, never silently."""
     pref = str(get_settings().get("h3_dit") or "auto").strip().lower()
     q8 = _h3_q8_dit_dir()
     if pref == "q8" and q8 is not None:
@@ -10930,10 +10929,19 @@ def h3_status() -> dict:
                    "base_model": _CIVITAI_VIDEO_FAMILIES["h3"][0]}),
         "min_ram_gb": H3_MIN_RAM_GB,
         "min_ram_gb_q8": H3_MIN_RAM_GB_Q8,
-        "dit_choice": (lambda _c: {"kind": _c[0],
-                                   "q8_pack": str(_c[1]) if _c[1] else None,
-                                   "q8_available": _h3_q8_dit_dir() is not None,
-                                   "pref": str(get_settings().get("h3_dit") or "auto")})(h3_dit_choice()),
+        "dit_choice": (lambda _c, _p: {
+            "kind": _c[0],
+            "q8_pack": str(_c[1]) if _c[1] else None,
+            "q8_available": _h3_q8_dit_dir() is not None,
+            "pref": _p,
+            # Names the situation instead of making the reader derive it:
+            # "auto_no_q8_pack" is the pre-v4.8.0-install case where AUTO
+            # wants the compact engine and Install never built one.
+            "reason": ("auto_no_q8_pack" if (_c[0] == "bf16" and _p != "bf16")
+                       else "explicit" if _p == _c[0]
+                       else "auto_q8")})(
+            h3_dit_choice(),
+            str(get_settings().get("h3_dit") or "auto").strip().lower()),
         "ram_gb": round(SYSTEM_RAM_GB, 1),
         "root": paths["root"],
         "models": paths["models"],
@@ -20841,6 +20849,17 @@ def run_h3_job_inner(job: dict) -> None:
     if chain_prompts_path is None:
         cmd.append(prompt)
     _dit_kind, _dit_q8 = h3_dit_choice()
+    if _dit_kind == "bf16" and \
+            str(get_settings().get("h3_dit") or "auto").strip().lower() != "bf16":
+        # AUTO wanted the compact engine and there is none on disk. Installs
+        # made before v4.8.0 never built the Q8 pack on 64 GB+ Macs, and
+        # Update ships code, not weights — so "I updated but the memory is
+        # the same" is exactly this line's job to explain, in the log the
+        # user actually reads, at the moment it matters.
+        push("H3 is rendering with the FULL bf16 engine (~39-48 GB resident): "
+             "the compact Q8 engine is not built on this install. Re-run the "
+             "H3 engine Install (safe to repeat, ~5 min) to build it and "
+             "halve H3's memory.")
     _dit_path = _dit_q8 if (_dit_kind == "q8" and _dit_q8 is not None) else paths["dit"]
     cmd += [
         "--dit", str(_dit_path),
@@ -44879,10 +44898,11 @@ HTML = r"""<!doctype html>
       <div class="hint" id="settingsH3DitHint" style="margin-top:6px" hidden>
         Measured on the same prompt and seed: <b>Full 38.9 GiB</b> peak in 196.9 s
         versus <b>Compact 21.4 GiB</b> in 200.1 s — <b>45 % less memory for 1.6 %
-        more time</b>. Automatic gives a 64 GB Mac the full model and anything
-        smaller the compact one. Choose Compact if you want to keep using the Mac
-        while it renders; the memory it gives back is memory H3 was holding, not
-        memory it needed.
+        more time</b>. Automatic prefers the Compact engine on every size of Mac;
+        Full runs only when you choose it here — or when the Compact engine is
+        not built on this install (re-run the H3 engine Install to build it).
+        The memory Compact gives back is memory H3 was holding, not memory it
+        needed.
       </div>
       <div class="hint" style="margin-top:6px">
         Never changes the result — the clip is byte-for-byte the same either way.

@@ -207,6 +207,101 @@ def _aggressive_cleanup_before_generate() -> None:
         pass
 
 
+# =============================================================================
+# A2V AUDIO ADHESION — the slider that was never connected (on the Q8 path)
+# =============================================================================
+#
+# The panel has shipped an "Audio conditioning strength" control (0.5-5.0,
+# "Higher = stronger audio adhesion") since A2V landed. On the Q8 two-stage
+# path the engine has never had a parameter by that name: the vendored
+# `A2VidPipelineTwoStage.generate_and_save()` does not accept
+# `audio_conditioning_scale`, so `_filter_unsupported_kwargs` DROPPED it on
+# every render. Verified by introspection, not by reading:
+#
+#     DROPPED every a2v render: ['audio_conditioning_scale']
+#
+# The real knob there is `modality_scale` on MultiModalGuiderParams — "how
+# strongly the model reacts to the modality perturbation" — and
+# `_denoise_stage1` hardcodes it: video 3.0, audio bare default. Nobody had
+# ever swept it, because the control that looked like it did was inert.
+#
+# The Q4 distilled path is DIFFERENT and this patch must stay away from it:
+# `A2VidDistilledPipeline` (local a2vid_distilled.py) natively accepts
+# `audio_conditioning_scale` (it amplifies the audio tokens before the DiT)
+# and its overridden generate_and_save uses plain `denoise_loop` — no
+# guiders, so no `modality_scale` exists on that path at all. The distilled
+# branch passes the kwarg through natively and does not touch this state.
+#
+# Patched here rather than in the vendored engine so it costs no fork tag and
+# an older pipeline simply keeps its own defaults.
+# Holder dict, not a module global: the a2v branch lives deep inside the
+# main loop where a `global` statement collides with earlier assignments.
+_A2V_STATE = {"modality_scale": None}
+
+
+def _a2v_modality_scale_value(raw):
+    """Parse the slider off the job params: '14.0' -> 14.0; ''/None/0/'0'/
+    garbage/negative -> None (= keep the engine's own 3.0 default)."""
+    try:
+        value = float(raw or 0)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _a2v_stage1_guider_params(guider_params_cls, cfg_scale, stg_scale):
+    """The (video, audio) guider params for a2v stage 1, exactly as the
+    vendored `_denoise_stage1` builds them — except `modality_scale` reads
+    `_A2V_STATE` instead of the hardcoded 3.0. Split out so the test suite
+    can drive the real MultiModalGuiderParams class through it."""
+    ms = _A2V_STATE.get("modality_scale")
+    ms = 3.0 if ms is None else float(ms)
+    video_gp = guider_params_cls(cfg_scale=cfg_scale, stg_scale=stg_scale,
+                                 rescale_scale=0.7, modality_scale=ms,
+                                 stg_blocks=[28])
+    audio_gp = guider_params_cls()
+    return video_gp, audio_gp
+
+
+def _install_a2v_modality_patch() -> bool:
+    """Make `_denoise_stage1` read `_A2V_STATE['modality_scale']`. Idempotent."""
+    try:
+        from ltx_pipelines_mlx.a2vid_two_stage import (             # noqa: PLC0415
+            A2VidPipelineTwoStage as _P,
+        )
+        from ltx_core_mlx.components.guiders import (               # noqa: PLC0415
+            MultiModalGuiderParams as _GP,
+            create_multimodal_guider_factory as _mk,
+        )
+        from ltx_pipelines_mlx.utils.samplers import (               # noqa: PLC0415
+            guided_denoise_loop as _loop,
+        )
+    except Exception:                                                # noqa: BLE001
+        return False
+    if getattr(_P, "_phos_modality_patched", False):
+        return True
+
+    def _denoise_stage1(self, x0_model, video_state, audio_state, video_embeds,
+                        audio_embeds, neg_video_embeds, neg_audio_embeds,
+                        sigmas, cfg_scale=3.0, stg_scale=1.0):
+        video_gp, audio_gp = _a2v_stage1_guider_params(_GP, cfg_scale, stg_scale)
+        # Build the factories BEFORE the flush, exactly as upstream does — the
+        # flush frees memory and the original ordering is part of its contract.
+        video_factory = _mk(video_gp, negative_context=neg_video_embeds)
+        audio_factory = _mk(audio_gp, negative_context=neg_audio_embeds)
+        self._pre_denoise_flush(video_state, audio_state)
+        return _loop(
+            model=x0_model, video_state=video_state, audio_state=audio_state,
+            video_text_embeds=video_embeds, audio_text_embeds=audio_embeds,
+            video_guider_factory=video_factory,
+            audio_guider_factory=audio_factory,
+            sigmas=sigmas)
+
+    _P._denoise_stage1 = _denoise_stage1
+    _P._phos_modality_patched = True
+    return True
+
+
 def _apply_vae_streaming_decision(num_frames: int) -> None:
     """Set/unset os.environ['LTX_VAE_STREAMING'] for the upcoming decode.
     No-op if the user pinned a value at helper start time. Threshold reads
@@ -3362,6 +3457,18 @@ for line in sys.__stdin__:
                 stg_scale=float(p.get("stg_scale", 1.0)),
                 audio_start_time=float(p.get("audio_start_time", 0.0)),
             )
+            # Route the "Audio conditioning strength" slider to the knob that
+            # exists. It was sent for years as an `audio_conditioning_scale`
+            # kwarg that `generate_and_save` does not accept, so the signature
+            # filter dropped it on EVERY render. The real control is
+            # `modality_scale` on the stage-1 video guider, hardcoded to 3.0.
+            _A2V_STATE["modality_scale"] = _a2v_modality_scale_value(
+                p.get("audio_conditioning_scale"))
+            if _A2V_STATE["modality_scale"] is not None:
+                ok = _install_a2v_modality_patch()
+                emit({"event": "log",
+                      "line": f"[a2v] audio adhesion modality_scale="
+                              f"{_A2V_STATE['modality_scale']:.2f} (patched={ok})"})
             # Optional reference image — when present, conditions frame 0
             # so the audio-driven generation opens on the user's still.
             ref_image = p.get("image") or None
@@ -3465,7 +3572,13 @@ for line in sys.__stdin__:
                 stage1_steps=int(p.get("stage1_steps", 8)),
                 stage2_steps=int(p.get("stage2_steps", 3)),
                 audio_start_time=float(p.get("audio_start_time", 0.0)),
-                audio_conditioning_scale=float(p.get("audio_conditioning_scale", 1.0)),
+                # NATIVE here, unlike the Q8 path: A2VidDistilledPipeline
+                # accepts this kwarg and amplifies the audio tokens with it
+                # before the DiT. Its denoise is plain `denoise_loop` — no
+                # guiders — so the modality_scale patch has nothing to drive
+                # on this path and must not claim otherwise in the log.
+                audio_conditioning_scale=float(
+                    p.get("audio_conditioning_scale") or 1.0),
             )
             ref_image = p.get("image") or None
             if ref_image:
