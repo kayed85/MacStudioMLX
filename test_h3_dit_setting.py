@@ -33,7 +33,10 @@ sys.path.insert(0, str(ROOT))
 
 import mlx_ltx_panel as P  # noqa: E402
 
-SRC = (ROOT / "mlx_ltx_panel.py").read_text(encoding="utf-8")
+SRC = ((ROOT / "mlx_ltx_panel.py").read_text(encoding="utf-8")
+       + "\n" + (ROOT / "webapp" / "index.html").read_text(encoding="utf-8"))
+for _m in sorted((ROOT / "webapp" / "js").glob("*.js")):
+    SRC += "\n" + _m.read_text(encoding="utf-8")
 
 
 class TheSettingRoundTrips(unittest.TestCase):
@@ -114,8 +117,13 @@ class TheControlExists(unittest.TestCase):
     def test_it_reads_a_status_global_that_exists(self):
         m = re.search(r"const haveH3 = !!\((\w+) &&", SRC)
         self.assertIsNotNone(m, "the H3-installed check is gone")
-        self.assertIn(f"let {m.group(1)} = null;", SRC,
-                      f"{m.group(1)} is not a declared global")
+        # Since the queue module extraction (slice 3, docs/ARCHITECTURE.md)
+        # the status global is declared as a globalThis property — which is
+        # exactly what makes it readable across module files.
+        self.assertTrue(
+            f"let {m.group(1)} = null;" in SRC
+            or f"globalThis.{m.group(1)} = null;" in SRC,
+            f"{m.group(1)} is not a declared global")
 
     def test_the_memory_numbers_shown_are_the_measured_ones(self):
         block = SRC[SRC.index('id="settingsH3DitHint"'):][:900]

@@ -473,7 +473,13 @@ class AGreenTallyIsNotProof(unittest.TestCase):
         self.assertIn("validated", panel.TRAIN_PRESETS["high"]["subtitle"])
 
     def test_the_trainer_event_is_read_and_a_weak_run_is_not_a_plain_done(self):
-        src = (Path(__file__).resolve().parent / "mlx_ltx_panel.py").read_text()
+        root = Path(__file__).resolve().parent
+        # Server source + the page (webapp/index.html since slice 2 of
+        # the extraction — docs/ARCHITECTURE.md): the asserts span both.
+        src = (root / "mlx_ltx_panel.py").read_text() + "\n" + (
+            root / "webapp" / "index.html").read_text()
+        for _m in sorted((root / "webapp" / "js").glob("*.js")):
+            src += "\n" + _m.read_text()
         self.assertIn('elif evt == "adapter_strength":', src)
         self.assertIn("[train] adapter strength: delta_rms", src)
         self.assertIn("delta_rms_median", src)
@@ -497,7 +503,13 @@ class TheDefaultIsTheRecommendation(unittest.TestCase):
         self.assertEqual(panel.TRAIN_DEFAULT_PRESET["style"], "quick")
 
     def test_the_pill_that_is_preselected_is_the_pill_that_is_badged(self):
-        src = (Path(__file__).resolve().parent / "mlx_ltx_panel.py").read_text()
+        root = Path(__file__).resolve().parent
+        # Server source + the page (webapp/index.html since slice 2 of
+        # the extraction — docs/ARCHITECTURE.md): the asserts span both.
+        src = (root / "mlx_ltx_panel.py").read_text() + "\n" + (
+            root / "webapp" / "index.html").read_text()
+        for _m in sorted((root / "webapp" / "js").glob("*.js")):
+            src += "\n" + _m.read_text()
         pills = [ln for ln in src.splitlines() if "data-train-preset=" in ln]
         self.assertEqual(len(pills), 3, pills)
         quick = next(p for p in pills if 'data-train-preset="quick"' in p)
@@ -584,7 +596,13 @@ class AVerdictWithoutARemedyIsNotAnAnswer(unittest.TestCase):
         self.assertIn("failed", advice)
 
     def test_the_library_carries_the_remedy_and_the_ui_renders_it(self):
-        src = (Path(__file__).resolve().parent / "mlx_ltx_panel.py").read_text()
+        root = Path(__file__).resolve().parent
+        # Server source + the page (webapp/index.html since slice 2 of
+        # the extraction — docs/ARCHITECTURE.md): the asserts span both.
+        src = (root / "mlx_ltx_panel.py").read_text() + "\n" + (
+            root / "webapp" / "index.html").read_text()
+        for _m in sorted((root / "webapp" / "js").glob("*.js")):
+            src += "\n" + _m.read_text()
         # /train/list ships the remedy beside the verdict...
         self.assertIn('"adapter_advice"', src)
         # ...the trained-LoRA list renders both...

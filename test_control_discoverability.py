@@ -46,7 +46,13 @@ sys.path.insert(0, str(ROOT))
 
 import mlx_ltx_panel as P  # noqa: E402
 
-PANEL_SRC = (ROOT / "mlx_ltx_panel.py").read_text(encoding="utf-8")
+# Both halves of the panel — the Python server and the page (markup + JS),
+# which lives at webapp/index.html since slice 2 of the extraction
+# (docs/ARCHITECTURE.md).
+PANEL_SRC = ((ROOT / "mlx_ltx_panel.py").read_text(encoding="utf-8")
+             + "\n" + (ROOT / "webapp" / "index.html").read_text(encoding="utf-8"))
+for _m in sorted((ROOT / "webapp" / "js").glob("*.js")):
+    PANEL_SRC += "\n" + _m.read_text(encoding="utf-8")
 DOC = ROOT / "docs" / "MOTION_CONTROL.md"
 
 

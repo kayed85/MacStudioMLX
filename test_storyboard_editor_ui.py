@@ -2954,8 +2954,11 @@ class SplitEditsInTheBrowser(unittest.TestCase):
             r"\{ key: '(\w+)',\s+base:\s*(\d+), cap:\s*(\d+), share: ([\d.]+) \}",
             self.src)
         self.assertEqual([l[0] for l in lanes], ["ov", "track", "alane", "wave"])
-        floor = int(re.search(r"const SBE_TL_MIN_H = (\d+);", self.src).group(1))
-        ceil_ = int(re.search(r"const SBE_TL_MAX_H = (\d+);", self.src).group(1))
+        # These two are read by the layout harness's injected probe JS, so
+        # the editor module publishes them as globalThis properties rather
+        # than module-private consts (slice 3, docs/ARCHITECTURE.md).
+        floor = int(re.search(r"globalThis\.SBE_TL_MIN_H = (\d+);", self.src).group(1))
+        ceil_ = int(re.search(r"globalThis\.SBE_TL_MAX_H = (\d+);", self.src).group(1))
         self.assertEqual(floor, chrome + sum(int(l[1]) for l in lanes))
         self.assertEqual(ceil_, chrome + sum(int(l[2]) for l in lanes))
         # And the CSS fallback — what the page shows for the frame before the
@@ -3006,10 +3009,12 @@ class ThePanelsClientPARSES(unittest.TestCase):
     def test_the_served_script_parses_as_javascript(self):
         if NODE is None:
             raise unittest.SkipTest("node not on PATH")
-        src = panel_source()
-        m = re.search(r'HTML = r"""(.*?)"""', src, re.S)
-        self.assertIsNotNone(m, "the panel's HTML template moved")
-        blocks = re.findall(r"<script>(.*?)</script>", m.group(1), re.S)
+        # The page lives on disk since slice 2 of the extraction
+        # (docs/ARCHITECTURE.md) — webapp/index.html IS the file the
+        # browser is handed, placeholders aside.
+        page = (Path(__file__).resolve().parent
+                / "webapp" / "index.html").read_text(encoding="utf-8")
+        blocks = re.findall(r"<script>(.*?)</script>", page, re.S)
         self.assertTrue(blocks, "no <script> block found in the panel HTML")
         for i, js in enumerate(blocks):
             with tempfile.NamedTemporaryFile("w", suffix=".js",

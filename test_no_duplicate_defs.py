@@ -19,13 +19,21 @@ import unittest
 from pathlib import Path
 
 PANEL = Path(__file__).with_name("mlx_ltx_panel.py")
+# Slices 2–3 of the extraction (docs/ARCHITECTURE.md) moved the page to
+# webapp/index.html and its JS into ES modules under webapp/js/. The
+# JS/id region is the page PLUS every module: ES module scope would
+# technically permit the same top-level name in two files, but that is
+# exactly the built-twice shape this gate exists for, so it stays
+# forbidden across the whole frontend.
+INDEX = Path(__file__).parent / "webapp" / "index.html"
+JSDIR = Path(__file__).parent / "webapp" / "js"
 
 
 def _regions():
-    src = PANEL.read_text()
-    html_start = src.index('HTML = r"""')
-    py = src[:html_start]
-    html = src[html_start:]
+    py = PANEL.read_text()
+    html = INDEX.read_text()
+    for f in sorted(JSDIR.glob("*.js")) if JSDIR.is_dir() else []:
+        html += "\n" + f.read_text()
     return py, html
 
 

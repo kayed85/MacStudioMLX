@@ -1,0 +1,11 @@
+{
+  "name": "phosphene-webapp-lint",
+  "private": true,
+  "description": "Dev-only lint harness for the extracted frontend under webapp/ (docs/ARCHITECTURE.md). Not part of the shipped panel — the panel has no build step and no runtime node dependencies.",
+  "scripts": {
+    "lint": "node scripts/lint_webapp.mjs"
+  },
+  "devDependencies": {
+    "eslint": "^9.0.0"
+  }
+}

@@ -78,7 +78,12 @@ class ControlsHideWithTheirParents(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.src = (Path(__file__).resolve().parent / "mlx_ltx_panel.py").read_text()
+        # These rules are CSS, and the panel's CSS lives on disk at
+        # webapp/style/panel.css since the slice-1 extraction
+        # (docs/ARCHITECTURE.md) — assert against the stylesheet the
+        # browser actually loads, not the Python source.
+        cls.src = (Path(__file__).resolve().parent
+                   / "webapp" / "style" / "panel.css").read_text()
 
     def test_the_remix_row_hides_wherever_the_mode_bar_hides(self):
         for wf in self.SURFACES:
@@ -103,7 +108,13 @@ class TheA2VWarningFollowsTheReports(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.src = (Path(__file__).resolve().parent / "mlx_ltx_panel.py").read_text()
+        root = Path(__file__).resolve().parent
+        # Panel source + the page (webapp/index.html since slice 2 of the
+        # extraction — docs/ARCHITECTURE.md): these assertions span both.
+        cls.src = (root / "mlx_ltx_panel.py").read_text() + "\n" + (
+            root / "webapp" / "index.html").read_text()
+        for _m in sorted((root / "webapp" / "js").glob("*.js")):
+            cls.src += "\n" + _m.read_text()
 
     def test_the_refuted_budget_is_gone(self):
         self.assertNotIn("A2V_PIXEL_BUDGET", self.src)

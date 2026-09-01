@@ -25,6 +25,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PANEL = ROOT / "mlx_ltx_panel.py"
+# Slices 1–2 of the extraction (docs/ARCHITECTURE.md) moved the CSS to
+# webapp/style/panel.css and the page — markup + JS — to webapp/index.html.
+CSS = ROOT / "webapp" / "style" / "panel.css"
+INDEX = ROOT / "webapp" / "index.html"
 
 
 class ExtractError(RuntimeError):
@@ -32,7 +36,29 @@ class ExtractError(RuntimeError):
 
 
 def panel_source() -> str:
-    return PANEL.read_text(encoding="utf-8")
+    # Everything the panel serves, in the order the pieces sat in the
+    # pre-extraction single file: Python, then the CSS, then the page
+    # (markup + JS), then the JS modules in the order their <script
+    # type="module"> tags load them. This keeps every existing
+    # extract_function / extract_element call — and the tests that slice
+    # CSS regions out of "the panel source" — addressing the real code
+    # wherever it lives. Slice 3 migrates the extraction-based tests to
+    # import the real JS module files directly; when the last one is
+    # migrated, this module is deleted.
+    parts = [PANEL.read_text(encoding="utf-8")]
+    # The route handlers moved out of the panel's do_GET/do_POST chains
+    # into panel/routes_*.py (slice 4) — still server code the tests
+    # address as "the panel source", so they ride directly after it.
+    for rf in sorted((ROOT / "panel").glob("*.py")):
+        parts.append(rf.read_text(encoding="utf-8"))
+    parts.append(CSS.read_text(encoding="utf-8"))
+    index = INDEX.read_text(encoding="utf-8")
+    parts.append(index)
+    for m in re.finditer(
+            r'<script type="module" src="/webapp/js/([\w.-]+\.js)"></script>',
+            index):
+        parts.append((ROOT / "webapp" / "js" / m.group(1)).read_text(encoding="utf-8"))
+    return "\n".join(parts)
 
 
 def extract_function(name: str, src: str | None = None) -> str:

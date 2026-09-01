@@ -165,6 +165,12 @@ separate dev folder. Old "local dev" copy was deleted to consolidate.
 ├── assets/                                     ← logos, banner, hero clip
 ├── launch/                                     ← launch post drafts (X, Reddit, Pinokio, CivitAI)
 ├── mlx_ltx_panel.py                            ← MAIN: HTTP server, HTML UI, queue
+├── webapp/                                     ← THE FRONTEND, served from disk (docs/ARCHITECTURE.md is the map)
+│   ├── index.html                              ← the page markup; inline JS is ONE line (the __BOOTSTRAP__ seam)
+│   ├── js/                                     ← 12 ES modules (boot…main) — new JS goes in the MATCHING module
+│   └── style/panel.css                         ← ALL panel CSS — new styles go HERE, never in the Python string
+├── panel/                                      ← ALL HTTP route handlers (routes_*.py) — new endpoints REGISTER
+│                                                 here (@get/@post/@get_when/@post_when), never as do_GET/do_POST arms
 ├── mlx_warm_helper.py                          ← subprocess holding MLX pipelines warm
 ├── pinokio.js / install.js / start.js / update.js / reset.js / download_q8.js
 ├── patch_ltx_codec.py                          ← applies patches to upstream package
@@ -175,13 +181,54 @@ To work: `cd ~/pinokio/api/phosphene.git/`, edit, `git commit`,
 `git push`. Pinokio's Update button does `git pull` here. No separate
 copy to keep in sync.
 
+### THE STRUCTURE LAW — non-negotiable, 2026-09-01+
+
+The 72k-line monolith is gone (`docs/ARCHITECTURE.md` is the full map
+and the reasoning). Every kind of change now has EXACTLY ONE home, and
+the point of this section is that no session — human or AI — ever has to
+guess. Before touching panel code, read the map; then obey:
+
+1. **Styles** → `webapp/style/panel.css`. Never a `<style>` block, never
+   CSS-in-Python, anywhere else.
+2. **Markup** → `webapp/index.html`. Its inline `<script>` is EXACTLY
+   one line (`const BOOT = __BOOTSTRAP__;`) and stays that way.
+3. **JS** → the ONE `webapp/js/` module that owns the screen (editor,
+   queue, characters, storyboard, stage, preview, engines, loras,
+   settings, boot, health). A function or state another file needs is
+   PUBLISHED (the `Object.assign(globalThis, {...})` block / a column-0
+   `globalThis.X =`); everything else stays module-private.
+4. **Run-once startup calls** → `webapp/js/main.js`, which loads last on
+   purpose. Never at a feature module's top level.
+5. **Routes** → a handler in the matching `panel/routes_*.py`,
+   registered with `@get`/`@post`/`@get_when`/`@post_when`. NEVER an
+   if-arm in `do_GET`/`do_POST` — those are ~35-line dispatchers now and
+   hold no logic.
+6. **First-paint data** → a field in BOOT built server-side in `page()`;
+   live data → a field in `/status`. The browser computes no tier, no
+   canvas, no estimate of its own.
+7. **Render behaviour** → `mlx_warm_helper.py` + the job spec
+   (`make_job()`), not the frontend.
+8. **No frontend in Python, no Python-side page strings — ever again.**
+
+Enforcement is mechanical, not honorary — these fail the build:
+`test_routes.py` (a route claimed once, chains stay empty),
+`test_no_duplicate_defs.py` (nothing defined twice — the built-twice
+tombstone), `test_panel_assets.py` (files really served; the one-line
+inline seam and the no-markup-in-Python pins), and
+`scripts/lint_webapp.mjs` (every cross-module reference resolves; run
+`npm install` once, then it rides in release_gates). After ANY change:
+`bash scripts/release_gates.sh --fast` must exit 0 before commit — key
+the commit on the runner's own exit code, never on grep output.
+
 ## 3. Architecture (request → frame)
 
 ```
 Pinokio app (port 42000)
    └── proxies to → mlx_ltx_panel.py (port 8198)
                        │
-                       ├── serves a single-page HTML/JS UI from one Python process
+                       ├── serves the single-page UI from webapp/ (index.html +
+                       │   12 ES modules + panel.css, files on disk; the HTTP
+                       │   handlers live in panel/routes_*.py — ARCHITECTURE.md)
                        ├── exposes HTTP API: /run, /status, /upload, /helper/restart, ...
                        ├── owns a job queue (FIFO) + worker thread
                        └── speaks JSON-over-stdin/stdout to:
@@ -1162,14 +1209,21 @@ running. Pinokio's start.js can't take over a port someone else owns.
 **Don't spawn the panel manually unless you're going to kill it before
 handing back.**
 
-### "I edited mlx_ltx_panel.py but the UI hasn't changed"
+### "I edited the UI but the browser hasn't changed"
 
-The HTML/JS is baked into the Python file as a template string. The
-running panel served the old version. Restart it:
-- via Pinokio: Stop → Start
-- or via shell: `pkill -f mlx_ltx_panel.py` then click Start in Pinokio
+The frontend lives in files under `webapp/` (docs/ARCHITECTURE.md), and
+what you must restart depends on which file:
 
-Then **hard-refresh the browser** (Cmd+Shift+R) to bypass JS cache.
+- **CSS (`webapp/style/panel.css`) or JS (`webapp/js/*.js`)** — served
+  from disk on every request with `Cache-Control: no-cache`. NO panel
+  restart needed; just hard-refresh the browser (Cmd+Shift+R).
+- **Markup (`webapp/index.html`)** — read ONCE at panel import (the
+  served page is pinned to the booted process on purpose; see the
+  build-stamp comment in the template). Restart the panel (Pinokio
+  Stop → Start, or `pkill -f mlx_ltx_panel.py` then Start), then
+  hard-refresh.
+- **Python (`mlx_ltx_panel.py`, `panel/routes_*.py`)** — restart the
+  panel.
 
 ### "I edited the helper or a patch but nothing changed"
 

@@ -10,7 +10,13 @@ ROOT = Path(__file__).resolve().parent
 class TestH3ManualLoraImportCopy(unittest.TestCase):
     def test_h3_empty_state_names_manual_drop_directory_and_key_layout(self):
         """The H3 picker must explain the no-CivitAI manual import route."""
-        panel = (ROOT / "mlx_ltx_panel.py").read_text(encoding="utf-8")
+        # The copy under test ships to the browser from the page and the
+        # served ES modules under webapp/js/ (slices 2-3 of the extraction,
+        # docs/ARCHITECTURE.md) — read everything the browser gets.
+        panel = ((ROOT / "mlx_ltx_panel.py").read_text(encoding="utf-8")
+                 + "\n" + (ROOT / "webapp" / "index.html").read_text(encoding="utf-8"))
+        for _m in sorted((ROOT / "webapp" / "js").glob("*.js")):
+            panel += "\n" + _m.read_text(encoding="utf-8")
         self.assertIn("Drop a converted H3 <code>.safetensors</code>", panel)
         self.assertIn("<code>lora_A</code> / <code>lora_B</code>", panel)
         self.assertIn("the <strong>Hailuo H3</strong> CivitAI filter", panel)

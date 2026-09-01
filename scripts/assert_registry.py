@@ -59,9 +59,15 @@ os.environ["PHOSPHENE_DISABLE_VERSION_CHECK"] = "1"
 os.environ.setdefault("LTX_PORT", "8299")
 sys.path.insert(0, str(ROOT))
 
-spec = importlib.util.spec_from_file_location("panel", ROOT / "mlx_ltx_panel.py")
+# The alias must NOT be "panel": that name now belongs to the route-handler
+# package (panel/routes_*.py, slice 4 of docs/ARCHITECTURE.md), and the panel
+# module itself does `from panel.routes import ...` at import time — a
+# sys.modules["panel"] pointing at the half-initialised panel MODULE makes
+# that import explode with "'panel' is not a package".
+spec = importlib.util.spec_from_file_location(
+    "phos_panel_under_test", ROOT / "mlx_ltx_panel.py")
 p = importlib.util.module_from_spec(spec)
-sys.modules["panel"] = p
+sys.modules["phos_panel_under_test"] = p
 spec.loader.exec_module(p)
 
 OK = FAIL = DEFECT = 0

@@ -42,7 +42,17 @@ sys.path.insert(0, str(ROOT))
 
 import mlx_ltx_panel as P  # noqa: E402
 
-PANEL_SRC = (ROOT / "mlx_ltx_panel.py").read_text(encoding="utf-8")
+# Both halves — the Python server and the page (markup + JS), which lives
+# at webapp/index.html since slice 2 of the extraction (docs/ARCHITECTURE.md).
+PANEL_SRC = ((ROOT / "mlx_ltx_panel.py").read_text(encoding="utf-8")
+             + "\n" + (ROOT / "webapp" / "index.html").read_text(encoding="utf-8"))
+for _m in sorted((ROOT / "webapp" / "js").glob("*.js")):
+    PANEL_SRC += "\n" + _m.read_text(encoding="utf-8")
+# The stylesheet the browser loads — CSS moved out of the Python source to
+# webapp/style/panel.css in the slice-1 extraction (docs/ARCHITECTURE.md).
+# CSS-rule assertions must scan THIS, or they pass vacuously against a
+# source file that no longer contains any CSS at all.
+PANEL_CSS = (ROOT / "webapp" / "style" / "panel.css").read_text(encoding="utf-8")
 
 
 class TestIngredientsGenerationGate(unittest.TestCase):
@@ -189,12 +199,12 @@ class TestHqHardwareTierGate(unittest.TestCase):
         """
         # No display:none rule may target the HQ lane any more — neither the
         # exact-match one (which let `high_720p` through) nor a prefix one.
-        self.assertNotIn('#qualityGroup [data-quality="high"]', PANEL_SRC)
-        self.assertNotIn('#qualityGroup [data-quality^="high"]', PANEL_SRC)
+        self.assertNotIn('#qualityGroup [data-quality="high"]', PANEL_CSS)
+        self.assertNotIn('#qualityGroup [data-quality^="high"]', PANEL_CSS)
         # The greyed/struck-through unavailable style has to reach the LTX
         # strips, or an un-hidden chip looks clickable and does nothing.
-        self.assertIn("#qualityGroup .q-chip.unavailable", PANEL_SRC)
-        self.assertIn("#ltxLengthGroup .q-chip.unavailable", PANEL_SRC)
+        self.assertIn("#qualityGroup .q-chip.unavailable", PANEL_CSS)
+        self.assertIn("#ltxLengthGroup .q-chip.unavailable", PANEL_CSS)
         # And a click has to SAY the reason: a tooltip is not discoverable on
         # a chip somebody has just tapped.
         gate = PANEL_SRC.split("function _ltxApplyShape(")[1][:1400]

@@ -36,7 +36,10 @@ sys.path.insert(0, str(ROOT))
 
 import mlx_ltx_panel as P  # noqa: E402
 
-PANEL_SRC = (ROOT / "mlx_ltx_panel.py").read_text(encoding="utf-8")
+PANEL_SRC = ((ROOT / "mlx_ltx_panel.py").read_text(encoding="utf-8")
+             + "\n" + (ROOT / "webapp" / "index.html").read_text(encoding="utf-8"))
+for _m in sorted((ROOT / "webapp" / "js").glob("*.js")):
+    PANEL_SRC += "\n" + _m.read_text(encoding="utf-8")
 
 # Measured 2026-08-29 on the staged runner, 640x384 73f and 768x416 243f.
 H3_PEAK_Q8_GIB = 25.63

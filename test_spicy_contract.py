@@ -34,6 +34,11 @@ NODE = shutil.which("node")
 # Exercise the server-rendered page, after bootstrap/profile/engine substitutions,
 # rather than the Python source template. This is the exact HTML a GET / serves.
 SOURCE = P.page()
+# ...plus the served ES module files — since slice 3 (docs/ARCHITECTURE.md)
+# parts of the page's JS ship as /webapp/js/*.js, which are served bytes
+# exactly like the page itself.
+for _m in sorted((ROOT / "webapp" / "js").glob("*.js")):
+    SOURCE += "\n" + _m.read_text(encoding="utf-8")
 
 
 DOM_SHIM = r"""

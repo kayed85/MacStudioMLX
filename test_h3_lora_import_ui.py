@@ -35,61 +35,60 @@ import mlx_ltx_panel as P  # noqa: E402
 
 NODE = shutil.which("node")
 SOURCE = P.page()
+# ...plus the served ES module files — since slice 3 (docs/ARCHITECTURE.md)
+# parts of the page's JS ship as /webapp/js/*.js, which are served bytes
+# exactly like the page itself.
+for _m in sorted((ROOT / "webapp" / "js").glob("*.js")):
+    SOURCE += "\n" + _m.read_text(encoding="utf-8")
 
-DOM_SHIM = r"""
-const _els = {};
-function _mk(id, props) {
-  const el = Object.assign({
-    id, hidden: false, disabled: false, textContent: '', value: '',
-    click(){ this.clicked = (this.clicked || 0) + 1; },
-  }, props || {});
-  _els[id] = el;
-  return el;
-}
-_mk('h3LoraImportBtn', {textContent: 'Import H3 LoRA',
-                        innerHTML: '<svg></svg>Import H3 LoRA'});
-_mk('h3LoraImportFile');
-global.document = { getElementById: (id) => _els[id] || null };
-global.FormData = class { constructor(){ this.parts = []; }
-                          append(k, v, n){ this.parts.push([k, n]); } };
-global._alerts = [];
-global.alert = (m) => global._alerts.push(String(m));
-global._refreshed = 0;
-global.refreshLoras = async () => { global._refreshed++; };
-global._btnStates = [];
-"""
+# The REAL module, imported. scripts/webapp_import_shim.mjs stands in for
+# the browser just deeply enough for webapp/js/loras.js to import in node;
+# importH3Lora then runs as the browser would run it, module scope and all.
+# One consequence is deliberate: internal collaborators (refreshLoras) are
+# the real functions and cannot be stubbed — the network boundary (fetch)
+# is the seam, so "the picker refreshed" is asserted as "GET /loras went
+# out", which is also the truer claim.
 
 
 def run_node(script: str) -> dict:
     if NODE is None:
         raise unittest.SkipTest("node not on PATH")
-    proc = subprocess.run([NODE, "-e", script], capture_output=True,
-                          text=True, timeout=30)
+    proc = subprocess.run([NODE, "--input-type=module", "-e", script],
+                          capture_output=True, text=True, timeout=30)
     if proc.returncode:
         raise AssertionError(f"node failed:\n{proc.stdout}\n{proc.stderr}")
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
 def drive(fetch_js: str, file_js: str) -> dict:
-    script = "\n".join([
-        DOM_SHIM,
-        f"global.fetch = {fetch_js};",
-        extract_function("importH3Lora", SOURCE),
-        f"""
-        (async () => {{
-          const btn = document.getElementById('h3LoraImportBtn');
-          await importH3Lora({file_js});
-          console.log(JSON.stringify({{
-            alerts: global._alerts,
-            refreshed: global._refreshed,
-            fetched: global._fetched || null,
-            btnDisabled: btn.disabled,
-            btnLabel: btn.textContent,
-            btnHTML: btn.innerHTML,
-          }}));
-        }})();
-        """,
-    ])
+    script = f"""
+import {{ installShim, el }} from {json.dumps((ROOT / 'scripts' / 'webapp_import_shim.mjs').as_uri())};
+installShim();
+el('h3LoraImportBtn', {{textContent: 'Import H3 LoRA',
+                        innerHTML: '<svg></svg>Import H3 LoRA'}});
+el('h3LoraImportFile');
+globalThis._alerts = [];
+const _userFetch = {fetch_js};
+globalThis._refreshed = 0;
+globalThis.fetch = async (url, init) => {{
+  if (String(url).startsWith('/loras')) {{
+    globalThis._refreshed++;
+    return {{ok: true, status: 200, json: async () => ({{}})}};
+  }}
+  return _userFetch(url, init || {{}});
+}};
+await import({json.dumps((ROOT / 'webapp' / 'js' / 'loras.js').as_uri())});
+const btn = document.getElementById('h3LoraImportBtn');
+await importH3Lora({file_js});
+console.log(JSON.stringify({{
+  alerts: globalThis._alerts,
+  refreshed: globalThis._refreshed,
+  fetched: globalThis._fetched || null,
+  btnDisabled: btn.disabled,
+  btnLabel: btn.textContent,
+  btnHTML: btn.innerHTML,
+}}));
+"""
     return run_node(script)
 
 
@@ -178,7 +177,11 @@ class TestImportControlMarkup(unittest.TestCase):
         classes = (attr(markup, "class") or "").split()
         self.assertIn("loras-browse-btn", classes)
         self.assertIn("is-ghost", classes)
-        self.assertIn(".loras-summary .loras-browse-btn.is-ghost", SOURCE)
+        # The ghost style is CSS, and the CSS lives on disk since the slice-1
+        # extraction (docs/ARCHITECTURE.md) — the page links it, so assert
+        # against the stylesheet the browser loads.
+        css = (ROOT / "webapp" / "style" / "panel.css").read_text(encoding="utf-8")
+        self.assertIn(".loras-summary .loras-browse-btn.is-ghost", css)
 
     def test_the_file_input_accepts_only_safetensors_and_clears_itself(self):
         markup = extract_element("h3LoraImportFile", SOURCE)

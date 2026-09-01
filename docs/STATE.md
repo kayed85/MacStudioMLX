@@ -1,5 +1,60 @@
 # Phosphene — project state, history, open work
 
+> **🧱 2026-09-01 — v4.9.0: the frontend and the routes leave the monolith.**
+> Shipped to public `main` the same day, at the owner's explicit green light,
+> with the residual risks named below accepted ("we will discover if there is
+> something serious on the way"). Nothing user-visible changes in this release
+> — same screens, same renders, byte-for-byte — but every future fix lands in
+> a small named file instead of a 72k-line monolith.
+> `mlx_ltx_panel.py` carried the whole product as one 72,542-line file — the
+> shape that shipped the built-twice bug class. On `dev` (beta), in ~20 sliced
+> commits (a0ee1ff..a9c5f66), each gated green before the next:
+>
+> * **Slice 1 — CSS** → `webapp/style/panel.css`, served by a path-bound
+>   `/webapp/` route with `__ENGINE_RULES__` substituted at serve time;
+>   byte-verified identical page. `test_panel_assets.py` pins it.
+> * **Slice 2 — the page** → `webapp/index.html`, read once at import,
+>   `page()` substitutions unchanged; byte-verified modulo the build SHA.
+> * **Slice 3 — the JS** → 12 ES modules under `webapp/js/` (boot, stage,
+>   characters, engines, queue, settings, loras, preview, health, storyboard,
+>   editor, main), extracted bottom-up so execution order never changed; each
+>   module publishes its outside-facing surface explicitly
+>   (`Object.assign(globalThis, …)`), `main.js` deliberately loads LAST so the
+>   kickoffs keep the ordering guarantee hoisting used to give. The page's
+>   inline script is ONE line: `const BOOT = __BOOTSTRAP__;`.
+>   `scripts/lint_webapp.mjs` (eslint, dev-only, in release_gates) enforces
+>   no-undef/no-redeclare over the real scope model + a cross-file
+>   duplicate-publish check.
+> * **Slice 4 — the routes**: all 101 routes moved from the do_GET/do_POST
+>   if/elif chains into `panel/routes_*.py` (stats, meta, models, loras,
+>   train, files, queue, characters, storyboard, image) — exact paths in
+>   `panel.routes`' tables, startswith/endswith families in ordered pattern
+>   lists; registration refuses duplicates; the dispatchers are ~35 lines.
+>   `test_routes.py` refuses a chain arm outright and pins the pattern order.
+>   The chains' hidden body-parse coupling became `Handler._read_form_body()`.
+> * `mlx_ltx_panel.py` is now ~24.5k lines of pure server; the panel was
+>   re-verified in a live browser after every module and every route family
+>   (all seven surfaces, poll streaming, /run round-trip under a paused queue).
+>   `docs/ARCHITECTURE.md` is the authority on what lives where and where new
+>   code goes; CLAUDE.md points at it.
+>
+> **Residual risk accepted at ship time:** the from-zero install with real
+> weight downloads and a real prior-install Update click were rehearsed
+> structurally (fresh clone boots and serves everything; a v4.8.2 checkout
+> fast-forwards and boots) but not performed on a clean physical machine;
+> this release adds NO new weight-pack requirements, so the update's weights
+> half is vacuous by construction.
+>
+> **NEXT (in order):** (1) migrate the remaining extraction-based suites to
+> import the real modules via `scripts/webapp_import_shim.mjs` — the pattern
+> is proven on `test_h3_lora_import_ui`; the shared node harness behind
+> `test_storyboard_editor_ui` / `test_editor_mix` / `test_character_roundtrip`
+> / `test_stage_live_preview` / `test_spicy_contract` is one coherent package,
+> and `scripts/extract_panel_js.py` is deleted only when the last one moves.
+> (2) The per-module `Object.assign` publish lists can shrink as those
+> migrations land. (3) An end-to-end render smoke on the dev panel before any
+> promote (none of this is released; v4.8.2 remains the public tip).
+
 > **🩹 2026-09-01 — v4.8.2: a bug-fix release, nothing else.** Thirteen fixes from a full-codebase review driven by fleet analytics and open issues. What users stop suffering: "I updated and nothing changed" cases from a status chip that had been built twice and half-worked by luck; renders that died with a meaningless code when the Mac ran out of memory now say so and say what to do; a render that silently hung forever now stops itself after 20 minutes with an honest message; the "H3 needs repairing" card stops blaming the wrong thing and shows exactly what is missing (#68); Macs with 36-45 GB stop being told to install H3 by one screen and refused by another; weights moved to an external drive stop triggering a phantom 75 GB re-download; Update now repairs a broken Python environment instead of failing with a red banner; an old hidden speed control restored from ancient renders no longer crashes new ones; the log pane stops un-selecting text while users try to copy an error; character training sidecars stop lying about what they trained on, widescreen training actually trains widescreen, and the adapter-strength check stops ranking working character files below broken ones (#62 collateral). Detail per fix in the commit log (989aaf1..8db82d9).
 >
 > **Gates at the promote tree:** scripts/release_gates.sh full run — 50 PASS / 0 FAIL (the runner itself is new in this release and caught one of this release's own bugs before commit).

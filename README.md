@@ -13,7 +13,7 @@
 
 </p>
 
-> **Current release: v4.8.2.** A bug-fix release: clearer errors when a render dies from memory pressure, no more silent forever-hangs, honest H3 repair diagnosis (external-drive installs included), Update that fixes a broken Python environment instead of failing, and several character-training truthfulness fixes. Full notes on the [releases page](https://github.com/mrbizarro/phosphene/releases).
+> **Current release: v4.9.0.** An under-the-hood release: nothing on screen changes, but the panel's code was reorganized from one 72,000-line file into small named pieces (see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)), verified byte-for-byte and render-for-render along the way. Fixes and features land faster and safer from here on. Also removes some dead code. Full notes on the [releases page](https://github.com/mrbizarro/phosphene/releases).
 
 ## Overview
 
@@ -272,7 +272,7 @@ Behavioral changes worth noting in 3.0:
 
 ## What's in the repo
 
-- `mlx_ltx_panel.py` is the panel HTTP server. One file, around 64k lines, with HTML, CSS, and JS inlined as the page string. Worker thread plus helper subprocess management plus capability tier detection.
+- `mlx_ltx_panel.py` is the panel HTTP server: worker thread, helper subprocess management, engine registry, capability tier detection. The HTTP route handlers live in `panel/routes_*.py` (registered into route tables — one claim per route, enforced), and the frontend is plain files under `webapp/` (`index.html`, twelve ES modules in `webapp/js/`, `webapp/style/panel.css`) served from disk. `docs/ARCHITECTURE.md` is the map: what lives where, how the halves talk, and where a new feature's code goes.
 - `mlx_warm_helper.py` is the long-running inference subprocess. Holds T2V, I2V, Extend, HQ, and Keyframe pipelines. Reads job specs from stdin, emits events to stdout.
 - `image_engine.py` dispatches the Image tab. Backends `hidream`, `mflux`, `mock`. Each spawns its own subprocess with `start_new_session=True` so `/stop` kills the whole tree.
 - `patch_ltx_codec.py` applies one idempotent runtime patch: lossless H.264 output (yuv444p). As of the v0.14.8 pin the memory-frees, VAE streaming, Metal-watchdog and frame_rate patches are all native upstream; the v0.14.19 pin keeps that shape — one edit, one line.

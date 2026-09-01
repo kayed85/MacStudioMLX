@@ -314,7 +314,10 @@ class TestH3LoraFileImport(unittest.TestCase):
         self.assertEqual((self.dir / "keep-me.safetensors").read_bytes(), first)
 
     def test_picker_markup_has_a_real_import_control(self):
-        panel = (ROOT / "mlx_ltx_panel.py").read_text(encoding="utf-8")
+        panel = ((ROOT / "mlx_ltx_panel.py").read_text(encoding="utf-8")
+                 + "\n" + (ROOT / "webapp" / "index.html").read_text(encoding="utf-8"))
+        for _m in sorted((ROOT / "webapp" / "js").glob("*.js")):
+            panel += "\n" + _m.read_text(encoding="utf-8")
         self.assertIn("Import H3 LoRA", panel)
         self.assertIn("/h3/loras/import", panel)
 

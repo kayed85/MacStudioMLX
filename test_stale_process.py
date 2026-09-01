@@ -267,7 +267,11 @@ class ThePageAnswersWhichBuildItIs(unittest.TestCase):
         """The decoy lived in this function's comments. Nothing in the code
         that RENDERS the stamp may carry a SHA of its own."""
         import re
-        page = panel.page()
+        # renderVersionPill ships to the browser from webapp/js/health.js
+        # since the slice-3 extraction (docs/ARCHITECTURE.md) — the module
+        # file IS served bytes, so the guard reads it there.
+        page = (Path(__file__).resolve().parent
+                / "webapp" / "js" / "health.js").read_text(encoding="utf-8")
         start = page.index("function renderVersionPill(")
         end = page.index("\nfunction ", start + 1)
         body = page[start:end]

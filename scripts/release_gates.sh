@@ -103,10 +103,20 @@ if command -v node >/dev/null 2>&1; then
     run_gate "check_ltx_pin.js"         node scripts/check_ltx_pin.js
     run_gate "check_pinokio_scripts.js" node scripts/check_pinokio_scripts.js
     run_gate "check_post_update.js"     node scripts/check_post_update.js
+    # The extracted-frontend lint (docs/ARCHITECTURE.md): no-undef and
+    # no-redeclare over webapp/js modules + the inline block, plus the
+    # cross-file duplicate-publish check. Needs the dev-only eslint from
+    # package.json — a missing install is a loud skip, not a pass.
+    if [ -d node_modules/eslint ]; then
+        run_gate "lint_webapp.mjs" node scripts/lint_webapp.mjs
+    else
+        mark_skip "lint_webapp.mjs" "eslint not installed — run: npm install"
+    fi
 else
     mark_skip "check_ltx_pin.js"         "node not on PATH"
     mark_skip "check_pinokio_scripts.js" "node not on PATH"
     mark_skip "check_post_update.js"     "node not on PATH"
+    mark_skip "lint_webapp.mjs"          "node not on PATH"
 fi
 
 # ---------------------------------------------------------------------------
