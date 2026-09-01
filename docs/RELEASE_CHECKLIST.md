@@ -10,6 +10,25 @@ box and only showed up from zero.
 
 Run these BEFORE promoting `dev`/`beta` → public `main`. All must pass.
 
+## 0. The mechanical gates, in one command
+
+```
+bash scripts/release_gates.sh          # everything (~2 min)
+bash scripts/release_gates.sh --fast   # skips the two slowest
+```
+
+It runs every check on this page that a command can run — `py_compile`, the
+three `node` gates, `assert_registry`, `assert_schedules`, `check_output_codec`
+(§3a), the whole root `test_*.py` sweep, and `scripts/test_*.py` **through
+pytest** (three of those suites are pytest-style; `python -m unittest` collects
+zero tests from them and prints a green "Ran 0 tests / OK" that asserts
+nothing). It prints a PASS/FAIL/SKIP table and exits non-zero on any failure.
+**A SKIP is not a PASS** — it means the gate could not run.
+
+This does NOT replace the sections below. From-zero, the Ideogram eyeball, the
+smoke renders, the weight mirror and the update-path gate all need a human and
+a real machine.
+
 ## 1. Ideogram — from-zero render gate (the one that keeps biting us)
 
 ```
@@ -126,7 +145,109 @@ ltx-2-mlx/env/bin/python -m py_compile mlx_ltx_panel.py image_engine.py
 cat VERSION                                          # bumped for this release
 ```
 
+## 5. Update-path gate — the release most users actually receive
+
+From-zero is the gate above, and it stays mandatory. It is also **not the path
+most people take**: two of the last five releases (v4.4.0, v4.8.1) were fixes to
+the update path itself, and both of them were invisible to a from-zero install
+by construction. v4.4.0 shipped because Pinokio reads `update.js` into memory
+and *then* runs it, so an update that fixes the updater always landed one click
+late. v4.8.1 shipped because **an update ships code, not weights** — installs
+that already had H3 kept running the full bf16 engine after v4.8.0 promised them
+the compact one, and nothing told them why. A from-zero box has neither problem:
+it gets the new `update.js` as a file and downloads every weight anyway.
+
+So run this too, on a real previous install:
+
+```
+# 1. install the PREVIOUS public release into a scratch dir
+git clone https://github.com/mrbizarro/phosphene.git /tmp/upd-gate
+git -C /tmp/upd-gate checkout <PREVIOUS-TAG>          # e.g. v4.8.0
+#    then install it through Pinokio (or run install.js) so it has a real venv
+#    and the packs the previous release shipped
+
+# 2. run the Update flow — the same button a user clicks, not `git pull`
+#    (update.js is read into memory BEFORE it runs; a thin update.js that
+#     delegates to a file read AFTER the pull is what makes fixes land on time)
+
+# 3. assert BOTH of these, not just the first
+cat /tmp/upd-gate/VERSION                              # == this release's VERSION
+```
+
+**Both halves must arrive, and they are different mechanisms:**
+
+- **Code version** — `VERSION` on disk, the panel's `/version`, and the
+  stale-process pill all agree with what was promoted.
+- **New weight-pack requirements** — anything this release ADDED to
+  `required_files.json`, or any engine/quantisation it made the new default,
+  is actually **on disk in the updated install**, not merely referenced. If a
+  release changes what a pack must contain, the update must build or fetch it;
+  a headline the update cannot keep is a v4.8.0. Confirm from the updated
+  install's own `/status` (`model_integrity`), and confirm the panel does not
+  quietly fall back — a fallback that is not named in the render log is the
+  bug, not the fallback.
+
+If the previous release's install cannot reach this release's headline feature
+by pressing Update, **do not promote** — ship the delivery fix in the same
+release.
+
 ---
 
-When all pass, promote (`git push origin dev:main` + `gh release create`). If
-any fails, **do not ship** — that's the whole point of this file.
+## Promoting — a curated SNAPSHOT, never a branch push
+
+> ### ⛔ NEVER push the `dev` branch onto public `main`
+>
+> Not as a refspec, not fast-forward, not with any flag. This file used to end
+> by telling you to, and it was wrong.
+>
+> Public `main` is **not** `dev` under a different name. It is a chain of
+> single-parent **snapshot** commits, one per release
+> (`release(v4.8.1): …` → `release(v4.8.0): …` → …), each carrying a tree and
+> nothing else. A branch push would publish the **entire dev history** — 465+
+> commits of internal notes, dead experiments, abandoned branches, and every
+> message written on the assumption nobody outside would read it. It is not
+> undoable in any way that matters: it is public the second it lands.
+>
+> `test_release_coherence.py` fails if that command ever reappears in this file.
+
+The promote is: build the tree you want to publish, remove what must not go
+public, commit that tree onto `origin/main` with `commit-tree`, **verify the
+result before it is pushed**, then push exactly one commit.
+
+```
+git fetch origin
+
+# 1. stage dev's tree, then remove what public main does not carry
+git read-tree --empty
+git read-tree <DEV-SHA>
+git rm --cached -q <scratch paths>        # currently: the dev-only scratch
+                                          # test files not on main — diff first,
+                                          # never guess this list
+TREE=$(git write-tree)
+
+# 2. one snapshot commit, parented on public main
+COMMIT=$(git commit-tree "$TREE" -p origin/main \
+    -m "release(vX.Y.Z): <the release headline>")
+
+# 3. LEAK-VERIFY before pushing — this is the step that cannot be skipped
+git diff --stat origin/main "$COMMIT"     # read EVERY path; expect only this
+                                          # release's changes
+diff <(git ls-tree -r --name-only "$COMMIT" | sort) \
+     <(git ls-tree -r --name-only <DEV-SHA> | sort)   # only the removals above
+git log --format=%P -1 "$COMMIT"          # exactly ONE parent == origin/main
+
+# 4. push the single commit, then tag it
+git push origin "$COMMIT":refs/heads/main
+git tag -a vX.Y.Z "$COMMIT" -m "vX.Y.Z"
+git push origin vX.Y.Z
+gh release create vX.Y.Z --repo mrbizarro/Phosphene ...
+```
+
+Reminders that bit before: the git index is shared, so `read-tree`/`rm --cached`
+leaves it staging the promote tree — reset it when you are done. And any weight
+pack published for this release must be tagged on the **public main commit you
+just pushed** (§3b), which means the packs go up *after* step 4, not before.
+
+---
+
+If any gate fails, **do not ship** — that's the whole point of this file.

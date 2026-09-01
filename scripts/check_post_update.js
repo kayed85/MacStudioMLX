@@ -18,6 +18,12 @@
  * It must ALSO stay after the package reinstall: that step overwrites
  * site-packages, so a patch applied before it is thrown away.
  *
+ * And at the other end: the LTX venv self-heal (step 0) must stay BEFORE the
+ * mlx pin, because everything from the pin onward installs into that venv.
+ * A dangling uv interpreter — which any other Pinokio pack can cause — turned
+ * an Update into a run of install failures whose FATAL banner named a pin
+ * instead of the venv, leaving reinstall as the only apparent cure.
+ *
  * ---------------------------------------------------------------------------
  * 2. FATALITY — a failed load-bearing step fails the Update
  * ---------------------------------------------------------------------------
@@ -48,6 +54,8 @@ const at = (re, label) => {
   return hit.n
 }
 
+const venv = at(/ltx_venv\.sh/, "the LTX venv self-heal")
+const mlxPin = at(/mlx==0\.31\.1/, "the mlx pin")
 const reinstall = at(/uv pip install .*--reinstall .*\.\/packages\/ltx-core-mlx/, "the vendored package reinstall")
 const patch = at(/patch_ltx_codec\.py/, "the codec patch")
 const optional = [
@@ -60,8 +68,25 @@ const optional = [
   ["the model trim", /^rm -f /],
 ]
 
+console.log(`venv self-heal    : line ${venv}`)
+console.log(`mlx pin           : line ${mlxPin}`)
 console.log(`package reinstall : line ${reinstall}`)
 console.log(`codec patch       : line ${patch}`)
+
+// --- 0. THE VENV EXISTS BEFORE ANYTHING INSTALLS INTO IT --------------------
+// Every step from the mlx pin onward is `uv pip install --python $VENV_PY`. If
+// that interpreter is a dangling uv symlink chain — which any other Pinokio
+// pack can cause, see the note in post_update.sh — the Update becomes a run of
+// install failures whose FATAL banner names a pin instead of the venv, and the
+// user's only remaining move is a full reinstall of a machine whose weights are
+// all fine. The self-heal is idempotent and costs ~50 ms on a healthy install,
+// so the only thing that can go wrong here is someone moving it later in the
+// file during a future edit. That is what this asserts.
+if (venv > mlxPin) {
+  failures.push(`the LTX venv self-heal (line ${venv}) runs AFTER the mlx pin (line ${mlxPin}). Everything from the pin onward installs into that venv, so it has to be repaired first — see step 0 in post_update.sh.`)
+} else {
+  console.log(`  ok    venv self-heal(${venv}) < mlx pin(${mlxPin})`)
+}
 
 if (patch < reinstall) {
   failures.push(`the codec patch (line ${patch}) runs BEFORE the package reinstall (line ${reinstall}) — the reinstall overwrites site-packages, so the patch would be thrown away.`)
@@ -83,6 +108,9 @@ if (!/^require\(\)/m.test(lines.join("\n"))) {
   failures.push("post_update.sh defines no `require()` helper — load-bearing steps have no way to fail the Update.")
 }
 const mustRequire = [
+  // Not optional despite being a "repair": a venv that cannot be rebuilt makes
+  // every later step fail, so continuing only makes the report worse.
+  ["the LTX venv self-heal", /ltx_venv\.sh/],
   ["the vendored pin move", /ltx_checkout\.sh/],
   ["the mlx pin", /mlx==0\.31\.1/],
   ["the vendored package reinstall", /--reinstall .*\.\/packages\/ltx-core-mlx/],

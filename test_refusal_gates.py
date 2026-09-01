@@ -283,6 +283,9 @@ class TestH3RamRefusalStatesTheRealFloor(unittest.TestCase):
     """
 
     def setUp(self):
+        # h3_status() memoizes for 3 s (poll-load fix); these tests patch
+        # RAM/paths state between calls and need fresh computation.
+        P.h3_status_invalidate()
         self.old_ram = P.SYSTEM_RAM_GB
         self.old_dir = P._h3_q8_dit_dir
 

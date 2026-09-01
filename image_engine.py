@@ -1007,12 +1007,16 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
     # when the layer-0 residual is stable step-to-step). The patch is
     # injected by patch_mflux_fbcache.py at install/update time and is
     # a no-op unless MFLUX_FB_CACHE=1 is set in the subprocess env.
-    # Enabled for ALL Qwen tiers — the threshold itself gates whether
-    # caching actually triggers. At 4-step Lightning the per-step
-    # residual deltas are usually large enough that no cache hits land
-    # (no gain, no harm); at 8+ steps we measured ~28% speedup with
-    # identical visual output.
-    if fam == "qwen_edit":
+    # Enabled for the SHORT Qwen tiers only. At 4-step Lightning the
+    # per-step residual deltas are usually large enough that no cache
+    # hits land (no gain, no harm); at 8 steps we measured ~28% speedup
+    # with identical visual output. At 40 steps it was NEVER measured,
+    # and there the inter-step deltas shrink enough that the skip path
+    # (a direct replay of a stale pre-last-layer state, no consecutive-
+    # skip cap) can serve dozens of middle steps from one cache — the
+    # second contributor to the 2026-08-30 Quality-tier noise. Long
+    # schedules run honest until a long-schedule measurement exists.
+    if fam == "qwen_edit" and int(config.mflux_steps or 0) <= 12:
         env["MFLUX_FB_CACHE"] = "1"
         env.setdefault("MFLUX_FB_THRESHOLD", "0.15")
         env.setdefault("MFLUX_FB_KEEP_LAST", "8")

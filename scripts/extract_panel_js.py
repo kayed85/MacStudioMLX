@@ -38,9 +38,22 @@ def panel_source() -> str:
 def extract_function(name: str, src: str | None = None) -> str:
     """The full text of `function <name>(...) { ... }`, braces balanced."""
     s = src if src is not None else panel_source()
-    m = re.search(r"^(?:async\s+)?function\s+%s\s*\(" % re.escape(name), s, re.M)
-    if not m:
+    pat = r"^(?:async\s+)?function\s+%s\s*\(" % re.escape(name)
+    hits = list(re.finditer(pat, s, re.M))
+    if not hits:
         raise ExtractError("function %s() not found in mlx_ltx_panel.py" % name)
+    if len(hits) > 1:
+        # A duplicated declaration is exactly the parallel-edit accident this
+        # repo has now shipped twice (the health chip, both times). Returning
+        # the FIRST match here meant the tests covered the copy the browser
+        # does not run — JS hoisting makes the LAST declaration win. Refusing
+        # is the only honest behaviour: the caller must fix the panel, not
+        # pick a copy.
+        raise ExtractError(
+            "function %s() is declared %d times in mlx_ltx_panel.py — "
+            "duplicate definitions must be removed before it can be tested"
+            % (name, len(hits)))
+    m = hits[0]
     start = m.start()
     i = s.index("{", m.end() - 1)
     depth, j, in_s, esc, in_c, in_lc = 0, i, "", False, False, False

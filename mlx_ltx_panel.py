@@ -3336,6 +3336,20 @@ def _character_dataset_image(trigger: str) -> Path | None:
     return None
 
 
+def _character_sheet_png(trigger: str) -> Path | None:
+    """mlx_models/characters/<trigger>/sheet.png when a generated character
+    sheet exists, else None.
+
+    Unlike `_character_dataset_image` there is no lora-lab fallback — sheets
+    are panel-generated only (generate_character_sheet writes them), so the
+    single panel-owned location is the whole search space. Keeping this a
+    one-liner helper (rather than inlining the path twice) means the record
+    surfacing in list_characters and the /characters/<id>/sheet serve route
+    can never disagree about where a sheet lives."""
+    p = _CHARACTERS_CACHE_PATH / trigger / "sheet.png"
+    return p if p.is_file() else None
+
+
 def _character_bundle(trigger: str) -> dict:
     """Read mlx_models/characters/<trigger>/bundle.json if present.
     Returns an empty dict on missing or unparseable JSON — discovery
@@ -3388,6 +3402,7 @@ def list_characters() -> list[dict]:
                 break
         bundle = _character_bundle(trigger)
         sample = _character_dataset_image(trigger)
+        sheet = _character_sheet_png(trigger)
         compat_parts = [_ltx_lora_compatibility(face_path)]
         if has_audio:
             compat_parts.append(_ltx_lora_compatibility(audio_path))
@@ -3420,6 +3435,12 @@ def list_characters() -> list[dict]:
             "sample_image_path": str(sample) if sample else None,
             "sample_image_url": (f"/characters/{trigger}/preview"
                                  if sample else None),
+            # Generated character sheet (multi-view turnaround), when one
+            # exists. Same path/url pairing as sample_image so UI code can
+            # treat the two thumbnails uniformly.
+            "sheet_image_path": str(sheet) if sheet else None,
+            "sheet_image_url": (f"/characters/{trigger}/sheet"
+                                if sheet else None),
             "ltx_compatible": (
                 False if incompatible else (True if compatibility_known else None)
             ),
@@ -6736,17 +6757,31 @@ def caffeinate_off() -> None:
 
 # ---- system probes -----------------------------------------------------------
 
-def find_comfy_pids() -> list[int]:
+# find_comfy_pids feeds one status pill, but it was called from the /status
+# handler — a pgrep FORK every 1.5 s poll, ~2,400 process spawns per hour per
+# open tab, including during renders. Comfy starting or stopping is a
+# once-a-session event; 30 s staleness on the pill is invisible, the constant
+# forking was not. kill_comfy() bypasses the cache (it acts on the pids).
+_COMFY_PIDS_CACHE: tuple[float, list] = (0.0, [])
+
+
+def find_comfy_pids(fresh: bool = False) -> list[int]:
+    global _COMFY_PIDS_CACHE
+    ts, pids = _COMFY_PIDS_CACHE
+    if not fresh and time.time() - ts < 30.0:
+        return pids
     try:
         out = subprocess.run(["pgrep", "-f", COMFY_PATTERN],
             capture_output=True, text=True, timeout=2).stdout
+        pids = [int(line) for line in out.splitlines() if line.strip().isdigit()]
     except Exception:
-        return []
-    return [int(line) for line in out.splitlines() if line.strip().isdigit()]
+        pids = []
+    _COMFY_PIDS_CACHE = (time.time(), pids)
+    return pids
 
 
 def kill_comfy() -> int:
-    pids = find_comfy_pids()
+    pids = find_comfy_pids(fresh=True)
     for pid in pids:
         try:
             os.kill(pid, signal.SIGTERM)
@@ -10823,8 +10858,27 @@ def h3_visible_lengths() -> list[dict]:
         key=lambda l: l["order"])]
 
 
+# h3_status() ran DOZENS of stat() calls, a glob and two directory scans on
+# EVERY 1.5 s /status poll — steady filesystem churn on every open tab, and on
+# an external-SSD install (the exact #68 layout) the poll loop kept the disk
+# awake continuously. 3 s of staleness is invisible to the "install finishes
+# and the pill lights up within a couple of seconds" story the freshness
+# comment defended; the churn was not. Install/repair endpoints can call
+# h3_status_invalidate() so their effect lands on the very next poll.
+_H3_STATUS_CACHE = (0.0, None)
+
+
+def h3_status_invalidate() -> None:
+    global _H3_STATUS_CACHE
+    _H3_STATUS_CACHE = (0.0, None)
+
+
 def h3_status() -> dict:
-    """Compact H3 snapshot for /status + the page bootstrap."""
+    """Compact H3 snapshot for /status + the page bootstrap (3 s memo)."""
+    global _H3_STATUS_CACHE
+    _ts, _cached = _H3_STATUS_CACHE
+    if _cached is not None and time.time() - _ts < 3.0:
+        return _cached
     paths = h3_paths()
     verdict = h3_ram_verdict()
     needs_q8_dit = bool(verdict["needs_q8_dit"])
@@ -10839,7 +10893,7 @@ def h3_status() -> dict:
     # engine that the server then refuses. The weights ARE on disk, so this is
     # `repairable` — a named 5-minute step, not a 75 GB download.
     available = (not paths["missing"]) and not needs_q8_dit
-    return {
+    result = {
         "capable": capable,
         "available": available,
         "installed": available,
@@ -11039,6 +11093,10 @@ def h3_status() -> dict:
 #                 tint only — never a repaint.
 #   state         "ready" | "announced". An announced engine renders as an
 #                 inert "soon" chip and can never be selected.
+    _H3_STATUS_CACHE = (time.time(), result)
+    return result
+
+
 ENGINE_DEFAULT = "ltx"
 
 ENGINES: tuple[dict, ...] = (
@@ -11921,6 +11979,11 @@ _ANALYTICS_REFUSAL_REASONS = (
                 "gb of unified memory on its reduced-ram q8 engine")),
     ("h3_mode", ("doesn't serve mode",)),
     ("h3_lora_slots", ("adapter slot",)),
+    # The vendored engine predates the Gemma 4 tower, so a 2.5 render would
+    # die at the first prompt encode with mlx_lm's own words. Refused up
+    # front instead — the remedy is two Update clicks, and the refusal says
+    # so. Capability comes from the helper's gemma4_tower_supported probe.
+    ("stale_engine", ("predates ltx-2.5's text encoder",)),
 )
 
 _ANALYTICS_REFUSAL_SLUGS = tuple(s for s, _ in _ANALYTICS_REFUSAL_REASONS)
@@ -11962,8 +12025,14 @@ _ANALYTICS_ERROR_CLASSES = (
     ("oom_jetsam", ("sigkill", "helper died mid-job")),
     ("native_crash", ("sigsegv", "sigbus", "sigabrt")),
     ("helper_start_timeout", ("helper failed to start", "handshake")),
+    # "exited with code N" is the shared shape of six raise sites (training,
+    # audio trainer, H3 render, upscale, qwen-edit, generic subprocess) that
+    # all landed in `other`. Negative codes are decoded to signal names at the
+    # raise sites, so SIGKILL/SIGABRT strings are claimed by the rows above
+    # before this needle sees them.
     ("helper_exit", ("pipe closed", "broken pipe", "helper exited",
-                     "exited mid-job")),
+                     "exited mid-job", "exited with code",
+                     "failed (exit")),
     # ONE NEEDLE HOISTED, so the row below cannot claim it: a hub
     # "repo not found" is a fetch fault about something that was never local.
     # The rest of `download_failed` stays in its original place, BELOW
@@ -11991,6 +12060,17 @@ _ANALYTICS_ERROR_CLASSES = (
     ("input_missing", ("does not exist", "no longer exists",
                        "not found:", "no longer on disk",
                        "needs a reference image")),
+    # HOISTED ABOVE THE LOOSE `download` NEEDLE for the same reason
+    # `input_missing` is: these strings carry paths and reassurances that
+    # contain the word "download". "[load_safetensors] Failed to open file
+    # <path>" was the single biggest failure signature in the fleet (493
+    # events in 7 days) and it sat in `other` — or, when the path ran through
+    # ~/Downloads, in `download_failed`. And the H3 pack gate's repairable
+    # branch ends "NOT a 75 GB download", which the loose needle read as a
+    # fetch fault; its two halves of one condition landed in two different
+    # classes.
+    ("model_missing", ("failed to open file", "load_safetensors",
+                       "isn't installed", "needs repair")),
     ("download_failed", ("download", "urlopen", "http error", "gated",
                          "401", "403", "fetch")),
     ("model_corrupt", ("corrupt", "checksum", "integrity",
@@ -12160,11 +12240,17 @@ def _analytics_render_event(job: dict) -> None:
         wall = _analytics_wall_sec_bucket(job.get("elapsed_sec"))
         if wall is not None:
             props["wall_sec_bucket"] = wall
-        if status == "done" and not bool(
-                get_settings().get("analytics_first_render_reported")):
+        if (status == "done" and _analytics_enabled()
+                and not bool(
+                    get_settings().get("analytics_first_render_reported"))):
             # Activation as a one-event funnel (spec D1): the first
             # successful render this install ever produced, once, same
-            # persisted-flag shape as analytics_install_reported.
+            # persisted-flag shape as analytics_install_reported. The
+            # _analytics_enabled() guard mirrors _analytics_boot: without it
+            # a render with analytics OFF burned the one-shot flag, so a
+            # user who later opted in could never appear in the activation
+            # funnel — and the flag write (a synchronous settings fsync in
+            # the worker's finally) bought nothing.
             props["first_render"] = True
             _settings_set_internal(analytics_first_render_reported=True)
         event = "render_completed" if status == "done" else "render_failed"
@@ -12175,8 +12261,16 @@ def _analytics_render_event(job: dict) -> None:
             # structural stamp (worker_loop, from RenderRefused.reason) is
             # the real signal; the text classifier is the fallback for a
             # refusal that lost its exception type on the way here.
-            reason = (str(job.get("refused_reason") or "").strip()
-                      or _analytics_refusal_reason(job.get("error")))
+            # BOTH candidates are computed and the first VALID slug wins.
+            # The old `or` short-circuited on any non-empty refused_reason —
+            # so a raise site that stamped a reason not in the table starved
+            # the text fallback the table was explicitly built as a safety
+            # net for, and the event fell through to render_failed.
+            reason = next(
+                (r for r in (str(job.get("refused_reason") or "").strip(),
+                             _analytics_refusal_reason(job.get("error")))
+                 if r in _ANALYTICS_REFUSAL_SLUGS),
+                "")
             if reason in _ANALYTICS_REFUSAL_SLUGS:
                 # One closed-vocabulary field instead of error_class /
                 # error_signature / error_fingerprint: there is no fault to
@@ -13639,6 +13733,7 @@ class WarmHelper:
                     # every downstream reader sees None — which is exactly how
                     # a capability the helper knew about never reached the UI.
                     "live_preview_supported",
+                    "gemma4_tower_supported",
                 )
             }
             _vtag = ""
@@ -21037,7 +21132,43 @@ def run_h3_job_inner(job: dict) -> None:
         _proc_guard_write("h3", proc.pid, os.getpgid(proc.pid),
                           note=f"job {job['id']}")
         assert proc.stdout is not None
-        for raw in proc.stdout:
+        # IDLE DEADLINE. A child that is alive but silent — SIGSTOP, or a
+        # machine so deep in swap that no denoise step ever completes — used
+        # to block this read forever: the job showed its last progress line
+        # for the rest of the session and no analytics event was ever
+        # emitted. Denoise steps print continuously (the slowest measured
+        # step is ~2 min on a chained window), so 20 minutes of total
+        # silence is not patience, it is a hang. select() on the raw fd
+        # costs nothing when output is flowing.
+        import selectors as _selectors
+        _sel = _selectors.DefaultSelector()
+        _sel.register(proc.stdout, _selectors.EVENT_READ)
+        _H3_IDLE_LIMIT_SEC = 20 * 60
+
+        def _h3_lines():
+            buf = b""
+            while True:
+                if not _sel.select(timeout=_H3_IDLE_LIMIT_SEC):
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError, OSError):
+                        pass
+                    raise RuntimeError(
+                        "H3 render timed out — no output for 20 minutes, so "
+                        "the process was killed. The machine was likely "
+                        "swapping too hard to make progress; try a shorter "
+                        "length or a smaller canvas.")
+                chunk = os.read(proc.stdout.fileno(), 65536)
+                if not chunk:
+                    if buf:
+                        yield buf.decode("utf-8", "replace")
+                    return
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    yield line.decode("utf-8", "replace") + "\n"
+
+        for raw in _h3_lines():
             line = raw.rstrip("\n")
             if not line.strip():
                 continue
@@ -21127,6 +21258,34 @@ def run_h3_job_inner(job: dict) -> None:
             # exception to the neutral `stopped` history state.
             raise JobStopped("H3 render stopped early at the next forward boundary")
         if rc != 0:
+            # Negative rc means the child died on a signal, and NAMING it is
+            # the whole diagnosis: a jetsam kill during joint denoise (issue
+            # #67 — the log just stops at "== w1_joint_denoise ==") used to
+            # raise the bare code, which named no cause, offered no remedy,
+            # and classified as `other` — so every H3 OOM in the fleet was
+            # invisible as a series. The LTX helper has decoded signals this
+            # way since #44; the H3 path never got the same treatment.
+            if rc < 0:
+                try:
+                    _sig = signal.Signals(-rc).name
+                except (ValueError, AttributeError):
+                    _sig = f"signal{-rc}"
+                _hint = {
+                    "SIGKILL": ("out of memory (jetsam) or external kill — "
+                                "close memory-heavy apps, or drop to a shorter "
+                                "length / smaller canvas, and retry"),
+                    "SIGSEGV": ("native segfault inside MLX/Metal — share the "
+                                "crashlog at ~/Library/Logs/DiagnosticReports/"),
+                    "SIGABRT": ("C-level abort — if the log shows a Metal "
+                                "'Command buffer execution failed' line, the "
+                                "macOS GPU watchdog killed an over-long "
+                                "command buffer"),
+                    "SIGBUS": ("memory access fault — possible Metal driver "
+                               "issue or a bad weight file"),
+                }.get(_sig, "external kill")
+                raise RuntimeError(
+                    f"H3 helper exited from {_sig} ({_hint}) — see the log "
+                    f"above (metrics at {metrics_path}).")
             raise RuntimeError(
                 f"H3 render exited with code {rc} — see the log above for the "
                 f"traceback (metrics at {metrics_path}).")
@@ -21325,6 +21484,23 @@ def run_job_inner(job: dict) -> None:
     # applies to it.
     if (p.get("engine") or "ltx").strip().lower() == "h3":
         return run_h3_job_inner(job)
+    # STALE-ENGINE GATE (fleet: 'Model type gemma4_unified not supported.',
+    # 19 events / 6 installs, every one a legacy install whose vendored engine
+    # predates the Gemma 4 tower). The render would die at first text-encode
+    # with mlx_lm's own unhelpful words; the fault self-heals on a SECOND
+    # Update click and nothing ever said so. Capability-probed, never
+    # version-string-inferred, same shape as live_preview_supported — and
+    # `is False`, not falsy: ready_info is {} until the helper boots, and
+    # 'we haven't asked yet' must not render as 'your engine is broken'.
+    if (model_version().get("id") == "ltx25"
+            and HELPER.ready_info.get("gemma4_tower_supported") is False):
+        raise RenderRefused(
+            "stale_engine",
+            "This install's vendored engine predates LTX-2.5's text encoder "
+            "(the Gemma 4 tower), so a 2.5 render would fail at the first "
+            "prompt encode. Click Update — and if the first click only moves "
+            "the panel, click it once more: an update started by an old "
+            "version updates itself first.")
     _apply_generation_profile_to_job(job)
     for note in p.get("generation_clamp_notes") or []:
         push(f"[generation] {p.get('generation_profile_label')}: {note}")
@@ -21332,6 +21508,21 @@ def run_job_inner(job: dict) -> None:
     if p.get("accel") not in ("off", "boost", "turbo"):
         p["accel"] = "off"
     if ltx_quality_uses_hq(quality) or mode in ("extend", "keyframe", "a2v", "restore", "ingredients", "control"):
+        p["accel"] = "off"
+    # RETIRED CONTROL, FORCED OFF (fleet bug, 15 events / 4 installs). The
+    # Boost/Turbo row lost its UI in v4.0.5, but the hidden #accel input
+    # survived and Load Params restores it from any pre-4.0.5 sidecar — and
+    # the helper's accel wrapper (_build_adaptive_x0_loop) was written against
+    # an older engine signature: on the 2.5 distilled lanes the engine now
+    # passes video_cross_attention_mask / diffusion_step / preview /
+    # repin_masked_sample, none of which the wrapper accepts, so the render
+    # dies with a TypeError at the first denoise step. Until the wrapper is
+    # rewritten against the current signature (and conformance-tested against
+    # inspect.signature(samplers.denoise_loop)), a resurrected value must not
+    # reach it. A control with no surface cannot be honestly honoured anyway.
+    if p.get("accel") != "off":
+        push("[accel] Boost/Turbo was retired in v4.0.5 — this render restored "
+             "it from an old sidecar; running with acceleration off.")
         p["accel"] = "off"
 
     # Guard: Q4 distilled hardcoded 9-sigma schedule needs the full walk to
@@ -23366,9 +23557,14 @@ def _build_image_engine_config(
         # Qwen MEDIUM — 8-step Q6, no LoRA, no CFG. Sits between Fast's
         # distilled output (sometimes over-smooth) and Quality's 40-step
         # cost. ~2:35 per image (50 s cold + 105 s denoise).
+        # mflux_lora_paths=[] is LOAD-BEARING, not styling: the dataclass
+        # default carries the Lightning 4-step LoRA (eca173a made it the
+        # universal default), so a builder that stays silent inherits a
+        # step-distillation adapter it never asked for.
         return agent_image_engine.ImageEngineConfig(
             kind="mflux", mflux_model="Qwen/Qwen-Image-Edit-2511",
             mflux_family="qwen_edit", mflux_quantize=6, mflux_steps=8,
+            mflux_lora_paths=[], mflux_lora_scales=[],
         )
     if engine_override == "qwen_edit_high_inline":
         # Qwen QUALITY — 40-step Q8 + CFG 4.0. Matches the Qwen
@@ -23376,10 +23572,19 @@ def _build_image_engine_config(
         # guidance_scale=1.0 + steps=40). mflux's --guidance maps to
         # true_cfg_scale on the qwen-edit CLI. ~5 min per image
         # (60 s cold + 240 s denoise).
+        # mflux_lora_paths=[] is the 2026-08-30 speckle-noise fix: this
+        # preset was created "no LoRA" (30211f8) and then eca173a moved
+        # the Lightning 4-step LoRA into the dataclass DEFAULT, so
+        # Quality silently fused a 4-step distillation adapter at scale
+        # 1.0 into a 40-step true-CFG schedule — the exact failure the
+        # LoRA-stacking comment predicts as "silently produce noise".
+        # Proof it shipped: every candidate sidecar of the 2026-08-30
+        # marcus_images_hq run records the Lightning path.
         return agent_image_engine.ImageEngineConfig(
             kind="mflux", mflux_model="Qwen/Qwen-Image-Edit-2511",
             mflux_family="qwen_edit", mflux_quantize=8, mflux_steps=40,
             mflux_guidance=4.0,
+            mflux_lora_paths=[], mflux_lora_scales=[],
         )
     # ===== FLUX.2 family + Z-Image-Turbo (REMOVED 2026-05-13) ===============
     # Dropped from the dropdown. We focus the local stack on the two
@@ -23431,6 +23636,361 @@ def _build_image_engine_config(
     if engine_override == "mock_inline":
         return agent_image_engine.ImageEngineConfig(kind="mock")
     raise ValueError(f"unknown engine_override: {engine_override!r}")
+
+
+# ============================================================================
+# Character sheet — multi-view turnaround from one reference image
+# ============================================================================
+# v1 is API-first: POST /characters/<id>/sheet/generate renders N views of a
+# character through the ref-honoring image engines and composites them into
+# mlx_models/characters/<id>/sheet.png (+ a sheet.json sidecar). No UI yet.
+#
+# The view catalogue is the API surface — POST bodies name views by these
+# keys. Each value is only the camera/pose clause; _character_sheet_view_prompt
+# wraps it in the identity-preserving edit framing. Insertion order is render
+# order and grid order on the composited sheet.
+CHARACTER_SHEET_VIEWS: dict[str, str] = {
+    "front": "a chest-up front portrait, facing the camera directly",
+    # Plain "side view" wording, not "strict left profile": on the live
+    # hidream verify the profile-jargon phrase (once the centering clause
+    # landed next to it) kept re-imagining a dark-haired reference as
+    # platinum — salon-editorial vocabulary drags salon-editorial styling
+    # with it, across seeds and despite an explicit same-hair-color pin.
+    "profile_left": ("a side view portrait from the left, head and "
+                     "shoulders, the face seen from the side"),
+    "three_quarter": ("a three-quarter view, head and shoulders turned "
+                      "halfway between front and profile"),
+}
+
+# Only engines that actually condition on the reference image may build a
+# sheet. Identity comes from the ref; a text-only engine (ideogram4) or an
+# unknown saved Settings config ("auto" could resolve to BFL/ideogram) would
+# happily render a stranger and call it a sheet — refuse up front instead.
+# mock_inline stays allowed: it marks refs_ignored and exists for tests.
+_CHARACTER_SHEET_ENGINES = {
+    "hidream_fast_inline", "hidream_inline", "hidream_quality_inline",
+    "qwen_edit_lightning_inline", "qwen_edit_inline", "qwen_edit_high_inline",
+    "mock_inline",
+}
+
+
+class CharacterSheetBusyError(RuntimeError):
+    """The GPU is already held by a render/training/image job. The sheet
+    generator refuses rather than queueing (same contract as the inline
+    /image/generate path's 429)."""
+
+
+def _character_sheet_view_prompt(view_phrase: str, wardrobe: str = "") -> str:
+    """Build the per-view edit prompt for one sheet cell.
+
+    The framing is the change-only edit style: open with an explicit
+    keep-everything clause so the engine treats the request as a camera
+    change, not a re-imagination. Wardrobe is ALWAYS pinned to the reference
+    ("wearing exactly the same clothes") because wardrobe drift is the known
+    residual defect of ref-conditioned edits; the optional `wardrobe` string
+    re-states the outfit in words on top of that, for references where the
+    clothing is partly out of frame."""
+    # "centered in the frame, filling most of it" is load-bearing: the first
+    # live hidream run (ariatrn, seed 424242) drifted the profile view to the
+    # left edge of a mostly-empty wall — ref-conditioned edits keep identity
+    # but freely re-stage composition unless told not to.
+    # "same hair COLOR and STYLE" spelled out: with the bare "same hair" pin
+    # a live profile-view render re-imagined dark hair as silver-blonde while
+    # holding face and clothes — the loosest attribute needs the most
+    # explicit words.
+    prompt = (
+        "Keep this person exactly as they are in the reference image — same "
+        "face, same hair color, same hairstyle, same build, wearing exactly "
+        "the same clothes as in "
+        "the reference image. Change only the camera and pose: "
+        f"{view_phrase}, the person centered in the frame and filling most "
+        "of it. Neutral seamless studio background, soft even lighting, "
+        "photorealistic."
+    )
+    if wardrobe:
+        prompt += f" They are wearing {wardrobe}."
+    return prompt
+
+
+def _compose_character_sheet_row(image_paths: list[str], out_path: Path) -> Path:
+    """Composite N same-aspect view renders into one horizontal strip.
+
+    Not _compose_ingredient_sheet: that one is a conditioning input (fixed
+    1536x896 black canvas, sqrt grid), so 3 views land in a 2x2 grid with a
+    black hole and dead margins — wrong for a sheet that is itself the
+    deliverable. Here the layout is 1 row x N columns, cell height fixed at
+    1024, each cell aspect-preserved, thin light gutters (the presentation
+    style of the 2x3 reference sheets the feature is modeled on)."""
+    from PIL import Image
+    paths = [p for p in (image_paths or []) if p and Path(p).exists()]
+    if not paths:
+        raise RuntimeError("character sheet composite got no view images")
+    imgs = [Image.open(p).convert("RGB") for p in paths]
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if len(imgs) == 1:
+        # A one-view "sheet" IS that render — pass it through at full
+        # resolution rather than resampling it onto a strip.
+        imgs[0].save(out_path, format="PNG")
+        return out_path
+    BG = (235, 233, 229)  # warm light gutter, matches studio-gray renders
+    g, ch = 12, 1024
+    cells = []
+    for im in imgs:
+        w = max(1, round(im.width * ch / im.height))
+        cells.append(im.resize((w, ch), Image.LANCZOS))
+    total_w = sum(c.width for c in cells) + g * (len(cells) + 1)
+    canvas = Image.new("RGB", (total_w, ch + 2 * g), BG)
+    x = g
+    for c in cells:
+        canvas.paste(c, (x, g))
+        x += c.width + g
+    canvas.save(out_path, format="PNG")
+    return out_path
+
+
+def generate_character_sheet(character_id: str, *,
+                             engine_override: str = "hidream_inline",
+                             views: list[str] | None = None,
+                             wardrobe: str = "",
+                             seed: int = -1) -> dict:
+    """Render a multi-view character sheet for one trained character.
+
+    Resolves the character through list_characters(), takes its reference
+    image (bundle avatar first, training-sample fallback — the same priority
+    _character_dataset_image already implements), renders one full-resolution
+    1:1 image per view SEQUENTIALLY through the image engine, composites the
+    views with _compose_character_sheet_row, and writes atomically:
+
+      mlx_models/characters/<id>/sheet.png     — the composited sheet
+      mlx_models/characters/<id>/sheet.json    — phosphene/character_sheet@1
+      mlx_models/characters/<id>/sheet_views/<view>/  — the per-view PNGs
+
+    bundle.json's `preview` is pointed at "sheet.png" ONLY when it is
+    currently null — a curated preview is never clobbered (the same
+    never-clobber rule the trainer's avatar copy follows).
+
+    Raises:
+      ValueError               — bad id / engine / views       (route → 400)
+      LookupError              — no such character             (route → 404)
+      FileNotFoundError        — no reference image on disk    (route → 404)
+      CharacterSheetBusyError  — GPU held by another job       (route → 429)
+      RuntimeError             — preflight/engine failure      (route → 500)
+
+    `seed=-1` means random per view; a non-negative seed gives view i
+    `seed + i` (the engine's own base_seed+i convention, so a whole sheet
+    reproduces from one number).
+    """
+    cid = _character_safe_id(character_id)
+    engine_override = (engine_override or "hidream_inline").strip().lower()
+    if engine_override not in _CHARACTER_SHEET_ENGINES:
+        raise ValueError(
+            f"engine_override {engine_override!r} cannot build a character "
+            f"sheet — it does not condition on the reference image. Use one "
+            f"of: {', '.join(sorted(_CHARACTER_SHEET_ENGINES))}")
+
+    # Views: default the full catalogue; otherwise validate + dedupe
+    # (order-preserving — a duplicate key would just burn a render on an
+    # identical prompt).
+    if views is None:
+        view_keys = list(CHARACTER_SHEET_VIEWS)
+    else:
+        if not isinstance(views, list) or not all(
+                isinstance(v, str) for v in views):
+            raise ValueError("views must be a list of view-name strings")
+        view_keys = list(dict.fromkeys(v.strip() for v in views if v.strip()))
+        unknown = [v for v in view_keys if v not in CHARACTER_SHEET_VIEWS]
+        if unknown:
+            raise ValueError(
+                f"unknown views: {', '.join(unknown)} — available: "
+                f"{', '.join(CHARACTER_SHEET_VIEWS)}")
+        if not view_keys:
+            raise ValueError("views resolved to an empty list")
+
+    wardrobe = str(wardrobe or "").strip()
+    try:
+        seed = int(seed)
+    except (TypeError, ValueError):
+        raise ValueError("seed must be an integer")
+
+    char = next((c for c in list_characters() if c["id"] == cid), None)
+    if char is None:
+        raise LookupError(f"character {cid!r} not found")
+
+    # Reference image — the record's sample_image_path IS the bundle-avatar-
+    # first resolution (see _character_dataset_image). Defense in depth on
+    # top of that resolver, mirroring the /characters/<id>/preview serve
+    # route: the file must live under the lora-lab dataset tree or the
+    # panel-owned characters cache before we hand it to a subprocess.
+    ref_raw = char.get("sample_image_path")
+    if not ref_raw or not Path(ref_raw).is_file():
+        raise FileNotFoundError(
+            f"character {cid!r} has no reference image — no bundle avatar "
+            f"and no training sample on disk. Train the character (or drop "
+            f"an avatar into mlx_models/characters/{cid}/) first.")
+    try:
+        ref = Path(ref_raw).resolve()
+        in_lab = ref.is_relative_to(LORA_LAB_ROOT.resolve())
+        in_char_cache = ref.is_relative_to(_CHARACTERS_CACHE_PATH.resolve())
+    except (OSError, ValueError):
+        raise FileNotFoundError(f"reference image unresolvable: {ref_raw}")
+    if not (in_lab or in_char_cache):
+        raise FileNotFoundError(
+            f"reference image outside the known character roots: {ref_raw}")
+
+    # A ValueError here (only possible if _CHARACTER_SHEET_ENGINES drifts
+    # out of the builder's catalogue) surfaces as a 400 through the route,
+    # same as the allowlist refusal above.
+    cfg = _build_image_engine_config(engine_override)
+
+    char_dir = _CHARACTERS_CACHE_PATH / cid
+    char_dir.mkdir(parents=True, exist_ok=True)
+
+    # Same process-wide GPU gate as the inline /image/generate path:
+    # non-blocking acquire, fail fast when a video/training/image job holds
+    # it (worker_loop holds _GPU_LOCK for every queued job's duration).
+    # Never queue — a sheet is 3+ full renders and silently queueing it
+    # behind a 12-minute High render is worse than an honest busy error.
+    if not _GPU_LOCK.acquire(blocking=False):
+        raise CharacterSheetBusyError(
+            "the GPU is busy with a render or training job — character "
+            "sheet generation is paused until it finishes (they'd contend "
+            "for GPU memory). Try again once it completes.")
+    t0 = time.time()
+    try:
+        # Preflight inside the gate: RAM/disk numbers measured while another
+        # render holds the GPU would be meaningless anyway.
+        _preflight_image_job(cfg, engine_override=engine_override)
+
+        view_records: list[dict] = []
+        anchor_png: str | None = None
+        for i, key in enumerate(view_keys):
+            prompt = _character_sheet_view_prompt(
+                CHARACTER_SHEET_VIEWS[key], wardrobe)
+            # One engine call per view, n=1, so each view is a full-
+            # resolution single image (a batched n=len(views) call would
+            # give every view the SAME prompt). Per-view subdir because the
+            # engine's candidate filenames are deterministic per dir.
+            view_dir = char_dir / "sheet_views" / key
+            view_dir.mkdir(parents=True, exist_ok=True)
+            # Ref chaining: views after the first also get the FIRST
+            # rendered view as a second reference. Measured on a dim,
+            # backlit avatar (ariatrn, hidream, seeds 424242/424243, three
+            # prompt phrasings): the frontal render held the dark hair
+            # every time while every solo side-angle render re-imagined it
+            # platinum — at side angles the raw avatar under-specifies
+            # appearance and the model falls back to priors. A clean
+            # studio frontal from the same run re-anchors exactly the
+            # attributes the avatar leaves ambiguous. hidream and the
+            # qwen_edit family both take multi-ref natively.
+            view_refs = [str(ref)] + ([anchor_png] if anchor_png else [])
+            push(f"[sheet] {cid}: view {i + 1}/{len(view_keys)} ({key}) "
+                 f"via {engine_override}")
+            candidates = agent_image_engine.generate(
+                prompt=prompt, n=1, aspect="1:1",
+                output_dir=view_dir,
+                base_seed=(seed + i) if seed >= 0 else None,
+                refs=view_refs,
+                config=cfg,
+                on_log=lambda line: push(f"[sheet] {line}"),
+            )
+            if not candidates or not candidates[0].get("png_path"):
+                raise RuntimeError(
+                    f"engine returned no image for view {key!r}")
+            c = candidates[0]
+            if anchor_png is None:
+                anchor_png = c.get("png_path")
+            view_records.append({
+                "key": key,
+                "prompt": prompt,
+                "seed": c.get("seed"),
+                "png_path": c.get("png_path"),
+                "engine": c.get("engine"),
+                "width": c.get("width"),
+                "height": c.get("height"),
+                "refs": view_refs,
+                "refs_ignored": bool(c.get("refs_ignored", False)),
+            })
+    finally:
+        _GPU_LOCK.release()
+
+    # Composite + atomic swap. sheet.png is served by URL and (below) named
+    # from bundle.json, so a torn write would paint broken cards until the
+    # next regenerate — temp-in-same-dir + fsync + os.replace guarantees the
+    # file on disk is always either the old sheet or the new one (binary
+    # sibling of atomic_write_text / storyboard.save_storyboard).
+    sheet_path = char_dir / "sheet.png"
+    tmp = char_dir / (f".sheet.{os.getpid()}.{threading.get_ident()}"
+                      f".{time.time_ns()}.png")
+    try:
+        _compose_character_sheet_row(
+            [r["png_path"] for r in view_records], tmp)
+        with open(tmp, "rb") as fh:
+            os.fsync(fh.fileno())
+        os.replace(tmp, sheet_path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+    elapsed = round(time.time() - t0, 2)
+    sheet_json_path = char_dir / "sheet.json"
+    sheet_meta = {
+        "schema": "phosphene/character_sheet@1",
+        "character_id": cid,
+        "engine": engine_override,
+        "reference": str(ref),
+        "wardrobe": wardrobe,
+        "seed": seed,
+        "views": view_records,
+        "sheet_png": str(sheet_path),
+        "created_at": time.time(),
+        "elapsed_sec": elapsed,
+    }
+    # 0o644, not atomic_write_text's secret-grade 0o600 default: the sidecar
+    # is prompts + paths, the same sensitivity as every other sidecar the
+    # panel writes with plain write_text.
+    atomic_write_text(sheet_json_path,
+                      json.dumps(sheet_meta, indent=2, ensure_ascii=False),
+                      mode=0o644)
+
+    # Point bundle.json's `preview` at the sheet — ONLY if preview is
+    # currently null/absent (never clobber a curated preview; the same
+    # never-clobber intent as the trainer's avatar copy guard). Stored
+    # dir-relative ("sheet.png")
+    # because bundle.json lives beside it and an absolute path would rot on
+    # any install move. A character with no bundle.json is left without one:
+    # the rename route establishes that a side effect should not CREATE a
+    # bundle for a trigger that never had one.
+    preview_updated = False
+    bundle_path = char_dir / "bundle.json"
+    if bundle_path.is_file():
+        bundle = _character_bundle(cid)
+        if bundle and bundle.get("preview") in (None, ""):
+            bundle["preview"] = "sheet.png"
+            atomic_write_text(
+                bundle_path,
+                json.dumps(bundle, indent=2, ensure_ascii=False),
+                mode=0o644)
+            preview_updated = True
+
+    push(f"[sheet] {cid}: done — {len(view_records)} views in {elapsed}s "
+         f"→ {sheet_path}")
+    return {
+        "ok": True,
+        "character_id": cid,
+        "sheet_path": str(sheet_path),
+        "sheet_url": f"/characters/{cid}/sheet",
+        "sheet_json_path": str(sheet_json_path),
+        "reference": str(ref),
+        "engine": engine_override,
+        "wardrobe": wardrobe,
+        "seed": seed,
+        "views": view_records,
+        "preview_updated": preview_updated,
+        "elapsed_seconds": elapsed,
+    }
 
 
 def _validate_mflux_python_path(value: str) -> str:
@@ -24836,6 +25396,53 @@ class Handler(BaseHTTPRequestHandler):
             ctype = ("image/png" if resolved.suffix.lower() == ".png"
                      else "image/jpeg" if resolved.suffix.lower() in (".jpg", ".jpeg")
                      else "application/octet-stream")
+            self._ok(data, ctype)
+            return
+
+        # Serve the generated character sheet (multi-view turnaround PNG).
+        # Mirror of /characters/<id>/preview above, with two differences:
+        # containment is single-root (_CHARACTERS_CACHE_PATH only — sheets
+        # are panel-generated, there is no lora-lab fallback to allow), and
+        # `?w=<px>` returns a cached thumbnail through the same
+        # _ensure_thumbnail lane the /image route uses (a multi-view sheet
+        # is a 1536x896 PNG; grid cards should not decode the full thing).
+        if parsed.path.startswith("/characters/") and parsed.path.endswith("/sheet"):
+            cid_raw = parsed.path[len("/characters/"):-len("/sheet")]
+            try:
+                cid = _character_safe_id(cid_raw)
+            except ValueError:
+                self.send_error(404); return
+            sheet = _character_sheet_png(cid)
+            if not sheet or not sheet.is_file():
+                self.send_error(404); return
+            try:
+                resolved = sheet.resolve()
+                if not resolved.is_relative_to(_CHARACTERS_CACHE_PATH.resolve()):
+                    self.send_error(404); return
+            except (OSError, ValueError):
+                self.send_error(404); return
+            try:
+                w_raw = (parse_qs(parsed.query).get("w") or [""])[0] or ""
+                req_w = int(w_raw) if w_raw else 0
+            except (TypeError, ValueError):
+                req_w = 0
+            served = resolved
+            if req_w > 0:
+                try:
+                    served = _ensure_thumbnail(resolved, req_w)
+                except Exception as exc:
+                    # Same fallback contract as /image: a failed resize
+                    # serves the full sheet rather than breaking the card.
+                    push(f"[sheet] thumbnail failed for {cid} @ {req_w}: {exc}")
+                    served = resolved
+            try:
+                data = served.read_bytes()
+            except OSError:
+                self.send_error(500); return
+            # Thumbnails re-encode as JPEG for opaque sources; the full
+            # sheet is always the PNG the compositor wrote.
+            ctype = ("image/jpeg" if served.suffix.lower() == ".jpg"
+                     else "image/png")
             self._ok(data, ctype)
             return
 
@@ -28107,6 +28714,60 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
+        # ====== Character sheet — synchronous, JSON body ==================
+        # POST /characters/<id>/sheet/generate. All body fields optional:
+        # {engine_override, wardrobe, views, seed}. Synchronous like
+        # /image/generate (the caller blocks for the 3-view render);
+        # generate_character_sheet owns the GPU gate and refuses with a
+        # busy error rather than queueing.
+        #
+        # MUST stay above the urlencoded-body section: the Characters
+        # render route below matches `endswith("/generate")`, and
+        # "<id>/sheet/generate" satisfies that too — falling through would
+        # answer 400 "invalid character id" instead of rendering a sheet.
+        if path.startswith("/characters/") and path.endswith("/sheet/generate"):
+            cid_raw = path[len("/characters/"):-len("/sheet/generate")]
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                self._json({"error": "invalid Content-Length"}, 400); return
+            # Empty body is a valid request (every field defaults); only a
+            # present body must be sane. 64 KB is generous for four fields.
+            if length > 64 * 1024:
+                self._json({"error": "body too large (max 65536 bytes)"}, 413)
+                return
+            payload: dict = {}
+            if length > 0:
+                try:
+                    payload = json.loads(self.rfile.read(length).decode() or "{}")
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    self._json({"error": "invalid JSON body"}, 400); return
+                if not isinstance(payload, dict):
+                    self._json({"error": "JSON body must be an object"}, 400)
+                    return
+            try:
+                result = generate_character_sheet(
+                    cid_raw,
+                    engine_override=(payload.get("engine_override")
+                                     or "hidream_inline"),
+                    views=payload.get("views"),
+                    wardrobe=str(payload.get("wardrobe") or ""),
+                    seed=payload.get("seed", -1),
+                )
+            except CharacterSheetBusyError as e:
+                self._json({"error": str(e)}, 429); return
+            except (LookupError, FileNotFoundError) as e:
+                self._json({"error": str(e)}, 404); return
+            except ValueError as e:
+                self._json({"error": str(e)}, 400); return
+            except RuntimeError as e:
+                # Preflight refusals and engine-side failures both carry
+                # actionable messages of their own — surface them verbatim,
+                # same as /image/generate does.
+                self._json({"error": str(e)}, 500); return
+            self._json(result)
+            return
+
         # Bug-report endpoint — used by the header bug button + modal. The
         # client supplies a title + body (already pre-filled with environment
         # info) and an `includeCrashReports` flag. We URL-build the GitHub
@@ -28923,6 +29584,7 @@ class Handler(BaseHTTPRequestHandler):
         # This currently fails closed with the exact publication requirement;
         # _h3_install_turbo must not fetch a raw LightX2V file as a substitute.
         if path == "/h3/turbo/install":
+            h3_status_invalidate()   # the 3 s /status memo must not outlive an install action
             result = _h3_install_turbo(push)
             if not result.get("ok"):
                 self._json(result, 409 if "active" in result.get("error", "") else 400)
@@ -30112,6 +30774,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "active": True}, 202); return
 
         if path == "/models/repair":
+            h3_status_invalidate()   # the 3 s /status memo must not outlive an install action
             # Re-download corrupt/partial weight files for a repo. We DELETE the
             # bad files first (hf skips files it believes are already complete,
             # so a same-size-but-corrupt file would never be re-fetched), then
@@ -39801,10 +40464,17 @@ HTML = r"""<!doctype html>
       background: transparent;
       white-space: nowrap;
     }
+    /* These four were a dangling selector list — a trailing comma swallowed
+       the next rule, so the version pill and both icon buttons silently
+       inherited the ENGINE TRIGGER's box (border, radius, padding, weight)
+       instead of their own. If they ever need shared declarations again,
+       give them their own terminated block. */
     body > header #versionPill,
     body > header #bugBtn,
     body > header #settingsBtn,
-    body > header .creator-link,
+    body > header .creator-link {
+      flex-shrink: 0;
+    }
     /* ---- Engine picker: trigger + portaled menu ------------------------ */
     .eng-trigger {
       display: inline-flex; align-items: center; gap: 7px;
@@ -39844,51 +40514,6 @@ HTML = r"""<!doctype html>
     /* Inert = real but unreachable right now; still listed, visibly muted. */
     .eng-opt.inert { opacity: .58; }
     .eng-opt.needs-install .eng-badge.offer { color: var(--eng-accent, currentColor); }
-
-    /* ---- Health: one chip, detail in a portaled popover ------------------ */
-    #healthChip {
-      display: inline-flex; align-items: center; gap: 7px; width: auto;
-      padding: 4px 9px 4px 8px; cursor: pointer; white-space: nowrap;
-      background: rgba(255,255,255,.04);
-      border: 1px solid var(--line, #262a33); border-radius: 99px;
-      color: var(--ink, #e8eaf0); font-size: 11.5px; font-weight: 500;
-      font-variant-numeric: tabular-nums;
-      transition: background .14s ease, border-color .14s ease;
-    }
-    #healthChip:hover { background: rgba(255,255,255,.075); border-color: #333a46; }
-    #healthChip[aria-expanded="true"] { background: rgba(255,255,255,.085); }
-    .hc-dot {
-      width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto;
-      background: #5fbf8f; box-shadow: 0 0 0 3px rgba(95,191,143,.16);
-      transition: background .2s ease, box-shadow .2s ease;
-    }
-    #healthChip.is-warn  .hc-dot { background: #f0b940; box-shadow: 0 0 0 3px rgba(240,185,64,.16); }
-    #healthChip.is-warn  { border-color: rgba(240,185,64,.42); color: #f7d489; }
-    #healthChip.is-danger .hc-dot { background: #ff5c5c; box-shadow: 0 0 0 3px rgba(255,92,92,.18); }
-    #healthChip.is-danger { border-color: rgba(255,92,92,.46); color: #ffa3a3; }
-    .hc-caret { width: 10px; height: 10px; opacity: .5; }
-    #healthPop {
-      position: fixed; z-index: 9000; min-width: 264px;
-      background: #171a21; border: 1px solid #2a2f3a;
-      border-radius: 13px; padding: 6px;
-      box-shadow: 0 20px 48px rgba(0,0,0,.58), inset 0 1px 0 rgba(255,255,255,.04);
-    }
-    #healthPop[hidden] { display: none; }
-    .hc-row {
-      display: flex; align-items: center; gap: 10px;
-      padding: 6px 8px; border-radius: 8px; font-size: 12px;
-    }
-    /* display:flex above beats the UA's [hidden]{display:none} — without this a
-       hidden row still paints its label with nothing after it. */
-    .hc-row[hidden] { display: none; }
-    .hc-row:hover { background: rgba(255,255,255,.04); }
-    .hc-label { color: var(--ink-500, #98a0b3); flex: 0 0 74px; }
-    /* The relocated pill keeps its own id, classes and colour logic; the row
-       only gives it a place to stand and a word in front of it. */
-    .hc-row .pill {
-      margin: 0 0 0 auto !important; font-size: 11.5px;
-      font-variant-numeric: tabular-nums;
-    }
 
     body > header .engine-switch {
       flex-shrink: 0;
@@ -40953,28 +41578,6 @@ HTML = r"""<!doctype html>
        on the face because it is the one number worth a glance.
        PORTALED to <body>: <header> is overflow:hidden and would slice it —
        the same clipping that once cut off the avatar. -->
-  <!-- ONE CHIP (v4.5.0). Six pills across the header truncated on a 14" and
-       could not have taken a seventh. The pills are UNCHANGED — same ids, same
-       updaters, same colour classes — they are simply relocated into the rows
-       below at boot, and #healthChip summarises them: worst state wins the
-       colour, memory stays on the face because it is the one number worth a
-       glance. Both the chip's popover and this cluster escape <header>, which
-       is overflow:hidden and would slice them. -->
-  <button type="button" id="healthChip" aria-haspopup="dialog" aria-expanded="false"
-          aria-controls="healthPop" title="System health — click for detail">
-    <span class="hc-dot"></span>
-    <span class="hc-face">checking…</span>
-    <svg class="ph hc-caret" aria-hidden="true"><use href="#ph-caret-down-bold"/></svg>
-  </button>
-  <div id="healthPop" hidden role="dialog" aria-label="System health detail">
-    <div class="hc-row" data-pill="tierPill"><span class="hc-label">Tier</span></div>
-    <div class="hc-row" data-pill="memPill"><span class="hc-label">Memory</span></div>
-    <div class="hc-row" data-pill="helperPill"><span class="hc-label">Helper</span></div>
-    <div class="hc-row" data-pill="modelsPill"><span class="hc-label">Models</span></div>
-    <div class="hc-row" data-pill="comfyPill"><span class="hc-label">ComfyUI</span></div>
-    <div class="hc-row" data-pill="queuePill"><span class="hc-label">Queue</span></div>
-    <div class="hc-row" data-pill="jobPill"><span class="hc-label">Render</span></div>
-  </div>
   <div id="healthCluster" role="group" aria-label="System health" hidden>
     <button type="button" id="healthChip" aria-haspopup="dialog"
             aria-expanded="false" aria-controls="healthPop"
@@ -52858,18 +53461,38 @@ function openH3InstallCard(source) {
     // user whose 75 GB of weights are still on disk must not be shown a "~75
     // GB download" card — that is what made the v3.4.0 report read as "H3
     // vanished and Reset didn't bring it back".
+    // WHAT actually broke, from the probe's own missing-list — NOT from the
+    // two-way venv_broken guess. venv_broken means "a venv was BUILT and its
+    // interpreter dangles"; a venv that was never built at all is reason
+    // missing_venv with venv_broken false, and the old two-way branch rendered
+    // that as "the code checkout is missing" — issue #68, where a user with a
+    // complete external-SSD install chased a phantom checkout problem while
+    // the real gap (venv never built) sat folded away in a <details>.
+    const _missing = (H3.missing || []).map(String);
+    const _missVenv = _missing.some(m => m.includes('venv'));
+    const _missRunner = _missing.some(m => m.includes('runner') || m.includes('scripts/'));
+    const diagnosis = H3.venv_broken
+        ? 'What broke: H3’s Python environment points at a moved or deleted '
+          + 'interpreter. Rebuilding the environment takes about two minutes.'
+        : _missVenv
+        ? 'What broke: H3’s Python environment was never built (or was '
+          + 'removed). Building it takes about two minutes and re-downloads '
+          + 'nothing.'
+        : _missRunner
+        ? 'What broke: the engine’s code checkout is missing or incomplete. '
+          + 'Re-cloning it takes about a minute.'
+        : 'What broke: ' + (_missing[0] || 'a component the probe lists below')
+          + '.';
     const intro = H3.repairable ? `
       <p style="margin:0 0 10px">
         <b>Hailuo H3 is installed — it just needs repairing.</b> Your weights
         (~75 GB) are still on disk and are <em>not</em> re-downloaded.
       </p>
       <p style="margin:0 0 10px;color:var(--muted)">
-        ${H3.venv_broken
-            ? 'What broke: H3’s Python environment points at Pinokio’s shared '
-              + 'managed interpreter, and installing another pack moved it. '
-              + 'Rebuilding the environment takes about two minutes.'
-            : 'What broke: the engine’s code checkout is missing or incomplete. '
-              + 'Re-cloning it takes about a minute.'}
+        ${diagnosis}
+      </p>
+      <p style="margin:0 0 10px;color:var(--muted);font-size:12px">
+        ${_missing.length ? 'Missing: ' + _missing.map(escapeHtml).join(' · ') : ''}
       </p>
       <p style="margin:0 0 10px">
         Fix it from Pinokio: open the <b>Phosphene</b> entry in the Pinokio
@@ -53979,9 +54602,6 @@ async function poll() {
   const m = s.memory;
   const memPill = document.getElementById('memPill');
   memPill.innerHTML = `<span class="dot"></span>${fmtMem(m)}`;
-  try { _healthSync(); } catch (e) {}
-  memPill.title = fmtMemTitle(m);
-  if (typeof updateHealthChip === 'function') updateHealthChip();
   memPill.title = fmtMemTitle(m);
   // 2026-05-20: color the badge by real pressure, not by sticky swap.
   // Same reason fmtMem dropped swap from the visible label — swap is
@@ -53992,6 +54612,9 @@ async function poll() {
   if (m.pressure_pct > 90) memCls = 'pill-danger';
   else if (m.pressure_pct > 75) memCls = 'pill-warn';
   memPill.className = 'pill ' + memCls;
+  // The chip DERIVES from the pills, so it must refresh after the colour
+  // classes land — calling it before memCls kept the chip one poll stale.
+  try { updateHealthChip(); } catch (e) {}
 
   // Comfy (hidden when not running). Drives three things in lockstep —
   // the status pill, the global Stop Comfy button, and the per-render
@@ -54401,7 +55024,11 @@ async function poll() {
   // Logs
   const log = document.getElementById('log');
   const wasNearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
-  log.textContent = s.log.length ? s.log.join('\n') : 'No log yet.';
+  const _logText = s.log.length ? s.log.join('\n') : 'No log yet.';
+  // Only touch the DOM when the text changed: an unconditional write replaced
+  // the text node 40x/min, which destroyed the user's selection — the exact
+  // gesture of copying a traceback into a bug report.
+  if (log.textContent !== _logText) log.textContent = _logText;
   if (wasNearBottom) log.scrollTop = log.scrollHeight;
 
   // Queue list — memoized on a signature of the IDs + ordinals so
@@ -54454,6 +55081,17 @@ async function poll() {
     const isPhoto = (j.params && j.params.mode === 'image');
     return filterPhotos === 'photos' ? isPhoto : !isPhoto;
   });
+  // Memoized on the same principle as the queue list above: identical data
+  // must not trigger an innerHTML replacement every 1.5 s. Unmemoized, the 20
+  // <li> (with photo thumbs re-decoded each time) flickered, dropped :hover
+  // state, and could swap a Retry button out from under an in-flight click.
+  // NOTE: this block is INLINE IN poll(), not a function — an early return
+  // here would abort the whole poll (outputs, version, banners). Guard, never
+  // return, exactly like the queue memo above.
+  const hSig = filterPhotos + '|' + filtered.slice(0, 20)
+    .map(j => j.id + '|' + j.status + '|' + (j.output_path || '')).join(';');
+  if (window._lastHistorySig !== hSig) {
+  window._lastHistorySig = hSig;
   if (!filtered.length) {
     const empty = filterPhotos === 'photos' ? 'No photo renders yet'
                 : filterPhotos === 'videos' ? 'No video renders yet'
@@ -54543,6 +55181,7 @@ async function poll() {
       <span>${actionHtml}</span>
     </li>`;
   }).join('');
+  }
 
   // Outputs / carousel
   if (JSON.stringify(currentOutputs) !== JSON.stringify(s.outputs)) {
@@ -56805,12 +57444,20 @@ function updateModelsCard(s) {
     card.classList.add('state-warn');
     icon.innerHTML = '<svg class="ph" aria-hidden="true"><use href="#ph-warning-fill"/></svg>';
     title.textContent = 'Hailuo H3 needs repair — your weights are still on disk';
+    // Same missing-list-first logic as the repair modal (issue #68): the
+    // two-way venv_broken guess blamed the checkout whenever the venv was
+    // simply never built.
+    const _miss = (h3s.missing || []).map(String);
     sub.innerHTML = h3s.venv_broken
-      ? 'H3’s Python environment points at Pinokio’s shared interpreter and '
-        + 'another pack install moved it. Rebuilding takes ~2 minutes and '
-        + '<b>re-downloads nothing</b>.'
-      : 'H3’s code checkout is missing or incomplete. Restoring it takes ~1 '
-        + 'minute and <b>re-downloads nothing</b>.';
+      ? 'H3’s Python environment points at a moved or deleted interpreter. '
+        + 'Rebuilding takes ~2 minutes and <b>re-downloads nothing</b>.'
+      : _miss.some(m => m.includes('venv'))
+      ? 'H3’s Python environment was never built. Building it takes ~2 '
+        + 'minutes and <b>re-downloads nothing</b>.'
+      : _miss.some(m => m.includes('runner') || m.includes('scripts/'))
+      ? 'H3’s code checkout is missing or incomplete. Restoring it takes ~1 '
+        + 'minute and <b>re-downloads nothing</b>.'
+      : 'Missing: ' + escapeHtml(_miss[0] || 'see the repair card') + '.';
     actions.innerHTML = `<button onclick="openH3InstallCard()">How to repair H3</button>`;
     return;
   }
@@ -59359,7 +60006,7 @@ function renderLiveStage(s, preview) {
   if (priorId && priorId !== currentId) {
     const ended = (s.history || []).find(j => j && j.id === priorId);
     if (ended && ended.status === 'done' && ended.output_path) {
-      window._liveStagePendingOutput = { id: priorId, path: ended.output_path };
+      window._liveStagePendingOutput = { id: priorId, path: ended.output_path, since: Date.now() };
     } else if (ended && window._liveStageOwnsPlayer) {
       _restoreSelectedOutputAfterLive();
     }
@@ -59368,7 +60015,19 @@ function renderLiveStage(s, preview) {
 
   const pending = window._liveStagePendingOutput;
   if (pending) {
-    if (window._liveStageOwnsPlayer || !_liveStageMediaHeld()) {
+    // GIVE-UP PATH. Every branch below returns, and the flag was cleared only
+    // by a SUCCESSFUL handoff — so a finished clip that never surfaces in the
+    // outputs list (hidden, deleted, or outside the 60-item /status window)
+    // parked the stage on "preparing finished take" for the rest of the
+    // session, and suppressed the live preview of every later render in the
+    // batch. 20 s is ten polls: far beyond the deliberate two-second
+    // list_outputs cutoff this state exists to bridge, and short enough that
+    // a batch's next render loses at most its warm-up to the stale card.
+    if (Date.now() - (pending.since || 0) > 20000) {
+      window._liveStagePendingOutput = null;
+      if (window._liveStageOwnsPlayer) _restoreSelectedOutputAfterLive();
+      else _hideLiveStageChrome();
+    } else if (window._liveStageOwnsPlayer || !_liveStageMediaHeld()) {
       if (_handoffLiveStageToOutput(pending.path)) {
         // A newly-queued job may already be running. Its preview is handled on
         // the next poll, after the finished video's real playback state exists.
@@ -61024,102 +61683,6 @@ function renderVersionPill() {
   pill.title = 'Checking for updates…';
 }
 
-// ---- Health: one chip, one popover ---------------------------------------
-//
-// The pills are NOT rewritten. Every existing updater still writes to
-// #memPill / #helperPill / #modelsPill / #tierPill / #comfyPill / #queuePill /
-// #jobPill exactly as before; they are relocated once and read back here to
-// summarise. A summary that re-derived state from /status would be a second
-// source of truth, and the two would drift the first time a pill's rule moved.
-window._healthPopOpen = false;
-
-function _healthPortal() {
-  const pop = document.getElementById('healthPop');
-  if (!pop || pop.dataset.portaled === '1') return pop;
-  pop.querySelectorAll('.hc-row[data-pill]').forEach(row => {
-    const pill = document.getElementById(row.dataset.pill);
-    if (pill) row.appendChild(pill);
-    else row.remove();                      // a pill this build does not have
-  });
-  const cluster = document.getElementById('healthCluster');
-  if (cluster) cluster.remove();            // the now-empty holder
-  document.body.appendChild(pop);           // escape header overflow:hidden
-  pop.dataset.portaled = '1';
-  return pop;
-}
-
-function closeHealthPop() {
-  window._healthPopOpen = false;
-  const pop = document.getElementById('healthPop');
-  if (pop) pop.hidden = true;
-  const chip = document.getElementById('healthChip');
-  if (chip) chip.setAttribute('aria-expanded', 'false');
-}
-
-function toggleHealthPop() {
-  const pop = _healthPortal();
-  const chip = document.getElementById('healthChip');
-  if (!pop || !chip) return;
-  if (window._healthPopOpen) { closeHealthPop(); return; }
-  const r = chip.getBoundingClientRect();
-  pop.hidden = false;                       // measure before placing
-  const w = pop.getBoundingClientRect().width;
-  pop.style.top = (r.bottom + 7) + 'px';
-  pop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - w - 10)) + 'px';
-  window._healthPopOpen = true;
-  chip.setAttribute('aria-expanded', 'true');
-}
-
-// Worst state wins: a green chip must never hide a red pill.
-function _healthSync() {
-  const chip = document.getElementById('healthChip');
-  if (!chip) return;
-  const ids = ['tierPill', 'memPill', 'comfyPill', 'helperPill', 'modelsPill'];
-  const pills = ids.map(id => document.getElementById(id))
-                   .filter(el => el && el.style.display !== 'none');
-  let worst = 'good';
-  pills.forEach(el => {
-    if (el.classList.contains('pill-danger') || el.classList.contains('pill-bad')) worst = 'bad';
-    else if (el.classList.contains('pill-warn') && worst !== 'bad') worst = 'warn';
-  });
-  chip.classList.toggle('is-warn', worst === 'warn');
-  chip.classList.toggle('is-danger', worst === 'bad');
-
-  // Comfy hides ITSELF when not running; its row has to follow or the popover
-  // shows a label with nothing after it.
-  const pop = document.getElementById('healthPop');
-  if (pop) pop.querySelectorAll('.hc-row[data-pill]').forEach(row => {
-    const pill = document.getElementById(row.dataset.pill);
-    row.hidden = !!(pill && pill.style.display === 'none');
-  });
-
-  // Memory keeps its place on the face: it is the number that moves while you
-  // watch, and the one that decides whether the next render fits.
-  const mem = document.getElementById('memPill');
-  const memText = mem ? mem.textContent.trim() : '';
-  const label = worst === 'bad' ? 'Needs attention'
-              : worst === 'warn' ? 'Under pressure' : 'All good';
-  const face = chip.querySelector('.hc-face');
-  if (face) face.textContent = memText ? `${label} · ${memText}` : label;
-  chip.title = pills.map(el => el.textContent.trim()).filter(Boolean).join(' · ')
-             || 'System health';
-}
-
-document.addEventListener('DOMContentLoaded', () => {
-  _healthPortal();
-  const chip = document.getElementById('healthChip');
-  if (chip) chip.onclick = (ev) => { ev.stopPropagation(); toggleHealthPop(); };
-  _healthSync();
-});
-document.addEventListener('click', (ev) => {
-  if (!window._healthPopOpen) return;
-  if (ev.target.closest('#healthPop') || ev.target.closest('#healthChip')) return;
-  closeHealthPop();
-}, true);
-document.addEventListener('keydown', (ev) => {
-  if (ev.key === 'Escape' && window._healthPopOpen) closeHealthPop();
-});
-window.addEventListener('resize', closeHealthPop);
 
 // ---- Update banner -------------------------------------------------------
 //

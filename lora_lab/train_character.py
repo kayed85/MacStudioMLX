@@ -137,6 +137,34 @@ PRESETS: dict[str, dict[str, Any]] = {
 
 TARGET_MODULES = ["to_q", "to_k", "to_v", "to_out"]
 
+# Bumped when the trainer's behaviour changes, so a sidecar dates its file.
+# "iter5" had been frozen in every sidecar since the yaml era regardless of
+# what changed; iter6 = truthful base_model + width/height honored.
+LORA_LAB_VERSION = "iter6"
+
+
+def _resolved_base_label() -> str:
+    """What the loader ACTUALLY trained against, from train.RESOLVED_BASE."""
+    # In a real training run train.py is already imported (it owns the
+    # loader patch), so sys.modules has it. Import errors here mean we are
+    # NOT in a training process (train.py needs ltx_trainer_mlx, which only
+    # exists in the trainer venv) — fall back to the honest unknown label
+    # rather than crashing the sidecar write.
+    try:
+        try:
+            from . import train as _train_mod
+        except ImportError:
+            import train as _train_mod  # script-style invocation
+    except Exception:
+        _train_mod = None
+    rb = getattr(_train_mod, "RESOLVED_BASE", None) if _train_mod else None
+    if not rb:
+        return "Lightricks/LTX-2.3 (dev transformer — resolution not recorded)"
+    gb = rb.get("bytes", 0) / 1e9
+    prec = "full-precision" if rb.get("full_precision") else "QUANTIZED (weak identity)"
+    return (f"Lightricks/LTX-2.3 dev transformer · {rb.get('dir', '?')} · "
+            f"{gb:.1f} GB · {prec}")
+
 # Estimator constants for THIS module's estimate. The panel's ETA is a
 # different formula, not a copy of this one: it uses a per-preset
 # `seconds_per_step` with no fixed term, and `3.0 * image_count` for
@@ -168,8 +196,15 @@ def resolve_preset(preset: str, advanced: dict[str, Any] | None) -> dict[str, An
         raise ValueError(f"unknown preset {preset!r}; expected one of {list(PRESETS)}")
     cfg = dict(PRESETS[preset])
     if advanced:
+        # `k in cfg` gated overrides to keys the preset already declared —
+        # and PRESETS has never declared width/height, so the aspect-matched
+        # training that commit 3f49ca3 shipped (the fix for "each eye gets
+        # ~1 latent token at 512²") was silently dropped here and every
+        # panel-driven training fell back to resolution×resolution. An
+        # explicit allowlist instead: preset keys plus the geometry pair.
+        _extra_ok = ("width", "height")
         for k, v in advanced.items():
-            if v is not None and k in cfg:
+            if v is not None and (k in cfg or k in _extra_ok):
                 cfg[k] = v
         if advanced.get("target_modules") is not None:
             cfg["target_modules"] = _normalize_target_modules(advanced.get("target_modules"))
@@ -840,12 +875,15 @@ def write_sidecar(
         "target_modules": _normalize_target_modules(cfg.get("target_modules")),
         "training_wall_seconds": round(float(training_wall_s), 1),
         "created_at": _dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "base_model": "Lightricks/LTX-2.3 (dgrauet/ltx-2.3-mlx-q4 dev transformer)",
+        # The RESOLVED base, not a literal. The old hardcoded string named
+        # the q4 dev regardless of what loaded — the exact provenance users
+        # pasted into #62 while their real base was unknown.
+        "base_model": _resolved_base_label(),
         "training_resolution": [
             int(cfg.get("width") or cfg.get("resolution") or 576),
             int(cfg.get("height") or cfg.get("resolution") or 576),
         ],
-        "lora_lab_version": "iter5",
+        "lora_lab_version": LORA_LAB_VERSION,
         "loadable_via": "ltx_core_mlx.loader.fuse_loras.apply_loras",
     }
     if strength is not None:

@@ -411,12 +411,34 @@ Returns `{"characters": [...]}`. Each entry describes one character discovered i
 | `voice_sample` | string \| null | Absolute path to `<trigger>.voice.<ext>` (the original training clip). For playback / inspection only; the model uses the audio LoRA, not the raw clip. |
 | `has_voice` | bool | `true` iff the audio LoRA is on disk. Silent characters (face LoRA only) are returned with `has_voice: false`. Callers should skip audio cues in prompts and not stack the (absent) audio LoRA. |
 | `sample_image_url` | string \| null | URL to a preview image from the training dataset. |
+| `sheet_image_path`, `sheet_image_url` | string \| null | The generated multi-view character sheet (`mlx_models/characters/<trigger>/sheet.png`), when one exists. Made by `POST /characters/<id>/sheet/generate`, served by `GET /characters/<id>/sheet`. |
 
 Discovery rule: `<trigger>_v2.safetensors` is required; everything else is optional.
 
 ### `GET /characters/<id>/preview`
 
 Serves the sample training image for the character (PNG/JPEG).
+
+### `GET /characters/<id>/sheet`
+
+Serves the generated character sheet PNG. `?w=<px>` returns a cached thumbnail (JPEG) through the same resize lane as `/image?w=`. 404 until a sheet has been generated.
+
+### `POST /characters/<id>/sheet/generate`
+
+Renders a multi-view turnaround sheet from the character's reference image (bundle avatar first, training-sample fallback) and composites it into `mlx_models/characters/<id>/sheet.png` + a `sheet.json` sidecar (`phosphene/character_sheet@1`). Synchronous, like `/image/generate` — the caller blocks for the whole render; 429 when the GPU is already held by a render/training/image job (never queued).
+
+`Content-Type: application/json`. Every field optional (an empty body renders the default 3-view sheet):
+
+```json
+{
+  "engine_override": "hidream_inline",
+  "views": ["front", "profile_left", "three_quarter"],
+  "wardrobe": "a red flight jacket",
+  "seed": -1
+}
+```
+
+Only ref-honoring engines are accepted (`hidream_*_inline`, `qwen_edit_*_inline`, `mock_inline`) — a text-only engine would render a stranger. `seed >= 0` gives view *i* `seed + i` so a whole sheet reproduces from one number. Every view prompt pins wardrobe to the reference ("wearing exactly the same clothes as in the reference image"); `wardrobe` re-states the outfit in words on top of that. Views after the first also chain the first rendered view as a second reference: measured on a dim reference image, solo side-angle renders re-imagined hair color across seeds and phrasings, and a clean frontal from the same run re-anchors the attributes the raw reference under-specifies. Per-view framing can still drift (a subject off-center in one view) — regenerate or vary the seed. On success, `bundle.json`'s `preview` is pointed at `sheet.png` **only** if it was null — a curated preview is never clobbered.
 
 ### `POST /characters/<id>/generate`
 

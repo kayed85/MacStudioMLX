@@ -1,5 +1,59 @@
 # Phosphene — project state, history, open work
 
+> **🩹 2026-09-01 — v4.8.2: a bug-fix release, nothing else.** Thirteen fixes from a full-codebase review driven by fleet analytics and open issues. What users stop suffering: "I updated and nothing changed" cases from a status chip that had been built twice and half-worked by luck; renders that died with a meaningless code when the Mac ran out of memory now say so and say what to do; a render that silently hung forever now stops itself after 20 minutes with an honest message; the "H3 needs repairing" card stops blaming the wrong thing and shows exactly what is missing (#68); Macs with 36-45 GB stop being told to install H3 by one screen and refused by another; weights moved to an external drive stop triggering a phantom 75 GB re-download; Update now repairs a broken Python environment instead of failing with a red banner; an old hidden speed control restored from ancient renders no longer crashes new ones; the log pane stops un-selecting text while users try to copy an error; character training sidecars stop lying about what they trained on, widescreen training actually trains widescreen, and the adapter-strength check stops ranking working character files below broken ones (#62 collateral). Detail per fix in the commit log (989aaf1..8db82d9).
+>
+> **Gates at the promote tree:** scripts/release_gates.sh full run — 50 PASS / 0 FAIL (the runner itself is new in this release and caught one of this release's own bugs before commit).
+
+> **🚚 2026-08-31 — v4.8.1 PUBLIC (`d790203`): the update that actually
+> delivers the memory fix.** v4.8.0 promised H3 at half the memory and could not
+> keep it on any install that already had H3: the compact Q8 engine was never
+> built on 64 GB+ Macs, and **an update ships code, not weights** — so H3 kept
+> rendering with the full bf16 engine at ~40–48 GB and nothing said why. Update
+> now builds the compact engine itself when H3 is installed (one time, ~5 min,
+> ~22 GB, safe to repeat); measured on the field scenario, DiT load **38.56 →
+> 20.22 GiB**, denoise peak 21.26 GiB, no wall-clock cost. Silent fallbacks are
+> gone — the render log names the reason in plain words and `/status` reports it
+> as data. Also: the a2v **Audio conditioning strength** slider is connected to a
+> control that exists (silently dropped on the Q8 path since it shipped), and
+> Storyboard treats **sung shots as first-class** (lyric in the dialogue form,
+> budgeted at a measured singing tempo, trained voice carried; a wordless "she
+> sings" is caught like a wordless "he explains"). Settings → Hailuo H3 model →
+> Full still forces the master.
+
+> **🪶 2026-08-29 — v4.8.0 PUBLIC (`f97ea3c`): Hailuo H3 uses half the memory,
+> and runs on 36 GB Macs.** H3 handed the bf16 master to any Mac ≥60 GB because
+> its peak fits — it fits and leaves nothing behind it. Measured at 640×432 / 73
+> frames, one prompt one seed: bf16 38.56 GiB resident / 38.89 peak / 196.9 s vs
+> **Q8 20.22 / 21.38 / 200.1 s — 45% less memory for 1.6% more time**. The older
+> "~12% slower" note that protected the heavy default was seven times worse than
+> reality. `h3_dit` had been honoured by the engine and validated by the settings
+> handler for months with **no control ever built** (and it was write-only, so
+> any control would have opened on "Automatic"); it is now a Settings row
+> carrying the measured numbers. The runner's `--memory-gb 58` clamp was leaving
+> 32/48 GB Macs **1.0 GB of their own machine** — every size now keeps ≥6 GB, for
+> free, since H3's real peak is 25.63 GiB. **Q8 floor 46 GB → 36 GB**, verified
+> byte-identical at a simulated 36 GB budget; 32 GB stays deliberately excluded.
+> Prompt embeddings are cached instead of re-encoded through a 26.28 GB text
+> encoder every render.
+
+> **🧠 2026-08-29 — v4.7.0 PUBLIC (`a9e7848`): the render that did not fit,
+> fits.** A third of every render's peak was the MLX allocator's cache and
+> nothing capped it. Capped now: a Q4 768×432 121-frame render went **25.53 GB →
+> 16.50 GB** peak on a 64 GB machine and got *faster* (71.45 → 68.84 s), with
+> **sha256-identical frames** — not a quality trade, memory that was never doing
+> any work. On a 16 GB Mac the same render moved from 101% of RAM to 96%: the
+> difference between swapping and running. The cap sizes itself from the machine
+> (1/8 of physical RAM, floor 2 GiB, ceiling 8 GiB), override `LTX_MLX_CACHE_GIB`.
+> The Remix engine is renamed **Motion Control** after two separate people asked
+> us to build the feature it already was. **H3 LoRA import from a file** landed
+> via PR #65 (@sahilkashyap64), reading a converter's own alpha metadata instead
+> of assuming 1.0, and costing +2.7 MB of RAM instead of +9.5 GB. Fixes: the
+> default training preset could not carry a face (#62); i2v could substitute a
+> reference image you never chose; and **updates land on time** — Pinokio reads
+> `update.js` into memory *then* runs it, so an update that fixed the updater
+> always arrived one click late; `update.js` is now thin and delegates to a file
+> read after the pull. 2,830 tests, 23 skipped.
+
 > **🤝 2026-08-29 — PR #65 lands: "Import H3 LoRA" is a real control, after
 > three fixes. Contributed by @sahilkashyap64, who also filed the issue (#64)
 > it closes. On `dev`.**

@@ -1743,8 +1743,17 @@ def get_gemma_lm():
             # transformer is ~12-19 GB, having both resident risks pushing
             # us past 64 GB on standard tier.
             release_pipelines(keep_kind=None)
-            _gemma_lm = GemmaLanguageModel()
-            _gemma_lm.load(ENHANCE_GEMMA_PATH)
+            # LOAD, THEN PUBLISH. Assigning the instance before load()
+            # succeeded poisoned the singleton: the FIRST failure reported
+            # its real cause (missing dir, OOM), and every later call in the
+            # warm process hit the retained half-built instance and reported
+            # the useless "Model not loaded. Call load() first." — which is
+            # what the fleet counts (14 events / 6 installs on 4.8.0). A
+            # failed load now leaves the slot None, so the next attempt
+            # re-tries the load and reports the real error again.
+            _candidate = GemmaLanguageModel()
+            _candidate.load(ENHANCE_GEMMA_PATH)
+            _gemma_lm = _candidate
         emit({"event": "log", "line": "Gemma loaded — subsequent enhances will be fast."})
     return _gemma_lm
 
@@ -2697,6 +2706,18 @@ emit({
     # tells the panel.
     "live_preview_supported": (
         importlib.util.find_spec("ltx_pipelines_mlx.live_preview") is not None),
+    # CAN THIS ENGINE ENCODE FOR LTX-2.5 AT ALL? Same capability-probe shape as
+    # live_preview_supported, for the same reason: an install whose vendored
+    # engine predates the Gemma 4 tower (site-packages older than
+    # v0.14.19+ltx25.3 — the 3.8→4.0 stale-updater path) routes 2.5 text
+    # encoding into mlx_lm, which has no gemma4 module and dies with mlx_lm's
+    # own words: "Model type gemma4_unified not supported." (19 fleet events /
+    # 6 installs, all legacy). The fault self-heals on a SECOND Update click,
+    # but nothing ever told the user that — the panel can only say it if the
+    # helper reports the capability.
+    "gemma4_tower_supported": (
+        importlib.util.find_spec("ltx_core_mlx.text_encoders.gemma.gemma4")
+        is not None),
     "mlx_version": _RUNTIME_ENV.get("mlx"),
     "mlx_metal_version": _RUNTIME_ENV.get("mlx_metal"),
     # None when the policy is off (LTX_MLX_CACHE_GIB=off) — i.e. MLX's own
@@ -2988,6 +3009,19 @@ for line in sys.__stdin__:
                 emit({"event": "stopped", "id": job_id, "reason": str(exc),
                       "exit_code": 75})
             else:
+                # DROP THE WARM PIPELINE ON REAL FAILURES TOO. The abort
+                # branch above learned this lesson first: an exception can
+                # leave the pipeline (or a half-loaded encoder) mid-state,
+                # and the helper's job is to keep such objects alive for the
+                # NEXT job — which then inherits the wreckage and fails with
+                # a misleading second-order error ("Model not loaded. Call
+                # load() first.", 14 fleet events). One pipeline reload
+                # (~7 s) is the price of a clean slate after any failure.
+                try:
+                    with _pipe_lock:
+                        release_pipelines(None)
+                except Exception:
+                    pass
                 emit({"event": "error", "id": job_id, "error": str(exc),
                       "trace": traceback.format_exc()})
         finally:

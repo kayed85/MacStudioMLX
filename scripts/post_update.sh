@@ -87,6 +87,31 @@ export HF_HUB_ENABLE_HF_TRANSFER=1
 
 echo "=== Phosphene post-update — app root: $ROOT ==="
 
+# ---- 0. The venv itself, before anything tries to install into it -----------
+# EVERY STEP BELOW TARGETS $VENV_PY. If that interpreter does not resolve, an
+# Update is a long sequence of `uv pip install --python <nothing>` failures, and
+# the first one to be load-bearing prints the FATAL banner naming a pin — which
+# is not the problem and sends the report in the wrong direction.
+#
+# And it does not resolve more often than anyone expects. install.js builds the
+# venv with `uv venv`, which makes env/bin/python a symlink chain into Pinokio's
+# SHARED managed Python; any other pack, or any other Pinokio app, that makes uv
+# re-resolve, bump or prune that interpreter leaves the chain DANGLING while
+# env/ still sits there. That is the v3.4.0 "installed other packs and Hailuo H3
+# vanished" report, one tree over — the LTX venv breaks the same way and had no
+# self-heal on the Update path at all. Reinstall was the only cure, for a
+# machine whose weights were all fine.
+#
+# Same implementation install.js runs (its own step, same cwd, same no-args
+# call), so there is exactly one venv-repair behaviour in the app. It ASKS
+# whether the interpreter runs and rebuilds only when it doesn't: a healthy
+# install pays ~50 ms and skips, a broken one pays ~5 min and re-downloads
+# nothing. Also carries the macOS-14 preflight, which is the right place for it.
+#
+# FATAL: if the venv cannot be made to work there is nothing this script can
+# usefully do afterwards except fail slower and less clearly.
+require "the LTX venv self-heal (rebuilds a dangling interpreter)" -- bash -c 'cd "$1/ltx-2-mlx" && bash ../scripts/pinokio/ltx_venv.sh' _ "$ROOT"
+
 # ---- 1. The vendored engine pin --------------------------------------------
 # One implementation, shared with install.js. Carries the 3.8.1 hotfix
 # (reset --hard before the checkout) and the v4.0 move from a branch SHA to an
@@ -246,10 +271,28 @@ echo 'Ensuring the Control IC-LoRA is present (Union, control mode, optional)…
 # actually being installed here (pure-LTX installs skip in one stat call),
 # idempotent via the pack's own quant_config.json, ~5 min and ~22 GB disk on
 # the one run that builds. Cannot fail the update.
-if [ -f "$ROOT/mlx_models/hailuo-h3/models/deepbeep-pruned-bf16/MiniMax-H3-FL2VA-pruned_bf16.safetensors" ] \
-   && [ -d "$ROOT/minimax-h3-mlx" ]; then
+#
+# THE GATE HAS TO ASK THE SAME QUESTION THE PANEL DOES. It hardcoded
+# $ROOT/mlx_models/hailuo-h3/models/... and $ROOT/minimax-h3-mlx, so it was
+# blind to both things that legitimately vary:
+#   * LTX_H3_ROOT / LTX_H3_MODELS relocate the checkout and the weights — the
+#     documented way (docs/H3_ENGINE.md) to stop a second install re-downloading
+#     75 GB. mlx_ltx_panel.py honours them; this gate did not, so on exactly the
+#     setup the docs recommend the Update reported nothing to do while the panel
+#     ran bf16 at ~48 GB.
+#   * the layout: upstream `download_selected.py --root X` appends `models/`,
+#     the canonical campaign tree is flat, and the panel accepts BOTH
+#     (`_h3_model_roots()`). A flat tree read as "H3 not installed" here.
+# h3_build_q8.sh resolves the same two roots and the same two layouts itself —
+# LTX_H3_MODELS reaches it through the environment — so it lands the pack beside
+# whichever DiT this gate found.
+H3_MODELS_ROOT="${LTX_H3_MODELS:-$ROOT/mlx_models/hailuo-h3}"
+H3_CHECKOUT="${LTX_H3_ROOT:-$ROOT/minimax-h3-mlx}"
+H3_DIT_REL='deepbeep-pruned-bf16/MiniMax-H3-FL2VA-pruned_bf16.safetensors'
+if { [ -f "$H3_MODELS_ROOT/models/$H3_DIT_REL" ] || [ -f "$H3_MODELS_ROOT/$H3_DIT_REL" ]; } \
+   && [ -d "$H3_CHECKOUT" ]; then
   echo 'Ensuring the H3 compact (Q8) engine is built (halves H3 render memory)…'
-  ( cd "$ROOT/minimax-h3-mlx" && bash "$ROOT/scripts/pinokio/h3_build_q8.sh" "$ROOT" ) \
+  ( cd "$H3_CHECKOUT" && bash "$ROOT/scripts/pinokio/h3_build_q8.sh" "$ROOT" ) \
     || echo 'WARN: H3 Q8 build failed — H3 keeps the full bf16 engine for now; re-run the H3 engine Install to retry.'
 fi
 

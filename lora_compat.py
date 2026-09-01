@@ -258,6 +258,15 @@ class AdapterEffect:
     median_rms: float
     max_rms: float
     floor: float = WEAK_DELTA_RMS
+    # The identity-bearing family alone: video attn1/attn2 to_q/k/v/out.
+    # Whole-file stats compare unlike populations — bizarrotrn_v2 (works,
+    # 1152 modules incl. ~half-zero audio families) scored WORSE than files
+    # users report as doing nothing (576 video-only modules), which is how
+    # the gate passed broken adapters all through issue #62. None when the
+    # file has no video-attn modules at all (style LoRAs, other naming).
+    identity_modules: int = 0
+    identity_median_rms: float | None = None
+    identity_max_rms: float | None = None
 
     @property
     def inert(self) -> bool:
@@ -266,14 +275,24 @@ class AdapterEffect:
 
     @property
     def weak(self) -> bool:
-        return self.modules > 0 and not self.inert and self.median_rms < self.floor
+        if self.inert or self.modules == 0:
+            return False
+        # Judge the family that carries the face when the file has one.
+        if self.identity_median_rms is not None and self.identity_modules >= 8:
+            return self.identity_median_rms < self.floor
+        return self.median_rms < self.floor
 
     @property
     def summary(self) -> str:
-        return (
+        base = (
             f"delta_rms median={self.median_rms:.2e} max={self.max_rms:.2e} "
             f"({self.modules - self.zero_modules}/{self.modules} modules carry a delta)"
         )
+        if self.identity_median_rms is not None:
+            base += (f" — identity family (video attn, "
+                     f"{self.identity_modules} modules) "
+                     f"median={self.identity_median_rms:.2e}")
+        return base
 
     def failure_message(self) -> str:
         return (
@@ -370,7 +389,19 @@ def measure_adapter_effect(
             return flat.astype(np.float32).reshape(info["shape"])
 
         rms: list[float] = []
+        identity_rms: list[float] = []
         zero = 0
+
+        def _is_identity(name: str) -> bool:
+            # Video attention only. The audio families are deliberately
+            # excluded from training (May 2026, lip-sync damage) and are
+            # structurally at-or-near zero in every working character file.
+            if "audio" in name:      # audio_attn*, audio_to_video, video_to_audio
+                return False
+            return (".attn1." in name or ".attn2." in name) and any(
+                name.endswith(t) for t in (".to_q", ".to_k", ".to_v",
+                                           ".to_out", ".to_out.0"))
+
         for module in modules:
             a = read(module + LORA_A_SUFFIX)
             b = read(module + LORA_B_SUFFIX)
@@ -393,6 +424,8 @@ def measure_adapter_effect(
             entries = float(a.shape[1]) * float(b.shape[0])
             value = frob / (entries**0.5) if entries else 0.0
             rms.append(value)
+            if _is_identity(module):
+                identity_rms.append(value)
             if value == 0.0:
                 zero += 1
 
@@ -401,6 +434,13 @@ def measure_adapter_effect(
     rms.sort()
     middle = len(rms) // 2
     median = rms[middle] if len(rms) % 2 else (rms[middle - 1] + rms[middle]) / 2
+    id_median = id_max = None
+    if identity_rms:
+        identity_rms.sort()
+        m2 = len(identity_rms) // 2
+        id_median = (identity_rms[m2] if len(identity_rms) % 2
+                     else (identity_rms[m2 - 1] + identity_rms[m2]) / 2)
+        id_max = identity_rms[-1]
     return AdapterEffect(
         lora_path=path,
         modules=len(rms),
@@ -408,6 +448,9 @@ def measure_adapter_effect(
         median_rms=median,
         max_rms=rms[-1],
         floor=floor,
+        identity_modules=len(identity_rms),
+        identity_median_rms=id_median,
+        identity_max_rms=id_max,
     )
 
 
