@@ -1,5 +1,27 @@
 # Phosphene — project state, history, open work
 
+> **🩹 2026-09-02 — v4.9.1: the buttons v4.9.0 broke, fixed the same day they were reported.**
+> The module split had one blind spot: a function referenced ONLY from its own
+> module's generated markup (`onclick="deleteOutput('…')"` inside a template
+> literal) looked module-internal to the extraction analysis and went
+> unpublished — but inline attributes resolve against the GLOBAL scope at click
+> time. 38 handlers died silently: gallery card actions, LoRA management,
+> training controls, timeline editing, CivitAI downloads, storyboard board
+> actions. @blackest reported it, diagnosed it and sent PR #69 within a day
+> (thank you); the shipped fix is the union of the PR's list and an
+> independent scan (which also caught `sbeLiftSelected`), folded into each
+> module's one publish block. **The class is now a build failure:**
+> `scripts/lint_webapp.mjs` scans every `on*=`/`javascript:`/`setAttribute('on…')`
+> string in the page and the modules and refuses any call to an unpublished
+> top-level function — proven red on the v4.9.0 tree, green on this one. Also
+> in: a per-thumbnail "×" on the Recent-uploads strip (`POST /upload/delete`,
+> path-bound, clears the thumbnail cache — a Pinokio ask from @le_wib). Riding
+> along from a parallel session: Editor Delete now LIFTS (leaves a slug) and
+> Shift+Delete ripples (00c248d); the theater's mute is remembered across
+> clips and restarts (a157b9b, Pinokio report by fuschichou); Update proves
+> the render packages import and self-repairs once before claiming success
+> (3698c53 — the fleet's second-commonest error).
+
 > **🧱 2026-09-01 — v4.9.0: the frontend and the routes leave the monolith.**
 > Shipped to public `main` the same day, at the owner's explicit green light,
 > with the residual risks named below accepted ("we will discover if there is

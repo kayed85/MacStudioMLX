@@ -1836,4 +1836,7 @@ Object.assign(globalThis, {
   ideoSetSelType, ideoDeleteSel, ideoRender, ideoAddImagePaletteColor,
   ideoBuildCaption, ideoOnRawInput, ideoApplyRaw, ideoLoadExample,
   ideoStagePointerDown, imgStudioGenerate, imgStudioRefreshLibrary, imgStudioCopyPath,
+  // inline-handler targets: generated markup resolves these through the
+  // global scope (the v4.9.0 regression, PR #69)
+  imgStudioClearRef, openExternal,
 });

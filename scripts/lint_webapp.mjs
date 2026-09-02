@@ -72,7 +72,11 @@ function publishedNames(src) {
     names.add(mm[1]);
   // Object.assign(globalThis, { a, b, c }) — the module publish block.
   for (const mm of src.matchAll(/Object\.assign\(globalThis,\s*\{([\s\S]*?)\}\s*\)/g)) {
-    for (const name of mm[1].split(",")) {
+    // Comments inside the block are legal; a brace inside one is not a
+    // terminator (the block is matched up to the first `}` — keep braces
+    // out of publish-block comments, and strip the comments before parsing).
+    const body = mm[1].replace(/\/\/[^\n]*/g, "");
+    for (const name of body.split(",")) {
       const t = name.trim().split(":")[0].trim();
       if (new RegExp(`^${IDENT}$`).test(t)) names.add(t);
     }
@@ -154,6 +158,41 @@ for (const f of moduleFiles) {
 if (inline.trim()) {
   report(await lintText(inline, path.join(ROOT, "webapp", "index.inline.js"),
                         "script", topLevelDecls(inline)));
+}
+
+// ---- inline handler targets must be published ------------------------------
+// The v4.9.0 regression (PR #69): markup generated INSIDE a module —
+// `onclick="deleteOutput('x')"` in a template literal — resolves its
+// function name against the GLOBAL scope at click time, not the module
+// scope. A function referenced only from its own module's generated markup
+// looked module-internal to the extraction analysis and went unpublished;
+// 38 buttons died silently. eslint cannot see into attribute strings, so
+// this pass scans every on*="…", href="javascript:…" and
+// setAttribute('on…', …) string in the page and the modules, and requires
+// each function it calls — if it is a top-level declaration in ANY module —
+// to be published.
+{
+  const topLevelAnywhere = new Map(); // name -> file
+  for (const [f, src] of modSrc)
+    for (const n of topLevelDecls(src)) topLevelAnywhere.set(n, f);
+  const publishedAll = new Set(shared);
+  const handlerRe = new RegExp(
+    String.raw`(?:\bon[a-z]+\s*=\s*\\?["']|href\s*=\s*\\?["']javascript:|setAttribute\(\s*['"]on[a-z]+['"]\s*,\s*['"\x60])([^"'\x60]{0,400})`, "g");
+  const callRe = new RegExp(String.raw`\b(${IDENT})\s*\(`, "g");
+  const sources = [[INDEX, html], ...modSrc.entries()];
+  const seen = new Set();
+  for (const [file, src] of sources) {
+    for (const m of src.matchAll(handlerRe)) {
+      for (const c of m[1].matchAll(callRe)) {
+        const name = c[1];
+        const owner = topLevelAnywhere.get(name);
+        if (!owner || publishedAll.has(name) || seen.has(name)) continue;
+        seen.add(name);
+        errors++;
+        console.error(`inline handler calls '${name}' (declared in ${path.relative(ROOT, owner)}) but it is not published — add it to that module's Object.assign(globalThis, {...}) block. Referenced from ${path.relative(ROOT, file)}`);
+      }
+    }
+  }
 }
 
 // ---- duplicate publishes across module files -------------------------------

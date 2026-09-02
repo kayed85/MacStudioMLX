@@ -314,4 +314,36 @@ rm -f "$ROOT/mlx_models/ltx-2.3-mlx-q8/spatial_upscaler_x1_5_v1_0.safetensors"
 rm -f "$ROOT/mlx_models/ltx-2.3-mlx-q8/temporal_upscaler_x2_v1_0.safetensors"
 echo 'Trim done.'
 
+# ---- 10. THE IMPORT GATE — the last thing, because it is the only proof -----
+#
+# THE FLEET SAYS THIS IS NEEDED. `No module named 'ltx_pipelines_mlx'` is the
+# SECOND most common error in the 14-day fleet read (464 events): an app that is
+# installed, boots, and cannot render a single frame.
+#
+# install.js has guarded this since v2.0.2, for a reason written in its own
+# comment: "the upstream pip step had silently failed mid-install but the patch
+# script's i2v target check tolerates a missing ltx_pipelines_mlx file, so the
+# install reported success and the user only learned about the breakage when
+# they clicked Generate." Update never got the same guard. Step 3 above
+# reinstalls the three packages and `require` catches a NON-ZERO pip — but pip
+# exiting 0 is not the same claim as "the module imports", which is the only
+# claim that matters, and the one the user finds out about at Generate time.
+#
+# So: import them. If that fails, do not fail the update yet — reinstall once
+# and import again, because a torn site-packages is exactly what this repairs
+# and the user should not have to run anything by hand. Only a second failure
+# is fatal, and then `require` says so in the app's own words.
+# The probe deliberately imports ONE package and the gate imports all three, so
+# `check_post_update.js` can tell them apart: the gate is the line it must find
+# wrapped in `require`, and a probe that matched the same text would shadow it.
+echo 'Verifying the render engine actually imports…'
+if ! "$PY" -c "import ltx_pipelines_mlx" 2>/dev/null; then
+  echo 'Render engine did not import — repairing the vendored packages once…'
+  ( cd "$ROOT/ltx-2-mlx" && uv pip install --python env/bin/python --reinstall \
+      --no-deps --build-constraints ../pip-build-constraints.txt \
+      ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx ./packages/ltx-trainer ) \
+    || true
+fi
+require "the render engine import gate" -- "$PY" -c "import ltx_core_mlx, ltx_pipelines_mlx, mlx"
+
 echo "=== post-update complete ==="

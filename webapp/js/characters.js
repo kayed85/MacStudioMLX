@@ -2824,4 +2824,8 @@ Object.assign(globalThis, {
   setQuality, _qualityUsesHq, setAccel, setTemporalMode,
   setUpscale, setUpscaleMethod, updateAccelAvailability, updateTemporalAvailability,
   setAspect, updateCustomizeSummary, updatePromptPlaceholder,
+  // inline-handler targets: generated markup resolves these through the
+  // global scope (the v4.9.0 regression, PR #69)
+  audioStudioClearAudio, charactersPickChip, trainInstall, trainRemoveImage,
+  trainUseInVideo,
 });

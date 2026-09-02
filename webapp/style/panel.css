@@ -7391,6 +7391,20 @@
     }
     .picker-recent-thumb:hover { border-color: var(--accent, #5a7cff); transform: translateY(-1px); }
     .picker-recent-thumb.selected { border-color: var(--success, #3fb950); }
+    /* The strip's per-thumbnail delete "×" — same grammar as the Ingredients
+       tile's remove button, sized for a 56 px thumb. Hidden until hover so
+       the strip stays a strip, not a row of buttons. */
+    .picker-recent-wrap { position: relative; flex: 0 0 auto; display: inline-block; }
+    .picker-recent-x {
+      position: absolute; top: -4px; right: -4px;
+      width: 18px; height: 18px; border-radius: 50%; border: none;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.72); color: #fff; cursor: pointer;
+      opacity: 0; transition: opacity 120ms ease, background 120ms ease;
+    }
+    .picker-recent-wrap:hover .picker-recent-x, .picker-recent-x:focus-visible { opacity: 1; }
+    .picker-recent-x:hover { background: var(--danger, #d9534f); }
+    .picker-recent-x .ph { width: 10px; height: 10px; }
 
     /* Ingredients (multi-reference) picker — drop tile + thumbnail grid. */
     .ingredients-drop { min-height: 96px; }

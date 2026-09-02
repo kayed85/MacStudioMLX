@@ -1197,4 +1197,7 @@ Object.assign(globalThis, {
   openSettingsModal, toggleAnalytics, saveAnalyticsKey, clearAnalyticsKey,
   toggleSpicyMode, onTokenInput, toggleTokenVisibility, testToken,
   clearToken, closeSettingsModal, applySettings, _applyHdrPillAvailability,
+  // inline-handler targets: generated markup resolves these through the
+  // global scope (the v4.9.0 regression, PR #69)
+  removeStoragePack,
 });

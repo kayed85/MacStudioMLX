@@ -25,6 +25,43 @@ def get_uploads(h, parsed) -> None:
     h._json({"uploads": P.list_uploads(limit=max(1, min(200, limit)))})
 
 
+# Delete one imported reference image (and drop its thumbnails). Asked for
+# on Pinokio: the Recent-uploads strip had no way to remove an image, and a
+# file removed by hand in Finder kept its cached thumbnail. Path-bound to
+# UPLOADS like every other file route; the thumb cache is keyed by
+# (path, mtime, size, width) so it cannot be purged per-file — it is
+# cleared whole and rebuilds lazily (thumbnails are small).
+@post("/upload/delete")
+def post_upload_delete(h, path, qs, ctype) -> None:
+    _rb = h._read_form_body()
+    if _rb is None:
+        return
+    body, form = _rb
+    raw = (form.get("path", [""])[0] or "").strip()
+    if not raw:
+        h._json({"ok": False, "error": "path required"}, 400); return
+    try:
+        target = P.Path(raw).resolve()
+        uploads = P.UPLOADS.resolve()
+    except Exception:
+        h._json({"ok": False, "error": "bad path"}, 400); return
+    if not target.is_relative_to(uploads) or target == uploads:
+        h._json({"ok": False, "error": "path must be an imported image"}, 400); return
+    if not target.is_file():
+        h._json({"ok": False, "error": "no such upload"}, 404); return
+    try:
+        target.unlink()
+    except OSError as exc:
+        h._json({"ok": False, "error": f"could not delete: {exc}"}, 500); return
+    try:
+        P.shutil.rmtree(P._THUMBCACHE, ignore_errors=True)
+    except Exception:
+        pass
+    P.push(f"upload removed: {target.name}")
+    h._json({"ok": True, "deleted": str(target),
+             "uploads": P.list_uploads(limit=24)})
+
+
 @get("/file")
 def get_file(h, parsed) -> None:
     qs = P.parse_qs(parsed.query)

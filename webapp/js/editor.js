@@ -1714,6 +1714,29 @@ function sbeRippleDelete(clips, id) {
   return { clips: out, ok: true, removed: c };
 }
 
+// LIFT: take the shot out and LEAVE ITS HOLE. Every clip after it stays
+// exactly where it was. This is what an editor means by "delete" most of
+// the time — the shot is wrong, the cut around it is right — and it is the
+// NLE default (Delete lifts, Shift+Delete ripples). The hole is a slug, a
+// real object on the timeline: black, no file, same window. It can be filled
+// from the pool, trimmed, or ripple-deleted later when the cut is ready to
+// close up. A ripple here would move every downstream cut off its beat.
+function sbeLiftDelete(clips, id) {
+  const c = sbeById(clips, id);
+  if (!c) return { clips: clips, ok: false, why: 'gone' };
+  if (c.locked) return { clips: clips, ok: false, why: 'locked' };
+  if (sbeKind(c) === 'slug') return { clips: clips, ok: false, why: 'already a hole' };
+  const len = sbeLen(c);
+  const out = clips.map(x => (x === c) ? {
+    id: c.id, kind: 'slug', path: null, proxy: null, duration: null,
+    start: 0, end: sbeRound(len),
+    film_start: c.film_start, film_end: c.film_end,
+    source: 'human', locked: false, _gap: c._gap,
+  } : Object.assign({}, x));
+  sbeLayout(out);
+  return { clips: out, ok: true, removed: c };
+}
+
 function sbeSplitAt(clips, t, newId) {
   const c = sbeClipAt(clips, t);
   if (!c) return { clips: clips, ok: false, why: 'nothing there' };
@@ -5488,7 +5511,10 @@ function sbePaintInspector() {
     sect('Clip',
       '<button type="button" class="ghost-btn" onclick="sbeToggleLock()">' +
       (c.locked ? 'Unlock' : 'Lock') + '</button>' +
-      '<button type="button" class="ghost-btn" onclick="sbeRippleSelected()">Ripple delete</button>') +
+      '<button type="button" class="ghost-btn" onclick="sbeLiftSelected()" ' +
+      'title="Take this shot out and leave its hole. Nothing else moves. (Delete)">Lift</button>' +
+      '<button type="button" class="ghost-btn" onclick="sbeRippleSelected()" ' +
+      'title="Take this shot out and close the gap. Everything after it slides earlier. (Shift+Delete)">Ripple delete</button>') +
     sect('Sound',
     // THE J-CUT'S ONE SWITCH. Only a video clip has sound of its own, so
     // only a video clip is offered it.
@@ -7268,6 +7294,13 @@ function sbeRippleSelected() {
   sbePaint();
 }
 
+function sbeLiftSelected() {
+  if (!SBE.sel) return;
+  sbeMutate(cs => sbeLiftDelete(cs, SBE.sel));
+  SBE.sel = '';
+  sbePaint();
+}
+
 function sbeSplitHere() {
   sbeMutate(cs => sbeSplitAt(cs, SBE.playhead));
 }
@@ -7570,7 +7603,8 @@ document.addEventListener('keydown', (ev) => {
   if (ev.key === ' ') { ev.preventDefault(); sbeTogglePlay(); return; }
   if (ev.key === 'ArrowLeft') { ev.preventDefault(); sbeStop(); sbeSeek(SBE.playhead - (ev.shiftKey ? step * 10 : step)); return; }
   if (ev.key === 'ArrowRight') { ev.preventDefault(); sbeStop(); sbeSeek(SBE.playhead + (ev.shiftKey ? step * 10 : step)); return; }
-  if (ev.key === 'Delete' || ev.key === 'Backspace') { ev.preventDefault(); sbeRippleSelected(); return; }
+  if ((ev.key === 'Delete' || ev.key === 'Backspace') && ev.shiftKey) { ev.preventDefault(); sbeRippleSelected(); return; }
+  if (ev.key === 'Delete' || ev.key === 'Backspace') { ev.preventDefault(); sbeLiftSelected(); return; }
   if (ev.key === 's' || ev.key === 'S') { ev.preventDefault(); sbeSplitHere(); return; }
   if ((ev.metaKey || ev.ctrlKey) && (ev.key === 'z' || ev.key === 'Z')) {
     ev.preventDefault();
@@ -7862,7 +7896,7 @@ Object.assign(globalThis, {
   sbeOvTrim, sbeOvAdd, sbeOvDelete, sbeStripOwned,
   sbePictureCarriesSound, sbeStripsAt, sbeClipAt, sbeHoles,
   sbeBeatGrid, sbeGridIsAGuess, sbeSnapTime, sbeById,
-  sbeMoveTo, sbeTrim, sbeRippleDelete, sbeSplitAt,
+  sbeMoveTo, sbeTrim, sbeRippleDelete, sbeLiftDelete, sbeSplitAt,
   sbeNewId, sbePlaceUnplaced, sbeKind, sbeBright,
   sbeBrightnessCss, sbeSetBrightness, sbeDropIndex, sbeInsertAt,
   sbeReorderTo, sbeCleanClip, sbeSaveBody, sbeErrorsByClip,
@@ -7914,4 +7948,8 @@ Object.assign(globalThis, {
   sbeZoomSlide, sbeOnTlWheel, sbePrepare, sbePrepareCancel,
   sbeAuto, sbeGenClose, sbeGenSubmit, sbeRenderFilm,
   sbeExportNle, sbeTick, workflowSwitch,
+  // inline-handler targets: generated markup resolves these through the
+  // global scope (the v4.9.0 regression, PR #69)
+  sbeLiftSelected, sbeOvDeleteSel, sbeOvFadeCommit, sbePlace,
+  sbeRippleSelected, sbeToggleLock,
 });

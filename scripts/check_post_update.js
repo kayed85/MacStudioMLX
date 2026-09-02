@@ -115,6 +115,12 @@ const mustRequire = [
   ["the mlx pin", /mlx==0\.31\.1/],
   ["the vendored package reinstall", /--reinstall .*\.\/packages\/ltx-core-mlx/],
   ["the codec patch", /patch_ltx_codec\.py/],
+  // The fleet's second-commonest error is `No module named 'ltx_pipelines_mlx'`
+  // — 464 events, an app that boots and cannot render a frame. install.js has
+  // guarded this since v2.0.2; Update did not until v4.9. A pip step exiting 0
+  // is not the same claim as "the module imports", and the user discovers the
+  // difference at Generate time.
+  ["the render engine import gate", /import ltx_core_mlx, ltx_pipelines_mlx, mlx/],
 ]
 for (const [label, re] of mustRequire) {
   const hit = code.find((l) => re.test(l.t) && !/^\s*require\(\)/.test(l.t))
@@ -123,6 +129,23 @@ for (const [label, re] of mustRequire) {
     failures.push(`${label} (line ${hit.n}) is not wrapped in \`require\` — it would print its error and let the Update report success.`)
   } else {
     console.log(`  ok    ${label} is fatal on failure`)
+  }
+}
+
+// --- 2c. THE IMPORT GATE MUST BE LAST ---------------------------------------
+// It is the only step that proves the app can render, so anything that can
+// break the import must already have run. A gate in the middle of the script
+// would pass and then be invalidated by step 7's mflux resolve, which is
+// precisely the move that walks mlx to a version the engine cannot use.
+{
+  const gate = code.find((l) => /import ltx_core_mlx, ltx_pipelines_mlx, mlx/.test(l.t))
+  if (gate) {
+    const after = code.filter((l) => l.n > gate.n && /^\s*(require |uv pip install|\( cd )/.test(l.t))
+    if (after.length) {
+      failures.push(`the import gate (line ${gate.n}) is followed by ${after.length} more install step(s), starting at line ${after[0].n} — it must be the LAST thing the script does or it proves nothing.`)
+    } else {
+      console.log("  ok    the import gate is the last install step")
+    }
   }
 }
 

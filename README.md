@@ -13,7 +13,7 @@
 
 </p>
 
-> **Current release: v4.9.0.** An under-the-hood release: nothing on screen changes, but the panel's code was reorganized from one 72,000-line file into small named pieces (see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)), verified byte-for-byte and render-for-render along the way. Fixes and features land faster and safer from here on. Also removes some dead code. Full notes on the [releases page](https://github.com/mrbizarro/phosphene/releases).
+> **Current release: v4.9.1.** Fixes the buttons that v4.9.0's reorganization silently broke — the gallery card actions (Quality / Animate / delete), LoRA management, character training controls, timeline editing and CivitAI downloads — reported and diagnosed by a contributor within a day (thanks @blackest). Also adds an "×" on the Recent-uploads strip to delete an imported image. Full notes on the [releases page](https://github.com/mrbizarro/phosphene/releases).
 
 ## Overview
 

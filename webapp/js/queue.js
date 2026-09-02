@@ -1192,21 +1192,60 @@ async function refreshUploadsStrip() {
     if (!els.recentStrip) return;
     if (!_uploadsCache.length) {
       els.recentWrap.style.display = 'none';
+      els.recentStrip.innerHTML = '';   // no stale thumbs behind a hidden strip
       return;
     }
     els.recentWrap.style.display = '';
     const currentPath = els.hidden.value;
+    // Each thumbnail carries its own "×" (a Pinokio ask): the strip had no
+    // way to remove an imported image, and files removed by hand in Finder
+    // kept their thumbnails. Listeners, not inline onclick — generated
+    // markup resolves inline handlers through the global scope, which is
+    // the v4.9.0 regression class (see scripts/lint_webapp.mjs).
     els.recentStrip.innerHTML = _uploadsCache.map(u => `
-      <img class="picker-recent-thumb${u.path === currentPath ? ' selected' : ''}"
-           src="${escapeHtml(_thumbUrl(u.url, 128))}"
-           data-path="${escapeHtml(u.path)}"
-           title="${escapeHtml(u.name)} · ${u.size_kb} KB · ${escapeHtml(u.mtime)}"
-           alt="">
+      <span class="picker-recent-wrap">
+        <img class="picker-recent-thumb${u.path === currentPath ? ' selected' : ''}"
+             src="${escapeHtml(_thumbUrl(u.url, 128))}"
+             data-path="${escapeHtml(u.path)}"
+             title="${escapeHtml(u.name)} · ${u.size_kb} KB · ${escapeHtml(u.mtime)}"
+             alt="">
+        <button type="button" class="picker-recent-x" data-path="${escapeHtml(u.path)}"
+                title="Delete this imported image"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>
+      </span>
     `).join('');
     els.recentStrip.querySelectorAll('img').forEach(img => {
       img.addEventListener('click', () => pickerSetImage(key, img.dataset.path));
     });
+    els.recentStrip.querySelectorAll('.picker-recent-x').forEach(btn => {
+      btn.addEventListener('click', (e) => { e.stopPropagation(); deleteUpload(btn.dataset.path); });
+    });
   });
+}
+
+// Delete an imported reference image from disk (plus its thumbnails), then
+// repaint every strip. A picker currently pointing at the deleted file is
+// cleared so a queued job cannot reference a path that no longer exists.
+async function deleteUpload(path) {
+  if (!path) return;
+  const name = String(path).split('/').pop();
+  if (!confirm(`Delete "${name}" from your imported images? This removes the file.`)) return;
+  let r;
+  try {
+    r = await api('/upload/delete', 'POST', new URLSearchParams({path}));
+  } catch (e) {
+    phosToast('Could not delete: ' + (e && e.message ? e.message : e), {});
+    return;
+  }
+  if (!r || r.ok === false) {
+    phosToast('Could not delete: ' + ((r && r.error) || 'unknown error'), {});
+    return;
+  }
+  PICKERS.forEach(key => {
+    const els = pickerEls(key);
+    if (els && els.hidden && els.hidden.value === path) pickerSetImage(key, '');
+  });
+  await refreshUploadsStrip();
+  if (typeof refreshIngredientRecent === 'function') { try { refreshIngredientRecent(); } catch (e) {} }
 }
 
 // ====== Ingredients (multi-reference) picker ======
@@ -2932,6 +2971,24 @@ function findOutputByPath(path) {
   }
   return o || null;
 }
+// Persistent stage mute (fuschichou, Pinokio, 2026-09-01). Every finished
+// render lands in a FRESH <video> element, so muting via the native control
+// only ever silenced that one clip — the next overnight completion started
+// audible again. The native mute button is the toggle; this makes it stick:
+// each new stage/lightbox video starts in the last chosen state, and any
+// mute/unmute the user makes is written back.
+const STAGE_MUTE_KEY = 'ph_stage_muted';
+function _stageMutePreferred() {
+  try { return localStorage.getItem(STAGE_MUTE_KEY) === '1'; } catch (e) { return false; }
+}
+function _wireStageMutePersistence(video) {
+  if (!video) return;
+  video.muted = _stageMutePreferred();
+  video.addEventListener('volumechange', () => {
+    try { localStorage.setItem(STAGE_MUTE_KEY, video.muted ? '1' : '0'); } catch (e) {}
+  });
+}
+
 function stageMayAutoSelectOutput() {
   return !activePath && !window._liveStageOwnsPlayer;
 }
@@ -3000,6 +3057,7 @@ function selectOutput(path, options) {
       `<img class="player-handoff-backdrop" src="${escapeHtml(liveBackdrop)}" alt="">` +
       `<video class="player-handoff-media" controls autoplay src="${escapeHtml(playerSrc)}"></video>`;
     const handoffVideo = wrap.querySelector('.player-handoff-media');
+    _wireStageMutePersistence(handoffVideo);
     const revealFinished = () => {
       if (!handoffVideo || !handoffVideo.isConnected) return;
       handoffVideo.classList.add('is-ready');
@@ -3017,6 +3075,7 @@ function selectOutput(path, options) {
     setTimeout(revealFinished, 4000);
   } else {
     wrap.innerHTML = `<video controls autoplay src="${escapeHtml(playerSrc)}"></video>`;
+    _wireStageMutePersistence(wrap.querySelector('video'));
   }
   // Surface aspect adapts to actual media dimensions so vertical clips
   // render vertically (previous hardcoded 16:9 surface + object-fit:cover
@@ -3125,6 +3184,7 @@ function openExpandLightbox() {
   stage.innerHTML = isPhoto
     ? `<img src="${o.url}" alt="${escapeHtml(o.name)}">`
     : `<video src="${o.url}" controls autoplay></video>`;
+  _wireStageMutePersistence(stage.querySelector('video'));
   if (meta) {
     const sizeLbl = `${o.size_mb.toFixed(1)} MB`;
     meta.textContent = `${o.name} · ${sizeLbl}`;
@@ -4409,4 +4469,8 @@ Object.assign(globalThis, {
   animateActive, hide, openOutputsFolder, hideActive,
   useAsExtendSource, loadParams, _flashActionDone, closeOutputInfoModal,
   togglePause, openBatch, closeBatch, queueBatch,
+  // inline-handler targets: generated markup resolves these through the
+  // global scope (the v4.9.0 regression, PR #69)
+  _copyToClipboard, animateFromPhoto, deleteOutput, openOutputInfoModal,
+  remakeInQuality, removeJob, repairModel,
 });

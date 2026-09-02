@@ -2111,4 +2111,8 @@ Object.assign(globalThis, {
   sbStopShot, sbStopFilm, sbExport, sbFilmOpen,
   sbFilmPaint, sbBoardChip, sbRowAction, sbAddActiveToBoard,
   sbOpenFromClip, sbPollHook,
+  // inline-handler targets: generated markup resolves these through the
+  // global scope (the v4.9.0 regression, PR #69)
+  sbDeleteBoard, sbFilmReveal, sbFilmSelect, sbFixError,
+  sbOpenShotClip, sbPickCast, sbScrollToShot,
 });

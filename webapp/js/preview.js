@@ -1807,4 +1807,7 @@ Object.assign(globalThis, {
   closeCivitaiModal, civitaiSearch, civitaiLoadMore, renderCivitaiGrid,
   openModelsModal, closeModelsModal, refreshModelsModal, startDownload,
   cancelDownload,
+  // inline-handler targets: generated markup resolves these through the
+  // global scope (the v4.9.0 regression, PR #69)
+  _charactersManageDelete, _charactersManageSave, civitaiAuthSave, civitaiSetFamily,
 });

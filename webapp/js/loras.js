@@ -1259,4 +1259,8 @@ Object.assign(globalThis, {
   onIngredientCharChange, onIngredientCharStrength, refreshLoras, _loraGenerationCompatible,
   renderLorasList, appendTriggerToPrompt, _updateCharsPickerVisibility, refreshManualCharacters,
   _renderManualCharactersList, _renderCharsAppliedNote, renderCharacterStrip,
+  // inline-handler targets: generated markup resolves these through the
+  // global scope (the v4.9.0 regression, PR #69)
+  deleteLora, downloadLora, removeLoraFromActive, renameLora,
+  setLoraStrength, toggleLora,
 });
