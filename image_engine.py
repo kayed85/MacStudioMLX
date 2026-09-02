@@ -103,6 +103,83 @@ def _clean_subprocess_env() -> dict:
     return env
 
 
+def _hf_hub_root(env: "dict | None" = None) -> Path:
+    """The Hub cache root the mflux subprocess will resolve, from ITS env —
+    HF_HUB_CACHE, else HF_HOME/hub, else ~/.cache/huggingface/hub, the
+    order huggingface_hub itself uses."""
+    import os as _os
+    src = env if env is not None else _os.environ
+    explicit = src.get("HF_HUB_CACHE") or src.get("HUGGINGFACE_HUB_CACHE")
+    if explicit:
+        return Path(explicit).expanduser()
+    home = src.get("HF_HOME")
+    if home:
+        return Path(home).expanduser() / "hub"
+    return Path.home() / ".cache" / "huggingface" / "hub"
+
+
+def _is_hf_repo_id(value) -> bool:
+    # mflux's own test for "this is a Hub id, not a path": exactly one slash
+    # and no path prefix.
+    s = str(value or "")
+    return ("/" in s and s.count("/") == 1
+            and not s.startswith(("./", "../", "~/", "/")))
+
+
+def hf_repo_partial_download(repo_id: str, env: "dict | None" = None) -> "dict | None":
+    """Report an interrupted download of `repo_id` in the Hub cache, or None.
+
+    huggingface_hub streams each file to `blobs/<sha>.incomplete` and renames
+    it on completion, so a leftover `.incomplete` is the one unambiguous sign
+    that a download stopped partway. #73: 38 of 54 GB had landed, 14 files
+    were still `.incomplete`, the panel reported the engine ready and every
+    image generation died in mflux's weight loader.
+    """
+    repo_dir = _hf_hub_root(env) / ("models--" + repo_id.replace("/", "--"))
+    blobs = repo_dir / "blobs"
+    if not blobs.is_dir():
+        return None
+    try:
+        entries = list(blobs.iterdir())
+    except OSError:
+        return None
+    partial = [p for p in entries if p.name.endswith(".incomplete")]
+    if not partial:
+        return None
+    total = 0
+    for p in entries:
+        try:
+            if p.is_file():
+                total += p.stat().st_size
+        except OSError:
+            pass
+    return {"incomplete": len(partial), "on_disk_gb": round(total / 1e9, 1),
+            "repo_dir": repo_dir}
+
+
+def repair_partial_hf_download(repo_id: str, env: "dict | None" = None) -> "dict | None":
+    """Make an interrupted download resume instead of crash.
+
+    mflux resolves a Hub id cached-first, and its completeness test only
+    asks whether every file pattern has SOME match — a snapshot missing 14
+    of its transformer shards passes, mflux loads the shards it finds and
+    dies in WeightLoader, and snapshot_download (the only thing that would
+    resume the `.incomplete` blobs) is never called. Removing `snapshots/`
+    — a tree of symlinks; every finished blob stays where it is — makes the
+    cached rule fail, so mflux's own download rule runs: it re-links each
+    blob that is already complete and resumes the rest. Returns the partial
+    report when a repair was made, None when nothing was needed.
+    """
+    import shutil as _shutil
+    info = hf_repo_partial_download(repo_id, env)
+    if not info:
+        return None
+    snaps = info["repo_dir"] / "snapshots"
+    if snaps.is_dir():
+        _shutil.rmtree(snaps, ignore_errors=True)
+    return info
+
+
 class ImageJobCancelled(RuntimeError):
     """Raised when an image-generation subprocess is killed by /stop.
 
@@ -1078,6 +1155,18 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
     # `for raw in iter(readline, "")` which could block forever if mflux
     # stopped flushing — the deadline check after each line never tripped
     # and the queue worker hung indefinitely.
+    # A download that stopped partway must resume, not crash (#73).
+    if _is_hf_repo_id(getattr(config, "mflux_model", None)):
+        _partial = repair_partial_hf_download(config.mflux_model, env)
+        if _partial and on_log is not None:
+            try:
+                on_log(f"[download] {config.mflux_model} was interrupted at "
+                       f"{_partial['on_disk_gb']} GB ({_partial['incomplete']} files "
+                       f"unfinished) — resuming it before this render; nothing "
+                       f"already downloaded is fetched again.")
+            except Exception:  # noqa: BLE001
+                pass
+
     import collections
     import select
     last_lines: collections.deque[str] = collections.deque(maxlen=64)
@@ -1304,13 +1393,15 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
                 f"  - Quit other big apps (browsers + IDEs eat 8-15 GB).\n"
                 f"A crash report was saved to ~/Library/Logs/DiagnosticReports/"
                 f"python3.11-*.ips — useful for a bug report.\n\n"
-                f"Tail of stdout/stderr:\n{stderr_tail[:800]}"
+                f"Tail of stdout/stderr:\n{stderr_tail[-800:]}"
             )
         # Generic non-zero exit — pass through the tail so the user sees
-        # whatever mflux printed last.
+        # whatever mflux printed last. Keep the END of the tail: a Python
+        # traceback puts the exception on its last line, and the head-slice
+        # this used to take cut it off right before the message (#73).
         raise RuntimeError(
             f"{bin_name} failed (exit {rc}) on batch of {n} seeds. "
-            f"Tail of stdout/stderr:\n{stderr_tail[:1200]}"
+            f"Tail of stdout/stderr:\n{stderr_tail[-1200:]}"
         )
 
     # Build results from whatever files actually landed. If the

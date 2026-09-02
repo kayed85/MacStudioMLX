@@ -330,7 +330,7 @@ Kick off a character LoRA training. The panel shells out to `lora_lab.train_char
 | Field | Type | Note |
 |---|---|---|
 | `train_job_id` | string | From `/train/upload`. |
-| `trigger` | string | Trigger token, e.g. `bizarrotrn`. Must be compound and rare so it doesn't collide with normal language. The face LoRA lands at `mlx_models/loras/<trigger>_v2.safetensors`; the optional audio LoRA at `<trigger>.audio.safetensors`. |
+| `trigger` | string | Trigger token, e.g. `bizarrotrn`. Must be compound, rare and **letters-only** so it doesn't collide with normal language — digits tokenize as single, very common tokens (`mrz07` → `m / rz / 0 / 7`), and every trigger that has carried an identity here was letters-only; the panel suggests `<3 consonants>trn` (`mrztrn`) and logs a note when a trigger carries digits (#62). The face LoRA lands at `mlx_models/loras/<trigger>_v2.safetensors`; the optional audio LoRA at `<trigger>.audio.safetensors`. |
 | `preset` | `quick` \| `medium` \| `high` | Hyperparameter preset. **Default changed in v4.6.1: omitting it now gives `high` for `train_type=character` and `quick` for `train_type=style`** (`TRAIN_DEFAULT_PRESET`) — it used to give `quick` for both, which is the tier that has never carried an identity (#62). See the table below — **the step count is not a constant, and on a sub-64 GB Mac neither is anything else.** |
 | `image_count` | int | Confirmed by the panel from the uploaded images. |
 | `train_audio` | `true` \| `false` | Optional. Default `false`. When `true`, a voice clip must already exist for this `train_job_id` (uploaded via `/train/upload-voice`) — otherwise `/train/start` returns 400. |

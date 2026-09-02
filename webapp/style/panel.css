@@ -4322,6 +4322,8 @@
       opacity: 0.85;
       margin-left: 8px;
     }
+    /* A trigger with digits in it (#62) — a warning, not a refusal. */
+    .train-pane h2 .h2-hint.warn { color: var(--warning); opacity: 1; }
     /* Preflight banner — only visible when a required model isn't on disk.
        Same dark-card chrome as the Composer cards. */
     .train-preflight-card {

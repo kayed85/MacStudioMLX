@@ -1243,10 +1243,12 @@ function trainInit() {
     const t = document.getElementById('trainTrigger');
     if (t && !t.value) t.value = trainGenerateTriggerJS();
     document.getElementById('trainTriggerExample').textContent =
-      (document.getElementById('trainTrigger').value || 'mrz07');
+      (document.getElementById('trainTrigger').value || 'mrztrn');
+    trainTriggerDigitWarn();
     document.getElementById('trainTrigger').addEventListener('input', () => {
       document.getElementById('trainTriggerExample').textContent =
-        (document.getElementById('trainTrigger').value || 'mrz07');
+        (document.getElementById('trainTrigger').value || 'mrztrn');
+      trainTriggerDigitWarn();
       trainUpdateButtonState();
       trainUpdateEstimate();
     });
@@ -1418,18 +1420,34 @@ async function trainInstall(key) {
 // Skip vowels + ambiguous letters (l, i, o → 1, 0). Mirrors the Python
 // _suggest_trigger_token; not a security boundary so the algorithms can
 // drift slightly — server has its own generator for non-JS callers.
+// Letters-only, `<3 consonants>trn` — the shape of every trigger that has
+// carried a face here (bizarrotrn, elontrn, ariatrn). The old `mrz07` shape
+// tokenizes to m / rz / 0 / 7: two single-digit tokens with a huge prior of
+// their own. Mirrors _suggest_trigger_token() server-side (#62).
 function trainGenerateTriggerJS() {
   const cons = 'bcdfghjkmnpqrstvwxyz';
   let letters = '';
   for (let i = 0; i < 3; i++) letters += cons[Math.floor(Math.random() * cons.length)];
-  const digits = String(Math.floor(Math.random() * 100)).padStart(2, '0');
-  return letters + digits;
+  return letters + 'trn';
+}
+
+// Warn (never block) when a typed trigger carries digits — see above.
+function trainTriggerDigitWarn() {
+  const t = document.getElementById('trainTrigger');
+  const hint = document.getElementById('trainTriggerHint');
+  if (!t || !hint) return;
+  const bad = /\d/.test((t.value || '').trim());
+  hint.textContent = bad
+    ? 'digits split into their own very common tokens — every trigger that has carried a face here was letters-only (e.g. mrztrn)'
+    : 'a rare, letters-only token the model will associate with this character';
+  hint.classList.toggle('warn', bad);
 }
 
 function trainSuggestTrigger() {
   const t = document.getElementById('trainTrigger');
   t.value = trainGenerateTriggerJS();
   document.getElementById('trainTriggerExample').textContent = t.value;
+  trainTriggerDigitWarn();
 }
 
 function trainWireDropZone() {

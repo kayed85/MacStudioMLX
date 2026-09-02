@@ -2409,22 +2409,38 @@ def _train_reconcile_captions(dataset_dir: Path) -> tuple[int, int, list[str]]:
 
 
 def _suggest_trigger_token() -> str:
-    """Generate a rare token of the form `<3-letter><2-digit>` (e.g. `mrz07`,
-    `lqx42`). Avoids English-word collisions by picking three consonants for
-    the leading run — phonotactically rare in English, almost always unique
-    across the LTX vocabulary's text encoder. The two-digit tail prevents
-    accidental clashes with existing LoRA triggers a user already has
-    installed (e.g. an `mrz` LoRA + an `mrz07` LoRA coexist fine)."""
-    # Skip vowels + ambiguous letters (l, i, o → 1, 0). Keep the set rare-in-
-    # English (no common bigrams like 'th', 'st', 'sh').
+    """Generate a rare, LETTERS-ONLY token of the form `<3 consonants>trn`
+    (e.g. `mrztrn`, `kvdtrn`).
+
+    The previous shape was `<3 consonants><2 digits>` (`mrz07`). Through
+    Gemma's tokenizer that is `m / rz / 0 / 7` — two of the four pieces
+    are single digits, among the most common tokens the model knows, with
+    a prior that has nothing to do with a face. Every trigger that has
+    ever carried an identity here is letters-only and ends in `trn`
+    (`bizarrotrn` -> b / izarro / trn; `elontrn`; `ariatrn`), and the
+    trainings reported in #62 as "active but no identity" all used the
+    digit shape the panel itself suggested (`mmx26`, `sfw25`, `3Mar26`).
+    Whether the digits are THE cause is being A/B'd; suggesting the shape
+    that is known to work costs nothing. `trn` keeps the family readable
+    at a glance in the LoRA list; three consonants keep it phonotactically
+    rare in English (no common bigrams like 'th', 'st', 'sh').
+    """
     consonants = "bcdfghjkmnpqrstvwxyz"
     while True:
         letters = "".join(random.choice(consonants) for _ in range(3))
         # Reject anything that happens to spell a common letter pattern.
         if letters in ("the", "and", "for", "but"):
             continue
-        digits = f"{random.randint(0, 99):02d}"
-        return letters + digits
+        token = letters + "trn"
+        # Stay clear of an adapter the user already has under this name
+        # (the digit tail used to be what avoided that clash).
+        try:
+            if (LORAS_DIR / f"{token}_v2.safetensors").exists() or \
+               (LORAS_DIR / f"{token}.style.safetensors").exists():
+                continue
+        except Exception:  # noqa: BLE001 — LORAS_DIR unset this early is fine
+            pass
+        return token
 
 
 def _train_estimate_seconds(preset: str, image_count: int, *,
@@ -19939,6 +19955,67 @@ _TRAIN_ABORT_RX = re.compile(
 )
 
 
+def _train_phase_from_line(line: str, payload: "dict | None", current: str) -> str:
+    """Which phase the trainer is in, from the lines it prints.
+
+    The preprocessor's phase banners are plain text (they reach the panel
+    on the merged stdout/stderr pipe); a training step is a JSON event.
+    Anything else keeps the current phase. Phases: start -> text_encode ->
+    image_encode -> train.
+    """
+    if isinstance(payload, dict):
+        if (payload.get("event") or "step") in ("step", "train_progress"):
+            return "train"
+        return current
+    s = line or ""
+    if "Phase 1: encoding text captions" in s:
+        return "text_encode"
+    if "Phase 2: encoding image latents" in s:
+        return "image_encode"
+    return current
+
+
+def _train_encode_retry_wanted(rc: int, watchdog_seen: bool, phase: str,
+                               already_retried: bool) -> bool:
+    """One automatic relaunch, and only for the kill this can fix (#61):
+    SIGABRT with a Metal-watchdog signature in the log, during the caption
+    encode, not already retried. A kill during image encode or training
+    is the canvas-sized problem the existing error names; a crash without
+    the signature is not a GPU timeout at all."""
+    return (rc == -6 and bool(watchdog_seen) and phase == "text_encode"
+            and not already_retried)
+
+
+def _train_gemma_fallback_max_length() -> int:
+    """The shorter Gemma pad the relaunch uses — the same knob and default
+    (256, floor 64) as the render helper's fallback, so one env var tunes
+    both: LTX_GEMMA_FALLBACK_MAX_LENGTH."""
+    try:
+        return max(64, int(os.environ.get("LTX_GEMMA_FALLBACK_MAX_LENGTH", "256") or 256))
+    except ValueError:
+        return 256
+
+
+def _train_wipe_caption_conditions(dataset_dir: Path) -> int:
+    """Discard the caption encodings a killed run wrote, so the relaunch
+    re-encodes every caption at one length — the preprocessor skips a
+    condition file that exists, and a dataset half at 1024 tokens and half
+    at 256 would not batch. Image latents live beside them and are left
+    alone. Returns how many files went."""
+    cond = Path(dataset_dir) / "training_data" / ".precomputed" / "conditions"
+    if not cond.is_dir():
+        return 0
+    n = 0
+    for f in cond.iterdir():
+        if f.is_file() and f.name.startswith("condition_"):
+            try:
+                f.unlink()
+                n += 1
+            except OSError:
+                pass
+    return n
+
+
 def run_train_job_inner(job: dict) -> None:
     """Run a Train Character job. Reads the dataset that /train/upload built
     under state/train_character/<train_job_id>/, writes a job-spec JSON the
@@ -19994,6 +20071,13 @@ def run_train_job_inner(job: dict) -> None:
 
     preset = p.get("preset", "quick")
     trigger = p.get("trigger") or _suggest_trigger_token()
+    if re.search(r"\d", trigger):
+        # Not a refusal — the field is the user's — but the log should carry
+        # the one fact that separates the triggers that have carried a face
+        # from the ones reported in #62 (see _suggest_trigger_token).
+        push(f"[train] note: trigger {trigger!r} contains digits, which Gemma "
+             "splits into single very common tokens. Every trigger that has "
+             "carried an identity here was letters-only (e.g. 'mrztrn').")
     caption_strategy = p.get("caption_strategy", "trigger_simple")
     preset_table = TRAIN_STYLE_PRESETS if is_style else TRAIN_PRESETS
     clamp_notes = p.get("train_clamp_notes") or []
@@ -20179,131 +20263,160 @@ def run_train_job_inner(job: dict) -> None:
     last_step = 0
     total_steps = spec["steps"]
     last_loss = None
+    # Where the trainer is, read from its own lines, so a watchdog kill can
+    # be PLACED (#61): the caption encode is the phase that dies on some
+    # chips, and the only one worth relaunching — see _train_encode_retry.
+    _train_phase = "start"
+    _train_env = {**os.environ}
+    _encode_retried = False
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            env={**os.environ},
-            # Own process group so /stop can take down the entire trainer
-            # tree (train_character + its lora_lab + LtxvTrainer threads +
-            # any ffmpeg helpers) with a single os.killpg. Without this,
-            # /stop only killed the warm helper + mux ffmpeg and left the
-            # trainer running for hours, blocking the worker.
-            start_new_session=True,
-        )
-        with LOCK:
-            STATE["pid"] = proc.pid
-            STATE["train_pgid"] = os.getpgid(proc.pid)
-        # Stream stdout. Each line is either JSON (a structured progress
-        # event) or plain text (forwarded as-is to the log).
-        assert proc.stdout is not None
-        for raw in proc.stdout:
-            line = raw.rstrip("\n")
-            if not line:
-                continue
-            payload = None
-            if line.lstrip().startswith("{"):
-                try:
-                    payload = json.loads(line)
-                except json.JSONDecodeError:
-                    payload = None
-            if isinstance(payload, dict):
-                # Progress event from the lab side. lora-lab's train_character
-                # emits 'train_progress' (legacy upstream name from ltx-trainer),
-                # while our newer train_audio emits 'step'. Accept both so the
-                # face-phase progress bar actually advances (2026-05-15 fix —
-                # before this the bar stuck at 'Loading pipeline' through the
-                # entire face run).
-                evt = payload.get("event") or "step"
-                if evt in ("step", "train_progress"):
+        while True:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                env=_train_env,
+                # Own process group so /stop can take down the entire trainer
+                # tree (train_character + its lora_lab + LtxvTrainer threads +
+                # any ffmpeg helpers) with a single os.killpg. Without this,
+                # /stop only killed the warm helper + mux ffmpeg and left the
+                # trainer running for hours, blocking the worker.
+                start_new_session=True,
+            )
+            with LOCK:
+                STATE["pid"] = proc.pid
+                STATE["train_pgid"] = os.getpgid(proc.pid)
+            # Stream stdout. Each line is either JSON (a structured progress
+            # event) or plain text (forwarded as-is to the log).
+            assert proc.stdout is not None
+            for raw in proc.stdout:
+                line = raw.rstrip("\n")
+                if not line:
+                    continue
+                payload = None
+                if line.lstrip().startswith("{"):
                     try:
-                        last_step = int(payload.get("step") or last_step)
-                    except (TypeError, ValueError):
-                        pass
-                    try:
-                        total_steps = int(payload.get("total") or total_steps)
-                    except (TypeError, ValueError):
-                        pass
-                    last_loss = payload.get("loss", last_loss)
-                    # Write progress fields the existing /status reader can
-                    # pick up — same shape as _compute_progress would emit.
-                    with LOCK:
-                        if STATE.get("current") and STATE["current"].get("id") == job["id"]:
-                            phase_word = "style" if is_style else "face"
-                            STATE["current"]["progress"] = {
-                                "phase": "denoise",
-                                "phase_label": (
-                                    f"Training {phase_word} · step "
-                                    f"{last_step} / {total_steps}"),
-                                "pct": (last_step / max(1, total_steps)) * 100.0,
-                                "elapsed_sec": time.time() - t0,
-                                "eta_sec": max(0,
-                                    (total_steps - last_step) * (
-                                        (time.time() - t0) / max(1, last_step)
-                                        if last_step > 0
-                                        else preset_table.get(
-                                            preset, preset_table["quick"]
-                                        )["seconds_per_step"]
-                                    )),
-                                "denoise_step": last_step,
-                                "denoise_total": total_steps,
-                            }
-                    if last_step % 50 == 0 or last_step == total_steps:
-                        push(f"[train] step {last_step}/{total_steps} loss={last_loss}")
-                elif evt == "log":
-                    push(f"[train] {payload.get('msg', '')}")
-                elif evt == "adapter_strength":
-                    # A GREEN TALLY WAS NEVER PROOF THE FILE COULD DO
-                    # ANYTHING. A LoRA can train to completion, write a
-                    # perfectly valid safetensors, load without a warning and
-                    # change NOTHING in the picture — because the deltas it
-                    # learned are numerically too small to move the model.
-                    # Every gate we had said "done"; only the render said
-                    # otherwise, hours later, on the owner's eye.
-                    #
-                    # The trainer measures the adapter's own delta RMS against
-                    # a floor and says so. Surfacing it here is the difference
-                    # between a training run that reports success and one that
-                    # reports the truth.
-                    med = payload.get("delta_rms_median")
-                    mx = payload.get("delta_rms_max")
-                    verdict = str(payload.get("verdict") or "unknown")
-                    carrying = payload.get("carrying_modules")
-                    mods = payload.get("modules")
-                    bits = [f"median={med}", f"max={mx}"]
-                    if carrying is not None and mods is not None:
-                        bits.append(f"{carrying}/{mods} modules carrying")
-                    if payload.get("floor") is not None:
-                        bits.append(f"floor={payload.get('floor')}")
-                    push(f"[train] adapter strength: delta_rms "
-                         f"{' · '.join(bits)} ({verdict})")
-                    train_verdict = verdict
-                    if verdict != "ok":
-                        push("[train] WARNING: this adapter may not visibly "
-                             "change anything it is applied to. Train longer, "
-                             "raise the rank, or check the captions — a file "
-                             "that loads is not a file that works.")
-                elif evt == "checkpoint":
-                    push(f"[train] checkpoint → {payload.get('path', '?')}")
-                elif evt == "done":
-                    push(f"[train] done · {payload.get('path', '?')}")
+                        payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        payload = None
+                _train_phase = _train_phase_from_line(line, payload, _train_phase)
+                if isinstance(payload, dict):
+                    # Progress event from the lab side. lora-lab's train_character
+                    # emits 'train_progress' (legacy upstream name from ltx-trainer),
+                    # while our newer train_audio emits 'step'. Accept both so the
+                    # face-phase progress bar actually advances (2026-05-15 fix —
+                    # before this the bar stuck at 'Loading pipeline' through the
+                    # entire face run).
+                    evt = payload.get("event") or "step"
+                    if evt in ("step", "train_progress"):
+                        try:
+                            last_step = int(payload.get("step") or last_step)
+                        except (TypeError, ValueError):
+                            pass
+                        try:
+                            total_steps = int(payload.get("total") or total_steps)
+                        except (TypeError, ValueError):
+                            pass
+                        last_loss = payload.get("loss", last_loss)
+                        # Write progress fields the existing /status reader can
+                        # pick up — same shape as _compute_progress would emit.
+                        with LOCK:
+                            if STATE.get("current") and STATE["current"].get("id") == job["id"]:
+                                phase_word = "style" if is_style else "face"
+                                STATE["current"]["progress"] = {
+                                    "phase": "denoise",
+                                    "phase_label": (
+                                        f"Training {phase_word} · step "
+                                        f"{last_step} / {total_steps}"),
+                                    "pct": (last_step / max(1, total_steps)) * 100.0,
+                                    "elapsed_sec": time.time() - t0,
+                                    "eta_sec": max(0,
+                                        (total_steps - last_step) * (
+                                            (time.time() - t0) / max(1, last_step)
+                                            if last_step > 0
+                                            else preset_table.get(
+                                                preset, preset_table["quick"]
+                                            )["seconds_per_step"]
+                                        )),
+                                    "denoise_step": last_step,
+                                    "denoise_total": total_steps,
+                                }
+                        if last_step % 50 == 0 or last_step == total_steps:
+                            push(f"[train] step {last_step}/{total_steps} loss={last_loss}")
+                    elif evt == "log":
+                        push(f"[train] {payload.get('msg', '')}")
+                    elif evt == "adapter_strength":
+                        # A GREEN TALLY WAS NEVER PROOF THE FILE COULD DO
+                        # ANYTHING. A LoRA can train to completion, write a
+                        # perfectly valid safetensors, load without a warning and
+                        # change NOTHING in the picture — because the deltas it
+                        # learned are numerically too small to move the model.
+                        # Every gate we had said "done"; only the render said
+                        # otherwise, hours later, on the owner's eye.
+                        #
+                        # The trainer measures the adapter's own delta RMS against
+                        # a floor and says so. Surfacing it here is the difference
+                        # between a training run that reports success and one that
+                        # reports the truth.
+                        med = payload.get("delta_rms_median")
+                        mx = payload.get("delta_rms_max")
+                        verdict = str(payload.get("verdict") or "unknown")
+                        carrying = payload.get("carrying_modules")
+                        mods = payload.get("modules")
+                        bits = [f"median={med}", f"max={mx}"]
+                        if carrying is not None and mods is not None:
+                            bits.append(f"{carrying}/{mods} modules carrying")
+                        if payload.get("floor") is not None:
+                            bits.append(f"floor={payload.get('floor')}")
+                        push(f"[train] adapter strength: delta_rms "
+                             f"{' · '.join(bits)} ({verdict})")
+                        train_verdict = verdict
+                        if verdict != "ok":
+                            push("[train] WARNING: this adapter may not visibly "
+                                 "change anything it is applied to. Train longer, "
+                                 "raise the rank, or check the captions — a file "
+                                 "that loads is not a file that works.")
+                    elif evt == "checkpoint":
+                        push(f"[train] checkpoint → {payload.get('path', '?')}")
+                    elif evt == "done":
+                        push(f"[train] done · {payload.get('path', '?')}")
+                    else:
+                        push(f"[train] {line}")
                 else:
                     push(f"[train] {line}")
-            else:
-                push(f"[train] {line}")
-            # The trainer dies by SIGABRT when macOS kills its GPU command
-            # buffer, and `code -6` on its own tells the user nothing. Watch
-            # the same signatures the render helper watches (#61).
-            if not _train_watchdog_seen and _TRAIN_ABORT_RX.search(line or ""):
-                _train_watchdog_seen = True
-        rc = proc.wait()
-        proc = None
-        with LOCK:
-            STATE["pid"] = None
-            STATE["train_pgid"] = None
+                # The trainer dies by SIGABRT when macOS kills its GPU command
+                # buffer, and `code -6` on its own tells the user nothing. Watch
+                # the same signatures the render helper watches (#61).
+                if not _train_watchdog_seen and _TRAIN_ABORT_RX.search(line or ""):
+                    _train_watchdog_seen = True
+            rc = proc.wait()
+            proc = None
+            with LOCK:
+                STATE["pid"] = None
+                STATE["train_pgid"] = None
+            if _train_encode_retry_wanted(rc, _train_watchdog_seen, _train_phase,
+                                          _encode_retried):
+                # The render helper survives this exact kill by retrying once
+                # at a shorter Gemma encode; this is the same move for the
+                # trainer (#61). Nothing trained yet, so nothing is lost: the
+                # caption conditions written so far are wiped so every caption
+                # is re-encoded at ONE length (the trainer batches them), and
+                # the image latents — the expensive half — are untouched and
+                # skipped by the preprocessor on the relaunch.
+                _encode_retried = True
+                n = _train_gemma_fallback_max_length()
+                wiped = _train_wipe_caption_conditions(dataset_dir)
+                push(f"[train] the macOS GPU watchdog killed the caption encode "
+                     f"(Metal, SIGABRT) — relaunching the trainer once with Gemma "
+                     f"encoding at {n} tokens instead of 1024. {wiped} caption "
+                     f"encoding(s) discarded; image latents kept.")
+                _train_env["LTX2_GEMMA_MAX_LENGTH"] = str(n)
+                _train_watchdog_seen = False
+                _train_phase = "start"
+                continue
+            break
         if rc != 0:
             # -6 is SIGABRT. With a watchdog signature in the log it is macOS
             # killing the GPU command buffer, not our code faulting — and the
@@ -20311,6 +20424,13 @@ def run_train_job_inner(job: dict) -> None:
             # aborted on quick AND medium while 512x512 trained fine, which is
             # canvas-shaped, not preset-shaped.
             if rc == -6 and _train_watchdog_seen:
+                if _train_phase == "text_encode":
+                    raise RuntimeError(
+                        "macOS killed the training GPU command buffer (Metal "
+                        "watchdog, SIGABRT) during the caption encode — twice: "
+                        "the automatic relaunch at a shorter Gemma length died "
+                        "the same way. Close other GPU apps and retry; if it "
+                        "repeats, attach the Logs tail to an issue.")
                 raise RuntimeError(
                     "macOS killed the training GPU command buffer (Metal "
                     "watchdog, SIGABRT). This is the canvas, not the preset — "

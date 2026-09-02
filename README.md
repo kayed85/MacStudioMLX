@@ -13,7 +13,7 @@
 
 </p>
 
-> **Current release: v4.9.1.** Fixes the buttons that v4.9.0's reorganization silently broke — the gallery card actions (Quality / Animate / delete), LoRA management, character training controls, timeline editing and CivitAI downloads — reported and diagnosed by a contributor within a day (thanks @blackest). Also adds an "×" on the Recent-uploads strip to delete an imported image. Full notes on the [releases page](https://github.com/mrbizarro/phosphene/releases).
+> **Current release: v4.9.2.** Three issue fixes: an interrupted image-model download now resumes instead of crashing every generation (#73), character training survives the GPU watchdog killing caption encoding by relaunching once at a shorter text encode (#61), and suggested trigger words are letters-only — the old `mrz07` shape was half digit tokens (#62). Includes v4.9.1, which fixed the buttons v4.9.0's reorganization silently broke (thanks @blackest) and added an "×" on the Recent-uploads strip. Full notes on the [releases page](https://github.com/mrbizarro/phosphene/releases).
 
 ## Overview
 

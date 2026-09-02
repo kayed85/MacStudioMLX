@@ -351,6 +351,14 @@ function imgStudioRenderEnginePill() {
     pill.dataset.state = 'ready';
     pill.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-check-bold"/></svg>ready';
     pill.title = 'Weights are cached locally';
+  } else if (info.partial) {
+    // A download that stopped partway (#73). Generate resumes it — say so,
+    // instead of "ready" (the old lie) or a fresh full-size download.
+    pill.dataset.state = 'missing';
+    const done = info.partial_gb || 0;
+    const gb = info.download_gb || 0;
+    pill.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-download-simple"/></svg>resume' + (gb > 0 ? ` · ${done.toFixed(0)} of ~${gb.toFixed(0)} GB` : '');
+    pill.title = `The weight download was interrupted at ${done.toFixed(1)} GB — Generate resumes it. Nothing already downloaded is fetched again.`;
   } else {
     pill.dataset.state = 'missing';
     const gb = info.download_gb || 0;
@@ -375,7 +383,9 @@ function imgStudioUpdateEstimate() {
   // doesn't know its target ahead of time so we hide.
   const info = _IMG_ENGINE_STATUS[eng];
   let label = 'Generate';
-  if (info && !info.cached && (info.download_gb || 0) > 0) {
+  if (info && !info.cached && info.partial) {
+    label = `Generate · resumes the download first (${(info.partial_gb || 0).toFixed(0)} GB done)`;
+  } else if (info && !info.cached && (info.download_gb || 0) > 0) {
     label = `Generate · downloads ~${info.download_gb.toFixed(0)} GB first`;
   }
   btnLabel.textContent = label;

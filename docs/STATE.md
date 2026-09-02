@@ -1,5 +1,40 @@
 # Phosphene — project state, history, open work
 
+> **🩹 2026-09-02 — v4.9.2: three issue fixes (#73, #61, #62), shipped the same day as v4.9.1.**
+> **#73 — an interrupted image-engine download looked ready and crashed every
+> render.** Qwen-Image-Edit-2511 stopped at 38 of 54 GB with 14 blobs still
+> `.incomplete`; `/image/engine_status` said cached; mflux resolves a Hub id
+> cached-first and its completeness test only asks whether every file pattern
+> has SOME match, so it loaded the shards it had and died in its weight loader
+> without ever calling the one function that resumes. Now: `image_engine.
+> hf_repo_partial_download()` reads the one unambiguous sign huggingface_hub
+> leaves (`blobs/*.incomplete`); the status route reports `partial` and stops
+> saying cached (pill "resume · N of ~M GB", button "Generate · resumes the
+> download first"); and a pre-flight before every mflux spawn removes the
+> `snapshots/` symlink tree so mflux's own download rule runs, re-links every
+> finished blob and resumes the rest — nothing downloads twice. The error the
+> panel showed was the HEAD of the traceback (`stderr_tail[:1200]`), cut off
+> right before the exception; both slices now keep the END. `test_image_
+> partial_download.py`. **#61 — training dies when the GPU watchdog kills the
+> caption encode.** The render helper's mitigation (retry once at a shorter
+> Gemma pad) is ported: the panel places the kill from the trainer's own
+> phase banners, relaunches the trainer ONCE for a SIGABRT-with-signature in
+> `text_encode` with `LTX2_GEMMA_MAX_LENGTH=256` (honoured by a wrapper in
+> `lora_lab/preprocess_images.py` around the vendored `encode_all_layers`,
+> default 1024), wipes the half-written caption conditions so every caption
+> is encoded at one length, and leaves the image latents (the expensive
+> half) for the preprocessor to skip. Kills in other phases keep the canvas
+> advice. `test_train_encode_retry.py`. **#62 — the trigger the panel
+> suggested was half digits.** `mrz07` tokenizes through Gemma as `m / rz /
+> 0 / 7`; every trigger that has ever carried a face here is letters-only
+> (`bizarrotrn` → `b / izarro / trn`, `elontrn`, `ariatrn`), and the rank-32
+> High trainings reported as "active but no identity" all used the digit
+> shape (`mmx26`, `sfw25`, `3Mar26`). Unproven as THE cause — it is being
+> A/B'd with the reporter — but suggesting the shape known to work costs
+> nothing: `_suggest_trigger_token()` and its JS mirror now emit
+> `<3 consonants>trn`, the Train tab warns (never blocks) on a digit, the
+> trainer logs the same note, API.md says letters-only.
+
 > **🩹 2026-09-02 — v4.9.1: the buttons v4.9.0 broke, fixed the same day they were reported.**
 > The module split had one blind spot: a function referenced ONLY from its own
 > module's generated markup (`onclick="deleteOutput('…')"` inside a template

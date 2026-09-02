@@ -304,6 +304,7 @@ def get_image_engine_status(h, parsed) -> None:
         out = []
         for engine, repo, dl_gb, sec, cold in ENGINES:
             family_installed = True
+            partial = None
             if engine in ("hidream_inline", "hidream_fast_inline", "hidream_quality_inline"):
                 # HiDream lives outside the HF cache (lab venv path).
                 # All three modes share the same Dev-BF16 model dir.
@@ -314,6 +315,13 @@ def get_image_engine_status(h, parsed) -> None:
             else:
                 _snap = P._repo_hf_cache_dir(repo)
                 cached = _snap is not None
+                # An interrupted download is NOT cached (#73): a snapshot
+                # with `.incomplete` blobs beside it looked ready here,
+                # and the render died in mflux's loader. The pill says
+                # "resume" and the render's pre-flight resumes it.
+                partial = P.agent_image_engine.hf_repo_partial_download(repo)
+                if partial:
+                    cached = False
                 # Ideogram: count EITHER the un-gated mirror OR an existing
                 # official download, and require a real weight file (a
                 # gated stub snapshot has only README/LICENSE).
@@ -353,6 +361,8 @@ def get_image_engine_status(h, parsed) -> None:
                 "engine": engine,
                 "repo_id": repo or "",
                 "cached": cached,
+                "partial": bool(partial),
+                "partial_gb": (partial["on_disk_gb"] if partial else 0),
                 "family_installed": family_installed,
                 "download_gb": dl_gb,
                 "sec_per_image": round(sec, 1),
