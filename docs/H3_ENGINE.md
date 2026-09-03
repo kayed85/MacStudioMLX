@@ -3,10 +3,38 @@
 MiniMax-H3 (FL2VA) takes one prompt and returns **picture, dialogue and sound
 generated together**. It is a **peer of LTX, not an add-on to it** — but it is
 too big to ship in the base install, so it arrives as **its own one-click
-install**: ~75 GB of weights, a 64 GB+ Mac, and a licence with territory
+install**: ~75 GB of weights, a 46 GB+ Mac, and a licence with territory
 restrictions. LTX remains the default engine and is completely untouched by
 any of this; whichever engines you have installed sit side by side in the
 switcher.
+
+---
+
+## How much memory it actually needs
+
+**Two lanes, two floors, and neither of them is 64.** The panel used to say
+"about 64 GB" in every refusal and tooltip; that number was never one of the
+product's own floors and it told 48 GB owners their Mac could not do something
+it can.
+
+| Band | Lane | State |
+|---|---|---|
+| **≥ 60 GB** (`H3_MIN_RAM_GB`) | bf16 master DiT | Renders. 64 GB Macs report ~63.x after firmware reservations, which is why the floor is 60. |
+| **≥ 46 GB** (`H3_MIN_RAM_GB_Q8`), Q8 DiT pack on disk | quantised Q8 DiT | Renders. |
+| **≥ 46 GB, Q8 DiT pack absent** | — | **Not a hardware verdict.** `scripts/pinokio/h3_build_q8.sh` builds that pack locally in ~5 min / ~22 GB with **no extra download**, and "Install Hailuo H3" runs it automatically below 60 GB. The switcher shows H3 as an offer, the inline card names the step, and `h3_status()` carries `needs_q8_dit: true` with the sentence in `ram_note`. |
+| **< 46 GB** | — | Genuinely out of reach. The refusal states 46, not 64. |
+
+`h3_ram_verdict()` is the single place those bands are decided. The render
+refusal, the `make_job` fallback line, the switcher tooltip, the engine-row
+note and the inline install card all read it, so they cannot state four
+different numbers again.
+
+**The floors are per tier, not per render.** They were set from peaks measured
+at 1024×576 / 124f (27.3 GiB Q8, 42.8 GiB bf16). On the staged loader at
+243 frames / 10.125 s the same lanes peak at **32.6 GB (Q8)** and **50.8 GB
+(bf16)** — peaks scale with frame count. A 3 s Q8 clip needs far less than a
+10 s one, so a length-aware gate could open short H3 renders to smaller Macs.
+That gate does **not** exist; the floors are deliberately one number per lane.
 
 ---
 
@@ -377,7 +405,7 @@ restart. `GET /status` → `.h3` tells you what resolved:
 
 | Symptom | Cause |
 |---|---|
-| Engine switcher not visible at all | `h3.capable` false, so H3 isn't renderable and there is only one engine left to choose between — the switcher and its divider both hide. Either under the 46 GB floor, or a 48 GB-class Mac whose reduced-RAM **Q8 DiT pack is not on disk**: `h3_capable()` requires `_h3_q8_dit_dir()` below 60 GB. Check `dit_choice.q8_available` in `/status`. |
+| Engine switcher not visible at all | Under the **46 GB** floor. `h3.capable` is false, so there is only one engine left to choose between and the switcher hides with its divider. A 48 GB-class Mac whose reduced-RAM Q8 DiT pack is not on disk **no longer lands here** — see the RAM bands below. |
 | H3 pill dashed, "not installed" | `h3.missing` lists exactly which component didn't resolve |
 | Image mode snaps back to LTX | `h3.first_frame` false — the installed runner has no `--first-frame` |
 | `ffmpeg not found on PATH` | the runner pipes raw RGB into `ffmpeg`; the panel prepends `FFMPEG_BIN` to the subprocess PATH, so this means the bundled binary is missing |

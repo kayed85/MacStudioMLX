@@ -5,7 +5,13 @@
 // install:
 //
 //   * ~75 GB of weights on top of the ~36 GB base — most users never want it.
-//   * It needs ~40 GiB resident at peak, so it only runs on 64 GB+ Macs.
+//   * Memory: the full bf16 engine peaks at ~42.8 GiB and wants a 60 GB+ Mac;
+//     the compact Q8 engine built at the end of this script peaks at 25.63 GiB
+//     and runs from 36 GB. Q8 has been the AUTO default on every machine since
+//     v4.8.0, so 36 GB is the real floor — and it is the number
+//     scripts/pinokio/h3_preflight.sh enforces and H3_MIN_RAM_GB_Q8 in
+//     mlx_ltx_panel.py gates on. (This said "only runs on 64 GB+ Macs" for two
+//     releases after that stopped being true.)
 //   * MiniMax Community License — territory restrictions apply, so it must be
 //     an explicit opt-in, not something that lands with the app.
 //
@@ -45,7 +51,11 @@ module.exports = {
     {
       method: "notify",
       params: {
-        html: "<b>Installing Hailuo H3 (second video engine, ~75 GB).</b><br>Generates picture, dialogue and sound together, and sits beside LTX in the engine switcher. Needs a 64 GB+ Apple Silicon Mac. MiniMax Community License — territory restrictions apply. Resumable if interrupted."
+        // "Needs a 64 GB+ Apple Silicon Mac" until v4.8.0 made the compact Q8
+        // engine the default everywhere and dropped the real floor to 36 GB.
+        // The preflight two steps down enforces 36; this sentence was turning
+        // away 36-48 GB Macs the installer would have happily served.
+        html: "<b>Installing Hailuo H3 (second video engine, ~75 GB).</b><br>Generates picture, dialogue and sound together, and sits beside LTX in the engine switcher. Needs an Apple Silicon Mac with 36 GB+ of memory (the compact Q8 engine, built at the end of this install); 60 GB+ additionally unlocks the full bf16 quality engine. MiniMax Community License — territory restrictions apply. Resumable if interrupted."
       }
     },
 
@@ -62,7 +72,7 @@ module.exports = {
         message: [
           // 3.8.3: the if/else was a "\n"-joined STRING, so Pinokio wrote all
           // 845 chars to the pty in one go (#56 / #50). Body — with the
-          // fail-open rationale and the 46e9 floor — now in
+          // fail-open rationale and the 36e9 floor — now in
           // scripts/pinokio/h3_preflight.sh. Gate: scripts/check_pinokio_scripts.js.
           "bash scripts/pinokio/h3_preflight.sh",
           "echo 'free disk space:'",
@@ -123,9 +133,10 @@ module.exports = {
       params: {
         path: "minimax-h3-mlx",
         message: [
-          "git fetch --force origin " + H3_BRANCH,
-          "if [ -d minimax_h3_mlx ]; then git reset --hard HEAD; else echo 'WARN: not the H3 tree - skipping reset'; fi",
-          "git checkout --force -B " + H3_BRANCH + " FETCH_HEAD",
+          // The pin itself lives in scripts/pinokio/h3_checkout.sh (#74: Update
+          // must make the same move; one literal, two callers). H3_BRANCH above
+          // is only the fresh-clone branch and must match it.
+          "bash ../scripts/pinokio/h3_checkout.sh \"$(pwd)\"",
           "git rev-parse --short HEAD"
         ]
       }
@@ -277,15 +288,22 @@ module.exports = {
       }
     },
 
-    // ---- Reduced-RAM engine (48 GB Macs): build the Q8 DiT locally ---------
+    // ---- Reduced-RAM engine (every Mac): build the Q8 DiT locally ----------
     // The Q8 pack halves the render peak (27.3 vs 42.8 GiB measured), which is
     // what makes H3 possible on this class of machine at all. Built locally by
     // quantize_stream.py — bounded memory (never holds more than one tensor,
     // CPU stream, deterministic), so the build itself runs fine on the same
-    // 48 GB machine that could never load the model whole. ~22 GB on disk,
-    // ~5 min. 64 GB+ Macs skip this: bf16 is the quality default there, and
-    // the panel can build the pack later via Settings if the user wants the
-    // low-RAM mode. Idempotent: the pack's own config files gate the re-run.
+    // 36 GB machine that could never load the model whole. ~22 GB on disk,
+    // ~5 min.
+    //
+    // EVERY MACHINE BUILDS IT SINCE v4.8.0. This used to be skipped on 64 GB+
+    // Macs ("bf16 is the quality default there") — then v4.8.0 made Q8 the AUTO
+    // default everywhere without un-gating the build, so on a big Mac the new
+    // default silently fell back to bf16 for want of a pack Install refused to
+    // make: "i updated but still getting this much memory", python3.11 at
+    // 47.76 GB. The gate now lives in h3_build_q8.sh with that history; here it
+    // is unconditional. Idempotent: the pack's own quant_config.json gates the
+    // re-run, so a healthy install pays one stat call.
     {
       method: "shell.run",
       params: {
@@ -310,7 +328,7 @@ module.exports = {
         // sentence sent him. Say where the control actually is, and name the
         // one thing that can still hide it: the switcher only appears when
         // there is more than one engine this Mac can render with, and on a
-        // 48 GB-class Mac that means the reduced-RAM Q8 pack built by the step
+        // sub-60 GB Mac that means the reduced-RAM Q8 pack built by the step
         // above must be on disk.
         html: "<b>Hailuo H3 ready.</b><br>Open the panel — the engine switcher is in the <b>top right of the header</b>, next to the memory and models pills: <b>LTX-2.3 | Hailuo H3</b>. (Not in the Video tab.) Restart the panel if it was already running. H3 serves Text and Image, and generates dialogue + sound from the same prompt, so write them into it."
       }

@@ -29,6 +29,7 @@ usage-log.jsonl
 usage-fleet.json
 *.log
 *.tmp
+*.dmg
 # Manual `.original_<date>` asset backups (e.g. before re-exporting a logo).
 # Kept on disk for the author, never committed / shipped (v3.0.7 review P3).
 *.original_*
@@ -150,4 +151,3 @@ notes/
 desktop_app/node_modules/
 desktop_app/dist/
 node_modules/
-

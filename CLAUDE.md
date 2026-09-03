@@ -165,6 +165,12 @@ separate dev folder. Old "local dev" copy was deleted to consolidate.
 ├── assets/                                     ← logos, banner, hero clip
 ├── launch/                                     ← launch post drafts (X, Reddit, Pinokio, CivitAI)
 ├── mlx_ltx_panel.py                            ← MAIN: HTTP server, HTML UI, queue
+├── webapp/                                     ← THE FRONTEND, served from disk (docs/ARCHITECTURE.md is the map)
+│   ├── index.html                              ← the page markup; inline JS is ONE line (the __BOOTSTRAP__ seam)
+│   ├── js/                                     ← 12 ES modules (boot…main) — new JS goes in the MATCHING module
+│   └── style/panel.css                         ← ALL panel CSS — new styles go HERE, never in the Python string
+├── panel/                                      ← ALL HTTP route handlers (routes_*.py) — new endpoints REGISTER
+│                                                 here (@get/@post/@get_when/@post_when), never as do_GET/do_POST arms
 ├── mlx_warm_helper.py                          ← subprocess holding MLX pipelines warm
 ├── pinokio.js / install.js / start.js / update.js / reset.js / download_q8.js
 ├── patch_ltx_codec.py                          ← applies patches to upstream package
@@ -175,13 +181,54 @@ To work: `cd ~/pinokio/api/phosphene.git/`, edit, `git commit`,
 `git push`. Pinokio's Update button does `git pull` here. No separate
 copy to keep in sync.
 
+### THE STRUCTURE LAW — non-negotiable, 2026-09-01+
+
+The 72k-line monolith is gone (`docs/ARCHITECTURE.md` is the full map
+and the reasoning). Every kind of change now has EXACTLY ONE home, and
+the point of this section is that no session — human or AI — ever has to
+guess. Before touching panel code, read the map; then obey:
+
+1. **Styles** → `webapp/style/panel.css`. Never a `<style>` block, never
+   CSS-in-Python, anywhere else.
+2. **Markup** → `webapp/index.html`. Its inline `<script>` is EXACTLY
+   one line (`const BOOT = __BOOTSTRAP__;`) and stays that way.
+3. **JS** → the ONE `webapp/js/` module that owns the screen (editor,
+   queue, characters, storyboard, stage, preview, engines, loras,
+   settings, boot, health). A function or state another file needs is
+   PUBLISHED (the `Object.assign(globalThis, {...})` block / a column-0
+   `globalThis.X =`); everything else stays module-private.
+4. **Run-once startup calls** → `webapp/js/main.js`, which loads last on
+   purpose. Never at a feature module's top level.
+5. **Routes** → a handler in the matching `panel/routes_*.py`,
+   registered with `@get`/`@post`/`@get_when`/`@post_when`. NEVER an
+   if-arm in `do_GET`/`do_POST` — those are ~35-line dispatchers now and
+   hold no logic.
+6. **First-paint data** → a field in BOOT built server-side in `page()`;
+   live data → a field in `/status`. The browser computes no tier, no
+   canvas, no estimate of its own.
+7. **Render behaviour** → `mlx_warm_helper.py` + the job spec
+   (`make_job()`), not the frontend.
+8. **No frontend in Python, no Python-side page strings — ever again.**
+
+Enforcement is mechanical, not honorary — these fail the build:
+`test_routes.py` (a route claimed once, chains stay empty),
+`test_no_duplicate_defs.py` (nothing defined twice — the built-twice
+tombstone), `test_panel_assets.py` (files really served; the one-line
+inline seam and the no-markup-in-Python pins), and
+`scripts/lint_webapp.mjs` (every cross-module reference resolves; run
+`npm install` once, then it rides in release_gates). After ANY change:
+`bash scripts/release_gates.sh --fast` must exit 0 before commit — key
+the commit on the runner's own exit code, never on grep output.
+
 ## 3. Architecture (request → frame)
 
 ```
 Pinokio app (port 42000)
    └── proxies to → mlx_ltx_panel.py (port 8198)
                        │
-                       ├── serves a single-page HTML/JS UI from one Python process
+                       ├── serves the single-page UI from webapp/ (index.html +
+                       │   12 ES modules + panel.css, files on disk; the HTTP
+                       │   handlers live in panel/routes_*.py — ARCHITECTURE.md)
                        ├── exposes HTTP API: /run, /status, /upload, /helper/restart, ...
                        ├── owns a job queue (FIFO) + worker thread
                        └── speaks JSON-over-stdin/stdout to:
@@ -205,10 +252,10 @@ These are not arbitrary — every pin is a paid lesson:
 | Pin | Why |
 |---|---|
 | `python>=3.11` (force `uv venv --python 3.11`) | Pinokio's `venv:` shortcut defaults to conda's base 3.10. ltx-core-mlx requires `>=3.11`. |
-| `mlx==0.31.1` | mlx 0.31.2 introduced a numerical regression that attenuates LTX 2.3 vocoder output by ~22 dB. Verified: same model + same prompt + same seed → -42 dB peak on 0.31.2 vs -9 dB peak on 0.31.1. |
+| `mlx==0.31.1` | mlx 0.31.2 introduced a numerical regression that attenuates LTX 2.3 vocoder output by ~22 dB. Verified: same model + same prompt + same seed → -42 dB peak on 0.31.2 vs -9 dB peak on 0.31.1. **2026-08-28 — 0.32.1 / 0.32.2 measured and held back, on MEMORY, not audio.** The audio blocker is 0.31.2-specific and gone by 0.32 (isolated vocoder delta **0.000001 dB**; five renders per arm: max_volume -1.7 vs -1.8 dB, -9.2 vs -9.3 LUFS, no time shift — claimed 22 dB, measured 0.1). Speed is real too: Q8 1024×576 121f **139.8 s → 133.6 s (-4.5%)**, all in DiT load + VAE decode. What holds it back: 0.31.1's peak footprint tracks the WORKLOAD, 0.32.x's tracks the MACHINE — it takes ~95% of the ceiling MLX derives from RAM (`0.95 * hw.memsize`, identical formula on both), so it scales down with the Mac but never stops filling it. `/usr/bin/time -l` peak, same prompt/seed/dims, MLX memory+cache limits set to each Mac's derived value: Q4 768×432 — 16 GB **17.41 → 20.35** (0.32.2: 19.35), 32 GB **25.66 → 33.18** (97% of physical), 64 GB **25.53 → 54.28**; Q8 1024×576 — 48 GB **39.49 → 49.95** (97% of physical). On the 64 GB box the Q4 render moved system pressure **58% → 84%** with +1.5 GB swap, the Q8 one hit **87%** — past the 82% at which `plan_memory_policy()` forces the streamed decode (~30 s on a 5 s clip, more than the 4.5% the move earns). **Ruled out:** Metal residency sets (new in 0.32) — `MLX_RESIDENCY_SET_MAX_PCT=0` reproduces the footprint to within 300 KB over three runs. The growth is allocator **cache**, so an explicit `mx.set_cache_limit()` is the prerequisite — **shipped, on this pin, ahead of any version move**: `mlx_warm_helper.py` now caps the cache at **one eighth of physical RAM** (floor 2 GiB, ceiling 8 GiB), applied at helper start and re-asserted before every render because the pipelines drop it to 0 on paths we do not take. On 0.31.1 that is Q4 768x432 121f **25.53 -> 16.50 GB for 71.45 -> 68.84 s** and Q8 1024x576 at the 48 GiB tier **39.49 -> 25.39 GB for 139.84 -> 138.71 s**, both sha256-identical to the uncapped render. **And the pin cannot move alone** — see `scripts/check_post_update.js`. **2026-08-28, second pass: the cap shipped and the move was REFUSED AGAIN.** With the policy applied to both versions, 0.32.1's peak as a share of physical RAM is 16 GiB **101% → 116%**, 32 GiB 75% → 68%, 48 GiB Q8 **77% → 82%**, 64 GiB **37% → 41%** — three of four tiers worse than 0.31.1 uses today, and the Comfortable 48 GiB tier lands ON the 82% line `plan_memory_policy()` treats as pressured. The cap cannot reach it because the excess is not cache: at an identical cap, 0.32.1's **active** memory is +12.0 GB on Q4 and +29.2 GB on Q8. Cache **0** does get it under (Q8@48 GiB 32.25 GB, Q4@16 GiB 17.04 GB) and erases the entire speed win at the same time. There is no cache setting where 0.32.1 beats 0.31.1+policy on both axes, so mflux stays at 0.18.0 too. |
 | `mlx-lm==0.31.1` `mlx-metal==0.31.1` | Same release line, kept consistent with mlx. |
 | `huggingface-hub>=1.0` | `hf` CLI replaced `huggingface-cli`; older Pinokio bundles ship < 1.0. |
-| `ltx-2-mlx` PINNED to the FORK TAG **`v0.14.19+ltx25.6`** (`mrbizarro/ltx-2-mlx`, commit `b2a9d9e` on `release/ltx25.5` = v0.14.19 `1192051` + the LTX-2.5 port + the schedule/sampler/live-preview work + the i2v anchor re-pin on BOTH loops) | **The pin is a TAG and it lives in `scripts/pinokio/ltx_checkout.sh`**, which is the ONE checkout implementation both lanes call (install.js dispatches it; scripts/post_update.sh calls it). It was a bare SHA through v3.8.3 and was reachable only by luck — a force-push would have stranded every install with an un-fetchable pin and a dead Update button. `check_ltx_pin.js` is the gate. The packages report **`0.14.19+ltx25.4`**; `_LTX_EXPECTED_VERSION` in mlx_warm_helper.py must equal that string or every render logs VERSION SKEW — move the two together. This pin is what lets **LTX-2.5 render through the panel**, and on **dev/beta** 2.5 is the registry DEFAULT (2.3 stays installed, selectable via `LTX_MODEL_VERSION=ltx23`). **v3.8.x did NOT register `ltx25` at all** and shipped 2.3 as the only generation, because the 2.5 weight packs were not publicly downloadable when it was cut — a fresh install would have booted into a generation it could not fetch. They are published now, and **v4.0.0 closes that divergence**: 2.5 is the registered default everywhere. If you ever need to curate a release back to a single generation, it is one `MODEL_VERSIONS` dict plus its three `required_files.json` rows (watch the `kind: "base"` trap: any base row is mandatory for an install to read complete, in the panel *and* in `pinokio.js`). The **pin diverged for the same reason**: v3.8.x shipped `871694d` / `0.14.19+ltx25.1`, one commit behind, because `e6be9d6` (the 2.5 sampler + stage-2 schedule, below) had no 2.3 regression evidence behind it at cut time. It does now — a 2.3 sha256-identity pair across the change — so the next release should choose the pin deliberately rather than inherit either. The base tag v0.14.19 landed 2026-08-11 (a catch-up from v0.14.8, itself a 2026-06-01 catch-up from v0.14.0). **STAY PINNED** — this is NOT "main HEAD", and not upstream's tip either. The v0.14.8 bump had pulled dgrauet's native `_pre_denoise_flush` (the Metal-watchdog fix for the I2V "mosaic" on memory-pressured Macs, #17), budget-aware VAE decode tiling and first-class `frame_rate`, which cut us from 7 runtime patches to 1 (codec-only). The v0.14.19 bump keeps that shape and adds: checkpoint-read `av_ca_timestep_scale_multiplier` (0.14.11 — **audio/dialogue weighting changes on every render**, toward upstream parity, plus `LTXModelConfig.from_checkpoint_dir()`), `frame_rate` forwarded at the A2V/lipdub call sites and no more shortest-stream mux truncation (0.14.15), quantized transformers at any `group_size` (0.14.16), and GPU-watchdog explanation + DiT-freed-before-VAE-decode + a Gemma cache-limit fix (0.14.19). **The `+ltx25.2` bump (2026-08-12) is the first one that changes what a 2.5 render computes**, and only a 2.5 render: (a) the **euler-ancestral sampler is finally REACHED** — it had been implemented with 48 tests and zero callers, so every prior 2.5 render silently used the 2.3 Euler step, against upstream's own `ANCESTRAL_SAMPLER_SINCE_VERSION = (2, 5)` and all three official ComfyUI 2.5 templates; keyframe/flf2v deliberately stays on Euler because the flf2v template pins eta to 0. (b) **stage 2's first sigma is now the vendor's 0.85**, read from `video_ltx2_5_t2v.json` node 395, where we had been using 2.3's 0.909375 — a refine pass starting at the wrong noise level. Both are version-keyed off the checkpoint's own `model_version`, and 2.3 output is proven **sha256-identical** before and after. **No model re-download**: 0.14.13+ prefers a versioned `transformer-distilled-*.safetensors` and falls back to the unversioned name, and update.js trims the `-1.1` variants, so file resolution is identical to v0.14.8. Bumping the pin further is a deliberate, tested operation — read the release notes, bump `_LTX_EXPECTED_VERSION` in mlx_warm_helper.py, smoke-test the matrix on dev, then bump BOTH install.js and update.js in one commit. **The `+ltx25.4` bump (2026-08-14, v4.0.2) is the i2v anchor.** The conditioning item was always built correctly — `frame_idx=0`, `strength=1.0`, `mask_value=0`, a hard latent replace — and both loops forced those tokens back into the model's **x0 estimate** every step. Under Euler that was sufficient by arithmetic accident: velocity `(x - x0)/sigma` is exactly 0 at a pinned token, so the step returns it unchanged. The **euler-ancestral** step 2.5 selects has no such property: it rescales every token by `alpha_next/alpha_down` and adds fresh Gaussian noise, unmasked. Measured on the real 2.5 schedule the anchor is **halved and buried under noise 0.86x its own scale after step 1**, so every forward from step 2 on saw garbage where the image should be and the composition was decided without it; the terminal step stamped the image back in, which is why the delivered frame 0 always matched while the clip was a different shot. The fix re-composites the **sample** against `clean_latent`/`denoise_mask` after the ancestral step at all three sites, guarded by the existing uniform-mask flags — the other half of what ComfyUI's 2.5 i2v graph does. Proven, not argued: **t2v at a fixed seed is sha256-identical** before and after (`fbf09533583c423ab9ad3c0a437aee3484f15c0c5cceb2b1fc4ecc6d59071abb`), and frame-vs-input normalised cross-correlation at seed 424242 moves **0.0934 -> 0.7878** (frame 36) and **0.0902 -> 0.7187** (frame 72) while frame 0 holds at ~0.975. Every Euler lane — 2.3 i2v, keyframe/flf2v with its deliberate `eta=0`, a2v, extend, restore, ic_lora, lipdub — never reaches the branch. **The `+ltx25.5` bump (2026-08-15, v4.0.7) closes that on res_2s too**, which is the lane 2.5's HQ tiers run: the owner reported a reference image producing a high-quality clip of something else on High / High-720p. `res2s_denoise_loop` takes `repin_masked_sample` (default False = the old bytes) and `ti2vid_two_stages_hq` resolves it **per generation**, so 2.5 anchors i2v for real while 2.3 is byte-identical BY CONSTRUCTION — the reason this was deferred in +ltx25.4 is answered by construction rather than by measurement. `denoise_loop` takes the same flag defaulting True, so passing False deliberately restores the drift: that is **Inspire**, shipped as an explicit i2v mode (`loose_reference` through `generate_two_stage`/`generate_and_save` on both pipelines, forwarded only when true). `tests/test_repin_masked_sample.py` pins all four directions. The historic `dcd639e (0.1.0)` detour broke the Extend `cfg_scale` API; do not revisit. |
+| `ltx-2-mlx` PINNED to the FORK TAG **`v0.14.19+ltx25.6`** (`mrbizarro/ltx-2-mlx`, commit `0b74258` on `release/ltx25.6` = v0.14.19 `1192051` + the LTX-2.5 port + the schedule/sampler/live-preview work + the i2v anchor re-pin on BOTH loops) | **The pin is a TAG and it lives in `scripts/pinokio/ltx_checkout.sh`**, which is the ONE checkout implementation both lanes call (install.js dispatches it; scripts/post_update.sh calls it). It was a bare SHA through v3.8.3 and was reachable only by luck — a force-push would have stranded every install with an un-fetchable pin and a dead Update button. `check_ltx_pin.js` is the gate. The packages report **`0.14.19+ltx25.6`**; `_LTX_EXPECTED_VERSION` in mlx_warm_helper.py must equal that string or every render logs VERSION SKEW — move the two together. This pin is what lets **LTX-2.5 render through the panel**, and on **dev/beta** 2.5 is the registry DEFAULT (2.3 stays installed, selectable via `LTX_MODEL_VERSION=ltx23`). **v3.8.x did NOT register `ltx25` at all** and shipped 2.3 as the only generation, because the 2.5 weight packs were not publicly downloadable when it was cut — a fresh install would have booted into a generation it could not fetch. They are published now, and **v4.0.0 closes that divergence**: 2.5 is the registered default everywhere. If you ever need to curate a release back to a single generation, it is one `MODEL_VERSIONS` dict plus its three `required_files.json` rows (watch the `kind: "base"` trap: any base row is mandatory for an install to read complete, in the panel *and* in `pinokio.js`). The **pin diverged for the same reason**: v3.8.x shipped `871694d` / `0.14.19+ltx25.1`, one commit behind, because `e6be9d6` (the 2.5 sampler + stage-2 schedule, below) had no 2.3 regression evidence behind it at cut time. It does now — a 2.3 sha256-identity pair across the change — so the next release should choose the pin deliberately rather than inherit either. The base tag v0.14.19 landed 2026-08-11 (a catch-up from v0.14.8, itself a 2026-06-01 catch-up from v0.14.0). **STAY PINNED** — this is NOT "main HEAD", and not upstream's tip either. The v0.14.8 bump had pulled dgrauet's native `_pre_denoise_flush` (the Metal-watchdog fix for the I2V "mosaic" on memory-pressured Macs, #17), budget-aware VAE decode tiling and first-class `frame_rate`, which cut us from 7 runtime patches to 1 (codec-only). The v0.14.19 bump keeps that shape and adds: checkpoint-read `av_ca_timestep_scale_multiplier` (0.14.11 — **audio/dialogue weighting changes on every render**, toward upstream parity, plus `LTXModelConfig.from_checkpoint_dir()`), `frame_rate` forwarded at the A2V/lipdub call sites and no more shortest-stream mux truncation (0.14.15), quantized transformers at any `group_size` (0.14.16), and GPU-watchdog explanation + DiT-freed-before-VAE-decode + a Gemma cache-limit fix (0.14.19). **The `+ltx25.2` bump (2026-08-12) is the first one that changes what a 2.5 render computes**, and only a 2.5 render: (a) the **euler-ancestral sampler is finally REACHED** — it had been implemented with 48 tests and zero callers, so every prior 2.5 render silently used the 2.3 Euler step, against upstream's own `ANCESTRAL_SAMPLER_SINCE_VERSION = (2, 5)` and all three official ComfyUI 2.5 templates; keyframe/flf2v deliberately stays on Euler because the flf2v template pins eta to 0. (b) **stage 2's first sigma is now the vendor's 0.85**, read from `video_ltx2_5_t2v.json` node 395, where we had been using 2.3's 0.909375 — a refine pass starting at the wrong noise level. Both are version-keyed off the checkpoint's own `model_version`, and 2.3 output is proven **sha256-identical** before and after. **No model re-download**: 0.14.13+ prefers a versioned `transformer-distilled-*.safetensors` and falls back to the unversioned name, and update.js trims the `-1.1` variants, so file resolution is identical to v0.14.8. Bumping the pin further is a deliberate, tested operation — read the release notes, bump `_LTX_EXPECTED_VERSION` in mlx_warm_helper.py, smoke-test the matrix on dev, then bump BOTH install.js and update.js in one commit. **The `+ltx25.4` bump (2026-08-14, v4.0.2) is the i2v anchor.** The conditioning item was always built correctly — `frame_idx=0`, `strength=1.0`, `mask_value=0`, a hard latent replace — and both loops forced those tokens back into the model's **x0 estimate** every step. Under Euler that was sufficient by arithmetic accident: velocity `(x - x0)/sigma` is exactly 0 at a pinned token, so the step returns it unchanged. The **euler-ancestral** step 2.5 selects has no such property: it rescales every token by `alpha_next/alpha_down` and adds fresh Gaussian noise, unmasked. Measured on the real 2.5 schedule the anchor is **halved and buried under noise 0.86x its own scale after step 1**, so every forward from step 2 on saw garbage where the image should be and the composition was decided without it; the terminal step stamped the image back in, which is why the delivered frame 0 always matched while the clip was a different shot. The fix re-composites the **sample** against `clean_latent`/`denoise_mask` after the ancestral step at all three sites, guarded by the existing uniform-mask flags — the other half of what ComfyUI's 2.5 i2v graph does. Proven, not argued: **t2v at a fixed seed is sha256-identical** before and after (`fbf09533583c423ab9ad3c0a437aee3484f15c0c5cceb2b1fc4ecc6d59071abb`), and frame-vs-input normalised cross-correlation at seed 424242 moves **0.0934 -> 0.7878** (frame 36) and **0.0902 -> 0.7187** (frame 72) while frame 0 holds at ~0.975. Every Euler lane — 2.3 i2v, keyframe/flf2v with its deliberate `eta=0`, a2v, extend, restore, ic_lora, lipdub — never reaches the branch. **The `+ltx25.5` bump (2026-08-15, v4.0.7) closes that on res_2s too**, which is the lane 2.5's HQ tiers run: the owner reported a reference image producing a high-quality clip of something else on High / High-720p. `res2s_denoise_loop` takes `repin_masked_sample` (default False = the old bytes) and `ti2vid_two_stages_hq` resolves it **per generation**, so 2.5 anchors i2v for real while 2.3 is byte-identical BY CONSTRUCTION — the reason this was deferred in +ltx25.4 is answered by construction rather than by measurement. `denoise_loop` takes the same flag defaulting True, so passing False deliberately restores the drift: that is **Inspire**, shipped as an explicit i2v mode (`loose_reference` through `generate_two_stage`/`generate_and_save` on both pipelines, forwarded only when true). `tests/test_repin_masked_sample.py` pins all four directions. The historic `dcd639e (0.1.0)` detour broke the Extend `cfg_scale` API; do not revisit. |
 | `hatchling<1.32` (build-time only, `pip-build-constraints.txt`) | Not a runtime dep — the **wheel build backend** for the three vendored `ltx-*` packages. All three declare `readme = "../../README.md"`, which hatchling 1.32.0 turned into a hard error, so both installer paths died at `metadata-generation-failed` on *every* pinned tag from the day 1.32 shipped. **Both are now `uv pip install --build-constraints ../pip-build-constraints.txt`** — install.js always was, update.js as of the v3.8.0 port-back. **NOT `PIP_CONSTRAINT=`**: modern pip spawns its build-dependency sub-install with `_PIP_IN_BUILD_IGNORE_CONSTRAINTS=1` and drops the env constraint on purpose, so that spelling silently resolved hatchling 1.32.0 and failed anyway (proven on pip 26.1/26.2.1, relative and absolute paths). pip's `--build-constraint` flag would work but does not exist on older pips, and Update runs on venvs seeded years apart. Remove only when a pinned upstream tag stops pointing `readme` outside the package dir. |
 
 When changing a version, document the test that proved the new pin is OK.
@@ -637,11 +684,30 @@ could not detect from inside this file.
 The two things worth keeping here, because they are rules rather than tables:
 
 - **The port follows the profile.** `DEFAULT_PORT = 8199 if PROFILE == "dev"
-  else 8198` (`mlx_ltx_panel.py:275`), overridable with `LTX_PORT`. A dev
+  else 8198` (in `mlx_ltx_panel.py`), overridable with `LTX_PORT`. A dev
   checkout answers on 8199 and shows the DEV badge; a normal install answers
   on 8198. Pinokio proxies its own port 42000 to the panel.
 - **Everything is unauthenticated and loopback-only.** There is no auth layer
   to add a route to, so a route that should not be reachable must not exist.
+
+## 11a. Analytics — it exists, it is ON, and it ships a key
+
+- **Phosphene sends anonymous usage counts, on by default.** Do not write docs,
+  release notes or UI copy that imply otherwise.
+- **The shipped build carries a working PostHog project key** —
+  `ANALYTICS_KEY_DEFAULT` in `mlx_ltx_panel.py`. Phosphene is distributed as
+  source, so an empty key would mean no counts at all.
+- **Counts and hardware classes only** — never prompts, filenames, paths, seeds,
+  images, video, audio, or LoRA/character names. One random per-install UUID.
+- **Off switch:** Settings → *Anonymous usage analytics*, or
+  `PHOSPHENE_ANALYTICS_DISABLED=1`. Users can read everything sent in
+  `state/usage-log.jsonl`.
+- **The fleet view is not automatic:** the stats dashboard needs a PostHog
+  personal API key in `analytics_query_key` (Settings), separate from the
+  shipped project key.
+- **`docs/ANALYTICS.md` is the complete contract** — every event, every field,
+  every value. If the panel sends something not listed there, that is a bug.
+  Change the code and that document together.
 
 ## 12. Job spec — the contract for `/run` and `/queue/add`
 
@@ -1094,6 +1160,19 @@ Peak during I2V is +800 MB for the encoder pass + ~6 GiB for the
 connector that lingered in `feature_extractor` (Patches 3 + 4 fix
 the lingering — see §5).
 
+**The MLX allocator cache is part of that peak, and until 2026-08-28 it
+was uncapped.** MLX does not return freed Metal buffers to the driver; it
+keeps them, and its default ceiling for that cache is `0.95 * hw.memsize`
+— a number about the machine, not the job. `mlx_warm_helper.py` now caps
+it at **one eighth of physical RAM** (floor 2 GiB, ceiling 8 GiB: 16 GiB
+Mac → 2, 32 → 4, 48 → 6, 64 and up → 8), applied at helper start and
+re-asserted at the main-loop choke point before every render — the
+pipelines' own low-memory paths call `set_cache_limit(0)` and never put it
+back. Override with `LTX_MLX_CACHE_GIB` (a number in GiB, `0` for no cache,
+`off` for MLX's default). It takes about a third off the peak footprint of
+every render at no wall-clock cost, and `test_mlx_cache_policy.py` pins the
+value at each tier. The numbers are in §4's mlx row.
+
 macOS `jetsam` is the OOM killer. It enforces memory pressure based
 on a percentage that varies with paging activity, swap usage, and other
 heuristics — there is no fixed "kill at X% pressure" rule. Closing
@@ -1130,14 +1209,21 @@ running. Pinokio's start.js can't take over a port someone else owns.
 **Don't spawn the panel manually unless you're going to kill it before
 handing back.**
 
-### "I edited mlx_ltx_panel.py but the UI hasn't changed"
+### "I edited the UI but the browser hasn't changed"
 
-The HTML/JS is baked into the Python file as a template string. The
-running panel served the old version. Restart it:
-- via Pinokio: Stop → Start
-- or via shell: `pkill -f mlx_ltx_panel.py` then click Start in Pinokio
+The frontend lives in files under `webapp/` (docs/ARCHITECTURE.md), and
+what you must restart depends on which file:
 
-Then **hard-refresh the browser** (Cmd+Shift+R) to bypass JS cache.
+- **CSS (`webapp/style/panel.css`) or JS (`webapp/js/*.js`)** — served
+  from disk on every request with `Cache-Control: no-cache`. NO panel
+  restart needed; just hard-refresh the browser (Cmd+Shift+R).
+- **Markup (`webapp/index.html`)** — read ONCE at panel import (the
+  served page is pinned to the booted process on purpose; see the
+  build-stamp comment in the template). Restart the panel (Pinokio
+  Stop → Start, or `pkill -f mlx_ltx_panel.py` then Start), then
+  hard-refresh.
+- **Python (`mlx_ltx_panel.py`, `panel/routes_*.py`)** — restart the
+  panel.
 
 ### "I edited the helper or a patch but nothing changed"
 
@@ -1303,8 +1389,27 @@ Conventions:
 
 Tracked here so they don't get lost between sessions.
 
-- **mlx 0.31.1 → 0.31.2 audio bisect** — find the exact MLX commit
-  that attenuates LTX 2.3's vocoder by 22 dB. File upstream issue.
+- **The mlx 0.32.x move** — **CLOSED 2026-08-28, second refusal, with
+  the mitigation tried.** The route was: (1) ship an MLX cache-limit
+  policy on the current pin; (2) move mlx 0.32.1 + mflux 0.19.1 in one
+  commit; (3) re-run the tier table. Step 1 SHIPPED and is a standalone
+  win (one eighth of RAM: Q4 25.53 → 16.50 GB, Q8@48 GiB 39.49 → 25.39 GB,
+  sha256-identical, wall unchanged or better). Step 3 then failed step 2:
+  with the same policy on both versions, 0.32.1 is at a HIGHER share of
+  physical RAM than 0.31.1 on three of four tiers (16 GiB 101→116%,
+  48 GiB Q8 77→82%, 64 GiB 37→41%) and the 48 GiB Comfortable tier lands
+  on the 82% line that forces the streamed decode. The cap cannot reach
+  it: the excess is **active** memory, +12.0 GB on Q4 and +29.2 GB on Q8
+  at an identical cap. Cache 0 gets it under and erases the speed win in
+  the same move. So the pin holds at 0.31.1 and mflux at 0.18.0 — the
+  mechanics are all proved and reversible (mflux 0.19.1's FBCache anchors
+  applied cleanly to a real install; the post_update sequence resolves to
+  mlx 0.32.1 / mflux 0.19.1 / mlx-lm 0.31.1 with nothing walked back), so
+  a future attempt is a pin move plus this measurement, not a
+  re-derivation. What would change the answer is an upstream fix to
+  0.32.x's active-memory appetite, not another knob on our side. Full
+  tables in the mlx row of §4 and in `install.js` above the pin. The old
+  "bisect 0.31.1 → 0.31.2" task is retired — 0.32 fixed it upstream.
 - **A2V (audio-to-video) mode** — `ltx-2-mlx` upstream has
   `a2vid_two_stage.py` and `a2vid_two_stage_hq.py` but the panel
   doesn't expose them. UI work + helper plumbing required.

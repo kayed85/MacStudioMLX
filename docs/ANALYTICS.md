@@ -123,8 +123,9 @@ location the day the disable flag ever went missing.
 
 ## Events
 
-Six events. That's the whole list. (A seventh is described at the end because
-people expect it — it is documented as the thing we deliberately don't send.)
+Seven events. That's the whole list. (An eighth is described at the end
+because people expect it — it is documented as the thing we deliberately don't
+send.)
 
 ### `app_installed`
 
@@ -203,12 +204,115 @@ Same as `render_completed` (minus `first_render`), plus:
 
 | Field | Type | Example | Notes |
 |---|---|---|---|
-| `error_class` | string | `"metal_watchdog"` | **A closed 16-value taxonomy** (`oom_jetsam`, `metal_watchdog`, `native_crash`, `helper_start_timeout`, `helper_exit`, `model_missing`, `model_corrupt`, `download_failed`, `venv_broken`, `bad_params`, `input_missing`, `disk_full`, `export_failed`, `timeout`, `cancelled_race`, `other`). Classification runs on the original error text locally; **only the class leaves the machine** |
+| `error_class` | string | `"metal_watchdog"` | **A closed 17-value taxonomy** (`refused`, `oom_jetsam`, `metal_watchdog`, `native_crash`, `helper_start_timeout`, `helper_exit`, `model_missing`, `model_corrupt`, `download_failed`, `venv_broken`, `bad_params`, `input_missing`, `disk_full`, `export_failed`, `timeout`, `cancelled_race`, `other`). Classification runs on the original error text locally; **only the class leaves the machine.** `refused` is in the taxonomy but never rides on a `render_failed` event — it is the value that routes the event to `render_refused` instead, below |
 | `error_fingerprint` | string | `"a3f09c21e7b4"` | Only when `error_class` is `other`: 12 hex chars of the SHA-256 of the already-scrubbed first line. Lets "the same unknown error, 17 times, all on M1 Max" be counted without transmitting the text — the readable line stays in your own `state/usage-log.jsonl` |
 | `error_signature` | string | `"RuntimeError: helper exited before first frame"` | **The only free-text field the panel sends**, see the scrubbing rules below. Kept for ONE transition release alongside `error_class`, then removed |
 
 Cancelled jobs are **not** reported — a user cancelling is not a signal about
 the software.
+
+Neither are **refusals** — those get their own event, next.
+
+> **⚠️ A SERIES CHANGES SHAPE FROM v4.6.1 — `model_missing` gains, `other`
+> loses.** Four render faults that mean *"your Hailuo H3 clone is older than
+> this panel"* (its runner has no `--lora`, no `--first-frame`, or no
+> `--chain-windows`) used to classify as `other`, because each raise site wrote
+> its own sentence and no needle matched any of them. They are not unknowns:
+> they are one well-understood fault with one remedy — re-run **Install Hailuo
+> H3**, which keeps every weight already on disk. On the owner's ruling
+> (2026-08-23) they now classify as **`model_missing`**, matched on the shared
+> phrase `H3_RUNNER_BEHIND` (`the installed Hailuo H3 runner is behind this
+> panel`) so a fifth flag added later is classified without another edit.
+>
+> Consequences for anyone reading the fleet: a step up in `model_missing` and a
+> step down in `other` at that release is **this change, not a regression**, and
+> the affected `error_fingerprint` values stop being emitted entirely (a
+> fingerprint rides only on `other`). Do not compare `model_missing` across the
+> boundary without saying which side you are on.
+
+> **⚠️ A SECOND SERIES CHANGES SHAPE FROM v4.6.1 — `input_missing` gains, and
+> it was previously EMPTY.** Its needles were `does not exist` / `no longer
+> exists`, and **no raise site in this codebase has ever said either** — every
+> one of them says *not found*. So the class matched nothing at all, and the
+> widest-spread real failure in the fleet (`image not found: <path>` — 35 events
+> across 22 people in 14 days) sat in `other`. It now matches, on the
+> colon-anchored `not found:` plus `no longer on disk`.
+>
+> The same change fixed a **misclassification driven by the user's own
+> filesystem**: classification runs on the raw error text *including the path*,
+> and `download_failed` matches the bare word `download`, so a missing reference
+> image living in `~/Downloads` was counted as a failed fetch. `input_missing`
+> is now asked before the loose half of `download_failed` (a single needle,
+> `repo not found`, is hoisted above it so a hub lookup stays a fetch fault).
+>
+> So at that release expect: `input_missing` to go from ~zero to a real number,
+> `other` to drop again, and a small, permanent drop in `download_failed`. All
+> three are this change.
+
+### `render_refused`
+
+Once per job the panel **declined on purpose**. Same fields as
+`render_failed`, except that the three error fields are replaced by one:
+
+| Field | Type | Example | Notes |
+|---|---|---|---|
+| `refusal` | string | `"ingredients_generation"` | **A closed vocabulary** — `ingredients_generation`, `hardware_tier`, `h3_ram`, `h3_mode`, `h3_lora_slots`, `stale_engine` (v4.9+: a 2.5 render refused because the vendored engine predates the Gemma 4 tower — remedy is a second Update click). `image_ram` (v4.9.3+: the Image Studio memory guard — the engine holds more weights than this Mac can hold, or too little is free right now). `pack_missing` (v4.9.3+: High / Keyframes / Extend chosen on a Mac that has not downloaded the Q8 add-on — remedy is Settings → Models). Which guard said no. No free text, no fingerprint: the message is our own copy, so there is nothing to scrub and nothing unknown to count |
+
+#### The rule — a refusal is not a failure
+
+This is the distinction the two event names exist to keep apart, and it is
+the one thing on this page most likely to get quietly re-merged by someone
+adding a chart:
+
+> **`render_failed`** — the engine tried and something went wrong. A bug, a
+> crash, a missing file, an out-of-memory. Every one of these is a defect
+> report.
+>
+> **`render_refused`** — the panel understood the request perfectly and
+> declined it, because *this install* cannot serve that capability: the wrong
+> hardware tier, the wrong engine, or the wrong model generation. Nothing
+> broke. No GPU time was spent. The message names the way out.
+
+**Therefore: `render_refused` is not in the failure rate, is not in the render
+count, and is not in the engine mix — neither numerator nor denominator.** A
+refusal did not render, so counting it as a render (successful *or* failed)
+makes both numbers lie.
+
+**Why a separate event rather than an `error_class` value.** Both were built
+and the event won. A class value keeps one event and one funnel, but it makes
+every query that touches failures carry an `error_class != 'refused'`
+exclusion — in this file, in `_USAGE_FLEET_QUERIES`, and in every PostHog
+insight anyone writes afterwards. One forgotten exclusion silently restores
+the exact bug this replaced. A separate event name is right by default: a
+query that asks about `render_failed` gets failures, always, without anyone
+having to remember anything.
+
+**What it is actually for.** A refusal is a *product* signal, not an
+engineering one. The right reading of a tall `refusal` bar is "the UI offered
+a control that can never work on that install" — the fix is upstream, in the
+form, not in the engine. That is precisely how this event came to exist: on
+2026-08-23 the largest single `render_failed` signature in the whole fleet
+turned out to be the Ingredients-on-2.5 refusal — 65 events from 16 different
+people, all of them clicking a button that could not possibly succeed. The
+guard was right; offering the button was not. Both were fixed in the same
+change.
+
+**2026-08-28 — the `h3_ram` slug's WORDING moved; the series did not.** That
+refusal used to say "Hailuo H3 needs about 64 GB of unified memory", a number
+neither of the product's two floors has ever been (60 on the bf16 lane, 46 on
+the Q8 DiT lane). It now says one of three things, one per RAM band — see
+`h3_ram_verdict()`. The slug, the event and the series are unchanged, and
+`_ANALYTICS_REFUSAL_REASONS` gained needles for the two new sentences **while
+keeping the retired one**, so a replayed pre-2026-08-28 usage log still
+classifies as `refused` instead of falling back into `other`. Nothing raises
+the old sentence any more. Counts across the cutover stay comparable; a rise
+in `h3_ram` after it is a real change in who is being refused, not a rewording
+artefact.
+
+**A refusal still shows as an error in your own panel.** The job lands in
+history with a red card and the refusal text, because nothing was produced
+and that is honest. The queue does not gain a fourth status. The split is in
+what gets *counted*, which is what was wrong.
 
 #### How `error_signature` is scrubbed
 
@@ -365,12 +469,15 @@ like every other panel endpoint) has a **Usage** section fed by
   Requires the personal API key. Cached to `state/usage-fleet.json` for **6
   hours**; the section's *refresh* button bypasses the cache.
 
-It shows: weekly active installs, renders this week, H3 share, error rate, the
-top 5 error signatures of the last 7 days, version / chip / memory
-distributions, and a **pack-regression alert** that turns red when any pack
-went `true → false` in the last week.
+It shows: weekly active installs, renders this week, H3 share, error rate,
+refusals this week, the top 5 error signatures of the last 7 days, the top
+refusals of the last 7 days (with how many *distinct people* hit each — 65
+refusals from 16 people is a product bug, 65 from one person is a bookmark),
+version / chip / memory distributions, and a **pack-regression alert** that
+turns red when any pack went `true → false` in the last week. Refusals sit in
+their own tile and their own column, never inside the error rate.
 
-The fleet view runs ten read-only aggregate HogQL `SELECT`s against `events`.
+The fleet view runs eleven read-only aggregate HogQL `SELECT`s against `events`.
 Each is independent — one failing leaves that panel empty rather than
 collapsing the view. If every query fails, the section falls back to local
 data with a visible warning.
@@ -417,10 +524,13 @@ passes through, so a future engine is counted for free.
 python3 scripts/test_analytics_dryrun.py
 ```
 
-48 tests covering: the shipped key is a write-only `phc_` project key and is
+56 tests covering: the shipped key is a write-only `phc_` project key and is
 really the one that goes on the wire, the toggle and the env kill-switch each
 produce zero sockets *and* zero log lines, the exact field set of every event,
-every event name the panel can fire is documented on this page, prompt/path
+every event name the panel can fire is documented on this page, the
+refusal/fault fork (a refusal is `render_refused` and never a `render_failed`
+carrying `error_class: refused`; a real crash is untouched; refusals stay out
+of the local error rate), prompt/path
 non-leakage (including a prompt quoted inside an exception), forbidden-key
 dropping, the geo-disable and `$ip` flags riding on *every* event type and
 being un-overridable by a call site, bucketing, log rotation and the local

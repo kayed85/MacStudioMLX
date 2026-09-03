@@ -581,17 +581,189 @@ class TestEventSchemas(AnalyticsTestCase):
                 "download_failed",
             "safetensors header truncated": "model_corrupt",
             "Hailuo H3 isn't fully installed yet: dit": "model_missing",
+            # AN INSTALL THAT FELL BEHIND THE PANEL IS NOT AN UNKNOWN. All
+            # four raise sites — --lora (twice), --first-frame,
+            # --chain-windows — used to land in `other` because each wrote
+            # its own sentence. One shared phrase, one class, one remedy
+            # (owner ruling 2026-08-23). See docs/ANALYTICS.md for the note
+            # that this moves an existing series.
+            "Turbo needs `--lora` support: the installed Hailuo H3 runner "
+            "is behind this panel: it has no `--lora` (/x/generate_staged.py)."
+            " Re-run 'Install Hailuo H3' from the Phosphene sidebar to update "
+            "the clone - every weight already on disk is kept. Or turn Turbo "
+            "off.": "model_missing",
+            "Image mode conditions on a first frame: the installed Hailuo H3 "
+            "runner is behind this panel: it has no `--first-frame` "
+            "(/x/generate_staged.py).": "model_missing",
+            "10s renders as 2 chained windows: the installed Hailuo H3 runner "
+            "is behind this panel: it has no `--chain-windows` "
+            "(/x/generate_staged.py).": "model_missing",
             "No module named 'mlx'": "venv_broken",
             "OSError: [Errno 28] No space left on device": "disk_full",
             "input image does not exist": "input_missing",
+            # THE WIDEST-SPREAD REAL FAILURE IN THE FLEET, which used to
+            # classify as `other` because every raise site says "not found"
+            # and neither needle did. 35 events, 22 people, 14 days.
+            "image not found: /Users/x/pinokio/api/phosphene.git/examples/"
+            "reference.png": "input_missing",
+            "ref image not found: /tmp/x.png": "input_missing",
+            "The reference image is no longer on disk: /Users/x/a.png. It was "
+            "moved, renamed or deleted after it was picked.": "input_missing",
+            # ...and it must beat `download_failed`, because the text being
+            # matched carries the user's own path and a great many missing
+            # reference images live in ~/Downloads.
+            "image not found: /Users/x/Downloads/pic.png": "input_missing",
+            # But a hub lookup is still a fetch fault, not a missing input.
+            "Hugging Face repo not found: foo/bar. Check the repo id.":
+                "download_failed",
             "ffmpeg exited 1": "export_failed",
             "prompt required": "bad_params",
             "phase timed out after 300s": "timeout",
             "cancel requested, landing as failed": "cancelled_race",
             "some brand new exploding thing": "other",
+            # REFUSALS WIN OVER EVERYTHING. Each of these used to land as
+            # `other` — the first one was the single largest render_failed
+            # signature in the whole fleet on 2026-08-23 — and each contains
+            # a phrase that a lower row would otherwise have claimed.
+            # "install the 2.3 pack" reads as model_missing:
+            "Ingredients needs the LTX-2.3 generation. Its IC-LoRA is "
+            "2.3-trained ... or install the 2.3 pack from the Train tab.":
+                "refused",
+            "High quality (Q8 two-stage) isn't supported on the Compact "
+            "hardware tier - Q8 dev transformer (~19 GB) doesn't fit.":
+                "refused",
+            "Extend isn't supported on the Compact hardware tier": "refused",
+            "FFLF (keyframe interpolation) isn't supported on the Compact "
+            "hardware tier": "refused",
+            # "needs about 64 GB" reads as bad_params ("must be"/"required"):
+            "Hailuo H3 needs about 64 GB of unified memory; this Mac "
+            "reports 24 GB. Render on the LTX engine instead.": "refused",
+            "Hailuo H3 doesn't serve mode 'extend' - only t2v, i2v.":
+                "refused",
+            "H3's runner has 1 adapter slot - `--lora` takes a single path":
+                "refused",
         }
         for raw, want in cases.items():
             self.assertEqual(P._analytics_error_class(raw), want, raw)
+
+    def test_a_refusal_never_rides_on_a_render_failed_event(self):
+        """`refused` is in the taxonomy so that classification can never
+        drop a refusal into `other`. It is NOT a value render_failed may
+        carry: the moment it classifies, the event becomes render_refused.
+        If this ever fails, the failure rate has started lying again."""
+        self.configure(analytics_first_render_reported=True)
+        # Captured synchronously here rather than through the network spy:
+        # this asserts once per needle, and the delivery thread makes
+        # "which event was that one" racy at that granularity.
+        seen = []
+        orig = P._analytics_capture
+        P._analytics_capture = lambda ev, props=None: seen.append((ev, props))
+        try:
+            for slug, needles in P._ANALYTICS_REFUSAL_REASONS:
+                for needle in needles:
+                    seen.clear()
+                    P._analytics_render_event({
+                        "status": "failed", "error": f"...{needle}...",
+                        "elapsed_sec": 2.0,
+                        "params": {"mode": "t2v", "engine": "ltx",
+                                   "quality": "standard", "width": 640,
+                                   "height": 448, "frames": 73}})
+                    self.assertEqual([ev for ev, _ in seen],
+                                     ["render_refused"], needle)
+                    props = seen[0][1]
+                    self.assertEqual(props["refusal"], slug, needle)
+                    self.assertNotIn("error_class", props)
+        finally:
+            P._analytics_capture = orig
+
+    def test_refusal_slugs_are_a_closed_vocabulary(self):
+        """Same promise as every other string the panel transmits: the value
+        is drawn from a set defined in the source, never from user text."""
+        self.assertEqual(sorted(P._ANALYTICS_REFUSAL_SLUGS),
+                         ["h3_lora_slots", "h3_mode", "h3_ram",
+                          "hardware_tier",
+                          # v4.9.3: the Image Studio memory guard.
+                          "image_ram",
+                          "ingredients_generation",
+                          # v4.9.3: High/Keyframes/Extend without the Q8 pack.
+                          "pack_missing",
+                          # v4.9: the stale-vendored-engine gate (a 2.5 render
+                          # on an engine predating the Gemma 4 tower is
+                          # refused with the two-Update-clicks remedy).
+                          "stale_engine"])
+        self.assertEqual(len(set(P._ANALYTICS_REFUSAL_SLUGS)),
+                         len(P._ANALYTICS_REFUSAL_SLUGS))
+        # `refused` is a real member of the closed error taxonomy, and its
+        # needles are DERIVED from the refusal table so the two cannot drift.
+        classes = dict(P._ANALYTICS_ERROR_CLASSES)
+        self.assertIn("refused", classes)
+        self.assertEqual(P._ANALYTICS_ERROR_CLASSES[0][0], "refused",
+                         "refused must be matched first or a lower row "
+                         "claims the message")
+        self.assertEqual(
+            set(classes["refused"]),
+            {n for _, ns in P._ANALYTICS_REFUSAL_REASONS for n in ns})
+        self.assertIsNone(P._analytics_refusal_reason(
+            "SIGSEGV in worker"), "a real crash is not a refusal")
+        self.assertIsNone(P._analytics_refusal_reason(""))
+
+    def test_the_structural_stamp_beats_the_text(self):
+        """The raise sites use RenderRefused, and worker_loop stamps its
+        `reason` onto the job. Text matching is only the fallback for a
+        refusal that lost its type — so the stamp must win, and must work
+        even when the message says nothing recognisable at all."""
+        self.configure(analytics_first_render_reported=True)
+        P._analytics_render_event({
+            "status": "failed", "refused_reason": "h3_mode",
+            "error": "no recognisable phrase in here whatsoever",
+            "elapsed_sec": 3.0,
+            "params": {"mode": "extend", "engine": "h3", "h3_tier": "hq_5s"}})
+        drain()
+        p = self.props_of("render_refused")
+        self.assertEqual(p["refusal"], "h3_mode")
+        # Exactly ONE extra field over a completed render: no error_class to
+        # classify, no free text to scrub, no unknown to fingerprint.
+        self.assertEqual(set(p),
+                         self.RENDER_V2_FIELDS | {"wall_sec_bucket", "refusal"})
+        for gone in ("error_class", "error_signature", "error_fingerprint"):
+            self.assertNotIn(gone, p)
+
+    def test_a_bogus_stamp_falls_back_to_the_fault_path(self):
+        """A stamp is only trusted if it names a slug we declared. Anything
+        else is treated as the crash it probably is, rather than being
+        allowed to launder a failure out of the failure rate."""
+        self.configure(analytics_first_render_reported=True)
+        P._analytics_render_event({
+            "status": "failed", "refused_reason": "definitely_not_a_slug",
+            "error": "ZeroDivisionError: division by zero",
+            "elapsed_sec": 4.0,
+            "params": {"mode": "t2v", "engine": "ltx", "quality": "quick"}})
+        drain()
+        p = self.props_of("render_failed")
+        self.assertEqual(p["error_class"], "other")
+        self.assertNotIn("refusal", p)
+
+    def test_a_genuine_crash_is_unchanged_by_any_of_this(self):
+        """The regression guard for the whole change: the classes that
+        existed before must classify exactly as they did before, and a real
+        crash must still be a render_failed carrying the same three fields."""
+        self.configure(analytics_first_render_reported=True)
+        P._analytics_render_event({
+            "status": "failed",
+            "error": "Command buffer exec failed: "
+                     "kIOGPUCommandBufferCallbackErrorTimeout",
+            "elapsed_sec": 61.0,
+            "params": {"mode": "t2v", "engine": "ltx", "quality": "standard",
+                       "width": 1216, "height": 704, "frames": 121}})
+        drain()
+        names = [b["event"] for b in self.spy.bodies]
+        self.assertIn("render_failed", names)
+        self.assertNotIn("render_refused", names)
+        p = self.props_of("render_failed")
+        self.assertEqual(p["error_class"], "metal_watchdog")
+        self.assertEqual(set(p), self.RENDER_V2_FIELDS
+                         | {"wall_sec_bucket", "error_class",
+                            "error_signature"})
 
     def test_wall_ladder_edges(self):
         f = P._analytics_wall_sec_bucket
@@ -717,15 +889,48 @@ class TestDocumentationParity(unittest.TestCase):
     every event name the panel can capture must be named on that page."""
 
     def test_every_event_the_panel_fires_is_documented(self):
-        src = (REPO / "mlx_ltx_panel.py").read_text(encoding="utf-8")
-        fired = set(re.findall(r'_analytics_capture\(\s*"([a-z_]+)"', src))
-        self.assertTrue(fired, "no literal event names found — did the call "
-                               "sites stop passing string literals?")
         doc = (REPO / "docs" / "ANALYTICS.md").read_text(encoding="utf-8")
-        for name in sorted(fired):
+        for name in sorted(P._ANALYTICS_EVENTS):
             self.assertIn(f"`{name}`", doc,
                           f"{name} is captured by the panel but docs/"
                           f"ANALYTICS.md never names it")
+
+    def test_the_event_registry_covers_every_literal_call_site(self):
+        """The registry replaced a regex over string literals, because the
+        render call site stopped passing one when refusals got their own
+        event name. The regex is kept as a cross-check in the other
+        direction: any name still spelled literally at a call site has to
+        be a member, so the registry cannot fall behind the code."""
+        src = (REPO / "mlx_ltx_panel.py").read_text(encoding="utf-8")
+        fired = set(re.findall(r'_analytics_capture\(\s*"([a-z_]+)"', src))
+        self.assertTrue(fired, "no literal event names found at all — the "
+                               "cross-check has stopped checking anything")
+        missing = fired - set(P._ANALYTICS_EVENTS)
+        self.assertEqual(missing, set(),
+                         f"captured but not in _ANALYTICS_EVENTS: {missing}")
+
+    def test_the_render_path_can_only_produce_registry_names(self):
+        """The three names the render call site can choose between are the
+        reason the registry exists — drive all three and check."""
+        seen = []
+        orig = P._analytics_capture
+        P._analytics_capture = lambda ev, props=None: seen.append(ev)
+        try:
+            base = {"params": {"mode": "t2v", "engine": "ltx",
+                               "quality": "standard", "width": 640,
+                               "height": 448, "frames": 73}}
+            P._analytics_render_event(dict(base, status="done"))
+            P._analytics_render_event(dict(base, status="failed",
+                                           error="SIGSEGV in worker"))
+            P._analytics_render_event(dict(base, status="failed",
+                                           refused_reason="hardware_tier",
+                                           error="…hardware tier…"))
+        finally:
+            P._analytics_capture = orig
+        self.assertEqual(seen, ["render_completed", "render_failed",
+                                "render_refused"])
+        for name in seen:
+            self.assertIn(name, P._ANALYTICS_EVENTS)
 
 
 # --------------------------------------------------------------------------
@@ -766,13 +971,21 @@ class TestReceiverDirectives(AnalyticsTestCase):
         # straight from the /star-click handler, so it is captured directly
         # here with the same closed vocabulary that handler coerces `via` to.
         P._analytics_capture("star_prompt", {"via": "link"})
+        # A refusal: the panel declining on purpose. Fired here for the same
+        # reason as the rest — its payload has to carry the receiver
+        # directives too, and it is the newest way to get an event out.
+        P._analytics_render_event({
+            "status": "failed", "refused_reason": "ingredients_generation",
+            "error": "Ingredients needs the LTX-2.3 generation.",
+            "elapsed_sec": 1.0,
+            "params": {"mode": "ingredients", "engine": "ltx",
+                       "quality": "standard"}})
         drain()
         seen = {b["event"]: b["properties"] for b in self.spy.bodies}
-        # Coverage, read off the source rather than trusted: if someone adds a
-        # sixth event type, this test must be taught to fire it instead of
-        # quietly checking five out of six.
-        src = (REPO / "mlx_ltx_panel.py").read_text(encoding="utf-8")
-        firable = set(re.findall(r'_analytics_capture\(\s*"([a-z_]+)"', src))
+        # Coverage, read off the declared registry rather than trusted: if
+        # someone adds an eighth event type, this test must be taught to fire
+        # it instead of quietly checking seven out of eight.
+        firable = set(P._ANALYTICS_EVENTS)
         self.assertEqual(sorted(firable - set(seen)), [],
                          "an event type exists that this test never fires, so "
                          "its payload goes unchecked — add it above")
@@ -878,6 +1091,40 @@ class TestUsageReport(AnalyticsTestCase):
         self.assertEqual(r["pack_flips"]["h3_lost"], 1)
         self.assertEqual(r["versions"], [{"version": "3.4.1", "count": 1}])
         self.assertEqual(r["chips"], [{"chip": "M4 Max", "count": 1}])
+
+    def test_refusals_are_outside_every_render_number(self):
+        """The whole point, expressed as arithmetic. Two completed, one
+        failed, three refused: the error rate is 1-in-3, not 1-in-6, and
+        `renders_7d` is 3, not 6. Getting this wrong is what made the
+        published failure rate wrong in the first place."""
+        now = time.time()
+        self.seed([
+            {"event": "render_completed", "ts": now - 1800, "at": "x",
+             "props": {"engine": "ltx"}},
+            {"event": "render_completed", "ts": now - 1700, "at": "x",
+             "props": {"engine": "h3"}},
+            {"event": "render_failed", "ts": now - 1600, "at": "x",
+             "props": {"engine": "ltx", "error_signature": "OOM during decode"}},
+            {"event": "render_refused", "ts": now - 1500, "at": "x",
+             "props": {"engine": "ltx", "refusal": "ingredients_generation"}},
+            {"event": "render_refused", "ts": now - 1400, "at": "x",
+             "props": {"engine": "ltx", "refusal": "ingredients_generation"}},
+            {"event": "render_refused", "ts": now - 1300, "at": "x",
+             "props": {"engine": "h3", "refusal": "h3_ram"}},
+        ])
+        r = P._usage_local_report()
+        self.assertEqual(r["tiles"]["renders_7d"], 3)
+        self.assertAlmostEqual(r["tiles"]["error_rate_pct"], 33.3, places=1)
+        # Not in the engine mix either — no engine ran.
+        self.assertAlmostEqual(r["tiles"]["h3_share_pct"], 33.3, places=1)
+        # Counted, loudly, in their own place.
+        self.assertEqual(r["tiles"]["refusals_7d"], 3)
+        self.assertEqual(r["top_refusals"], [
+            {"refusal": "ingredients_generation", "count": 2},
+            {"refusal": "h3_ram", "count": 1}])
+        # And never in the error list, which is a crash leaderboard.
+        self.assertEqual(r["top_errors"],
+                         [{"signature": "OOM during decode", "count": 1}])
 
     def test_old_rows_fall_out_of_the_windows(self):
         old = time.time() - 40 * 86400

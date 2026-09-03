@@ -80,7 +80,11 @@ class OneCacheHoweverLaunched(unittest.TestCase):
     def test_the_default_is_set_before_any_subprocess_can_spawn(self):
         import re
         from pathlib import Path
-        src = Path(__file__).with_name("mlx_ltx_panel.py").read_text()
+        src = (Path(__file__).with_name("mlx_ltx_panel.py").read_text()
+               + "\n" + (Path(__file__).parent / "webapp"
+                          / "index.html").read_text())
+        for _m in sorted((Path(__file__).parent / "webapp" / "js").glob("*.js")):
+            src += "\n" + _m.read_text()
         i = src.index('os.environ.setdefault("HF_HOME"')
         # It must run at import time in the constants block, not inside some
         # handler that a render path may or may not reach.

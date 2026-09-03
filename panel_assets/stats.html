@@ -976,6 +976,14 @@
           <ul class="dist-list" id="usage-errors"></ul>
         </div>
         <div class="dist-col">
+          <!-- Refusals, kept next to errors and never inside them: these are
+               renders the panel declined on purpose, so they are not part of
+               the error rate. A tall bar here is a UI bug (we offered a
+               control that can never work), not an engine bug. -->
+          <h3>Refused <span class="count-pill" id="usage-refusals-count">0</span></h3>
+          <ul class="dist-list" id="usage-refusals"></ul>
+        </div>
+        <div class="dist-col">
           <h3>Versions</h3>
           <ul class="dist-list" id="usage-versions"></ul>
         </div>
@@ -2585,6 +2593,7 @@
       { label: 'Renders this week', value: fmt(t.renders_7d), sub: 'completed + failed · 7d' },
       { label: 'H3 share', value: fmtPct(t.h3_share_pct), sub: 'of renders · 14d' },
       { label: 'Error rate', value: fmtPct(t.error_rate_pct), sub: 'failed renders · 14d' },
+      { label: 'Refused', value: fmt(t.refusals_7d), sub: 'declined on purpose · 7d' },
     ];
     const grid = $('#usage-tiles');
     if (grid) {
@@ -2619,6 +2628,10 @@
     const errCount = $('#usage-errors-count');
     if (errCount) errCount.textContent = fmt(errs.reduce((a, r) => a + (Number(r.count) || 0), 0));
     paintDist('#usage-errors', errs, 'signature', { err: true });
+    const refs2 = Array.isArray(u.top_refusals) ? u.top_refusals : [];
+    const refCount = $('#usage-refusals-count');
+    if (refCount) refCount.textContent = fmt(refs2.reduce((a, r) => a + (Number(r.count) || 0), 0));
+    paintDist('#usage-refusals', refs2, 'refusal');
     paintDist('#usage-versions', u.versions, 'version');
     paintDist('#usage-chips', u.chips, 'chip');
     paintDist('#usage-ram', u.ram, 'ram_gb');

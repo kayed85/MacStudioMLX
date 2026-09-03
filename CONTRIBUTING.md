@@ -50,6 +50,20 @@ If you are reporting a render problem, the things that matter:
 - **Whether the engine CLI reproduces it** outside the panel. This single fact
   splits "engine bug" from "panel bug" immediately.
 
+## Where code goes — read the map first
+
+The frontend and the HTTP routes are no longer inside `mlx_ltx_panel.py`.
+**`docs/ARCHITECTURE.md` is the map**, and every kind of change has exactly
+one home: styles in `webapp/style/panel.css`, markup in `webapp/index.html`,
+JS in the one `webapp/js/` module that owns that screen (startup calls in
+`main.js`, which loads last on purpose), and every HTTP endpoint as a
+registered handler in `panel/routes_*.py` — never an if-arm in
+`do_GET`/`do_POST`. These aren't conventions, they're enforced:
+`test_routes.py`, `test_no_duplicate_defs.py`, `test_panel_assets.py` and
+`node scripts/lint_webapp.mjs` fail the build on a violation. A patch that
+puts code in the right home reviews in minutes; one that reopens the old
+monolith gets sent back with a link to the map.
+
 ## New engines are welcome
 
 The engine table is data-driven on purpose. Adding one is an `ENGINES` entry, a
@@ -72,17 +86,12 @@ you write the adapter.
 ## Before you send
 
 ```bash
-node scripts/check_ltx_pin.js          # engine pin agreement
-node scripts/check_pinokio_scripts.js  # launcher payload sizes
-python3 scripts/check_output_codec.py  # the last render is what was asked for
-node --check install.js && node --check update.js
+bash scripts/release_gates.sh          # the whole battery in one command
 ```
 
-and run the panel test suites:
-
-```bash
-for t in test_*.py; do ./ltx-2-mlx/env/bin/python -m unittest "${t%.py}"; done
-```
+That runs the pin checks, the launcher payload gate, the codec check, the
+frontend lint and every panel test suite, and prints a PASS/FAIL table. It
+must exit 0. (`--fast` skips the two slowest gates while iterating.)
 
 Tests are not a formality here. Several of them exist because a thing shipped
 broken in a way that looked fine — they encode the failure, not the feature.

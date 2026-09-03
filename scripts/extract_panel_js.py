@@ -25,6 +25,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PANEL = ROOT / "mlx_ltx_panel.py"
+# Slices 1–2 of the extraction (docs/ARCHITECTURE.md) moved the CSS to
+# webapp/style/panel.css and the page — markup + JS — to webapp/index.html.
+CSS = ROOT / "webapp" / "style" / "panel.css"
+INDEX = ROOT / "webapp" / "index.html"
 
 
 class ExtractError(RuntimeError):
@@ -32,15 +36,50 @@ class ExtractError(RuntimeError):
 
 
 def panel_source() -> str:
-    return PANEL.read_text(encoding="utf-8")
+    # Everything the panel serves, in the order the pieces sat in the
+    # pre-extraction single file: Python, then the CSS, then the page
+    # (markup + JS), then the JS modules in the order their <script
+    # type="module"> tags load them. This keeps every existing
+    # extract_function / extract_element call — and the tests that slice
+    # CSS regions out of "the panel source" — addressing the real code
+    # wherever it lives. Slice 3 migrates the extraction-based tests to
+    # import the real JS module files directly; when the last one is
+    # migrated, this module is deleted.
+    parts = [PANEL.read_text(encoding="utf-8")]
+    # The route handlers moved out of the panel's do_GET/do_POST chains
+    # into panel/routes_*.py (slice 4) — still server code the tests
+    # address as "the panel source", so they ride directly after it.
+    for rf in sorted((ROOT / "panel").glob("*.py")):
+        parts.append(rf.read_text(encoding="utf-8"))
+    parts.append(CSS.read_text(encoding="utf-8"))
+    index = INDEX.read_text(encoding="utf-8")
+    parts.append(index)
+    for m in re.finditer(
+            r'<script type="module" src="/webapp/js/([\w.-]+\.js)"></script>',
+            index):
+        parts.append((ROOT / "webapp" / "js" / m.group(1)).read_text(encoding="utf-8"))
+    return "\n".join(parts)
 
 
 def extract_function(name: str, src: str | None = None) -> str:
     """The full text of `function <name>(...) { ... }`, braces balanced."""
     s = src if src is not None else panel_source()
-    m = re.search(r"^(?:async\s+)?function\s+%s\s*\(" % re.escape(name), s, re.M)
-    if not m:
+    pat = r"^(?:async\s+)?function\s+%s\s*\(" % re.escape(name)
+    hits = list(re.finditer(pat, s, re.M))
+    if not hits:
         raise ExtractError("function %s() not found in mlx_ltx_panel.py" % name)
+    if len(hits) > 1:
+        # A duplicated declaration is exactly the parallel-edit accident this
+        # repo has now shipped twice (the health chip, both times). Returning
+        # the FIRST match here meant the tests covered the copy the browser
+        # does not run — JS hoisting makes the LAST declaration win. Refusing
+        # is the only honest behaviour: the caller must fix the panel, not
+        # pick a copy.
+        raise ExtractError(
+            "function %s() is declared %d times in mlx_ltx_panel.py — "
+            "duplicate definitions must be removed before it can be tested"
+            % (name, len(hits)))
+    m = hits[0]
     start = m.start()
     i = s.index("{", m.end() - 1)
     depth, j, in_s, esc, in_c, in_lc = 0, i, "", False, False, False

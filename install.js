@@ -251,14 +251,87 @@ module.exports = {
     // Pin huggingface-hub>=1.0 explicitly so older Pinokio bundles still
     // get the v1+ `hf` CLI used by the download steps below.
     //
-    // SHIP-BLOCKER: pin mlx==0.31.1 (NOT 0.31.2). LTX 2.3 audio regresses
-    // by 22 dB on mlx 0.31.2 — output peaks at -37 dB instead of the
+    // SHIP-BLOCKER (2026-04): pin mlx==0.31.1 (NOT 0.31.2). LTX 2.3 audio
+    // regresses by 22 dB on mlx 0.31.2 — output peaks at -37 dB instead of the
     // expected -9 to -15 dB. Verified empirically by downgrading mlx in a
     // working install and re-running the same prompt:
     //   mlx 0.31.2 → max_volume -42.8 dB (broken)
     //   mlx 0.31.1 → max_volume -9.2  dB (working)
     // Same packages, same weights, same seed; only mlx differs. Numerical
     // change in 0.31.2 attenuates the vocoder output.
+    //
+    // 2026-08-28 — mlx 0.32.1 and 0.32.2 EVALUATED AND HELD BACK, on MEMORY,
+    // not on audio. Recorded here so the next reader does not re-derive it.
+    //
+    // The audio half of this blocker is 0.31.2-SPECIFIC and does not survive
+    // into 0.32. Identical latents through the isolated vocoder differ by
+    // 0.000001 dB, and five full renders per arm land at max_volume -1.7 vs
+    // -1.8 dB, -9.2 vs -9.3 LUFS, -1.6 vs -1.7 true peak, no time shift, and
+    // spectra within 0.1 dB from 250 Hz to 16 kHz. Claimed 22 dB, measured 0.1.
+    // The speed is real as well: 1024x576 Q8 121f goes 139.8 s → 133.6 s
+    // (-4.5%), all of it in DiT load and VAE decode, denoise a wash.
+    //
+    // What holds it back is PEAK MEMORY, and it is not a 64 GB-only problem.
+    // 0.31.1's footprint is a function of the WORKLOAD; 0.32.x's is a function
+    // of the MACHINE — it consumes ~95% of whatever ceiling MLX derives from
+    // RAM (0.95 * hw.memsize; the same formula on both versions, so the
+    // ceiling — and the appetite — scales down with the Mac, it does not go
+    // away). Peak process footprint, /usr/bin/time -l, same prompt/seed/dims,
+    // MLX's memory AND cache limits set to the value each Mac would derive:
+    //   Q4 768x432 121f    16 GB Mac   17.41 → 20.35 GB  (0.32.2: 19.35)
+    //                      32 GB Mac   25.66 → 33.18 GB  = 97% of physical
+    //                      64 GB Mac   25.53 → 54.28 GB  = 2.13x
+    //   Q8 1024x576 121f   48 GB Mac   39.49 → 49.95 GB  = 97% of physical
+    // On this 64 GB box the Q4 render moved system memory pressure from 58% to
+    // 84% and added 1.5 GB of swap; the Q8 one reached 87%. plan_memory_policy()
+    // in mlx_ltx_panel.py calls a machine "pressured" at 82% and answers by
+    // forcing the streamed VAE decode — ~30 s on a 5 s clip, which is more than
+    // the 4.5% the move earns. So 0.32 would buy speed and spend more of it.
+    //
+    // Ruled out, so nobody chases it: Metal residency sets (new in 0.32) are
+    // NOT the cause — MLX_RESIDENCY_SET_MAX_PCT=0 reproduces the same footprint
+    // to within 300 KB across three runs.
+    //
+    // THE CACHE POLICY SHIPPED FIRST, ON THIS PIN, AND IT SETTLED THE QUESTION
+    // THE OTHER WAY. mlx_warm_helper.py now caps the MLX allocator cache at one
+    // eighth of physical RAM (floor 2 GiB, ceiling 8 GiB). Re-running the tier
+    // table with that policy applied to BOTH versions — same prompt/seed,
+    // /usr/bin/time -l peak footprint, share of the simulated Mac's RAM:
+    //
+    //   Q4 768x432 121f    0.31.1 today   0.31.1+policy   0.32.1+policy
+    //     16 GiB (cap 2)   17.41 (101%)   16.50 ( 96%)    19.91 (116%)  WORSE
+    //     32 GiB (cap 4)   25.66 ( 75%)   16.49 ( 48%)    23.40 ( 68%)
+    //     64 GiB (cap 8)   25.53 ( 37%)   16.50 ( 24%)    27.87 ( 41%)  WORSE
+    //   Q8 1024x576 121f
+    //     48 GiB (cap 6)   39.49 ( 77%)   25.39 ( 49%)    42.11 ( 82%)  WORSE
+    //
+    // Three of the four tiers end up at a HIGHER share of physical RAM than
+    // 0.31.1 uses today, and the 48 GiB Comfortable tier — the commonest
+    // paying-attention Mac — lands at 81.7%, which is the 82% at which
+    // plan_memory_policy() forces the streamed VAE decode, before Chrome and
+    // Slack are counted.
+    //
+    // WHY THE CAP CANNOT RESCUE IT: the extra footprint is not all cache. With
+    // the cache capped identically, 0.32.1's ACTIVE memory is +12.0 GB on Q4
+    // (26.57 vs 14.53) and +29.2 GB on Q8 (52.23 vs 23.08). Capping an
+    // allocator cache cannot reach that. Driving the cache to ZERO does get
+    // 0.32.1 under today's numbers (Q8@48 GiB 32.25 GB / 138.37 s; Q4@16 GiB
+    // 17.04 GB / 72.59 s) — and at cache 0 the entire speed advantage is gone
+    // (-1.1% and -0.5% vs 0.31.1 today, and slower than 0.31.1 WITH the policy).
+    // There is no cache setting where 0.32.1 beats 0.31.1+policy on both axes.
+    //
+    // So the move is REFUSED again, on the same ground, with the mitigation
+    // now tried: step 1 of the route took the win the version move was supposed
+    // to deliver, and took it on the safe pin. Every cache setting is
+    // sha256-IDENTICAL output within a version, so none of this is a quality
+    // question — but the two VERSIONS are not byte-identical with each other
+    // (144da74a... vs 016d2dd2...), so a future attempt still owes a look at
+    // faces, not just a green suite.
+    //
+    // And the pin does not move alone. scripts/check_post_update.js carries the
+    // measurement: moving mlx to 0.32.x while mflux stays at 0.18.0 makes the
+    // step-7 mflux resolve walk mlx back DOWN to 0.31.2 — the broken one — on
+    // every fresh install and every Update, silently.
     {
       method: "shell.run",
       params: {

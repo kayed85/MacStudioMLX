@@ -20,11 +20,18 @@ const fs = require("fs")
 const os = require("os")
 const path = require("path")
 
-// Hailuo H3 (optional second video engine): since v3.7.0 the Q8 DiT lane runs
-// in ~27 GiB peak, so the floor is 46 GB — the same number install_h3.js's
-// preflight and H3_MIN_RAM_GB_Q8 in mlx_ltx_panel.py use. Keep all three in
-// sync. (A 48 GB Mac reports ~47.x GB after firmware reservations.)
-const H3_MIN_BYTES = 46 * 1000 * 1000 * 1000
+// Hailuo H3 (optional second video engine): the compact Q8 DiT lane's measured
+// peak is 25.63 GiB (text_encode, a 7-second phase), so the floor is 36 GB —
+// the same number H3_MIN_RAM_GB_Q8 in mlx_ltx_panel.py and
+// scripts/pinokio/h3_preflight.sh use. Keep all three in sync.
+//
+// 46e9 UNTIL v4.8.0, AND THAT IS THE INCIDENT. 46 was never a measurement — it
+// was a guard band picked to sit ~4 GB under a 48 GB Mac's marketing number
+// back when the only number anyone had was "27.3 GiB peak". v4.8.0 lowered the
+// PANEL's floor to 36 on the phase profile above and left this restatement and
+// the preflight's behind, so a 36-48 GB Mac was told by the panel that H3 runs
+// and by this menu that H3 does not exist. One number, three files.
+const H3_MIN_BYTES = 36 * 1000 * 1000 * 1000
 
 function h3Capable() {
   try {
@@ -65,6 +72,33 @@ function loadRequired(installRoot) {
   }
 }
 
+// Persistent user overrides live in the ENVIRONMENT file the Pinokio launcher
+// sources — that is exactly where docs/H3_ENGINE.md tells users to put them.
+// The PANEL reads these names from its own process env; this menu runs in a
+// different process entirely, so the only way for the two to agree is to parse
+// the same file. Read once, used for the model generation AND for the two H3
+// roots (see the h3Path note below for what disagreeing costs).
+//
+// Deliberately narrow: `KEY=value`, no continuations, no expansion. Anything
+// this parser cannot read leaves the caller on its default, which is always the
+// shipped behaviour.
+const ENV_KEYS = ["LTX_MODEL_VERSION", "LTX_H3_ROOT", "LTX_H3_MODELS"]
+
+function readEnvironment(installRoot) {
+  const out = {}
+  try {
+    const envPath = path.join(installRoot, "ENVIRONMENT")
+    if (!fs.existsSync(envPath)) return out
+    const text = fs.readFileSync(envPath, "utf8")
+      .split("\n").filter(l => !/^\s*#/.test(l)).join("\n")
+    for (const key of ENV_KEYS) {
+      const m = text.match(new RegExp("^\\s*" + key + "\\s*=\\s*(\\S+)\\s*$", "m"))
+      if (m) out[key] = m[1].replace(/^["']|["']$/g, "")
+    }
+  } catch (e) { /* unreadable ENVIRONMENT: every caller keeps its default */ }
+  return out
+}
+
 function repoComplete(installRoot, repo, minBytes) {
   // A repo is "complete" iff every listed file exists at >= minBytes under
   // its local_dir. Mirrors the Python-side _repo_missing in mlx_ltx_panel.py.
@@ -87,7 +121,7 @@ module.exports = {
   // became the generation a fresh install renders with — the first sentence a prospective
   // user reads, naming the wrong engine, while a confused existing user hunting a "why
   // does it keep asking for LTX 2.3" answer finds it confirming their suspicion.
-  description: "[MAC ONLY] Local generative video panel for Apple Silicon. Joint audio+video via LTX-2.5 (MLX), with Hailuo H3 as a second engine. T2V, I2V, FFLF, Extend, trained characters. Lossless h264. Hardware-tier feature gating. Free, open source.",
+  description: "[BETA — unreleased builds, runs alongside the stable install on port 8199] Local generative video panel for Apple Silicon. Joint audio+video via LTX-2.5 (MLX), with Hailuo H3 as a second engine. T2V, I2V, FFLF, Extend, trained characters. Lossless h264. Hardware-tier feature gating. Free, open source.",
   icon: "icon.png",
   menu: async (kernel, info) => {
     // Resolve the install root. cocktailpeanut diagnosed that `info.path` is
@@ -98,6 +132,8 @@ module.exports = {
     const installRoot = getInstallRoot(info)
     const required = loadRequired(installRoot)
     const minBytes = required.min_size_bytes || 1024
+    // Every ENVIRONMENT override this menu honours, read once. See readEnvironment().
+    const envFile = readEnvironment(installRoot)
 
     // --- env detection: either Pinokio's `env/` or manual `.venv/` ---
     const env_ready = (required.env.marker_paths || []).some(p => info.exists(p))
@@ -124,15 +160,10 @@ module.exports = {
     // docs/H3_ENGINE.md tells users to put persistent overrides. Falls back to
     // the manifest default when nothing has been pinned, which is the norm.
     let activeVersion = capRender.default_version
-    try {
-      const envPath = path.join(installRoot, "ENVIRONMENT")
-      if (fs.existsSync(envPath)) {
-        const m = fs.readFileSync(envPath, "utf8")
-          .split("\n").filter(l => !/^\s*#/.test(l))
-          .join("\n").match(/^\s*LTX_MODEL_VERSION\s*=\s*(\S+)\s*$/m)
-        if (m && (capRender.repos_by_version || {})[m[1]]) activeVersion = m[1]
-      }
-    } catch (e) { /* unreadable ENVIRONMENT: keep the manifest default */ }
+    const pinnedVersion = envFile.LTX_MODEL_VERSION
+    if (pinnedVersion && (capRender.repos_by_version || {})[pinnedVersion]) {
+      activeVersion = pinnedVersion
+    }
     const renderKeys = ((capRender.repos_by_version || {})[activeVersion] || [])
     const baseRepos = renderKeys.length
       ? renderKeys.map(k => repos.find(r => r.key === k)).filter(Boolean)
@@ -206,8 +237,40 @@ module.exports = {
     // false, which makes the menu agree with the panel's _h3_python() by
     // construction. (repoComplete() above already probes with fs.statSync +
     // absolute paths for the same reason.) Keep the two in sync.
-    const h3Resolves = (rel) => {
+    const onDisk = (rel) => {
       try { return fs.existsSync(path.join(installRoot, rel)) } catch (e) { return false }
+    }
+
+    // ...AND AT THE ROOT THE PANEL ACTUALLY USES. required_files.json states the
+    // H3 paths relative to the install dir, but the panel's H3_ROOT / H3_MODELS
+    // are env-overridable (mlx_ltx_panel.py — `LTX_H3_ROOT`, `LTX_H3_MODELS`,
+    // documented in docs/H3_ENGINE.md as THE way to point a second install at an
+    // existing 75 GB checkout instead of duplicating it). This menu joined every
+    // manifest path onto installRoot unconditionally, so on exactly that setup
+    // the panel reported H3 installed and the menu reported it missing — and
+    // offered a 75 GB download for weights already on disk, next to a "Repair"
+    // for an engine that was never broken. Two consumers, one manifest, and now
+    // one set of roots. The two prefixes below are the panel's own defaults;
+    // they are what the override REPLACES, so they have to be named somewhere.
+    const H3_ROOT_REL = "minimax-h3-mlx"
+    const H3_MODELS_REL = "mlx_models/hailuo-h3"
+    // A relative override is relative to the install dir (same as the default it
+    // replaces); an absolute one passes straight through. path.join collapses a
+    // trailing "" cleanly, so an exact prefix match resolves to the root itself.
+    const underRoot = (base, rel) =>
+      path.isAbsolute(base) ? path.join(base, rel) : path.join(installRoot, base, rel)
+    const h3Path = (rel) => {
+      const norm = String(rel).replace(/\\/g, "/")
+      for (const [prefix, override] of [[H3_ROOT_REL, envFile.LTX_H3_ROOT],
+                                        [H3_MODELS_REL, envFile.LTX_H3_MODELS]]) {
+        if (!override) continue
+        if (norm === prefix) return underRoot(override, "")
+        if (norm.startsWith(prefix + "/")) return underRoot(override, norm.slice(prefix.length + 1))
+      }
+      return path.join(installRoot, norm)
+    }
+    const h3Resolves = (rel) => {
+      try { return fs.existsSync(h3Path(rel)) } catch (e) { return false }
     }
     // DECLARED, NOT RE-DERIVED. This used to call H3 ready on venv + runner +
     // the one big DiT, while the panel additionally required every compact Q8
@@ -256,6 +319,36 @@ module.exports = {
       return m
     }
 
+    // --- LTX engine health: the SAME dangling-interpreter class, one tree over -
+    // `env_ready` above trusts a marker path — ltx-2-mlx/env/pyvenv.cfg, a plain
+    // FILE that survives everything. The interpreter beside it does not: install
+    // .js builds it with `uv venv`, which makes bin/python a symlink chain into
+    // Pinokio's SHARED managed Python, and any other pack (or any other Pinokio
+    // app) that makes uv re-resolve, bump or prune that interpreter leaves the
+    // chain DANGLING. That is precisely the v3.4.0 report the H3 probes above
+    // exist for — LTX is simply the tree nobody re-checked afterwards.
+    //
+    // In that state the menu showed a confident `default: true` Start, Python
+    // never came up, and the only entries offered were Update (which pip-installs
+    // into the venv that isn't there) and Reset (which deletes the install). No
+    // route to the fix, for a machine whose venv is the ONLY broken thing.
+    // fs.existsSync FOLLOWS symlinks, so a dangling chain is definitively false.
+    //
+    // install.js IS the repair: its ltx_venv.sh step probes the interpreter,
+    // rebuilds only when it does not run, and every download step after it skips
+    // what is already on disk. Nothing is re-fetched — hence "models kept".
+    const ltx_python = onDisk("ltx-2-mlx/env/bin/python3.11") ||
+                       onDisk("ltx-2-mlx/env/bin/python")
+    const ltx_repair = env_ready && !ltx_python
+    const pushLtxRepair = (m) => {
+      if (ltx_repair) {
+        m.push({ icon: "fa-solid fa-screwdriver-wrench",
+                 text: "Repair Phosphene engine (models kept)",
+                 href: "install.js" })
+      }
+      return m
+    }
+
     // User-content folders persist across Reset (which only removes the venv).
     // Keep their shortcuts visible whenever they exist on disk so users can
     // still recover their renders / models / uploads.
@@ -300,9 +393,8 @@ module.exports = {
     // Net effect: a clean machine still auto-installs on first open (nothing
     // exists yet, so nothing to detect). Every state AFTER a failed attempt
     // waits for a deliberate click instead of respawning itself.
-    const onDisk = (rel) => {
-      try { return fs.existsSync(path.join(installRoot, rel)) } catch (e) { return false }
-    }
+    // (`onDisk` is defined next to the H3 probes above — same fs.existsSync
+    // reasoning, one definition.)
     const install_attempted =
       has_models || has_outputs || has_uploads ||
       onDisk("mlx_models") || onDisk("mlx_outputs") ||
@@ -365,6 +457,7 @@ module.exports = {
       if (has_outputs) m.push({ icon: "fa-solid fa-film",  text: "Outputs", href: "mlx_outputs?fs=true" })
       if (has_models)  m.push({ icon: "fa-solid fa-cube",  text: "Models",  href: "mlx_models?fs=true" })
       if (has_uploads) m.push({ icon: "fa-solid fa-image", text: "Uploads", href: "panel_uploads?fs=true" })
+      pushLtxRepair(m)
       pushH3Recovery(m)
       m.push({ icon: "fa-regular fa-circle-xmark", text: "Reset", href: "reset.js" })
       return m
@@ -391,6 +484,9 @@ module.exports = {
       { icon: "fa-solid fa-cube",  text: "Models",  href: "mlx_models?fs=true" },
       { icon: "fa-solid fa-image", text: "Uploads", href: "panel_uploads?fs=true" },
     ]
+    // Right under Start, because it is what the user reaches for when Start does
+    // nothing: base models and clone intact, interpreter gone. See ltx_repair.
+    pushLtxRepair(baseMenu)
     if (!q8_ready) {
       // ~30 GB and what it actually buys on 2.5: trained characters and voices.
       // High additionally needs the separate 29.5 GB add-on, which is offered
@@ -413,15 +509,24 @@ module.exports = {
     }
     if (!h3_ready && h3Capable()) {
       // Second VIDEO engine — joint picture + dialogue + sound. Opt-in only:
-      // ~75 GB, 64 GB+ Macs, MiniMax Community License with territory
-      // restrictions. Hidden entirely on machines that can't run it, so it
-      // never reads as a missing piece of the base install.
+      // ~75 GB, 36 GB+ Macs (H3_MIN_BYTES above), MiniMax Community License
+      // with territory restrictions. Hidden entirely on machines that can't
+      // run it, so it never reads as a missing piece of the base install.
       baseMenu.push(h3_repair
         ? { icon: "fa-solid fa-screwdriver-wrench", text: "Repair Hailuo H3 (weights kept — no re-download)", href: "install_h3.js" }
         // ENGINES ARE PEERS: "optional" told a user that half the panel's
         // video capability was a side dish. The entry names what it IS.
         // The panel's install card quotes this string verbatim -- change both.
         : { icon: "fa-solid fa-comments", text: "Install Hailuo H3 (second video engine, ~75 GB)", href: "install_h3.js" })
+    } else if (h3_ready) {
+      // THE DOOR MUST NOT CLOSE BEHIND THE INSTALL. The panel's live-preview
+      // note tells users with an older H3 runner to update it "from the
+      // Phosphene sidebar" — but this entry used to exist only while H3 was
+      // NOT installed, so the exact people the note addressed had no button
+      // to press (reported by a user on X, 2026-08-18, whose sidebar showed
+      // only the sharp/Q8 offers). install_h3.js is idempotent: runner
+      // refresh, weights untouched.
+      baseMenu.push({ icon: "fa-solid fa-rotate", text: "Update Hailuo H3 runner (weights kept — no re-download)", href: "install_h3.js" })
     }
     baseMenu.push(
       { icon: "fa-solid fa-rotate", text: "Update", href: "update.js" },

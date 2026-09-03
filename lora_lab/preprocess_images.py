@@ -58,6 +58,44 @@ def _force_eval(*arrays: mx.array) -> None:
     mx.eval(*arrays)
 
 
+def _apply_gemma_max_length_override() -> int | None:
+    """Honour ``LTX2_GEMMA_MAX_LENGTH`` for the caption encode, the way the
+    render pipelines do.
+
+    The vendored ``_encode_all_captions`` calls ``encode_all_layers(caption)``
+    with the default 1024-token pad, and on some chips the macOS GPU watchdog
+    kills that command buffer partway through the caption list (#61: SIGABRT
+    on the 1st, 7th or 11th caption of different runs — a race on accumulated
+    GPU pressure, not a bad caption). The render helper survives the same
+    kill by retrying once at a shorter encode; the panel relaunches the
+    trainer the same way and passes the length through this variable. A
+    256-token pad holds every caption the trainer writes (50-80 words) with
+    room to spare, and the transformer already trains and renders against
+    that length on the render side. Returns the applied length, or None when
+    the variable is unset (the default 1024 stays).
+    """
+    raw = (os.environ.get("LTX2_GEMMA_MAX_LENGTH") or "").strip()
+    if not raw:
+        return None
+    try:
+        n = max(64, int(raw))
+    except ValueError:
+        return None
+    from ltx_core_mlx.text_encoders.gemma.encoders import base_encoder as _be
+    cls = _be.GemmaLanguageModel
+    orig = cls.encode_all_layers
+    if getattr(orig, "_ltx_max_length_override", None) == n:
+        return n
+
+    def encode_all_layers(self, text: str, max_length: int = 1024):
+        return orig(self, text, min(int(max_length), n))
+
+    encode_all_layers._ltx_max_length_override = n  # type: ignore[attr-defined]
+    cls.encode_all_layers = encode_all_layers
+    print(f"caption encode: LTX2_GEMMA_MAX_LENGTH={n} (default 1024)")
+    return n
+
+
 def _resolve_captions(image_files: list[Path], captions_dir: Path | None, caption_ext: str) -> list[str]:
     captions: list[str] = []
     if captions_dir is None:
@@ -202,6 +240,7 @@ def preprocess_images(
     if gemma_model_id is None:
         from lora_lab import resolve_default_text_encoder
         gemma_model_id = resolve_default_text_encoder()
+    _apply_gemma_max_length_override()
     mx.set_cache_limit(mx.device_info()["memory_size"])
     model_dir = _resolve_model_dir(model_dir)
 

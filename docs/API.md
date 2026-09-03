@@ -54,7 +54,7 @@ Add a job to the panel's queue. Returns immediately; the helper renders it async
 | `accel` | `off` \| (other modes — see panel source) | Acceleration knob. |
 | `enhance` | `true` \| `false` | If `true`, Gemma rewrites the prompt before encoding. **Set `false` when the prompt contains LoRA trigger words** — the rewriter can strip them. |
 | `hdr` | `true` \| `false` | HDR ic-lora pass. |
-| `image` | path | I2V only. Absolute path to a reference PNG/JPG. |
+| `image` | path | I2V only. Absolute path to a reference PNG/JPG. **Required** — since v4.6.1 an omitted or empty `image` on `i2v` / `i2v_clean_audio` is refused at job start with a readable error instead of defaulting to `examples/reference.png`, a demo file no install has ever shipped (that default was the widest-spread render failure in the fleet: `image not found: <path>`, 35 events across 22 people in 14 days). `LTX_DEFAULT_IMAGE` still supplies a default when it points at a file that actually exists. |
 | `audio` | path | Optional audio reference. |
 | `label` | string | Optional UI label for the queue card. |
 | `temporal_mode` | `native` \| (tiled modes) | `native` for normal jobs. |
@@ -209,7 +209,7 @@ Returns `{"user": [...], "curated": [...], "loras_dir": "...", ...}`. Each entry
 
 A LoRA can train to completion, write a valid safetensors, load without a warning, and change **nothing**: the deltas it learned are numerically too small to move the model. Every structural gate passes, because every structural gate asks whether the KEYS land and none asks whether there is anything in them (#61, #62).
 
-`adapter_verdict` (`mlx_ltx_panel.py:2200`) is read out of the sidecar's `adapter_strength` block and is one of:
+`adapter_verdict` (`_adapter_verdict`) is read out of the sidecar's `adapter_strength` block and is one of:
 
 | Value | Meaning |
 |---|---|
@@ -220,6 +220,8 @@ A LoRA can train to completion, write a valid safetensors, load without a warnin
 Anything else is whatever the trainer called it, passed through verbatim.
 
 Callers should surface `weak` **before** a render is spent finding out, and should not decorate `unknown`.
+
+`GET /train/list` carries the same verdict plus **`adapter_advice`** — one sentence naming what to do about it, empty when the verdict is `ok` or `unknown`. It is hardware-aware: on a sub-64 GB Mac it does **not** say "train again on High", because that machine cannot reach the graded recipe (see the profile section below). The panel's Train tab renders it as a banner above the trained-character chips and in the finished job's history row; a verdict a user cannot act on is a measurement, not an answer (#62).
 
 ### `POST /loras/refresh`
 
@@ -233,18 +235,70 @@ Re-scan `mlx_models/loras/`. Returns the same payload as `/loras`.
 
 Deletes the file. Returns `{"ok": true}`.
 
+### `POST /h3/loras/import`
+
+`multipart/form-data`. Installs one **Hailuo H3** adapter you already have into H3's own
+LoRA library (`mlx_models/hailuo-h3/loras/`, or wherever the installed pack keeps it).
+Deliberately NOT `/upload`: reference media can be any image or audio, whereas an H3
+adapter has to pass the runner's layout contract before it may appear in the picker.
+
+| Field | Type | Note |
+|---|---|---|
+| `file` | file | Exactly one `.safetensors`. The filename is reduced to its basename and sanitised; it may not collide with a file already in the library. |
+
+The body is **streamed** to a hidden staging directory — not buffered — so a multi-gigabyte
+adapter costs about 1 MiB of resident memory. `Content-Length` is required and capped at
+`H3_LORA_UPLOAD_MAX_BYTES` (4 GiB).
+
+What happens to the file, in order: staged under `.import.<pid>.<tid>/<name>` →
+`_h3_lora_prepare` (a ComfyUI repack has its `diffusion_model.` namespace stripped in
+place, a header-only rewrite) → the import-only payload and target-module checks →
+`os.replace` into the library → sidecar JSON. A refusal at any step leaves nothing behind.
+
+Returns:
+
+```json
+{
+  "ok": true,
+  "path": "/abs/path/in/the/h3/library.safetensors",
+  "filename": "my_lora.safetensors",
+  "name": "my lora",
+  "layout": "bare" | "comfyui",
+  "converted": false,
+  "pairs": 208,
+  "recommended_strength": 1.0,
+  "scale_source": "folded" | "per_module" | "uniform" | "advisory" | "none",
+  "scale_evidence": "…"
+}
+```
+
+`recommended_strength` is written into the sidecar and picked up by the picker's per-LoRA
+strength control. The H3 loader applies `B @ A` and no alpha, so an adapter whose PEFT
+`alpha/rank` is not already folded into `lora_B` needs that number here — this is reported,
+never used as grounds for refusal.
+
+Errors: `411` when `Content-Length` is absent or zero, `413` when the body exceeds the cap,
+`400` for a bad file (wrong extension, empty, duplicate name, unusable layout, malformed
+payload, wrong model), `500` otherwise. Every message names the file the user chose.
+
 ---
 
 ## Training
 
 ### `POST /train/upload`
 
-`multipart/form-data` upload. Adds images to a training dataset.
+`multipart/form-data` upload. Adds **one image** to a training dataset — this route is
+one-file-per-request, not a batch. Send the images in a loop, echoing the returned
+`train_job_id` back on every call after the first so the whole set lands in one directory.
 
 | Field | Type | Note |
 |---|---|---|
-| `train_job_id` | string | Optional — autogenerated if omitted. |
-| `files[]` | files | One or more PNG/JPG/JPEG/WEBP/BMP. |
+| `job_id` | string | Optional on the FIRST call (a fresh id is minted), required after, to keep the batch together. Note the name: `job_id`, **not** `train_job_id` — the response returns it as `train_job_id`. |
+| `file` | file | Exactly ONE PNG/JPG/JPEG/WEBP/BMP, or a `.txt` caption. |
+
+The request body is capped at `TRAIN_MAX_BYTES_PER_IMAGE` (32 MB). Because that cap is on the
+whole request and the route takes one file, a multi-file body is refused even when every
+individual image is small.
 
 Returns the dataset state (`train_job_id`, image count, etc.).
 
@@ -276,8 +330,8 @@ Kick off a character LoRA training. The panel shells out to `lora_lab.train_char
 | Field | Type | Note |
 |---|---|---|
 | `train_job_id` | string | From `/train/upload`. |
-| `trigger` | string | Trigger token, e.g. `bizarrotrn`. Must be compound and rare so it doesn't collide with normal language. The face LoRA lands at `mlx_models/loras/<trigger>_v2.safetensors`; the optional audio LoRA at `<trigger>.audio.safetensors`. |
-| `preset` | `quick` \| `medium` \| `high` | Hyperparameter preset. See the table below — **the step count is not a constant, and on a sub-64 GB Mac neither is anything else.** |
+| `trigger` | string | Trigger token, e.g. `bizarrotrn`. Must be compound, rare and **letters-only** so it doesn't collide with normal language — digits tokenize as single, very common tokens (`mrz07` → `m / rz / 0 / 7`), and every trigger that has carried an identity here was letters-only; the panel suggests `<3 consonants>trn` (`mrztrn`) and logs a note when a trigger carries digits (#62). The face LoRA lands at `mlx_models/loras/<trigger>_v2.safetensors`; the optional audio LoRA at `<trigger>.audio.safetensors`. |
+| `preset` | `quick` \| `medium` \| `high` | Hyperparameter preset. **Default changed in v4.6.1: omitting it now gives `high` for `train_type=character` and `quick` for `train_type=style`** (`TRAIN_DEFAULT_PRESET`) — it used to give `quick` for both, which is the tier that has never carried an identity (#62). See the table below — **the step count is not a constant, and on a sub-64 GB Mac neither is anything else.** |
 | `image_count` | int | Confirmed by the panel from the uploaded images. |
 | `train_audio` | `true` \| `false` | Optional. Default `false`. When `true`, a voice clip must already exist for this `train_job_id` (uploaded via `/train/upload-voice`) — otherwise `/train/start` returns 400. |
 | `audio_steps` | int | Optional. Default `250`. Number of audio-LoRA training steps. Heuristic: ~30 s/step on M4 Max. Smoke = `100`, Standard = `250`, Long = `500`. |
@@ -303,7 +357,9 @@ On a Mac with **64 GB or more** (`TRAIN_PRESETS`, `mlx_ltx_panel.py:1558`):
 |---|---|---|---|---|---|
 | `quick` | 30 | 8 | 512 | 8000 | **No.** The pill says "identity ungraded". |
 | `medium` | 60 | 16 | 576 | 12000 | **No.** Same. |
-| `high` | 100 | 32 | 512 | 20000 | **Yes** — the validated v2 recipe (Aria_v2, Bizarro_v2). |
+| `high` | 100 | 32 | 512 | 20000 | **Yes** — the validated v2 recipe (Aria_v2, Bizarro_v2). The default, and the one the pill badges "Recommended". |
+
+Measured with `lora_compat.py`: rank-32 adapters that carry an identity sit at 5.4e-04 to 1.6e-03 `delta_rms`; two independent users' rank-8 `quick` runs measured **1.54e-04** and **1.98e-04**, both at or under the `WEAK_DELTA_RMS` floor of 2.0e-04 (#62).
 
 So `high` at 50 images is 5000 steps, at 20 images 2000, at 300 images 20000 (capped). Only the rank-32 recipe has ever been put in front of a human eye and called good.
 
@@ -355,12 +411,34 @@ Returns `{"characters": [...]}`. Each entry describes one character discovered i
 | `voice_sample` | string \| null | Absolute path to `<trigger>.voice.<ext>` (the original training clip). For playback / inspection only; the model uses the audio LoRA, not the raw clip. |
 | `has_voice` | bool | `true` iff the audio LoRA is on disk. Silent characters (face LoRA only) are returned with `has_voice: false`. Callers should skip audio cues in prompts and not stack the (absent) audio LoRA. |
 | `sample_image_url` | string \| null | URL to a preview image from the training dataset. |
+| `sheet_image_path`, `sheet_image_url` | string \| null | The generated multi-view character sheet (`mlx_models/characters/<trigger>/sheet.png`), when one exists. Made by `POST /characters/<id>/sheet/generate`, served by `GET /characters/<id>/sheet`. |
 
 Discovery rule: `<trigger>_v2.safetensors` is required; everything else is optional.
 
 ### `GET /characters/<id>/preview`
 
 Serves the sample training image for the character (PNG/JPEG).
+
+### `GET /characters/<id>/sheet`
+
+Serves the generated character sheet PNG. `?w=<px>` returns a cached thumbnail (JPEG) through the same resize lane as `/image?w=`. 404 until a sheet has been generated.
+
+### `POST /characters/<id>/sheet/generate`
+
+Renders a multi-view turnaround sheet from the character's reference image (bundle avatar first, training-sample fallback) and composites it into `mlx_models/characters/<id>/sheet.png` + a `sheet.json` sidecar (`phosphene/character_sheet@1`). Synchronous, like `/image/generate` — the caller blocks for the whole render; 429 when the GPU is already held by a render/training/image job (never queued).
+
+`Content-Type: application/json`. Every field optional (an empty body renders the default 3-view sheet):
+
+```json
+{
+  "engine_override": "hidream_inline",
+  "views": ["front", "profile_left", "three_quarter"],
+  "wardrobe": "a red flight jacket",
+  "seed": -1
+}
+```
+
+Only ref-honoring engines are accepted (`hidream_*_inline`, `qwen_edit_*_inline`, `mock_inline`) — a text-only engine would render a stranger. `seed >= 0` gives view *i* `seed + i` so a whole sheet reproduces from one number. Every view prompt pins wardrobe to the reference ("wearing exactly the same clothes as in the reference image"); `wardrobe` re-states the outfit in words on top of that. Views after the first also chain the first rendered view as a second reference: measured on a dim reference image, solo side-angle renders re-imagined hair color across seeds and phrasings, and a clean frontal from the same run re-anchors the attributes the raw reference under-specifies. Per-view framing can still drift (a subject off-center in one view) — regenerate or vary the seed. On success, `bundle.json`'s `preview` is pointed at `sheet.png` **only** if it was null — a curated preview is never clobbered.
 
 ### `POST /characters/<id>/generate`
 

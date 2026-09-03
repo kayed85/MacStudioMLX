@@ -87,6 +87,31 @@ export HF_HUB_ENABLE_HF_TRANSFER=1
 
 echo "=== Phosphene post-update — app root: $ROOT ==="
 
+# ---- 0. The venv itself, before anything tries to install into it -----------
+# EVERY STEP BELOW TARGETS $VENV_PY. If that interpreter does not resolve, an
+# Update is a long sequence of `uv pip install --python <nothing>` failures, and
+# the first one to be load-bearing prints the FATAL banner naming a pin — which
+# is not the problem and sends the report in the wrong direction.
+#
+# And it does not resolve more often than anyone expects. install.js builds the
+# venv with `uv venv`, which makes env/bin/python a symlink chain into Pinokio's
+# SHARED managed Python; any other pack, or any other Pinokio app, that makes uv
+# re-resolve, bump or prune that interpreter leaves the chain DANGLING while
+# env/ still sits there. That is the v3.4.0 "installed other packs and Hailuo H3
+# vanished" report, one tree over — the LTX venv breaks the same way and had no
+# self-heal on the Update path at all. Reinstall was the only cure, for a
+# machine whose weights were all fine.
+#
+# Same implementation install.js runs (its own step, same cwd, same no-args
+# call), so there is exactly one venv-repair behaviour in the app. It ASKS
+# whether the interpreter runs and rebuilds only when it doesn't: a healthy
+# install pays ~50 ms and skips, a broken one pays ~5 min and re-downloads
+# nothing. Also carries the macOS-14 preflight, which is the right place for it.
+#
+# FATAL: if the venv cannot be made to work there is nothing this script can
+# usefully do afterwards except fail slower and less clearly.
+require "the LTX venv self-heal (rebuilds a dangling interpreter)" -- bash -c 'cd "$1/ltx-2-mlx" && bash ../scripts/pinokio/ltx_venv.sh' _ "$ROOT"
+
 # ---- 1. The vendored engine pin --------------------------------------------
 # One implementation, shared with install.js. Carries the 3.8.1 hotfix
 # (reset --hard before the checkout) and the v4.0 move from a branch SHA to an
@@ -98,6 +123,12 @@ require "the vendored engine pin move" -- bash "$ROOT/scripts/pinokio/ltx_checko
 # mlx 0.31.2 attenuates the vocoder by ~22 dB (measured: max_volume -42.8 dB vs
 # -9.2 dB on 0.31.1, same weights, same seed). --reinstall --no-deps so ONLY
 # mlx moves and nothing that depends on it is re-resolved.
+#
+# --no-deps protects this step, but NOT the pin: step 7 below installs mflux
+# WITH deps and can walk mlx back down from under it. That coupling, and the
+# 2026-08-28 measurements behind holding at 0.31.1 rather than moving to
+# 0.32.x, are in scripts/check_post_update.js and install.js. Read them before
+# touching this line — and change both pins in one commit or not at all.
 require "the mlx 0.31.1 pin" -- uv pip install --python "$VENV_PY" --reinstall --no-deps 'mlx==0.31.1' 'mlx-lm==0.31.1' 'mlx-metal==0.31.1'
 
 # ---- 2b. THE TRANSFORMERS CAP — the one install.js has been promising -------
@@ -231,6 +262,46 @@ echo 'Ensuring the Control IC-LoRA is present (Union, control mode, optional)…
 "$HF" download Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control --local-dir "$ROOT/mlx_models/loras/ic" --include 'ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors' \
   || echo 'WARN: Control IC-LoRA fetch failed — the Control mode will fetch it on first use, or click Repair.'
 
+# ---- 8b. H3 compact (Q8) engine — the memory-halving default (optional) ----
+# v4.8.0 made the Q8 DiT H3's AUTO default on every machine, but installs made
+# before that never built the pack on 64 GB+ Macs — the install skipped it
+# when bf16 was their default — so Update-only users kept rendering bf16
+# silently at ~40-48 GB ("i updated but still getting this much memory").
+# Update ships code; this step ships the default's weights. Gated on H3
+# actually being installed here (pure-LTX installs skip in one stat call),
+# idempotent via the pack's own quant_config.json, ~5 min and ~22 GB disk on
+# the one run that builds. Cannot fail the update.
+#
+# THE GATE HAS TO ASK THE SAME QUESTION THE PANEL DOES. It hardcoded
+# $ROOT/mlx_models/hailuo-h3/models/... and $ROOT/minimax-h3-mlx, so it was
+# blind to both things that legitimately vary:
+#   * LTX_H3_ROOT / LTX_H3_MODELS relocate the checkout and the weights — the
+#     documented way (docs/H3_ENGINE.md) to stop a second install re-downloading
+#     75 GB. mlx_ltx_panel.py honours them; this gate did not, so on exactly the
+#     setup the docs recommend the Update reported nothing to do while the panel
+#     ran bf16 at ~48 GB.
+#   * the layout: upstream `download_selected.py --root X` appends `models/`,
+#     the canonical campaign tree is flat, and the panel accepts BOTH
+#     (`_h3_model_roots()`). A flat tree read as "H3 not installed" here.
+# h3_build_q8.sh resolves the same two roots and the same two layouts itself —
+# LTX_H3_MODELS reaches it through the environment — so it lands the pack beside
+# whichever DiT this gate found.
+H3_MODELS_ROOT="${LTX_H3_MODELS:-$ROOT/mlx_models/hailuo-h3}"
+H3_CHECKOUT="${LTX_H3_ROOT:-$ROOT/minimax-h3-mlx}"
+H3_DIT_REL='deepbeep-pruned-bf16/MiniMax-H3-FL2VA-pruned_bf16.safetensors'
+if { [ -f "$H3_MODELS_ROOT/models/$H3_DIT_REL" ] || [ -f "$H3_MODELS_ROOT/$H3_DIT_REL" ]; } \
+   && [ -d "$H3_CHECKOUT" ]; then
+  # #74: the build script needs the v2 engine tree. Installs cloned before it
+  # sat on the old branch and this step built against that forever. Move the
+  # checkout to the pin first (the same move the H3 installer makes).
+  echo 'Ensuring the H3 engine checkout is on the pinned branch…'
+  bash "$ROOT/scripts/pinokio/h3_checkout.sh" "$H3_CHECKOUT" \
+    || echo 'WARN: could not move the H3 checkout to its pinned branch — the Q8 build below may not run; re-run the H3 engine Install to retry.'
+  echo 'Ensuring the H3 compact (Q8) engine is built (halves H3 render memory)…'
+  ( cd "$H3_CHECKOUT" && bash "$ROOT/scripts/pinokio/h3_build_q8.sh" "$ROOT" ) \
+    || echo 'WARN: H3 Q8 build failed — H3 keeps the full bf16 engine for now; re-run the H3 engine Install to retry.'
+fi
+
 # ---- 9. Trim variants we never load ----------------------------------------
 # Pre-Y1.024 installs downloaded whole repos (Q4 56 GB instead of 20, Q8 82 GB
 # instead of 37). `rm -f` is a no-op when the file is already gone.
@@ -248,5 +319,38 @@ rm -f "$ROOT/mlx_models/ltx-2.3-mlx-q8/ltx-2.3-22b-distilled-lora-384-1.1.safete
 rm -f "$ROOT/mlx_models/ltx-2.3-mlx-q8/spatial_upscaler_x1_5_v1_0.safetensors"
 rm -f "$ROOT/mlx_models/ltx-2.3-mlx-q8/temporal_upscaler_x2_v1_0.safetensors"
 echo 'Trim done.'
+
+# ---- 10. THE IMPORT GATE — the last thing, because it is the only proof -----
+#
+# THE FLEET SAYS THIS IS NEEDED. `No module named 'ltx_pipelines_mlx'` is the
+# SECOND most common error in the 14-day fleet read (464 events): an app that is
+# installed, boots, and cannot render a single frame.
+#
+# install.js has guarded this since v2.0.2, for a reason written in its own
+# comment: "the upstream pip step had silently failed mid-install but the patch
+# script's i2v target check tolerates a missing ltx_pipelines_mlx file, so the
+# install reported success and the user only learned about the breakage when
+# they clicked Generate." Update never got the same guard. Step 3 above
+# reinstalls the three packages and `require` catches a NON-ZERO pip — but pip
+# exiting 0 is not the same claim as "the module imports", which is the only
+# claim that matters, and the one the user finds out about at Generate time.
+#
+# So: import them. If that fails, do not fail the update yet — reinstall once
+# and import again, because a torn site-packages is exactly what this repairs
+# and the user should not have to run anything by hand. Only a second failure
+# is fatal, and then `require` says so in the app's own words.
+# The probe imports the same three packages as the gate but in semicolon form,
+# so `check_post_update.js` can still tell them apart: the gate is the
+# comma-form line it must find wrapped in `require`. (A one-package probe let
+# a torn ltx_core_mlx skip the repair and fail the gate — review 2026-09-02.)
+echo 'Verifying the render engine actually imports…'
+if ! "$PY" -c "import ltx_core_mlx; import ltx_pipelines_mlx; import mlx" 2>/dev/null; then
+  echo 'Render engine did not import — repairing the vendored packages once…'
+  ( cd "$ROOT/ltx-2-mlx" && uv pip install --python env/bin/python --reinstall \
+      --no-deps --build-constraints ../pip-build-constraints.txt \
+      ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx ./packages/ltx-trainer ) \
+    || true
+fi
+require "the render engine import gate" -- "$PY" -c "import ltx_core_mlx, ltx_pipelines_mlx, mlx"
 
 echo "=== post-update complete ==="

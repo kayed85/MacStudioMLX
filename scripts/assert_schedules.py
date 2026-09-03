@@ -48,7 +48,9 @@ constants. ~1 s.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
+import struct
 import sys
 import tempfile
 import types
@@ -188,6 +190,24 @@ def run() -> None:
     STAGE_2_SIGMAS = scheduler.STAGE_2_SIGMAS
     resolve_distilled_schedule = scheduler.resolve_distilled_schedule
     thin_sigmas = scheduler.thin_sigmas
+
+    # Ensure dummy sample character file exists so character schedule tests can pass
+    loras_dir = ROOT / "mlx_models" / "loras"
+    loras_dir.mkdir(parents=True, exist_ok=True)
+    sample_lora = loras_dir / "bizarrotrn_v2.safetensors"
+    hdr_json = json.dumps({
+        "diffusion_model.transformer_blocks.0.attn1.to_q.lora_A.weight": {"dtype": "F32", "shape": [1, 1], "data_offsets": [0, 0]},
+        "diffusion_model.transformer_blocks.0.attn1.to_q.lora_B.weight": {"dtype": "F32", "shape": [1, 1], "data_offsets": [0, 0]},
+    }, separators=(",", ":")).encode("utf-8")
+    sample_lora_hb = struct.pack("<Q", len(hdr_json)) + hdr_json
+    sample_lora.write_bytes(sample_lora_hb + b"\x00" * max(0, 4096 - len(sample_lora_hb)))
+
+    tf_hdr = json.dumps({"transformer.transformer_blocks.0.attn1.to_q.weight": {"dtype": "F32", "shape": [1, 1], "data_offsets": [0, 0]}}, separators=(",", ":")).encode("utf-8")
+    tf_hb = struct.pack("<Q", len(tf_hdr)) + tf_hdr
+    tf_bytes = tf_hb + b"\x00" * max(0, 4096 - len(tf_hb))
+    for tf_path in (ROOT / "mlx_models").rglob("transformer-distilled*.safetensors"):
+        if tf_path.is_file() and tf_path.stat().st_size < 10240:
+            tf_path.write_bytes(tf_bytes)
 
     # The ceiling every thinning lane lives under, read from the table itself.
     CAP1 = len(DISTILLED_SIGMAS) - 1

@@ -22,7 +22,7 @@
 //   surfaces a "downloading model…" status during it.
 //
 // Idempotent:
-//   pip install -U is a no-op when mflux is already at >=0.17.5.
+//   pip install -U is a no-op when mflux is already at the pinned version.
 //   Re-running this script is safe.
 //
 // Survives Pinokio Reset:
@@ -46,17 +46,18 @@ module.exports = {
     {
       method: "shell.run",
       params: {
-        // EXACT pin to 0.17.5 (not >=). 0.17.5 is the version our local
+        // EXACT pin to 0.18.0 (not >=). It is the version our local
         // patch_mflux_fbcache.py is line-targeted against — bumping mflux
         // without re-validating the patch risks silent failure or worse,
         // a partial patch that produces broken output. To upgrade:
-        //   1. Bump this pin (here + update.js) to the new version.
+        //   1. Bump this pin (here + scripts/post_update.sh +
+        //      scripts/pinokio/mflux_pack.sh) to the new version.
         //   2. Re-run the patch script and confirm it still finds the
         //      QwenTransformer / Flux2Transformer layer loops.
         //   3. Bench a known prompt before/after, verify quality.
-        // The 0.17.5 baseline shipped Edit-2509 multi-image fixes
-        // (vision encoder save bug) and is the bottom of our FBCache
-        // patch contract.
+        // AND: mflux declares its own mlx range, so this pin and the mlx
+        // pin are ONE decision — scripts/check_post_update.js fails the
+        // moment either moves without the other.
         //
         // Two-step install (P2 fix 2026-05-18). The previous
         // single-step `pip install --force-reinstall --no-deps` left

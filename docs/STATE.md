@@ -1,5 +1,665 @@
 # Phosphene — project state, history, open work
 
+> **🩹 2026-09-03 — v4.9.3: the full-review fixes, shipped as a plain bugfix.**
+> Everything in the 09-02 review entry below, plus #74 (Update now moves the
+> H3 engine checkout to `codex/h3-engine-v2` via the new shared
+> `scripts/pinokio/h3_checkout.sh` before building the Q8 engine — diagnosed
+> by @blackest). Image-mode identity on the 24 GB lane was REPRODUCED AS
+> WORKING (Q4 · Balanced · Anchor, seed 4242: frame one = the reference, the
+> character holds to the last frame) — the Pinokio report from @vxlab is not
+> a code defect on the default path; answered with the Anchor/Inspire and
+> train-a-character guidance. Gates: full 58/0/0 including the codec check on
+> that clip. Promoted by the snapshot ritual.
+
+> **🔎 2026-09-02 — FULL REVIEW after the fast releases (4.9.0→4.9.2): fix wave on dev/beta, UNRELEASED (dcb2589).**
+> Four audit lanes + fleet analytics. **Verdicts:** the module split is sound
+> (634 publishes checked, zero order hazards) and the route move is
+> behaviour-identical (2,568 probes old vs new); update from 4.8.2/4.6.0 and
+> fresh install both rehearsed clean. **What shipped broken and is now fixed
+> on beta:** (1) Storyboard on a 768-cap Mac — every NEW film was born with an
+> illegal 1024×576 delivery (clamp never ran for a fresh board), Render dead
+> from the first click, fix button offered the same illegal size, Quality
+> section crushed to 2px at Pinokio width, dropdowns replaced by the poll
+> (#71 follow-up; `storyboard.fit_canvas`, `test_storyboard_capfit.py`);
+> (2) character rename always failed (route split lost one body-read
+> preamble); (3) trained character "Use in video" never sent the LoRA
+> (called a serialiser that never existed); (4) Image Studio offered 8/24 GB
+> Macs engines that can't fit — 15/16 "unclassified" failures on 4.9.0 —
+> now disabled with "needs a 32 GB Mac", Studio moves to Auto, guard is a
+> refusal (`image_ram`); (5) High/Keyframes/Extend without the Q8 pack →
+> refusal (`pack_missing`) pointing at Settings → Models, not a CLI line;
+> (6) Image mode with no image stopped at the button; (7) header memory
+> readout clipped at 1300px; (8) in-app Update now skipped post_update.sh
+> when only it changed + self-repair probe covered 1 of 3 packages +
+> production serves boot-time webapp snapshot; (9) classifier: helper_exit
+> moved below model_missing/disk_full (was swallowing ~500 events/wk),
+> stuck partial downloads bounded. **Gate added:** lint_webapp fails on a
+> handler calling a function nothing declares. Gates: full 58/0/0, --fast
+> 56/0/2 on the final tree.
+> **Fleet (3 days):** 501 active installs/wk, 93 new on 09-01; 4.9.0 fail
+> rate 9.6% (4.8.1 was 23%); **43% of active installs rendered nothing all
+> week** — activation is the product problem, not stability. 22% of the
+> fleet has ≤24 GB. i2v > t2v; characters used in ~4% of renders; no events
+> for Storyboard/Editor use at all (instrumentation gap).
+> **Open:** Pinokio has NO Official Update post for 4.9.0/4.9.1/4.9.2 (rule:
+> post on every release); Pinokio question from @vxlab (24 GB, i2v loses the
+> reference face) unanswered; Lane B P1 — keyframe/audio/LoRA "not found"
+> gates lack the plain-English remedy the i2v gate has; Lane A — 3 function
+> names reached only through strings (`install_card` table, Python-emitted
+> `openModelsModal`, `${cta.run}`) that the lint cannot see.
+> **Process lesson:** two review agents ran `pkill -f mlx_ltx_panel.py` and
+> killed the owner's 8199 panel — briefs must mandate PID kills (memory
+> `feedback_agents_never_pkill_by_pattern`).
+
+> **🩹 2026-09-02 — v4.9.2: three issue fixes (#73, #61, #62), shipped the same day as v4.9.1.**
+> **#73 — an interrupted image-engine download looked ready and crashed every
+> render.** Qwen-Image-Edit-2511 stopped at 38 of 54 GB with 14 blobs still
+> `.incomplete`; `/image/engine_status` said cached; mflux resolves a Hub id
+> cached-first and its completeness test only asks whether every file pattern
+> has SOME match, so it loaded the shards it had and died in its weight loader
+> without ever calling the one function that resumes. Now: `image_engine.
+> hf_repo_partial_download()` reads the one unambiguous sign huggingface_hub
+> leaves (`blobs/*.incomplete`); the status route reports `partial` and stops
+> saying cached (pill "resume · N of ~M GB", button "Generate · resumes the
+> download first"); and a pre-flight before every mflux spawn removes the
+> `snapshots/` symlink tree so mflux's own download rule runs, re-links every
+> finished blob and resumes the rest — nothing downloads twice. The error the
+> panel showed was the HEAD of the traceback (`stderr_tail[:1200]`), cut off
+> right before the exception; both slices now keep the END. `test_image_
+> partial_download.py`. **#61 — training dies when the GPU watchdog kills the
+> caption encode.** The render helper's mitigation (retry once at a shorter
+> Gemma pad) is ported: the panel places the kill from the trainer's own
+> phase banners, relaunches the trainer ONCE for a SIGABRT-with-signature in
+> `text_encode` with `LTX2_GEMMA_MAX_LENGTH=256` (honoured by a wrapper in
+> `lora_lab/preprocess_images.py` around the vendored `encode_all_layers`,
+> default 1024), wipes the half-written caption conditions so every caption
+> is encoded at one length, and leaves the image latents (the expensive
+> half) for the preprocessor to skip. Kills in other phases keep the canvas
+> advice. `test_train_encode_retry.py`. **#62 — the trigger the panel
+> suggested was half digits.** `mrz07` tokenizes through Gemma as `m / rz /
+> 0 / 7`; every trigger that has ever carried a face here is letters-only
+> (`bizarrotrn` → `b / izarro / trn`, `elontrn`, `ariatrn`), and the rank-32
+> High trainings reported as "active but no identity" all used the digit
+> shape (`mmx26`, `sfw25`, `3Mar26`). Unproven as THE cause — it is being
+> A/B'd with the reporter — but suggesting the shape known to work costs
+> nothing: `_suggest_trigger_token()` and its JS mirror now emit
+> `<3 consonants>trn`, the Train tab warns (never blocks) on a digit, the
+> trainer logs the same note, API.md says letters-only.
+
+> **🩹 2026-09-02 — v4.9.1: the buttons v4.9.0 broke, fixed the same day they were reported.**
+> The module split had one blind spot: a function referenced ONLY from its own
+> module's generated markup (`onclick="deleteOutput('…')"` inside a template
+> literal) looked module-internal to the extraction analysis and went
+> unpublished — but inline attributes resolve against the GLOBAL scope at click
+> time. 38 handlers died silently: gallery card actions, LoRA management,
+> training controls, timeline editing, CivitAI downloads, storyboard board
+> actions. @blackest reported it, diagnosed it and sent PR #69 within a day
+> (thank you); the shipped fix is the union of the PR's list and an
+> independent scan (which also caught `sbeLiftSelected`), folded into each
+> module's one publish block. **The class is now a build failure:**
+> `scripts/lint_webapp.mjs` scans every `on*=`/`javascript:`/`setAttribute('on…')`
+> string in the page and the modules and refuses any call to an unpublished
+> top-level function — proven red on the v4.9.0 tree, green on this one. Also
+> in: a per-thumbnail "×" on the Recent-uploads strip (`POST /upload/delete`,
+> path-bound, clears the thumbnail cache — a Pinokio ask from @le_wib). Riding
+> along from a parallel session: Editor Delete now LIFTS (leaves a slug) and
+> Shift+Delete ripples (00c248d); the theater's mute is remembered across
+> clips and restarts (a157b9b, Pinokio report by fuschichou); Update proves
+> the render packages import and self-repairs once before claiming success
+> (3698c53 — the fleet's second-commonest error).
+
+> **🧱 2026-09-01 — v4.9.0: the frontend and the routes leave the monolith.**
+> Shipped to public `main` the same day, at the owner's explicit green light,
+> with the residual risks named below accepted ("we will discover if there is
+> something serious on the way"). Nothing user-visible changes in this release
+> — same screens, same renders, byte-for-byte — but every future fix lands in
+> a small named file instead of a 72k-line monolith.
+> `mlx_ltx_panel.py` carried the whole product as one 72,542-line file — the
+> shape that shipped the built-twice bug class. On `dev` (beta), in ~20 sliced
+> commits (a0ee1ff..a9c5f66), each gated green before the next:
+>
+> * **Slice 1 — CSS** → `webapp/style/panel.css`, served by a path-bound
+>   `/webapp/` route with `__ENGINE_RULES__` substituted at serve time;
+>   byte-verified identical page. `test_panel_assets.py` pins it.
+> * **Slice 2 — the page** → `webapp/index.html`, read once at import,
+>   `page()` substitutions unchanged; byte-verified modulo the build SHA.
+> * **Slice 3 — the JS** → 12 ES modules under `webapp/js/` (boot, stage,
+>   characters, engines, queue, settings, loras, preview, health, storyboard,
+>   editor, main), extracted bottom-up so execution order never changed; each
+>   module publishes its outside-facing surface explicitly
+>   (`Object.assign(globalThis, …)`), `main.js` deliberately loads LAST so the
+>   kickoffs keep the ordering guarantee hoisting used to give. The page's
+>   inline script is ONE line: `const BOOT = __BOOTSTRAP__;`.
+>   `scripts/lint_webapp.mjs` (eslint, dev-only, in release_gates) enforces
+>   no-undef/no-redeclare over the real scope model + a cross-file
+>   duplicate-publish check.
+> * **Slice 4 — the routes**: all 101 routes moved from the do_GET/do_POST
+>   if/elif chains into `panel/routes_*.py` (stats, meta, models, loras,
+>   train, files, queue, characters, storyboard, image) — exact paths in
+>   `panel.routes`' tables, startswith/endswith families in ordered pattern
+>   lists; registration refuses duplicates; the dispatchers are ~35 lines.
+>   `test_routes.py` refuses a chain arm outright and pins the pattern order.
+>   The chains' hidden body-parse coupling became `Handler._read_form_body()`.
+> * `mlx_ltx_panel.py` is now ~24.5k lines of pure server; the panel was
+>   re-verified in a live browser after every module and every route family
+>   (all seven surfaces, poll streaming, /run round-trip under a paused queue).
+>   `docs/ARCHITECTURE.md` is the authority on what lives where and where new
+>   code goes; CLAUDE.md points at it.
+>
+> **Residual risk accepted at ship time:** the from-zero install with real
+> weight downloads and a real prior-install Update click were rehearsed
+> structurally (fresh clone boots and serves everything; a v4.8.2 checkout
+> fast-forwards and boots) but not performed on a clean physical machine;
+> this release adds NO new weight-pack requirements, so the update's weights
+> half is vacuous by construction.
+>
+> **NEXT (in order):** (1) migrate the remaining extraction-based suites to
+> import the real modules via `scripts/webapp_import_shim.mjs` — the pattern
+> is proven on `test_h3_lora_import_ui`; the shared node harness behind
+> `test_storyboard_editor_ui` / `test_editor_mix` / `test_character_roundtrip`
+> / `test_stage_live_preview` / `test_spicy_contract` is one coherent package,
+> and `scripts/extract_panel_js.py` is deleted only when the last one moves.
+> (2) The per-module `Object.assign` publish lists can shrink as those
+> migrations land. (3) An end-to-end render smoke on the dev panel before any
+> promote (none of this is released; v4.8.2 remains the public tip).
+
+> **🩹 2026-09-01 — v4.8.2: a bug-fix release, nothing else.** Thirteen fixes from a full-codebase review driven by fleet analytics and open issues. What users stop suffering: "I updated and nothing changed" cases from a status chip that had been built twice and half-worked by luck; renders that died with a meaningless code when the Mac ran out of memory now say so and say what to do; a render that silently hung forever now stops itself after 20 minutes with an honest message; the "H3 needs repairing" card stops blaming the wrong thing and shows exactly what is missing (#68); Macs with 36-45 GB stop being told to install H3 by one screen and refused by another; weights moved to an external drive stop triggering a phantom 75 GB re-download; Update now repairs a broken Python environment instead of failing with a red banner; an old hidden speed control restored from ancient renders no longer crashes new ones; the log pane stops un-selecting text while users try to copy an error; character training sidecars stop lying about what they trained on, widescreen training actually trains widescreen, and the adapter-strength check stops ranking working character files below broken ones (#62 collateral). Detail per fix in the commit log (989aaf1..8db82d9).
+>
+> **Gates at the promote tree:** scripts/release_gates.sh full run — 50 PASS / 0 FAIL (the runner itself is new in this release and caught one of this release's own bugs before commit).
+
+> **🚚 2026-08-31 — v4.8.1 PUBLIC (`d790203`): the update that actually
+> delivers the memory fix.** v4.8.0 promised H3 at half the memory and could not
+> keep it on any install that already had H3: the compact Q8 engine was never
+> built on 64 GB+ Macs, and **an update ships code, not weights** — so H3 kept
+> rendering with the full bf16 engine at ~40–48 GB and nothing said why. Update
+> now builds the compact engine itself when H3 is installed (one time, ~5 min,
+> ~22 GB, safe to repeat); measured on the field scenario, DiT load **38.56 →
+> 20.22 GiB**, denoise peak 21.26 GiB, no wall-clock cost. Silent fallbacks are
+> gone — the render log names the reason in plain words and `/status` reports it
+> as data. Also: the a2v **Audio conditioning strength** slider is connected to a
+> control that exists (silently dropped on the Q8 path since it shipped), and
+> Storyboard treats **sung shots as first-class** (lyric in the dialogue form,
+> budgeted at a measured singing tempo, trained voice carried; a wordless "she
+> sings" is caught like a wordless "he explains"). Settings → Hailuo H3 model →
+> Full still forces the master.
+
+> **🪶 2026-08-29 — v4.8.0 PUBLIC (`f97ea3c`): Hailuo H3 uses half the memory,
+> and runs on 36 GB Macs.** H3 handed the bf16 master to any Mac ≥60 GB because
+> its peak fits — it fits and leaves nothing behind it. Measured at 640×432 / 73
+> frames, one prompt one seed: bf16 38.56 GiB resident / 38.89 peak / 196.9 s vs
+> **Q8 20.22 / 21.38 / 200.1 s — 45% less memory for 1.6% more time**. The older
+> "~12% slower" note that protected the heavy default was seven times worse than
+> reality. `h3_dit` had been honoured by the engine and validated by the settings
+> handler for months with **no control ever built** (and it was write-only, so
+> any control would have opened on "Automatic"); it is now a Settings row
+> carrying the measured numbers. The runner's `--memory-gb 58` clamp was leaving
+> 32/48 GB Macs **1.0 GB of their own machine** — every size now keeps ≥6 GB, for
+> free, since H3's real peak is 25.63 GiB. **Q8 floor 46 GB → 36 GB**, verified
+> byte-identical at a simulated 36 GB budget; 32 GB stays deliberately excluded.
+> Prompt embeddings are cached instead of re-encoded through a 26.28 GB text
+> encoder every render.
+
+> **🧠 2026-08-29 — v4.7.0 PUBLIC (`a9e7848`): the render that did not fit,
+> fits.** A third of every render's peak was the MLX allocator's cache and
+> nothing capped it. Capped now: a Q4 768×432 121-frame render went **25.53 GB →
+> 16.50 GB** peak on a 64 GB machine and got *faster* (71.45 → 68.84 s), with
+> **sha256-identical frames** — not a quality trade, memory that was never doing
+> any work. On a 16 GB Mac the same render moved from 101% of RAM to 96%: the
+> difference between swapping and running. The cap sizes itself from the machine
+> (1/8 of physical RAM, floor 2 GiB, ceiling 8 GiB), override `LTX_MLX_CACHE_GIB`.
+> The Remix engine is renamed **Motion Control** after two separate people asked
+> us to build the feature it already was. **H3 LoRA import from a file** landed
+> via PR #65 (@sahilkashyap64), reading a converter's own alpha metadata instead
+> of assuming 1.0, and costing +2.7 MB of RAM instead of +9.5 GB. Fixes: the
+> default training preset could not carry a face (#62); i2v could substitute a
+> reference image you never chose; and **updates land on time** — Pinokio reads
+> `update.js` into memory *then* runs it, so an update that fixed the updater
+> always arrived one click late; `update.js` is now thin and delegates to a file
+> read after the pull. 2,830 tests, 23 skipped.
+
+> **🤝 2026-08-29 — PR #65 lands: "Import H3 LoRA" is a real control, after
+> three fixes. Contributed by @sahilkashyap64, who also filed the issue (#64)
+> it closes. On `dev`.**
+>
+> His endpoint and staging design are what shipped: a dedicated
+> `POST /h3/loras/import` (not `/upload` — an adapter has to pass the runner's
+> layout contract before it may appear in the picker), `open("xb")` + `fsync` +
+> `os.replace`, and an `H3_LORA_IMPORT_LOCK` held across the whole
+> stage → validate → publish sequence so two requests cannot race the same
+> name. Path handling held under every probe thrown at it — traversal,
+> absolute paths, a symlink swapped mid-import, a header declaring 2^63 bytes,
+> eight concurrent imports of one filename. He also fixed a genuine latent bug
+> in passing: **`import struct` was missing on `dev`**, and
+> `_h3_lora_effective_alpha` has been unreachable dead code since it was
+> written — his PR is the first caller it ever had.
+>
+> **Three things were fixed on top of his commits before merge.**
+>
+> **1. The new gates ran on the RENDER path.** `_h3_lora_prepare` is called at
+> CivitAI install AND at render dispatch, not only by the importer. The PR
+> inserted the payload/target-module validation BEFORE `_h3_lora_strip_prefix`,
+> so keys still carried `diffusion_model.` while the DiT's stems are bare —
+> every module "missing". Measured against the 14 real H3 adapters on this
+> machine: **five that pass on `dev` were refused with the patch** (lightx2v
+> v1.1 comfyui, both Kijai repacks, drbaph, lightx2v v0.1 comfy), and the
+> CivitAI path DELETES the file after a refusal. The repo's own note above
+> `H3_LORAS_DIRNAME` says most H3 LoRAs on CivitAI are ComfyUI repacks. Fixed
+> by restoring `_h3_lora_prepare` byte-identical to `dev` and moving the new
+> checks into `_h3_lora_validate_for_import`, which the importer calls AFTER
+> prepare returns, when the keys are bare. **No fixture in the suite used a
+> prefixed key** — which is exactly why CI was green while the real files were
+> broken; `_prefixed_lora()` is now the regression gate.
+>
+> **2. The non-unit alpha/rank refusal rejected correct adapters on an
+> unreliable number.** Kijai's 8-step (metadata `alpha: "8"`,
+> `baked_scale: "0.0625"`) computed "alpha/rank 4"; his 4-step (`alpha: "128"`,
+> `baked_scale: "1.0"`) computed "21.33". Both files state the scale is already
+> folded into `lora_B`. The numbers came from `_h3_lora_effective_alpha`
+> pairing one metadata alpha with whatever module `for k in header` reached
+> first — and those two files carry 88 and 72 DISTINCT per-module ranks (2–173),
+> so the answer was dict-order dependent. It also contradicted this project's
+> own shipped position, that alpha != rank is normal and lightx2v's 8-step
+> loads at **0.0625**. Now: never refused. `_h3_lora_scale_report` believes
+> per-module `.alpha` scalars and the three folded-scale markers the real files
+> carry (`baked_scale`, `peft_scale_folded_into_B`, `training_scale`), divides
+> a bare metadata alpha only when the rank is unambiguous, and otherwise says
+> so; the result is written to the sidecar as `recommended_strength` and told
+> to the user. The picker already has a per-LoRA strength control, so the false
+> refusal became the feature.
+>
+> **3. The 512 MiB cap excluded the adapters people want, and was
+> simultaneously too high for RAM.** larryvrh's turbo v4 — the community
+> flagship — is **780 MB** and got a flat 413; drbaph 620 MB; the lightx2v
+> adapters 1.38–1.96 GB. Meanwhile `_parse_multipart_form` buffers the body,
+> the email parser copies it, `get_payload(decode=True)` copies it again, then
+> a BytesIO, then `.read()`. Measured with `ru_maxrss` on this machine: a
+> **296 MB import cost +3,982 MB of peak RSS (13.5x)** and a 744 MB one
+> **+9,496 MB (12.8x)** — next to H3's ~40 GiB render footprint. The endpoint
+> now streams the multipart part straight into the staging file
+> (`_stream_multipart_file_part`, 1 MiB window): the same two files cost
+> **+3.1 MB and +3.3 MB**. With the amplification gone the cap could be honest:
+> **4 GiB**. End to end through the live endpoint, the 780 MB larryvrh file
+> imports in **1.7 s for +2.7 MB of panel RSS**.
+>
+> Also: refusals named the staging temp
+> (`.name.22850.6152073216.uploading`) in an `alert()` — staging moved into a
+> hidden temp DIRECTORY so the staged file keeps the user's own filename and
+> every message names what they picked. `_h3_lora_target_modules` now goes
+> through `lora_compat.read_tensor_header` (LRU-cached; it was re-reading the
+> ~26 GB DiT's header uncached on every call). All-or-nothing matching became
+> the same **0.90** ratio `lora_compat` has always used on the LTX lane. The
+> import writes a sidecar like the CivitAI path, so the row has a name and a
+> strength. The button is a ghost, not a second `--accent` primary next to
+> Browse CivitAI. "(1 module pairs)" agrees with its number.
+>
+> **Validation.** All 14 real adapters re-run through `_h3_lora_prepare`:
+> identical to `dev`, 12 pass / 2 refused (both genuinely diffusers-layout).
+> All 12 loadable ones imported through the live HTTP endpoint. `importH3Lora`
+> driven in a browser on a real panel — plural copy, the 0.0625 strength
+> surfaced, the ComfyUI repack converted, a duplicate refused by the user's own
+> filename, a `.zip` refused client-side. Suite **1643 → 1687**, green. His
+> eight behavioural tests are kept; `test_h3_lora_import_http.py` (14) covers
+> the wire — 411, 413, framing, traversal, the streaming window, and that a
+> refused body still leaves the socket — and `test_h3_lora_import_ui.py` (10)
+> RUNS `importH3Lora` in node via `scripts/extract_panel_js.py` instead of
+> grepping the source for it.
+
+
+> **⛔ 2026-08-28 — the mlx 0.32 move, tried properly and refused a second
+> time. The mitigation worked; it just did not work on 0.32. On `dev`.**
+>
+> The route the previous pass laid out was (1) ship a cache policy on the
+> current pin, (2) move `mlx 0.32.1` + `mflux 0.19.1` in one commit, (3) re-run
+> the tier table. **Step 1 shipped and is a real win** (entry below). **Step 3
+> then failed step 2, so step 2 was reverted before it was committed.**
+>
+> Same policy on both versions, same prompt and seed, `/usr/bin/time -l` peak
+> memory footprint, and the share of the simulated Mac's physical RAM:
+>
+> | render | tier (cap) | 0.31.1 today | 0.31.1 + policy | **0.32.1 + policy** |
+> |---|---|---|---|---|
+> | Q4 768×432 121f | 16 GiB (2 GiB) | 17.41 (101%) | 16.50 (96%) | **19.91 (116%)** ✗ |
+> | Q4 768×432 121f | 32 GiB (4 GiB) | 25.66 (75%) | 16.49 (48%) | 23.40 (68%) ✓ |
+> | Q4 768×432 121f | 64 GiB (8 GiB) | 25.53 (37%) | 16.50 (24%) | **27.87 (41%)** ✗ |
+> | Q8 1024×576 121f | 48 GiB (6 GiB) | 39.49 (77%) | 25.39 (49%) | **42.11 (82%)** ✗ |
+>
+> **Three of four tiers end at a higher share of RAM than 0.31.1 uses today**,
+> and the 48 GiB Comfortable tier — the commonest paying-attention Mac — lands
+> at **81.7%**, which is the 82% at which `plan_memory_policy()` forces the
+> streamed VAE decode, before Chrome and Slack are counted. That was the stated
+> gate. It failed.
+>
+> **WHY THE CAP CANNOT RESCUE IT, and this is the new fact.** The previous pass
+> concluded "the growth is allocator cache". Half right. With the cache capped
+> *identically on both versions*, 0.32.1's **active** memory is still
+> **+12.0 GB** on Q4 (26.57 vs 14.53) and **+29.2 GB** on Q8 (52.23 vs 23.08).
+> No cache policy can reach that. Driving the cache to **zero** does get 0.32.1
+> under today's numbers — Q8@48 GiB **32.25 GB / 138.37 s**, Q4@16 GiB
+> **17.04 GB / 72.59 s** — and erases the whole speed advantage in the same
+> move (−1.1% and −0.5% against 0.31.1 today; *slower* than 0.31.1 with the
+> policy). **There is no cache setting at which 0.32.1 beats 0.31.1 + policy on
+> both axes.** Step 1 took the win the version move was supposed to deliver,
+> and took it on the safe pin.
+>
+> **FACES: not the blocker.** Q8 1024×576 121f with the trained character LoRA
+> (`bizarrotrn_v2` @ 1.0), two seeds, one arm per MLX version. Identity,
+> framing, expression, skin and hair detail are indistinguishable; frame-level
+> PSNR between the arms is **41.8–43.5 dB** at four matched timestamps, i.e.
+> sub-perceptual numerical noise, not a different shot. Audio is clean on both
+> (max_volume −3.1 dB, mean −17.6 / −19.6 dB, identical between versions —
+> more evidence the 22 dB story is 0.31.2-only). Clips + A/B frame strips +
+> a clipgrade manifest: `state/mlx032_faces/`.
+>
+> **WHAT WAS PROVED AND THEN PUT BACK**, so a future attempt is a pin move plus
+> this table rather than a re-derivation:
+> - The whole `post_update.sh` sequence, run in order in a copy of the real
+>   venv with the new pins, lands on **mlx 0.32.1 / mlx-metal 0.32.1 /
+>   mlx-lm 0.31.1 / mflux 0.19.1 / transformers 5.7.0** — the step-7 mflux
+>   resolve touches mflux, pillow and torch and leaves mlx alone. The 0.18.0
+>   trap (which walks mlx down to **0.31.2**) is real and is what the pin-pair
+>   gate exists for; it was negative-tested in both directions again.
+> - `patch_mflux_fbcache.py`'s two anchors are present exactly once each in the
+>   mflux 0.19.1 wheel, and the patch applied cleanly and idempotently to a
+>   real 0.19.1 install with the injected helper importable.
+> - mflux 0.19.1's console-script set is a strict superset of 0.18.0's, so no
+>   `image_engine.py` dispatch target disappears.
+> - `mlx-lm` is not part of the pair: no 0.32.x exists and it declares
+>   `mlx>=0.30.4` with no upper bound.
+>
+> **What would change the answer** is upstream shrinking 0.32.x's active-memory
+> appetite — not another knob on our side. Doc-truth fixed in passing: three
+> files still said the mflux pin was `0.17.5` when it has been `0.18.0`.
+
+> **🧊 2026-08-28 — Phosphene had no MLX cache policy. It has one now, and it
+> takes a third off the peak memory of every render for free. On `dev`.**
+>
+> MLX does not hand freed Metal buffers back to the driver — it keeps them in an
+> allocator cache. The ceiling on that cache is a number about the MACHINE, not
+> the job: `0.95 * hw.memsize`, about 61 GB on a 64 GB Mac. Phosphene never set
+> one. The single `set_cache_limit(0)` anywhere near this code is in the
+> engine's `_base.py`, on the `low_ram_streaming` path the warm helper does not
+> enable — a policy nothing calls.
+>
+> `mlx_warm_helper.py` now caps it at **one eighth of physical RAM**, floored at
+> 2 GiB and ceilinged at 8 GiB — so it scales with the Mac the way the
+> capability tiers do: 16 GiB → 2, 32 → 4, 48 → 6, 64 and up → 8.
+>
+> | render, mlx 0.31.1 (the current pin) | today | with the policy | wall |
+> |---|---|---|---|
+> | Q4 768×432 121f, 64 GiB, cap 8 GiB | 25.53 GB | **16.50 GB** (−35%) | 71.45 → **68.84 s** |
+> | Q8 1024×576 121f, 48 GiB, cap 6 GiB | 39.49 GB | **25.39 GB** (−36%) | 139.84 → **138.71 s** |
+>
+> Both arms are **sha256-identical** to the uncapped render (`144da74a…`,
+> `f47d4dc8…`). The cap changes the allocator's bookkeeping, never the
+> arithmetic — which is exactly why it could ship on the CURRENT pin, alone,
+> and be believed.
+>
+> **Two details that are the whole difference between a policy and a comment.**
+> It is applied at helper start AND re-asserted at the main loop's action choke
+> point before every render, because the pipelines' own low-memory paths call
+> `set_cache_limit(0)` and never put it back — startup-only would decay to "no
+> cache" for the rest of a warm helper's life after one A2V job. And the value
+> is a **pure function** (`mlx_cache_limit_bytes`), so `test_mlx_cache_policy.py`
+> pins what a 16 GB Mac gets from a 64 GB one — 13 tests, read out of the helper
+> with `ast` rather than copied, so a rename fails the suite instead of silently
+> testing a duplicate.
+>
+> Override: `LTX_MLX_CACHE_GIB` — a number in GiB, `0` for no cache at all,
+> `off` to restore MLX's machine-sized default.
+>
+> **Why now:** this is step 1 of the mlx 0.32 route recorded below. It is a
+> standalone win on 0.31.1, and it is the thing that makes the version move
+> safe — uncapped, 0.32.x fills whatever ceiling it is handed.
+
+> **🧮 2026-08-28 — the mlx pin: the reason it exists is gone, and it stays
+> anyway. Measured, not argued. On `dev`.**
+>
+> The `mlx==0.31.1` pin has carried one sentence since April: *0.31.2
+> attenuates the LTX vocoder by 22 dB.* That sentence is **true, and it is
+> about 0.31.2 only.** Isolated vocoder path, identical latents in: peak delta
+> **0.000001 dB** on 0.32.1. Five full renders per arm: max_volume **-1.7 vs
+> -1.8 dB**, integrated loudness **-9.2 vs -9.3 LUFS**, true peak -1.6 vs -1.7,
+> zero time shift, spectrum within 0.1 dB from 250 Hz to 16 kHz. **Claimed
+> 22 dB, measured 0.1.** The speed is real too — Q8 1024×576 121f goes
+> **139.8 s → 133.6 s (-4.5%)**, all of it in DiT load (-28%) and VAE decode
+> (-43%), denoise a wash — and the pin is now actively blocking mflux 0.19.1,
+> which declares `mlx>=0.32.0`.
+>
+> **And it does not ship, on two independent counts.**
+>
+> **1. Peak memory, on every tier — not just this 64 GB box.** MLX derives its
+> cache AND memory limits from `0.95 * hw.memsize` on both versions, so the
+> tiers were simulated by setting those limits to what each Mac would compute
+> and rendering at that tier's real canvas. **0.31.1's footprint is a function
+> of the workload; 0.32.x's is a function of the machine** — it takes ~95% of
+> whatever ceiling it is handed. `/usr/bin/time -l` peak, same prompt/seed:
+>
+> | render | simulated Mac | 0.31.1 | 0.32.1 | 0.32.2 | vs physical RAM |
+> |---|---|---|---|---|---|
+> | Q4 768×432 121f | 16 GB | 17.41 GB | 20.35 GB | 19.35 GB | 101% → 118% |
+> | Q4 768×432 121f | 32 GB | 25.66 GB | 33.18 GB | — | 75% → **97%** |
+> | Q4 768×432 121f | 64 GB (default) | 25.53 GB | 54.28 GB | — | 37% → 79% |
+> | Q8 1024×576 121f | 48 GB | 39.49 GB | 49.95 GB | 50.01 GB | 77% → **97%** |
+>
+> The 48 GB row is the **Comfortable tier's own compact profile** (max_dim
+> 1024) — the most common paying-attention machine — and it goes from roomy to
+> at-the-wall. On this box the Q4 render moved system pressure **58% → 84%**
+> and added **1.5 GB of swap**; the Q8 one hit **87%**. `plan_memory_policy()`
+> calls a machine pressured at **82%** and answers by forcing the streamed VAE
+> decode: **~30 s on a 5 s clip**, which is more than the 4.5% the move earns.
+> Phosphene would pay for its own speedup twice.
+>
+> **`mlx==0.32.2` changes nothing here.** 48 GB tier: 50.01 GB vs 0.32.1's
+> 49.95 GB. It is ~1 GB better on the 16 GB Q4 case and identical on Q8 — not a
+> reason to prefer it, not a reason to avoid it.
+>
+> **Ruled out, so nobody chases it again:** Metal residency sets, new in 0.32
+> (`MLX_RESIDENCY_SET_MAX_PCT`, default 5% of the working set). Setting it to
+> **0** reproduces the footprint to within **300 KB** across three runs
+> (20.3544 / 20.3546 / 20.3547 GB). The growth is allocator **cache** — and
+> capping the cache does not just mitigate it, it **inverts the comparison**.
+> Same Q4 render, default machine limits, one `mx.set_cache_limit()` call:
+>
+> | arm | cache cap | peak footprint | wall |
+> |---|---|---|---|
+> | 0.31.1 (today) | none | 25.53 GB | 71.45 s |
+> | 0.31.1 | 16 GB | 23.15 GB | 71.78 s |
+> | 0.32.1 | none | 54.28 GB | 72.45 s |
+> | 0.32.1 | 16 GB | 35.40 GB | 67.77 s |
+> | **0.32.1** | **8 GB** | **27.74 GB** | **68.24 s** |
+> | 0.32.1 | 0 | 17.04 GB | 72.18 s |
+>
+> **0.32.1 with an 8 GB cache cap is roughly today's memory at -4.5% wall; at
+> cache 0 it is a third LESS memory than today** for +1%. And the cap is
+> provably free of side effects — every cache setting inside a version is
+> **sha256-identical** output (`144da74a…` for all 0.31.1 arms including the
+> 16 and 32 GB tier sims, `016d2dd2…` for all 0.32.1 arms). The two versions
+> do NOT agree byte-for-byte with each other, which is its own reason the move
+> needs an eye on faces and not just a green suite.
+>
+> **2. The pin cannot move alone — and moving it alone lands users on 0.31.2.**
+> `post_update.sh` step 7 (and `mflux_pack.sh`, and `install_qwen.js`) installs
+> `mflux==0.18.0` **with deps**, after step 2 pins mlx. mflux 0.18.0 declares
+> `mlx>=0.27.0,<0.32.0`, so that later resolve walks mlx back **down**.
+> Measured in a copy of the real venv: `uv pip install 'mflux==0.18.0'` into a
+> 0.32.2 env proposes `- mlx==0.32.2 / + mlx==0.31.2` — the exact release the
+> whole ship-blocker exists to keep off users' machines, arriving silently on
+> every fresh install and every Update. Invisible today only because 0.31.1
+> sits inside mflux's range.
+>
+> **Shipped instead:** `scripts/check_post_update.js` gained a **pin-pair
+> gate** — mlx and mflux are one decision, asserted across `install.js`,
+> `post_update.sh`, `mflux_pack.sh` and `install_qwen.js`, failing the moment
+> either moves without the other, with the resolver transcript in the comment.
+> Negative-tested both directions. The measurements are recorded in
+> `install.js` above the pin and in the mlx row of `CLAUDE.md` §4, so the next
+> agent inherits the numbers instead of re-rendering them.
+>
+> **The route to 0.32, in order:** (1) an explicit MLX **cache-limit policy**
+> in `mlx_warm_helper.py` — worth doing on the CURRENT pin, where 0.31.1
+> already gives back **39.54 → 23.61 GB** at Q8 for 1–2% wall, and Phosphene
+> sets no MLX cache policy at all today (`_base.py`'s `set_cache_limit(0)`
+> sits on the `low_ram_streaming` path the warm helper never enables);
+> (2) **mflux 0.18.0 → 0.19.1 in the same commit** as the pin — its FBCache
+> patch anchors were checked against the 0.19.1 wheel and both survive, so it
+> is tractable, but Qwen-Edit / Ideogram output wants an eye; (3) re-run the
+> tier table against the capped policy. **`MLX_SDPA_BLOCKS` is not on that
+> list:** its win is at head dim 96, and LTX-2.5 uses 128 (video) and 64
+> (audio), so there is nothing for it to speed up here.
+>
+> Not done, deliberately: the cache-limit policy itself. It changes the memory
+> behaviour of every render on the daily driver, and the brief for this session
+> was "if a tier fails, stop" — a tier failed.
+
+> **🎬 2026-08-28 — a shipped feature two users asked us to build, and a
+> refusal quoting a number the product stopped believing. Both on `dev`.**
+>
+> **1. Union Control was findable by nobody.** It has worked for months —
+> official un-gated Lightricks weights, in `required_files.json`, wired to a
+> real pipeline — and @sohaibpp on Pinokio ("Motion control") plus a long-time
+> user on X ("would love to see IC-LoRA support … exposed in the UI") both
+> asked for it as a MISSING feature. Nothing on screen carried the words they
+> searched for: the mode was **"Control"**, one click inside **"Remix"**, whose
+> only visible sub-line said "your media → new video". The fix is the copy.
+> The Remix pill now reads **"motion control · refs · color"**, the sub-chip is
+> **"Motion Control"** with the adapter named in its tooltip, the section names
+> Union Control, and `#remixSubGroup` gets a 3-column grid so a three-tool row
+> stops living in five columns (chips 91 → 155 px, no wrap).
+> New doc: **`docs/MOTION_CONTROL.md`**, linked from a new README "Remix"
+> subsection. Gate: `test_control_discoverability.py`, 29 tests.
+>
+> **The honest half, stated in the UI.** Union Control follows whatever control
+> signal it is given, so a pose/depth/canny SEQUENCE works today — and
+> **Phosphene ships no preprocessor** to derive one from an ordinary clip. The
+> section says so, and the chip's sub-line deliberately does not advertise
+> "pose · depth", because a four-word label cannot carry the caveat.
+>
+> **MEASURED, and it changes what we say about 2.5.** Motion Control on the
+> default generation is **half-working, in the half that is hard to notice**.
+> Two A/B pairs, same clip, same prompt, same seed, each generation with its
+> own text encoder: on **2.3** the camera move transferred AND the prompt
+> repainted the world (a monk on a salt flat; a knight in plate armour). On
+> **2.5** the camera move still transferred — the control clip rides a *pinned*
+> reference latent at follow 1.0, adapter or no adapter — and the prompt did
+> not: both renders came back as the control clip's own subject, one of them
+> smeared through the middle. This is NOT the Ingredients failure (inert, and
+> refused). It is offered, with `LTX_CONTROL_GENERATION_NOTE` shown beside the
+> picker only where it is true (`ltx_control_full_repaint()` →
+> `control_full_repaint` → `_paintControlGenNote()`).
+> **OWNER CALL OUTSTANDING:** all three Remix tools ride 2.3-trained adapters,
+> so whether Motion Control (and Colorize) should be *refused* on 2.5 the way
+> Ingredients is, is one policy question about the whole group — deliberately
+> not settled from a discoverability pass.
+>
+> **2. `h3_ram` refused with "about 64 GB" — a number no floor here has ever
+> been.** The bf16 floor is `H3_MIN_RAM_GB` = 60; the Q8 DiT lane's is
+> `H3_MIN_RAM_GB_Q8` = 46, and building that pack was, in its own comment,
+> what "puts H3 in reach of 48 GB Macs". Worse, `h3_capable()` gates the
+> engine switcher and returns False below 60 GB until the Q8 pack exists on
+> disk — so a 48 GB Mac saw **no H3 at all** and never learned that a
+> 5-minute, zero-download local build (`scripts/pinokio/h3_build_q8.sh`) would
+> enable it. `h3_ram_verdict()` now owns one sentence per band and the refusal,
+> the `make_job` fallback, the switcher tooltip, the engine-row note and a new
+> inline card branch all read it. That band is `capable: true, available:
+> false, needs_q8_dit: true, repairable: true` — the dashed offer the chrome
+> already knows how to draw. The retired sentence survives only as an analytics
+> needle so replayed logs still classify as `refused`.
+> Gate: 13 new tests in `test_refusal_gates.py`.
+>
+> **3. Control and Colorize floored their canvas to /32.** Both derive dims
+> from the SOURCE CLIP inside `run_job_inner`, after `make_job`'s /64
+> normalisation has run, so they had their own copy of the rule and it was the
+> wrong one. A 768×416 control clip rendered **768×384** with the log line and
+> the sidecar both saying 416 — "Width × Height LIES", and here it also crushed
+> the reference 8% vertically onto the canvas we named. One `ltx_floor_canvas()`
+> now serves make_job, Control and Colorize.
+>
+> **Three example renders live in `mlx_outputs/`, each beside its source clip**
+> (`example_control_{craneout,skater,aerial}.mp4` + `*_source.mp4`), with
+> sidecars. Every prompt contains **no camera direction at all**, so every
+> camera move in them arrived from the control clip.
+
+> **🎯 2026-08-23 — #62: the interface recommended a preset that cannot carry a
+> face, and the number that proved it had no UI. Fixed on `dev`.**
+>
+> **The defect was in the markup.** The Quick pill was BOTH `active` and badged
+> "Recommended" while training at rank 8 — the one tier nobody has ever graded
+> on an identity. A first-time user (`@PhantombrainM`, 4.6.0, M4 Max Studio)
+> read the label, trained 18 images, and measured **1.98e-04** with the
+> self-service CLI: under `WEAK_DELTA_RMS` (2.0e-04). `@blackest` had already
+> measured **1.54e-04** on a controlled 15-image Quick run against **5.36e-04**
+> for the same dataset on High. Two independent users, same trap.
+>
+> * **The badge and the default moved together**, because to most people the
+>   default IS the recommendation. Character now pre-selects and badges `high`;
+>   style keeps `quick`, which is what rank 8/16 is genuinely good at. Both come
+>   from one server-side `TRAIN_DEFAULT_PRESET`, served in the bootstrap, so
+>   `make_job`'s fallback and the pill cannot drift apart again.
+> * **The subtitles carry the measured numbers**, not adjectives: Quick reads
+>   "a look, not a face · identity ungraded", and a note under the strip states
+>   the band (5.4e-04 – 1.6e-03 for adapters that carry a face) against Quick's
+>   two field measurements.
+> * **The loop after training is closed.** The verdict has existed since 4.6.0
+>   and lived in a log line and a sidecar field — a user with a weak LoRA had to
+>   read a 21-comment GitHub thread to learn what his own number meant. That was
+>   the real product failure. `/train/list` now carries `adapter_advice` beside
+>   `adapter_verdict`; the Train tab renders a banner naming the fix, the chips
+>   carry a WEAK/DEAD badge, and a training job that finished weak no longer
+>   reads as a plain `done` in history.
+>
+> **THE SUB-64 GB FINDING, measured from the table and not guessed.**
+> `_select_train_profile` rewrites both preset tables under 64 GB, and there
+> **High is rank 8 / 500 steps / 448px on `to_q` + `to_v` only** — half the
+> projections. That is strictly LESS adapter than the ≥64 GB *Quick* (rank 8,
+> 512px, all four, 450–540 steps on a real dataset), which has measured 1.54e-04
+> and 1.98e-04 in the field. So **no menu choice on a sub-64 GB Mac reaches the
+> graded recipe**, and "just use High" is advice that hardware cannot honour.
+> The compact High subtitle now says "NOT the rank-32 recipe", the preset note
+> says it in full, and `_train_weak_advice` says something different there.
+>
+> **Still open, and this change does not touch it:** `@blackest`'s High run
+> measured 5.36e-04 — inside the working band — and the trigger still did not
+> bind (a LoRA trained on a woman rendered a generic man). Magnitude is
+> necessary and not sufficient. E2 (the full rank-32 / 3,700-step run) is the
+> experiment that speaks to that.
+
+> **🎚 2026-08-23 — the two rulings, and the widest-spread failure in the fleet.**
+>
+> * **Compact-tier HQ chips: shown-disabled, not hidden** (owner ruling). The
+>   `display: none` on `body[data-cap-tier="q4"] #qualityGroup [data-quality^=
+>   "high"]` is gone. `ltx_tiers_payload()` already stamps every `hq` cell
+>   `available: false` with a written reason, so the chips now arrive greyed,
+>   struck through, `aria-disabled`, reason in the title — and a click writes
+>   the same reason into `#engineRowNote` (a tooltip is not discoverable on a
+>   chip somebody has just tapped). Hiding a capability is only kind when there
+>   is nothing to say; there was something to say.
+> * **"Re-run Install Hailuo H3" is `model_missing`, not `other`** (owner
+>   ruling). Four raise sites — `--lora` twice, `--first-frame`,
+>   `--chain-windows` — each wrote its own sentence, so all four sat in `other`
+>   beside genuine unknown crashes. They now share `H3_RUNNER_BEHIND` and one
+>   needle, so a fifth flag is classified for free. **`docs/ANALYTICS.md`
+>   records that this moves an existing series.**
+> * **`image not found: <path>` — 35 events, 22 people, 14 days — was a
+>   SERVER-SIDE DEFAULT.** `make_job` filled an empty `image` field with
+>   `examples/reference.png`, a demo file that has never existed on any install
+>   (not in git, not in `required_files.json`, created by no installer). When
+>   the control became a picker the CLIENT-side pre-fill was deliberately
+>   removed; the server's was left behind. ~1.6 events per person is the
+>   signature of a first-encounter mistake everybody makes once. Three fixes:
+>   the default is empty unless `LTX_DEFAULT_IMAGE` names a real file; `i2v` /
+>   `i2v_clean_audio` validate their input at job start like every other mode
+>   already did; and the picker clears a dead pick at PICK time (only on a 404,
+>   so a hiccup cannot throw away a good one) instead of letting a broken
+>   preview read as "an image is selected". The A2V lane had already noticed the
+>   same default and filtered it out at its own call site — every other lane
+>   inherited it.
+> * **`input_missing` matched NOTHING before today.** Its needles were "does not
+>   exist" / "no longer exists"; every raise site in this codebase says "not
+>   found". So the fleet's widest failure sat in `other` wearing a fingerprint.
+>   It also now outranks the loose half of `download_failed`, because
+>   classification runs on the raw text INCLUDING THE PATH and a great many
+>   missing reference images live in `~/Downloads`.
+
 > **🎚 2026-08-21 — two release-gate findings closed on `dev` (`947a183`,
 > `9c2f63d`, `490d942`). Both were measured, neither was a guess.**
 >
@@ -440,6 +1100,63 @@
 > with each other (+0.171). Suggestive, not conclusive — different rank, 8 of
 > 37 images, 240 steps against 5000.
 >
+> **🧭 2026-08-22 — the #61/#62 question CHANGES: magnitude is necessary, not sufficient.**
+> @blackest ran the controlled experiment nobody had: two LoRAs, **same 15-image dataset**,
+> differing only in preset. Quick 1.54e-04 · High 5.36e-04 · High on a second dataset
+> 5.75e-04 · `bizarrotrn_v2` 8.84e-04. Their script is independent of ours and returns
+> **8.84e-04 on `bizarrotrn_v2`** — three significant figures against our own tool, so their
+> numbers are directly comparable to our calibration table.
+>
+> **The finding that redirects the investigation:** their High run measured **5.36e-04 — INSIDE
+> the working band — and the trigger did not bind at all.** A LoRA trained on a woman rendered a
+> generic man. `WEAK_DELTA_RMS` would have passed that file. The gate can only catch an adapter
+> that moved *nothing*; it cannot catch one that moved and learned the wrong thing. Every
+> conclusion of the form "the delta is healthy, so the file is fine" is therefore unsound, and
+> that includes the reasoning that sent @Morac2 to measure his own adapter.
+>
+> **Next hypothesis — trigger binding, not the optimiser.** Captions reach training as
+> `[VISUAL]: <trigger>, The character stands…` (visible in #62's log), i.e. the trigger sits
+> inside a structured prefix rather than where a plain class-word caption would put it. Untested.
+> The experiment is a caption-format A/B at fixed rank/steps/seed, judged by whether the trigger
+> summons the identity — NOT by delta RMS, which is now known not to answer the question.
+>
+> **Also confirmed, and it is a trap worth stating plainly:** `_select_train_profile` rewrites the
+> preset table below **64 GB**, where **High is rank 8 / 500 steps / 448 px** under a pill still
+> named "High". A sub-64 GB Mac cannot reach the graded rank-32 recipe by any menu choice. If
+> blackest's box is under 64 GB, their "High" was never the graded recipe.
+>
+> **E2 IS RUNNING** (this 64 GB M4 Max, on the right side of that line): 37 images, rank 32 /
+> alpha 32 / 3700 steps / lr 1e-4 / 512 px — the validated v2 recipe — retraining `eltrumpo`.
+> Measured 2.32 s/step, ETA ~2.4 h. The prior `eltrumpo_v2` (1.41e-03, demonstrably working —
+> it carries the face through 6 shots of "The Long Night") is backed up at
+> `mlx_models/loras/_backup_20260822/` because the new file lands on the same name.
+>
+> **Shipped in passing** (`8949adb`): `POST /train/upload` is documented as `files[]` +
+> `train_job_id`; it takes **`file`** (ONE image per request) + **`job_id`**, so following the
+> docs 400s. And its size refusal said "max N bytes per file" for a 73 MB *batch* whose largest
+> image was 2.4 MB — the cap is on the request. Both corrected.
+
+> **📌 2026-08-21 — E1 is now the reporter's to run, and the probe was fixed
+> before he was pointed at it.** `python3 lora_compat.py <adapter>` is live on
+> **public `main`** (`69ee0b4`, cherry-picked onto the v4.6.0 release tree — so
+> main is ONE COMMIT past the `v4.6.0` tag, same version string, deliberate).
+> It printed three `divide by zero` and three `overflow encountered in matmul`
+> lines before every verdict: Accelerate's BLAS raising spurious FPE flags on
+> Apple Silicon, on inputs that are entirely finite (`bizarrotrn_v2` is 2304
+> F32 tensors, zero non-finite values), results identical with the flags
+> masked. Masked at the two matmuls only. **A real NaN now SKIPS the module
+> instead of entering the sample** — it could not before: `max(nan, 0.0)`
+> returns nan in CPython, `sqrt(nan)` is nan, `nan == 0.0` is False, so the
+> value entered `rms` and `rms.sort()` left the median undefined. The number
+> this whole investigation rests on could have been quietly wrong on any file
+> with one bad tensor. Calibration re-measured and unchanged. `test_lora_compat`
+> 28 green on the release tree; the raw-URL path verified end to end from
+> GitHub against a real adapter. @Morac2 asked on #62 and was given the
+> command; he has kept his training data, so E2's input exists if E1 points at
+> training.
+> ⚠️ **Promotional posts for v4.6.0 are LIVE** (owner, same evening) — character
+> training is the feature under that traffic and its root cause is still OPEN.
+
 > **The two experiments that settle it, in order.** (E1, one minute) @Morac2
 > offered his 132 MB adapter and his training data — measure the file with
 > `measure_adapter_effect`: in the working band means the file is fine and the
