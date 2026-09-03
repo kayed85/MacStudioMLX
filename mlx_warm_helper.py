@@ -1046,6 +1046,45 @@ _t2v_model_dir: str | None = None
 _i2v_model_dir: str | None = None
 
 
+def _install_gemma_model_not_loaded_patch() -> None:
+    """Ensure PromptEncoder.load() reloads GemmaLanguageModel if _model is None,
+    preventing 'Model not loaded. Call load() first.' runtime crashes.
+    """
+    try:
+        import ltx_pipelines_mlx.utils.blocks as _blocks
+        import ltx_core_mlx.text_encoders.gemma.encoders.base_encoder as _base_enc
+
+        _orig_load = _blocks.PromptEncoder.load
+
+        def _guarded_load(self):
+            if self._text_encoder is None or getattr(self._text_encoder, "_model", None) is None:
+                self._text_encoder = _base_enc.GemmaLanguageModel()
+                self._text_encoder.load(self.gemma_model_id)
+            return _orig_load(self)
+
+        _blocks.PromptEncoder.load = _guarded_load
+
+        _orig_tokenize = _base_enc.GemmaLanguageModel.tokenize
+
+        def _guarded_tokenize(self, text, max_length=1024):
+            if self._tokenizer is None and getattr(self, "_model_path", None):
+                self.load(self._model_path)
+            return _orig_tokenize(self, text, max_length)
+
+        _base_enc.GemmaLanguageModel.tokenize = _guarded_tokenize
+
+        _orig_get_all = _base_enc.GemmaLanguageModel.get_all_hidden_states
+
+        def _guarded_get_all(self, token_ids, attention_mask=None):
+            if self._model is None and getattr(self, "_model_path", None):
+                self.load(self._model_path)
+            return _orig_get_all(self, token_ids, attention_mask=attention_mask)
+
+        _base_enc.GemmaLanguageModel.get_all_hidden_states = _guarded_get_all
+    except Exception:
+        pass
+
+
 def get_pipe(kind: str, loras: list[dict] | None = None,
              model_dir: str | None = None,
              dev_transformer: str | None = None):
@@ -1116,6 +1155,7 @@ def get_pipe(kind: str, loras: list[dict] | None = None,
     _install_lora_fusion_patches()
     _install_video_decoder_patch()  # fps/frame_rate kwarg shim
     _install_a2v_frame_rate_patch()  # A2V missing frame_rate= on combined_image_conditionings
+    _install_gemma_model_not_loaded_patch()
 
     fp = _lora_fingerprint(loras)
 
