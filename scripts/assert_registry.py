@@ -79,7 +79,7 @@ with open(ROOT / "required_files.json", "r", encoding="utf-8") as _rfh:
     _req_data = json.load(_rfh)
 for _repo in _req_data.get("repos", []):
     _rel_name = Path(_repo["local_dir"]).name
-    for _base_dir in (ROOT / "mlx_models" / _rel_name, p.MODELS_DIR / _rel_name):
+    for _base_dir in (p.MODELS_DIR / _rel_name,):
         try:
             if _base_dir.is_symlink():
                 _target = _base_dir.resolve()

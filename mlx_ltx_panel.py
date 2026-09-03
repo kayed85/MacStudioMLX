@@ -218,7 +218,7 @@ MODEL_ID = os.environ.get(
 )
 MODEL_ID_HQ = os.environ.get("LTX_MODEL_HQ", "dgrauet/ltx-2.3-mlx-q8")
 # Q8 model is detected on disk so the High quality tier can be conditionally enabled.
-Q8_LOCAL_PATH = Path(os.environ.get("LTX_Q8_LOCAL", str(ROOT / "mlx_models/ltx-2.3-mlx-q8")))
+Q8_LOCAL_PATH = Path(os.environ.get("LTX_Q8_LOCAL", str(MODELS_DIR / "ltx-2.3-mlx-q8")))
 COMFY_PATTERN = os.environ.get("LTX_COMFY_PATTERN", "pinokio/api/comfy.git.*main\\.py")
 # State files (queue + hidden + settings) live in <ROOT>/state/, which
 # Pinokio's fs.link maps to a virtual drive that survives Reset. The
