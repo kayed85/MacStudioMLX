@@ -61,7 +61,14 @@ const SB_ERR_COPY = {
   refs_not_list:       { html: (e) => `<b>Shot ${e.n}'s reference images are damaged.</b>`, fix: 'clearrefs', label: 'Clear them' },
   ref_missing:         { html: (e) => `<b>Shot ${e.n} wants a reference image that isn't there any more:</b> <code>${escapeHtml(e.data.name || '')}</code>`, fix: 'clearrefs', label: 'Clear them' },
   remix_needs_ref:     { html: (e) => `<b>Shot ${e.n} is a Remix shot with no reference image.</b>`, fix: 'text', label: 'Make it Text' },
-  over_cap:            { html: (e) => `<b>${e.data.pass_name === 'final' ? 'Delivery' : 'Draft'} is set to ${e.data.width}×${e.data.height}; this Mac caps at ${e.data.max_dim}.</b> It'll shrink to fit unless you lower it.`, fix: 'cap', label: 'Use 1024×576' },
+  // The offer is the server's own `fit_*` — the largest canvas THIS Mac may
+  // render at the quality already chosen. It used to read "Use 1024×576" on
+  // every machine, which on a Mac that caps at 768 offered a size the validator
+  // rejects, and the button's guard (`> 1024`) meant it wrote nothing at all:
+  // the error never cleared and Render stayed disabled forever. (GitHub #71)
+  over_cap:            { html: (e) => `<b>${e.data.pass_name === 'final' ? 'Delivery' : 'Draft'} is set to ${e.data.width}×${e.data.height}; this Mac caps at ${e.data.max_dim}.</b> It'll shrink to fit unless you lower it.`,
+                         fix: 'cap',
+                         label: (e) => `Use ${e.data.fit_width}×${e.data.fit_height}` },
 };
 
 function sbEl(id) { return document.getElementById(id); }
@@ -141,27 +148,43 @@ function sbFilmPick(films, want) {
 // show a tier the registry grew. Filtered to the server's own final_qualities
 // list, labelled and sized from the cell, and stamped with the pack so the
 // q4-tier CSS gate hides every q8 tier rather than the one called "high".
-function sbRenderFinalQualities() {
-  const box = sbEl('sbFinalQuality');
+// The sub-label is the storyboard's OWN canvas for that tier, clamped to this
+// Mac (SB_BOOT.canvases) — not the registry's `c.canvas`, which describes a
+// single Manual render and disagrees (Standard is 1280×704 there, 1024×576
+// here). The chip must say what the click writes: printing one number and
+// writing another is how a 24 GB Mac ended up with an over-cap delivery pass
+// it never chose. (GitHub #71)
+function sbQualityChips(boxId, allowed, current) {
+  const box = sbEl(boxId);
   if (!box) return;
   const cells = ((BOOT.ltx || {}).qualities) || [];
-  const allowed = (SB_BOOT.final_qualities || []).slice();
+  const cv = SB_BOOT.canvases || {};
   const list = (Array.isArray(cells) ? cells : Object.values(cells))
-    .filter(c => c && allowed.indexOf(c.key) !== -1);
+    .filter(c => c && (allowed || []).indexOf(c.key) !== -1);
   if (!list.length) return;
-  // The ACTIVE chip is applied later from the board's own policy
-  // (sbRenderPlan), so this only needs a sane pre-board default.
-  const current = (SB_BOOT.defaults || {}).final_quality || 'standard';
   box.innerHTML = list.map(c => {
     const on = c.key === current;
-    const sub = `${c.canvas}${c.pack === 'q8' ? ' · Q8' : ''}`;
+    const size = cv[c.key] ? `${cv[c.key].width}×${cv[c.key].height}` : c.canvas;
+    const sub = `${size}${c.pack === 'q8' ? ' · Q8' : ''}`;
     return `<button type="button" class="pill-btn${on ? ' active' : ''}" `
          + `data-q="${escapeHtml(c.key)}" data-pack="${escapeHtml(c.pack || '')}">`
          + `${escapeHtml(c.label)}<span class="sub">${escapeHtml(sub)}</span></button>`;
   }).join('');
 }
 
+// The ACTIVE chip is applied later from the board's own policy (sbRenderPlan),
+// so these only need a sane pre-board default.
+function sbRenderFinalQualities() {
+  sbQualityChips('sbFinalQuality', SB_BOOT.final_qualities,
+                 (SB_BOOT.defaults || {}).final_quality || 'standard');
+}
+function sbRenderDraftQualities() {
+  sbQualityChips('sbDraftQuality', SB_BOOT.draft_qualities,
+                 (SB_BOOT.defaults || {}).draft_quality || 'quick');
+}
+
 function sbInit() {
+  sbRenderDraftQualities();
   sbRenderFinalQualities();
   const help = sbEl('sbRamHelpNote');
   if (help && !help.textContent) help.textContent = SB_BOOT.ram_help || '';
@@ -238,7 +261,33 @@ function sbTypingInShots() {
   const t = (a.tagName || '').toUpperCase();
   return t === 'TEXTAREA' || (t === 'INPUT' && a.type !== 'button');
 }
+// AN OPEN <select> IS NOT RELIABLY document.activeElement. In the Pinokio app
+// window the dropdown is a NATIVE menu in its own window, so the page loses
+// focus the instant it opens and activeElement falls back to <body> — the guard
+// below then read "nobody is holding", the 2 s poll rebuilt the shot list, and
+// the menu the user was reading blinked shut. Every time. In a browser tab the
+// select keeps document focus, which is exactly why the same build worked at
+// 127.0.0.1:8198 and not in the app. (GitHub #71)
+//
+// So we track the interaction ourselves rather than asking the document who has
+// focus. Set on pointerdown, cleared by the change (a choice) or by the next
+// pointerdown anywhere else (a dismissal); the ceiling exists only so a lost
+// clear cannot freeze the board poller for good.
+let _sbSelectOpenUntil = 0;
+const SB_SELECT_HOLD_MS = 20000;
+function sbSelectOpen() { return Date.now() < _sbSelectOpenUntil; }
+document.addEventListener('pointerdown', (ev) => {
+  const t = ev.target;
+  _sbSelectOpenUntil = (t && t.closest && t.closest('#sbShots select'))
+    ? Date.now() + SB_SELECT_HOLD_MS : 0;
+}, true);
+document.addEventListener('change', (ev) => {
+  const t = ev.target;
+  if (t && t.closest && t.closest('#sbShots select')) _sbSelectOpenUntil = 0;
+}, true);
+
 function sbHoldingShots() {
+  if (sbSelectOpen()) return true;
   const a = document.activeElement;
   if (a && a.closest && a.closest('#sbShots')) {
     const t = (a.tagName || '').toUpperCase();
@@ -946,6 +995,10 @@ document.addEventListener('keydown', function (e) {
 });
 
 // ---- the plan screen -------------------------------------------------------
+// The last shot-list HTML this module wrote. Nothing else writes #sbShots, so
+// "same string" means "the DOM already says this" — see sbRenderPlan.
+let _sbShotsHtml = '';
+
 function sbRenderPlan(r) {
   const b = r.board || {};
   const est = r.estimate || {};
@@ -1056,9 +1109,22 @@ function sbRenderPlan(r) {
   // --- shot cards ---
   // Rebuilding the list under a cursor is what makes editing impossible, so a
   // repaint that arrives mid-word repaints everything EXCEPT the cards. The
-  // next repaint after blur (<=2 s) brings the server's copy in.
-  if (!sbTypingInShots()) {
-    sbEl('sbShots').innerHTML = shots.map(s => sbShotCard(s, r, errs)).join('');
+  // next repaint after blur (<=2 s) brings the server's copy in. Same for a
+  // dropdown someone has open (see sbSelectOpen).
+  //
+  // AND: only paint when the list actually CHANGED. A board that nobody is
+  // touching renders byte-identical cards on every 2 s tick, and this line was
+  // still destroying and rebuilding every node in it ~30 times a minute — for
+  // nothing. Anything the DOM was holding died with it, an open <select> most
+  // visibly. Cheap, too: the string is built either way, the compare is the
+  // only new work.
+  const box = sbEl('sbShots');
+  if (!sbTypingInShots() && !sbSelectOpen()) {
+    const html = shots.map(s => sbShotCard(s, r, errs)).join('');
+    if (html !== _sbShotsHtml || box.childElementCount !== shots.length) {
+      box.innerHTML = html;
+      _sbShotsHtml = html;
+    }
   }
 
   // --- which engine, and why ---
@@ -1117,8 +1183,9 @@ function sbErrRow(e) {
   const copy = SB_ERR_COPY[e.code];
   const html = !copy ? escapeHtml(e.message)
              : (typeof copy.html === 'function' ? copy.html(e) : copy.html);
+  const label = copy && (typeof copy.label === 'function' ? copy.label(e) : copy.label);
   const fix = copy && copy.fix
-    ? `<button type="button" class="sb-err-fix" onclick="sbFixError('${copy.fix}',${e.n || 0},'${escapeHtml(e.code)}')">${escapeHtml(copy.label)}</button>`
+    ? `<button type="button" class="sb-err-fix" onclick="sbFixError('${copy.fix}',${e.n || 0},'${escapeHtml(e.code)}')">${escapeHtml(label)}</button>`
     : '';
   return `<div class="sb-err-row"><span class="sb-err-dot"></span><span>${html}</span>${fix}</div>`;
 }
@@ -1592,9 +1659,18 @@ function sbFixError(fix, n, code) {
   } else if (fix === 'clearrefs' && s) {
     s.refs = [];
   } else if (fix === 'cap') {
+    // Both passes, to whatever THIS Mac delivers at the quality each already
+    // asks for — looked up in the server's clamped table, never computed here.
+    const cv = SB_BOOT.canvases || {};
     ['draft', 'final'].forEach(k => {
       const p = (board.policy || {})[k];
-      if (p && Math.max(p.width, p.height) > 1024) { p.width = 1024; p.height = 576; }
+      if (!p) return;
+      let fit = cv[p.quality];
+      if (!fit) {                                  // a hand-edited quality name
+        p.quality = (k === 'draft' ? 'quick' : 'balanced');
+        fit = cv[p.quality];
+      }
+      if (fit) { p.width = fit.width; p.height = fit.height; }
     });
   }
   sbRenderPlan(SB.payload);
@@ -1974,11 +2050,15 @@ document.addEventListener('click', (ev) => {
     const board = ((SB.payload || {}).board);
     if (!board) return;
     const which = q.closest('#sbDraftQuality') ? 'draft' : 'final';
-    const table = { quick: [640, 448], balanced: [768, 432], standard: [1024, 576], high: [1024, 576] };
-    const dims = table[q.dataset.q] || [1024, 576];
+    // Server-owned, already clamped to this Mac. The literal table that used to
+    // live here wrote 1024×576 for Standard on a machine that caps at 768 — an
+    // over_cap error the moment you touched the control, with Render disabled
+    // and a fix button that did nothing. (GitHub #71)
+    const dims = (SB_BOOT.canvases || {})[q.dataset.q];
+    if (!dims) return;
     board.policy = board.policy || {};
     board.policy[which] = Object.assign({}, board.policy[which],
-      { quality: q.dataset.q, width: dims[0], height: dims[1] });
+      { quality: q.dataset.q, width: dims.width, height: dims.height });
     sbSaveSetting(which === 'draft' ? 'storyboard_draft_quality' : 'storyboard_final_quality', q.dataset.q);
     sbRenderPlan(SB.payload);
     sbQueueSave(true);

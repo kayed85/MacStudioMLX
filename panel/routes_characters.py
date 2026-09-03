@@ -573,6 +573,12 @@ def post_character_delete(h, path, qs, ctype) -> None:
 
 @post_when(lambda p: p.startswith("/characters/") and p.endswith("/rename"))
 def post_character_rename(h, path, qs, ctype) -> None:
+    # The one moved POST handler that lost its body-read preamble in the
+    # route split — every rename raised NameError (review 2026-09-02).
+    _rb = h._read_form_body()
+    if _rb is None:
+        return
+    body, form = _rb
     cid_raw = path[len("/characters/"):-len("/rename")]
     try:
         cid = P._character_safe_id(cid_raw)

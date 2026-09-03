@@ -615,10 +615,17 @@ def validate_storyboard_detail(
             p = policy.get(key) or {}
             w, h = p.get("width"), p.get("height")
             if isinstance(w, int) and isinstance(h, int) and max(w, h) > max_dim:
+                # `fit_*` is the offer the UI's one-click fix writes. It ships in
+                # the error because the browser must never compute a canvas of
+                # its own (docs/ARCHITECTURE.md) — and because the button used to
+                # carry a hardcoded 1024x576, which on a 768px Mac was itself
+                # illegal.
+                fw, fh = fit_canvas(w, h, max_dim)
                 add("over_cap",
                     f"policy.{key}: {w}x{h} exceeds this machine's {max_dim}px cap — "
                     f"lower it or the render will clamp",
-                    field=f"policy.{key}", pass_name=key, width=w, height=h, max_dim=max_dim)
+                    field=f"policy.{key}", pass_name=key, width=w, height=h, max_dim=max_dim,
+                    fit_width=fw, fit_height=fh)
     return errs
 
 
@@ -1455,6 +1462,23 @@ DEFAULT_POLICY: dict = {
 def default_policy() -> dict:
     """A fresh copy of DEFAULT_POLICY — callers mutate it (the planner clamps it)."""
     return {k: dict(v) for k, v in DEFAULT_POLICY.items()}
+
+
+def fit_canvas(width: int, height: int, cap: int) -> tuple[int, int]:
+    """The largest 8-aligned canvas with this aspect that a `cap`px Mac may render.
+
+    THE ONE CLAMP FORMULA. The panel's policy builder, the per-quality canvas
+    table the Quality chips are labelled from, and the over-cap error's own
+    "use this instead" offer must all land on the SAME numbers — otherwise the
+    button offers a size the validator then rejects, which is exactly the loop
+    a 24 GB Mac was stuck in (offered 1024x576 against a 768px cap, and the
+    guard around the write meant clicking it did nothing at all).
+    """
+    w, h = int(width), int(height)
+    if cap <= 0 or max(w, h) <= cap:
+        return w, h
+    scale = cap / float(max(w, h))
+    return max(64, int(w * scale) // 8 * 8), max(64, int(h * scale) // 8 * 8)
 
 
 def new_storyboard(board_id: str, title: str, *, shots: list[dict] | None = None,

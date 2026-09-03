@@ -731,7 +731,11 @@ def get_webapp_file(h, parsed) -> None:
         ".html": "text/html; charset=utf-8",
         ".svg": "image/svg+xml",
     }.get(ext, "application/octet-stream")
-    body = path.read_bytes()
+    # Production serves the bytes this process booted with (snapshot taken
+    # beside HTML at import) so a pull under a running panel can't pair new
+    # modules with old markup; dev reads from disk for hard-refresh edits.
+    _snap = getattr(P, "_WEBAPP_SNAPSHOT", None) or {}
+    body = _snap.get(rel) if rel in _snap else path.read_bytes()
     if ext == ".css":
         # The one dynamic seam in the stylesheet: per-engine accent +
         # fold rules are emitted from the ENGINES registry, exactly as

@@ -4341,7 +4341,7 @@ def _run_stats_fetch_once() -> None:
                 "stats: no GitHub token resolvable (tried "
                 "PHOSPHENE_REPO_STATS_TOKEN, GH_STATS_TOKEN, GH_TOKEN, "
                 "GITHUB_TOKEN, `gh auth token`). Dashboard will be empty "
-                "until you set one. See docs/stats-README.md."
+                "until you set one."
             )
             _STATS_WARNED_NO_TOKEN = True
         return
@@ -12074,6 +12074,12 @@ _ANALYTICS_REFUSAL_REASONS = (
     # front instead — the remedy is two Update clicks, and the refusal says
     # so. Capability comes from the helper's gemma4_tower_supported probe.
     ("stale_engine", ("predates ltx-2.5's text encoder",)),
+    # Image Studio memory guard (review 2026-09-02) — both of its messages
+    # open with this phrase; the disk-space pre-flight does not.
+    ("image_ram", ("image pre-flight:",)),
+    # A quality/mode that needs the Q8 pack, chosen on a Mac that hasn't
+    # downloaded it — an install prompt, not a fault (review 2026-09-02).
+    ("pack_missing", ("isn't downloaded on this mac yet",)),
 )
 
 _ANALYTICS_REFUSAL_SLUGS = tuple(s for s, _ in _ANALYTICS_REFUSAL_REASONS)
@@ -12115,14 +12121,6 @@ _ANALYTICS_ERROR_CLASSES = (
     ("oom_jetsam", ("sigkill", "helper died mid-job")),
     ("native_crash", ("sigsegv", "sigbus", "sigabrt")),
     ("helper_start_timeout", ("helper failed to start", "handshake")),
-    # "exited with code N" is the shared shape of six raise sites (training,
-    # audio trainer, H3 render, upscale, qwen-edit, generic subprocess) that
-    # all landed in `other`. Negative codes are decoded to signal names at the
-    # raise sites, so SIGKILL/SIGABRT strings are claimed by the rows above
-    # before this needle sees them.
-    ("helper_exit", ("pipe closed", "broken pipe", "helper exited",
-                     "exited mid-job", "exited with code",
-                     "failed (exit")),
     # ONE NEEDLE HOISTED, so the row below cannot claim it: a hub
     # "repo not found" is a fetch fault about something that was never local.
     # The rest of `download_failed` stays in its original place, BELOW
@@ -12148,8 +12146,9 @@ _ANALYTICS_ERROR_CLASSES = (
     # fleet story as one whose file has gone, and splitting them across two
     # classes would hide half of it.
     ("input_missing", ("does not exist", "no longer exists",
-                       "not found:", "no longer on disk",
-                       "needs a reference image")),
+                       "not found:", "not found at", "no longer on disk",
+                       "not on disk",
+                       "needs a reference image", "needs at least 1 reference")),
     # HOISTED ABOVE THE LOOSE `download` NEEDLE for the same reason
     # `input_missing` is: these strings carry paths and reassurances that
     # contain the word "download". "[load_safetensors] Failed to open file
@@ -12179,6 +12178,19 @@ _ANALYTICS_ERROR_CLASSES = (
     ("venv_broken", ("venv", "dangling", "runner missing",
                      "no module named")),
     ("disk_full", ("enospc", "no space left")),
+    # BELOW model_missing / download_failed / model_corrupt / disk_full ON
+    # PURPOSE (review 2026-09-02): the subprocess-exit sentence wraps the
+    # real cause ("mflux-generate failed (exit 1) … Failed to open file …",
+    # "… No space left on device"), and sitting above them it claimed 493
+    # missing-weights events a week as a generic exit.
+    # "exited with code N" is the shared shape of six raise sites (training,
+    # audio trainer, H3 render, upscale, qwen-edit, generic subprocess) that
+    # all landed in `other`. Negative codes are decoded to signal names at the
+    # raise sites, so SIGKILL/SIGABRT strings are claimed by the rows above
+    # before this needle sees them.
+    ("helper_exit", ("pipe closed", "broken pipe", "helper exited",
+                     "exited mid-job", "exited with code",
+                     "failed (exit")),
     ("export_failed", ("ffmpeg", "pipersr")),
     ("bad_params", ("required", "invalid", "unknown mode",
                     "unsupported mode", "must be", "out of range")),
@@ -15252,6 +15264,11 @@ def storyboard_status() -> dict:
         "engine_modes": list(STORYBOARD_ENGINE_MODES),
         "draft_qualities": list(STORYBOARD_DRAFT_QUALITIES),
         "final_qualities": list(STORYBOARD_FINAL_QUALITIES),
+        # What each quality DELIVERS on this Mac, clamped. The chips are
+        # labelled from this and the click writes exactly what the chip says —
+        # the browser computes no canvas of its own (docs/ARCHITECTURE.md).
+        "max_dim": _sb_max_dim(),
+        "canvases": _sb_canvases(),
         "defaults": {
             "shots": s.get("storyboard_shots", 12),
             "draft_quality": s.get("storyboard_draft_quality", "quick"),
@@ -15355,24 +15372,41 @@ def _sb_parse_locations(text: str) -> list[dict]:
     return out
 
 
+# A FILM'S canvas per quality tier — one size for every shot in the film, which
+# is why this is not the Manual strip's registry canvas (Standard there is
+# 1280x704). ONE home: the policy builder below, the BOOT table the Quality
+# chips are labelled from, and the over-cap fix all read this and nothing else.
+# Three copies of it used to exist — here, in webapp/js/storyboard.js, and as
+# hand-written sub-labels in webapp/index.html — and the chips advertised sizes
+# the click then did not write.
+_SB_QUALITY_CANVAS = {
+    "quick":     (640, 448),
+    "balanced":  (768, 432),
+    "standard":  (1024, 576),
+    "high":      (1024, 576),
+    "high_720p": (1024, 576),
+}
+
+
+def _sb_canvases() -> dict:
+    """Quality key -> the canvas THIS Mac actually delivers, already clamped."""
+    cap = _sb_max_dim()
+    out = {}
+    for q, (w, h) in _SB_QUALITY_CANVAS.items():
+        fw, fh = storyboard.fit_canvas(w, h, cap)
+        out[q] = {"width": fw, "height": fh}
+    return out
+
+
 def _sb_policy_for(draft_quality: str, final_quality: str) -> dict:
     """The board's two passes, in the panel's own geometry vocabulary, clamped
     to what this Mac can actually render."""
     cap = _sb_max_dim()
-    table = {
-        "quick":    (640, 448),
-        "balanced": (768, 432),
-        "standard": (1024, 576),
-        "high":     (1024, 576),
-    }
 
     def cell(q, default):
         q = (q or default).strip().lower()
-        w, h = table.get(q, table[default])
-        if max(w, h) > cap:
-            scale = cap / float(max(w, h))
-            w = max(64, int(w * scale) // 8 * 8)
-            h = max(64, int(h * scale) // 8 * 8)
+        w, h = _SB_QUALITY_CANVAS.get(q, _SB_QUALITY_CANVAS[default])
+        w, h = storyboard.fit_canvas(w, h, cap)
         return {"quality": q, "width": w, "height": h,
                 "frames": storyboard.ltx_frames_for(5)}
 
@@ -19648,6 +19682,34 @@ def _preflight_model_cached(cfg) -> bool:
     return _repo_hf_cache_dir(model) is not None
 
 
+_IMAGE_ENGINE_LABELS = {
+    "auto": "the Auto engine",
+    "qwen_edit_lightning_inline": "Reference Edit — Fast",
+    "qwen_edit_inline": "Reference Edit — Standard",
+    "qwen_edit_high_inline": "Reference Edit — Quality",
+    "ideogram4_inline": "Ideogram 4",
+    "hidream_fast_inline": "HiDream Fast",
+    "hidream_inline": "HiDream Medium",
+    "hidream_quality_inline": "HiDream Quality",
+}
+
+# Fleet Mac sizes, for "needs a 32 GB Mac" copy. The pre-flight compares
+# the engine's need against FREE memory, and macOS keeps several GB for
+# itself, so an engine needing 24 GB free never passes on a 24 GB Mac —
+# the honest floor is need + 4, rounded up to a size that exists.
+_MAC_SIZES_GB = (8, 16, 24, 32, 36, 48, 64, 96, 128, 192, 256, 512)
+
+
+def _image_engine_fit(need_gb: float) -> tuple[bool, int]:
+    """(fits this Mac at all, smallest Mac size that does) for an engine
+    needing `need_gb` free memory. Total RAM is the judge here, not free:
+    this is the "can this machine ever run it" question the Image Studio
+    asks BEFORE offering an engine."""
+    floor = float(need_gb) + 4.0
+    mac_gb = next((g for g in _MAC_SIZES_GB if g >= floor), int(round(floor)))
+    return (float(SYSTEM_RAM_GB or 0) >= floor), mac_gb
+
+
 def _preflight_image_job(cfg, *, engine_override: str = "auto") -> None:
     """Raise RuntimeError if the host can't safely run this image cfg.
 
@@ -19668,12 +19730,30 @@ def _preflight_image_job(cfg, *, engine_override: str = "auto") -> None:
     total_gb = float(mem.get("total_gb") or 0.0)
     used_gb = float(mem.get("used_gb") or 0.0)
     free_gb = max(0.0, total_gb - used_gb)
+    # Two different stories, both REFUSALS (deliberate guards, not faults —
+    # review 2026-09-02: 15 of the 16 "unclassified" failures on 4.9.0 were
+    # this branch, on 8 GB and 24 GB Macs that had been offered an engine
+    # holding ~24 GB of weights, then blocked here with a message pointing
+    # at a developer env var). A Mac that can never fit the engine is told
+    # which Mac size can and what fits here; a Mac that could fit it but is
+    # busy is told to close apps. Same slug, one-click breakdown either way.
+    fits_mac, mac_gb = _image_engine_fit(need_gb)
+    label = _IMAGE_ENGINE_LABELS.get(engine_override, engine_override)
+    if not fits_mac:
+        raise RenderRefused(
+            "image_ram",
+            f"Image pre-flight: {label} holds ~{need_gb:.0f} GB of weights in "
+            f"memory and needs a {mac_gb} GB Mac; this Mac has "
+            f"{total_gb:.0f} GB. Pick Auto (the 4B FLUX engine, fits here) "
+            f"or a lighter preset."
+        )
     if free_gb < need_gb:
-        raise RuntimeError(
-            f"pre-flight: this engine ({engine_override}) needs ~{need_gb:.0f} GB free RAM "
-            f"but only {free_gb:.1f} GB is available "
-            f"(total {total_gb:.0f} GB, used {used_gb:.1f} GB). "
-            f"Close other apps or set PHOSPHENE_SKIP_PREFLIGHT=1 to override."
+        raise RenderRefused(
+            "image_ram",
+            f"Image pre-flight: {label} needs ~{need_gb:.0f} GB free, but "
+            f"only {free_gb:.1f} GB is free right now (this Mac has "
+            f"{total_gb:.0f} GB, {used_gb:.1f} GB in use). Close other apps "
+            f"— browsers, another render — and try again."
         )
 
     cache_root = _hf_cache_root()
@@ -21788,14 +21868,17 @@ def run_job_inner(job: dict) -> None:
         # the helper to the Q8 dir.
         ext_missing = hq_surface_missing()
         if ext_missing:
-            raise RuntimeError(
-                f"Extend requires the full Q8 model at {pack_path('q8')}. "
+            raise RenderRefused(
+                "pack_missing",
+                f"Extend needs the LTX-2.5 High add-on (the Q8 model), which "
+                f"isn't downloaded on this Mac yet. "
                 f"Missing {len(ext_missing)} file(s): {', '.join(ext_missing[:3])}"
                 f"{' …' if len(ext_missing) > 3 else ''}. "
                 f"Install it from Settings \u2192 Models "
                 f"({(pack_repo('q8') or {}).get('name', 'the Q8 pack')}, "
                 f"~{(pack_repo('q8') or {}).get('size_gb', '?')} GB)."
-            )
+                f" Open Settings → Models and download it, then render again."
+                )
         src = p["video_path"]
         if not src or not Path(src).exists():
             raise RuntimeError(f"source video for extend not found: {src}")
@@ -22425,13 +22508,14 @@ def run_job_inner(job: dict) -> None:
         # `load_safetensors` error referencing a specific missing file.
         kf_missing = hq_surface_missing()
         if kf_missing:
-            raise RuntimeError(
-                f"Keyframe mode requires the full Q8 model at {pack_path('q8')}. "
+            raise RenderRefused(
+                "pack_missing",
+                f"Keyframe mode needs the LTX-2.5 High add-on (the Q8 model), which "
+                f"isn't downloaded on this Mac yet. "
                 f"Missing {len(kf_missing)} file(s): {', '.join(kf_missing[:3])}"
                 f"{' …' if len(kf_missing) > 3 else ''}. "
-                f"Run: hf download {(pack_repo('q8') or {}).get('repo_id', MODEL_ID_HQ)} "
-                f"--local-dir {pack_path('q8')}"
-            )
+                f" Open Settings → Models and download it, then render again."
+                )
         # Multi-keyframe path: agent submits a JSON-encoded list of
         # {image_path, frame_index} pairs. Layer 1 of the SDK shipped the
         # helper-side acceptance; this branch is Layer 2 (panel form).
@@ -22970,13 +23054,14 @@ def run_job_inner(job: dict) -> None:
         # Same completeness check as keyframe — see comment there.
         hq_missing = hq_surface_missing()
         if hq_missing:
-            raise RuntimeError(
-                f"High quality requires the full Q8 model at {pack_path('q8')}. "
+            raise RenderRefused(
+                "pack_missing",
+                f"High quality needs the LTX-2.5 High add-on (the Q8 model), which "
+                f"isn't downloaded on this Mac yet. "
                 f"Missing {len(hq_missing)} file(s): {', '.join(hq_missing[:3])}"
                 f"{' …' if len(hq_missing) > 3 else ''}. "
-                f"Run: hf download {(pack_repo('q8') or {}).get('repo_id', MODEL_ID_HQ)} "
-                f"--local-dir {pack_path('q8')}"
-            )
+                f" Open Settings → Models and download it, then render again."
+                )
         # HQ is the only inference path that runs the dev transformer with
         # CFG and the full sigma schedule — which is exactly what character
         # LoRAs are trained against. Distilled inference (Quick/Standard)
@@ -24848,6 +24933,16 @@ class Handler(BaseHTTPRequestHandler):
                                             (concept + str(time.time())).encode()
                                         ).hexdigest()[:6])
                     board = storyboard.new_storyboard(bid, "Planning…")
+                    # new_storyboard() hands back storyboard.DEFAULT_POLICY —
+                    # 1024x576 delivery, no tier clamp, and not the user's saved
+                    # Quality either. That made the `setdefault("policy", ...)`
+                    # further down a NO-OP for every new film ever planned: the
+                    # clamp never ran. Invisible on a 1024+ Mac; on a 24 GB Mac
+                    # (768px cap) every fresh plan came back with an illegal
+                    # delivery pass, an over_cap error, and Render disabled.
+                    board["policy"] = _sb_policy_for(
+                        get_settings().get("storyboard_draft_quality", "quick"),
+                        get_settings().get("storyboard_final_quality", "standard"))
                 # Offer the number or refuse it — never quietly render a
                 # different film. A brief that asked for 4 shots used to come
                 # back as a 12-shot board with no message anywhere. The four
@@ -27046,6 +27141,22 @@ def page() -> str:
 # page() substitutes the __PLACEHOLDER__ seams into this at request time,
 # unchanged from when the string was embedded here.
 HTML = (ROOT / "webapp" / "index.html").read_text(encoding="utf-8")
+
+# The JS/CSS the page loads follow the same rule in production: a git pull
+# under a running panel must not hand new modules to old markup (review
+# 2026-09-02 — the in-app Update pulls code while the panel runs, and the
+# page is read once). Snapshot the tree at boot; the /webapp/ route serves
+# from here when populated. Dev keeps reading from disk so a hard-refresh
+# still picks up edits without a restart (docs/ARCHITECTURE.md).
+_WEBAPP_SNAPSHOT: dict[str, bytes] = {}
+if PROFILE != "dev":
+    try:
+        _wa = ROOT / "webapp"
+        for _f in _wa.rglob("*"):
+            if _f.is_file():
+                _WEBAPP_SNAPSHOT[_f.relative_to(_wa).as_posix()] = _f.read_bytes()
+    except Exception:                                      # noqa: BLE001
+        _WEBAPP_SNAPSHOT = {}
 
 
 def _diagnose_port_busy(port: int) -> str:

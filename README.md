@@ -13,7 +13,7 @@
 
 </p>
 
-> **Current release: v4.9.2.** Three issue fixes: an interrupted image-model download now resumes instead of crashing every generation (#73), character training survives the GPU watchdog killing caption encoding by relaunching once at a shorter text encode (#61), and suggested trigger words are letters-only — the old `mrz07` shape was half digit tokens (#62). Includes v4.9.1, which fixed the buttons v4.9.0's reorganization silently broke (thanks @blackest) and added an "×" on the Recent-uploads strip. Full notes on the [releases page](https://github.com/mrbizarro/phosphene/releases).
+> **Current release: v4.9.3.** Fixes from a full review of the fast 4.9.x releases. Storyboard works again on Macs that cap at 768 (24 GB): new films are planned at a size the Mac can deliver, the fix button offers the real size, and the Quality section is visible at Pinokio window widths (#71). Renaming a character works again. A freshly trained character clicked "Use in video" now actually rides on the render. Image Studio tells 8/24 GB Macs up front which engines fit instead of refusing at the last second. High/Keyframes/Extend without the Q8 pack point to Settings → Models. Image mode with no image is stopped at the button. Update moves the H3 engine to its pinned branch before building the half-memory engine (#74, thanks @blackest). Full notes on the [releases page](https://github.com/mrbizarro/phosphene/releases).
 
 ## Overview
 

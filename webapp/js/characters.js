@@ -2471,12 +2471,12 @@ function trainUseInVideo(loraPath, trigger, targetMode) {
   // Use the existing picker plumbing if available. _activeLoras and
   // renderLorasList come from the unified LoRA picker module.
   if (typeof window._activeLoras !== 'undefined' && Array.isArray(window._activeLoras)) {
-    const already = window._activeLoras.some(x => x.path === loraPath);
-    if (!already) {
-      window._activeLoras.push({ path: loraPath, strength: 1.0, name: loraPath.split('/').pop() });
-      if (typeof renderLorasList === 'function') renderLorasList();
-      if (typeof _syncLorasJsonField === 'function') _syncLorasJsonField();
-    }
+    // Go through the picker's own add path: it renders the chip AND
+    // serialises #lorasJson, which is what the form actually posts. The
+    // previous hand-rolled push rendered the chip but called a serialiser
+    // that never existed (_syncLorasJsonField), so a freshly trained
+    // character LOOKED applied and rendered without it (review 2026-09-02).
+    addLoraToActive({ path: loraPath, strength: 1.0, name: loraPath.split('/').pop() });
   } else {
     // Fall back: copy the path so the user can paste it into the LoRA
     // picker manually.

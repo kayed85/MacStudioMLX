@@ -348,9 +348,15 @@ def post_version_pull(h, path, qs, ctype) -> None:
                 "install.js", "update.js", "pinokio.js", "download_q8.js",
                 "patch_ltx_codec.py", "required_files.json",
                 "requirements.txt", "pyproject.toml", "setup.py",
+                # Since v4.0 every pin, patch and weight step lives in
+                # post_update.sh and scripts/pinokio/ — a pull that touches
+                # them without the full Update ships new code onto old
+                # dependencies (review 2026-09-02).
+                "scripts/post_update.sh", "scripts/check_post_update.js",
             )
             for line in diff_out.splitlines():
-                if line in deps_signals or line.startswith("ltx-2-mlx/"):
+                if (line in deps_signals or line.startswith("ltx-2-mlx/")
+                        or line.startswith("scripts/pinokio/")):
                     deps_touched = True
                     break
 

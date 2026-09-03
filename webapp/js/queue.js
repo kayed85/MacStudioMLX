@@ -4220,6 +4220,18 @@ document.getElementById('genForm').addEventListener('submit', async e => {
     return;
   }
 
+  // Image mode with nothing in the Image slot used to queue, fail on the
+  // server, and show up as a red card — one person hit it six times in a
+  // row (fleet, 2026-09-02). Say it before the click costs anything.
+  const _modeNow = String(fd.get('mode') || '');
+  if ((_modeNow === 'i2v' || _modeNow === 'i2v_clean_audio')
+      && !String(fd.get('image') || '').trim()) {
+    alert('Image mode needs a reference image — drop one into the Image slot, '
+        + 'or switch to Text mode and render from the prompt alone.');
+    reenable();
+    return;
+  }
+
   // Safety net: if the prompt mentions a trigger word from a LoRA the user
   // has installed but NOT toggled active for this render, ask before
   // submitting. The #1 silent-failure mode is "I typed my LoRA's trigger

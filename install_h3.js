@@ -133,9 +133,10 @@ module.exports = {
       params: {
         path: "minimax-h3-mlx",
         message: [
-          "git fetch --force origin " + H3_BRANCH,
-          "if [ -d minimax_h3_mlx ]; then git reset --hard HEAD; else echo 'WARN: not the H3 tree - skipping reset'; fi",
-          "git checkout --force -B " + H3_BRANCH + " FETCH_HEAD",
+          // The pin itself lives in scripts/pinokio/h3_checkout.sh (#74: Update
+          // must make the same move; one literal, two callers). H3_BRANCH above
+          // is only the fresh-clone branch and must match it.
+          "bash ../scripts/pinokio/h3_checkout.sh \"$(pwd)\"",
           "git rev-parse --short HEAD"
         ]
       }

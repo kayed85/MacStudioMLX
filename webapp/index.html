@@ -3322,11 +3322,11 @@
           <div class="cz-body">
             <div class="cz-control">
               <div class="cz-label">Draft pass <span class="cz-label-hint">what you watch first</span></div>
-              <div class="pill-group cols-3" id="sbDraftQuality">
-                <button type="button" class="pill-btn active" data-q="quick">Quick<span class="sub">640×448</span></button>
-                <button type="button" class="pill-btn" data-q="balanced">Balanced<span class="sub">768×432</span></button>
-                <button type="button" class="pill-btn" data-q="standard">Standard<span class="sub">1024×576</span></button>
-              </div>
+              <!-- Rendered from the registry by sbRenderDraftQualities(), for
+                   the same reason the delivery row below is: hand-written sizes
+                   cannot know this Mac's pixel cap, so on a 24 GB Mac all three
+                   printed canvases it will never deliver. -->
+              <div class="pill-group cols-3" id="sbDraftQuality"></div>
             </div>
             <div class="cz-control">
               <div class="cz-label">Delivery pass <span class="cz-label-hint">what you keep</span></div>

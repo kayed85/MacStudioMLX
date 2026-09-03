@@ -95,7 +95,6 @@ for (const f of moduleFiles) {
 }
 // Optional hooks the code probes with `typeof x === 'function'` before
 // calling — declared, guarded, legitimately absent.
-shared.add("_syncLorasJsonField");
 
 const BROWSER = Object.fromEntries(
   ("window document navigator location localStorage sessionStorage fetch " +
@@ -179,14 +178,34 @@ if (inline.trim()) {
   const handlerRe = new RegExp(
     String.raw`(?:\bon[a-z]+\s*=\s*\\?["']|href\s*=\s*\\?["']javascript:|setAttribute\(\s*['"]on[a-z]+['"]\s*,\s*['"\x60])([^"'\x60]{0,400})`, "g");
   const callRe = new RegExp(String.raw`\b(${IDENT})\s*\(`, "g");
+  const KNOWN_CALLABLE = new Set((
+    "if for while switch catch return function async await typeof void " +
+    "Object Array String Number Boolean JSON Math Date RegExp Error Promise " +
+    "Map Set Symbol BigInt Function parseInt parseFloat isNaN isFinite " +
+    "encodeURIComponent decodeURIComponent encodeURI decodeURI escape unescape " +
+    "Intl Reflect Proxy WeakMap WeakSet").split(" "));
   const sources = [[INDEX, html], ...modSrc.entries()];
   const seen = new Set();
   for (const [file, src] of sources) {
     for (const m of src.matchAll(handlerRe)) {
       for (const c of m[1].matchAll(callRe)) {
         const name = c[1];
+        if (publishedAll.has(name) || seen.has(name)) continue;
+        // `obj.method(` and `new Ctor(` are not global function calls.
+        const before = m[1].slice(0, c.index).trimEnd();
+        if (/[.\w$]$/.test(before) && !/\bnew$/.test(before)) continue;
         const owner = topLevelAnywhere.get(name);
-        if (!owner || publishedAll.has(name) || seen.has(name)) continue;
+        if (!owner) {
+          // Review 2026-09-02: a handler calling a function NOBODY declares
+          // (deleted, renamed, or never written) is the same dead-button
+          // class, and this pass used to skip it. Builtins and keywords
+          // are the only legitimate unowned callees in a handler string.
+          if (KNOWN_CALLABLE.has(name) || name in BROWSER) continue;
+          seen.add(name);
+          errors++;
+          console.error(`inline handler calls '${name}' but nothing declares it — a deleted or renamed function; the control would do nothing. Referenced from ${path.relative(ROOT, file)}`);
+          continue;
+        }
         seen.add(name);
         errors++;
         console.error(`inline handler calls '${name}' (declared in ${path.relative(ROOT, owner)}) but it is not published — add it to that module's Object.assign(globalThis, {...}) block. Referenced from ${path.relative(ROOT, file)}`);

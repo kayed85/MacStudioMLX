@@ -157,6 +157,9 @@ def hf_repo_partial_download(repo_id: str, env: "dict | None" = None) -> "dict |
             "repo_dir": repo_dir}
 
 
+_REPAIR_MEMO: dict = {}   # repo_id -> on_disk_gb at the last repair attempt
+
+
 def repair_partial_hf_download(repo_id: str, env: "dict | None" = None) -> "dict | None":
     """Make an interrupted download resume instead of crash.
 
@@ -173,7 +176,19 @@ def repair_partial_hf_download(repo_id: str, env: "dict | None" = None) -> "dict
     import shutil as _shutil
     info = hf_repo_partial_download(repo_id, env)
     if not info:
+        _REPAIR_MEMO.pop(str(repo_id), None)
         return None
+    # Bounded (review 2026-09-02): if the previous attempt in this process
+    # left the download exactly where it was, wiping and re-fetching again
+    # on every render just burns time — say what's stuck instead.
+    on_disk = round(float(info.get("on_disk_gb") or 0.0), 2)
+    if _REPAIR_MEMO.get(str(repo_id)) == on_disk:
+        raise RuntimeError(
+            f"The download for {repo_id} is stuck at {on_disk:.1f} GB — it did "
+            f"not grow on the last try. Check free disk space and the network, "
+            f"then Generate again to resume it."
+        )
+    _REPAIR_MEMO[str(repo_id)] = on_disk
     snaps = info["repo_dir"] / "snapshots"
     if snaps.is_dir():
         _shutil.rmtree(snaps, ignore_errors=True)

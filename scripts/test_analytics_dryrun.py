@@ -681,7 +681,12 @@ class TestEventSchemas(AnalyticsTestCase):
         is drawn from a set defined in the source, never from user text."""
         self.assertEqual(sorted(P._ANALYTICS_REFUSAL_SLUGS),
                          ["h3_lora_slots", "h3_mode", "h3_ram",
-                          "hardware_tier", "ingredients_generation",
+                          "hardware_tier",
+                          # v4.9.3: the Image Studio memory guard.
+                          "image_ram",
+                          "ingredients_generation",
+                          # v4.9.3: High/Keyframes/Extend without the Q8 pack.
+                          "pack_missing",
                           # v4.9: the stale-vendored-engine gate (a 2.5 render
                           # on an engine predating the Gemma 4 tower is
                           # refused with the two-Update-clicks remedy).

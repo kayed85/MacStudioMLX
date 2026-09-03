@@ -121,7 +121,10 @@ function renderVersionPill() {
     const trail = sha ? ` · ${sha}${date ? ` (${date})` : ''}` : '';
     const branchLabel = (s.local_branch && s.local_branch !== 'main')
       ? s.local_branch : 'dev';
-    pill.textContent = `${local} · ${branchLabel}${trail}`;
+    // The SHA/date tail is what pushes a 1300px (Pinokio-sized) header over
+    // budget and clips the health chip; below 1400px CSS hides .vp-detail.
+    const _esc = (t) => String(t).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+    pill.innerHTML = `${_esc(local)} · ${_esc(branchLabel)}<span class="vp-detail">${_esc(trail)}</span>`;
     pill.title = `Update check paused: ${s.suppress_reason}.`
       + (sha ? `\nFull SHA: ${s.local_sha || sha}` : '')
       + `\nClick to copy a paste-ready debug string.`;
@@ -439,8 +442,13 @@ function updateHealthChip() {
     // Name the thing that is wrong. "Attention" tells the user to go looking.
     const bad = [models, helper, mem].find(el => _hcSeverity(el) === worst);
     face.textContent = clean(bad) || 'needs attention';
+    face.dataset.short = 'attention';
   } else {
     face.textContent = clean(mem) || 'all good';
+    // The narrow-header face (review 2026-09-02): below 1400px the chip
+    // shows just the percentage — the full readout was being CLIPPED to
+    // "15/64" at Pinokio's window width. CSS swaps to data-short.
+    face.dataset.short = ((face.textContent.match(/(\d+)%/) || [])[1] || '') ? (face.textContent.match(/(\d+)%/)[1] + '%') : (face.textContent.split(/[\s·]+/)[0] || '');
   }
   document.querySelectorAll('#healthPop .hc-row').forEach(row => {
     const pill = row.querySelector('.pill');

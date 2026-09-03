@@ -186,3 +186,22 @@ class TheStructureLawHolds(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ModulesTheTemplateLoads(unittest.TestCase):
+    """v4.9.0's headline bug was a split that left code unreachable. The
+    cheapest guard of that shape: every module file under webapp/js is a
+    <script type="module"> tag in the template, and every such tag names a
+    file that exists — in the same order main.js must come last."""
+
+    def test_every_module_is_loaded_and_main_is_last(self) -> None:
+        import re
+        from pathlib import Path
+        root = Path(__file__).resolve().parent
+        html = (root / "webapp" / "index.html").read_text(encoding="utf-8")
+        tags = re.findall(r'<script type="module" src="/webapp/js/([\w.-]+\.js)"', html)
+        on_disk = sorted(p.name for p in (root / "webapp" / "js").glob("*.js"))
+        self.assertEqual(sorted(tags), on_disk,
+                         "a module on disk is not loaded by the page (or a tag names a missing file)")
+        self.assertEqual(len(tags), len(set(tags)), "a module is loaded twice")
+        self.assertEqual(tags[-1], "main.js", "main.js must be the last module tag")

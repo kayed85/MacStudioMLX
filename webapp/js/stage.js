@@ -40,6 +40,9 @@ function imgStudioUpdateValidity() {
     invalidReason = (eng.value === 'ideogram4_inline')
       ? 'The Ideogram 4 engine needs mflux 0.18+ (the mflux-generate-ideogram4 CLI). Update the mflux add-on, then come back and Generate.'
       : 'The Qwen-Image-Edit engine isn\'t installed. It ships with the image-engine pack: click Update in Pinokio\'s Phosphene sidebar (NOT in this panel), then come back and Generate. If it\'s still missing after Update, the sidebar also shows "Reinstall image engines (Ideogram 4 + Qwen-Edit)" — ~30 s, ~150 MB.';
+  } else if (engInfo && engInfo.fits_mac === false) {
+    invalidReason = 'This engine needs a ' + engInfo.mac_gb_needed + ' GB Mac — this one has '
+      + (_IMG_HOST_RAM_GB || '?') + ' GB. Auto (the 4B FLUX engine) fits here.';
   } else if (needsRefs && refsCount === 0) {
     invalidReason = 'Pick at least 1 reference image (drop a file into one of the 3 slots above) — Qwen-Image-Edit composes against an image, it cannot run text-only. Use the Lightning preset only after picking a ref.';
   }
@@ -247,6 +250,35 @@ function imgStudioUpdateRefWarning() {
 // on every keystroke. Refreshed when setMode('image') runs and after a
 // successful Generate (in case the worker just downloaded weights).
 let _IMG_ENGINE_STATUS = {};   // engine_override -> {cached, download_gb, sec_per_image}
+let _IMG_HOST_RAM_GB = 0;
+
+// Memory fit (review 2026-09-02). The Studio's default engine holds ~24 GB
+// of weights; a fifth of the fleet has 24 GB or less and was offered it,
+// then refused at pre-flight with a developer-flag message. Engines that
+// can never fit this Mac stay listed — an honest offer — but disabled and
+// labelled with the Mac size that runs them; if the current pick is one
+// of them, the Studio moves to Auto (the 4B engine that fits everywhere).
+function imgStudioApplyMemoryFit() {
+  const sel = document.getElementById('imgStudioEngine');
+  if (!sel) return;
+  let moved = false;
+  Array.from(sel.options).forEach(opt => {
+    const info = _IMG_ENGINE_STATUS[opt.value];
+    if (!info || info.fits_mac !== false) return;
+    if (!opt.dataset.ramTagged) {
+      opt.dataset.ramTagged = '1';
+      opt.textContent = opt.textContent + ' — needs a ' + info.mac_gb_needed + ' GB Mac';
+    }
+    opt.disabled = true;
+    if (opt.selected) { sel.value = 'auto'; moved = true; }
+  });
+  if (moved) {
+    try { phosToast && phosToast('That image engine needs more memory than this Mac has — switched to Auto, which fits here.'); } catch (_) {}
+    try { imgStudioRenderEnginePill(); } catch (_) {}
+    try { imgStudioUpdateEstimate(); } catch (_) {}
+    try { ideoSyncVisibility && ideoSyncVisibility(); } catch (_) {}
+  }
+}
 
 async function imgStudioRefreshEngineStatus() {
   try {
@@ -256,6 +288,8 @@ async function imgStudioRefreshEngineStatus() {
     const map = {};
     (j.engines || []).forEach(e => { map[e.engine] = e; });
     _IMG_ENGINE_STATUS = map;
+    _IMG_HOST_RAM_GB = Number(j.host_ram_gb || 0);
+    imgStudioApplyMemoryFit();
   } catch (e) {
     // Silent — pill falls back to "unknown" (dim ellipsis).
     _IMG_ENGINE_STATUS = {};
@@ -327,6 +361,13 @@ function imgStudioRenderEnginePill() {
   // the weights-cached check below, which is about HF model downloads.
   // When family_installed is false, the engine literally can't run —
   // every other state is moot.
+  if (info.fits_mac === false) {
+    pill.dataset.state = 'missing-engine';
+    pill.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-warning-bold"/></svg>needs a ' + info.mac_gb_needed + ' GB Mac';
+    pill.title = 'This engine holds ~' + info.ram_need_gb + ' GB of weights in memory; this Mac has '
+               + (_IMG_HOST_RAM_GB || '?') + ' GB. Auto (the 4B FLUX engine) fits here.';
+    return;
+  }
   if (info.family_installed === false) {
     pill.dataset.state = 'missing-engine';
     if (v === 'ideogram4_inline') {

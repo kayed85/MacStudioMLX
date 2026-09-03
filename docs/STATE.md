@@ -1,5 +1,56 @@
 # Phosphene — project state, history, open work
 
+> **🩹 2026-09-03 — v4.9.3: the full-review fixes, shipped as a plain bugfix.**
+> Everything in the 09-02 review entry below, plus #74 (Update now moves the
+> H3 engine checkout to `codex/h3-engine-v2` via the new shared
+> `scripts/pinokio/h3_checkout.sh` before building the Q8 engine — diagnosed
+> by @blackest). Image-mode identity on the 24 GB lane was REPRODUCED AS
+> WORKING (Q4 · Balanced · Anchor, seed 4242: frame one = the reference, the
+> character holds to the last frame) — the Pinokio report from @vxlab is not
+> a code defect on the default path; answered with the Anchor/Inspire and
+> train-a-character guidance. Gates: full 58/0/0 including the codec check on
+> that clip. Promoted by the snapshot ritual.
+
+> **🔎 2026-09-02 — FULL REVIEW after the fast releases (4.9.0→4.9.2): fix wave on dev/beta, UNRELEASED (dcb2589).**
+> Four audit lanes + fleet analytics. **Verdicts:** the module split is sound
+> (634 publishes checked, zero order hazards) and the route move is
+> behaviour-identical (2,568 probes old vs new); update from 4.8.2/4.6.0 and
+> fresh install both rehearsed clean. **What shipped broken and is now fixed
+> on beta:** (1) Storyboard on a 768-cap Mac — every NEW film was born with an
+> illegal 1024×576 delivery (clamp never ran for a fresh board), Render dead
+> from the first click, fix button offered the same illegal size, Quality
+> section crushed to 2px at Pinokio width, dropdowns replaced by the poll
+> (#71 follow-up; `storyboard.fit_canvas`, `test_storyboard_capfit.py`);
+> (2) character rename always failed (route split lost one body-read
+> preamble); (3) trained character "Use in video" never sent the LoRA
+> (called a serialiser that never existed); (4) Image Studio offered 8/24 GB
+> Macs engines that can't fit — 15/16 "unclassified" failures on 4.9.0 —
+> now disabled with "needs a 32 GB Mac", Studio moves to Auto, guard is a
+> refusal (`image_ram`); (5) High/Keyframes/Extend without the Q8 pack →
+> refusal (`pack_missing`) pointing at Settings → Models, not a CLI line;
+> (6) Image mode with no image stopped at the button; (7) header memory
+> readout clipped at 1300px; (8) in-app Update now skipped post_update.sh
+> when only it changed + self-repair probe covered 1 of 3 packages +
+> production serves boot-time webapp snapshot; (9) classifier: helper_exit
+> moved below model_missing/disk_full (was swallowing ~500 events/wk),
+> stuck partial downloads bounded. **Gate added:** lint_webapp fails on a
+> handler calling a function nothing declares. Gates: full 58/0/0, --fast
+> 56/0/2 on the final tree.
+> **Fleet (3 days):** 501 active installs/wk, 93 new on 09-01; 4.9.0 fail
+> rate 9.6% (4.8.1 was 23%); **43% of active installs rendered nothing all
+> week** — activation is the product problem, not stability. 22% of the
+> fleet has ≤24 GB. i2v > t2v; characters used in ~4% of renders; no events
+> for Storyboard/Editor use at all (instrumentation gap).
+> **Open:** Pinokio has NO Official Update post for 4.9.0/4.9.1/4.9.2 (rule:
+> post on every release); Pinokio question from @vxlab (24 GB, i2v loses the
+> reference face) unanswered; Lane B P1 — keyframe/audio/LoRA "not found"
+> gates lack the plain-English remedy the i2v gate has; Lane A — 3 function
+> names reached only through strings (`install_card` table, Python-emitted
+> `openModelsModal`, `${cta.run}`) that the lint cannot see.
+> **Process lesson:** two review agents ran `pkill -f mlx_ltx_panel.py` and
+> killed the owner's 8199 panel — briefs must mandate PID kills (memory
+> `feedback_agents_never_pkill_by_pattern`).
+
 > **🩹 2026-09-02 — v4.9.2: three issue fixes (#73, #61, #62), shipped the same day as v4.9.1.**
 > **#73 — an interrupted image-engine download looked ready and crashed every
 > render.** Qwen-Image-Edit-2511 stopped at 38 of 54 GB with 14 blobs still

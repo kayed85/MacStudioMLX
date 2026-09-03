@@ -357,10 +357,22 @@ def get_image_engine_status(h, parsed) -> None:
                 ]
                 sec = sum(per_image) / len(per_image)
                 samples = f"observed-{len(observed)}"
+            # Memory verdict (review 2026-09-02): the Studio offered 8 GB
+            # and 24 GB Macs engines that hold ~24 GB of weights, and the
+            # render's pre-flight refused every time. Say it up front.
+            try:
+                _need = P._preflight_estimate_ram_gb(
+                    P._build_image_engine_config(engine))
+            except Exception:                              # noqa: BLE001
+                _need = 8.0
+            _fits, _mac_gb = P._image_engine_fit(_need)
             out.append({
                 "engine": engine,
                 "repo_id": repo or "",
                 "cached": cached,
+                "ram_need_gb": round(float(_need), 1),
+                "mac_gb_needed": int(_mac_gb),
+                "fits_mac": bool(_fits),
                 "partial": bool(partial),
                 "partial_gb": (partial["on_disk_gb"] if partial else 0),
                 "family_installed": family_installed,
@@ -375,7 +387,8 @@ def get_image_engine_status(h, parsed) -> None:
                 "license_url": ("https://huggingface.co/" + repo)
                                if (repo and engine == "ideogram4_inline") else None,
             })
-        h._json({"engines": out})
+        h._json({"engines": out,
+                 "host_ram_gb": int(round(float(P.SYSTEM_RAM_GB or 0)))})
     except Exception as exc:                                # noqa: BLE001
         h._json({"error": f"engine_status failed: {exc}"}, 500)
 

@@ -30,6 +30,7 @@ import re
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -430,3 +431,49 @@ class TestH3RamRefusalStatesTheRealFloor(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class ImageStudioMemoryGuardIsARefusal(unittest.TestCase):
+    """Review 2026-09-02: 15 of the 16 unclassified failures on 4.9.0 were
+    the Image Studio pre-flight refusing 8 GB / 24 GB Macs an engine that
+    holds ~24 GB of weights, with a message pointing at a developer env
+    var. The guard is now a refusal (closed slug `image_ram`) that names
+    the Mac size that runs the engine, or says to close apps when the Mac
+    could fit it but is busy."""
+
+    def _cfg(self):
+        return P._build_image_engine_config("qwen_edit_lightning_inline")
+
+    def test_engine_that_can_never_fit_names_the_mac_size(self):
+        with unittest.mock.patch.object(P, "SYSTEM_RAM_GB", 24.0), \
+             unittest.mock.patch.object(P, "get_memory",
+                                        lambda: {"total_gb": 24.0, "used_gb": 6.0}):
+            with self.assertRaises(P.RenderRefused) as cm:
+                P._preflight_image_job(self._cfg(), engine_override="qwen_edit_lightning_inline")
+        self.assertEqual(cm.exception.reason, "image_ram")
+        self.assertIn("needs a 32 GB Mac", str(cm.exception))
+        self.assertIn("Auto", str(cm.exception))
+        self.assertNotIn("PHOSPHENE_SKIP_PREFLIGHT", str(cm.exception))
+        self.assertEqual(P._analytics_refusal_reason(str(cm.exception)), "image_ram")
+
+    def test_busy_mac_that_could_fit_is_told_to_close_apps(self):
+        with unittest.mock.patch.object(P, "SYSTEM_RAM_GB", 64.0), \
+             unittest.mock.patch.object(P, "get_memory",
+                                        lambda: {"total_gb": 64.0, "used_gb": 54.0}):
+            with self.assertRaises(P.RenderRefused) as cm:
+                P._preflight_image_job(self._cfg(), engine_override="qwen_edit_lightning_inline")
+        self.assertEqual(cm.exception.reason, "image_ram")
+        self.assertIn("free right now", str(cm.exception))
+
+    def test_fit_table_rounds_to_a_mac_size_that_exists(self):
+        with unittest.mock.patch.object(P, "SYSTEM_RAM_GB", 64.0):
+            self.assertEqual(P._image_engine_fit(24.0), (True, 32))
+            self.assertEqual(P._image_engine_fit(32.0), (True, 36))
+        with unittest.mock.patch.object(P, "SYSTEM_RAM_GB", 16.0):
+            self.assertEqual(P._image_engine_fit(24.0)[0], False)
+            self.assertEqual(P._image_engine_fit(8.0), (True, 16))
+
+    def test_pack_missing_is_a_refusal_slug(self):
+        msg = ("High quality needs the LTX-2.5 High add-on (the Q8 model), which "
+               "isn't downloaded on this Mac yet. Missing 12 file(s): x.")
+        self.assertEqual(P._analytics_refusal_reason(msg), "pack_missing")

@@ -291,6 +291,12 @@ H3_CHECKOUT="${LTX_H3_ROOT:-$ROOT/minimax-h3-mlx}"
 H3_DIT_REL='deepbeep-pruned-bf16/MiniMax-H3-FL2VA-pruned_bf16.safetensors'
 if { [ -f "$H3_MODELS_ROOT/models/$H3_DIT_REL" ] || [ -f "$H3_MODELS_ROOT/$H3_DIT_REL" ]; } \
    && [ -d "$H3_CHECKOUT" ]; then
+  # #74: the build script needs the v2 engine tree. Installs cloned before it
+  # sat on the old branch and this step built against that forever. Move the
+  # checkout to the pin first (the same move the H3 installer makes).
+  echo 'Ensuring the H3 engine checkout is on the pinned branch…'
+  bash "$ROOT/scripts/pinokio/h3_checkout.sh" "$H3_CHECKOUT" \
+    || echo 'WARN: could not move the H3 checkout to its pinned branch — the Q8 build below may not run; re-run the H3 engine Install to retry.'
   echo 'Ensuring the H3 compact (Q8) engine is built (halves H3 render memory)…'
   ( cd "$H3_CHECKOUT" && bash "$ROOT/scripts/pinokio/h3_build_q8.sh" "$ROOT" ) \
     || echo 'WARN: H3 Q8 build failed — H3 keeps the full bf16 engine for now; re-run the H3 engine Install to retry.'
@@ -333,11 +339,12 @@ echo 'Trim done.'
 # and import again, because a torn site-packages is exactly what this repairs
 # and the user should not have to run anything by hand. Only a second failure
 # is fatal, and then `require` says so in the app's own words.
-# The probe deliberately imports ONE package and the gate imports all three, so
-# `check_post_update.js` can tell them apart: the gate is the line it must find
-# wrapped in `require`, and a probe that matched the same text would shadow it.
+# The probe imports the same three packages as the gate but in semicolon form,
+# so `check_post_update.js` can still tell them apart: the gate is the
+# comma-form line it must find wrapped in `require`. (A one-package probe let
+# a torn ltx_core_mlx skip the repair and fail the gate — review 2026-09-02.)
 echo 'Verifying the render engine actually imports…'
-if ! "$PY" -c "import ltx_pipelines_mlx" 2>/dev/null; then
+if ! "$PY" -c "import ltx_core_mlx; import ltx_pipelines_mlx; import mlx" 2>/dev/null; then
   echo 'Render engine did not import — repairing the vendored packages once…'
   ( cd "$ROOT/ltx-2-mlx" && uv pip install --python env/bin/python --reinstall \
       --no-deps --build-constraints ../pip-build-constraints.txt \
