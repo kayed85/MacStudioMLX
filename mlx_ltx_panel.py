@@ -19967,6 +19967,8 @@ _PREFLIGHT_BASE_GB: dict[tuple[str, int], float] = {
     ("z_image_turbo", 4): 4.0,
     ("z_image_turbo", 6): 5.0,
     # FLUX.1 family (krea-dev / dev / schnell) — covered for completeness
+    ("auto", 4): 4.0,
+    ("auto", 6): 6.0,
     ("flux1", 4): 6.0,
     ("flux1", 6): 8.0,
     ("flux1", 8): 12.0,
@@ -19979,29 +19981,14 @@ _PREFLIGHT_9B_GB = 36.0
 
 
 def _preflight_estimate_ram_gb(cfg) -> float:
-    """Return the best-effort RAM estimate (GB) for the given image cfg.
-
-    Lookup order:
-      1. exact (family, quantize) match
-      2. same family, nearest quantize, scaled by ~30% per Q-step
-      3. fall back to 8 GB (the smallest realistic image model)
-
-    The `9b` variant gets a hard override — its Metal residency dwarfs
-    every 4B sibling regardless of quantize.
-    """
+    """Return the best-effort RAM estimate (GB) for the given image cfg."""
     if cfg.kind == "hidream":
-        # 2026-05-31 review fix: HiDream-O1 BF16 was exempt from the RAM gate
-        # (fell through to the 1.0 GB `!= mflux` branch). Its Metal residency
-        # is ~18 GB. HiDream is dropdown-hidden as of v3.0.3 (#15) but remains
-        # reachable via a saved agent_image_config / engine_override, so the
-        # gate must still cover it or a 16 GB Mac OOMs instead of getting the
-        # friendly "needs more memory" refusal.
         return 18.0
     if cfg.kind != "mflux":
         # `mock` engine doesn't allocate; `bfl` is cloud-side.
         return 1.0
     fam = (cfg.mflux_family or "auto").lower()
-    q = int(cfg.mflux_quantize or 6)
+    q = int(cfg.mflux_quantize or 4)
     model = (getattr(cfg, "mflux_model", "") or "").lower()
     if fam == "flux2" and "9b" in model:
         return _PREFLIGHT_9B_GB
