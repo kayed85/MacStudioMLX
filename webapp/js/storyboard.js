@@ -1734,6 +1734,14 @@ function sbSetRenderMode(mode) {
   if (SB.payload) sbRenderPlan(SB.payload);
 }
 
+function sbSetAspect(asp) {
+  SB.aspect = asp || 'landscape';
+  try { localStorage.setItem('phos_sb_aspect', SB.aspect); } catch (e) {}
+  document.querySelectorAll('[data-sb-aspect]').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.sbAspect === SB.aspect);
+  });
+}
+
 async function sbRenderImages(only) {
   if (!SB.id) return;
   const mref = (sbEl('sb_master_ref') || {}).value || '';
@@ -2298,7 +2306,7 @@ Object.assign(globalThis, {
   sbSetStage, sbRenderPlan, sbRenderRemaining, sbAddShot,
   sbTitleSave, sbRenderDrafts, sbFinish, sbRewrite,
   sbStopShot, sbStopFilm, sbExport, sbFilmOpen,
-  sbSetRenderMode, sbRenderImages, sbConvertShotToVideo, sbConvertAllToVideo,
+  sbSetRenderMode, sbSetAspect, sbRenderImages, sbConvertShotToVideo, sbConvertAllToVideo,
   sbFilmPaint, sbBoardChip, sbRowAction, sbAddActiveToBoard,
   sbOpenFromClip, sbPollHook,
   // inline-handler targets: generated markup resolves these through the

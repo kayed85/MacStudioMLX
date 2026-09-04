@@ -2695,6 +2695,18 @@
         </div>
       </div>
 
+      <div class="cz-control" id="sbPlannerAspectRow">
+        <div class="cz-label">Orientation <span class="cz-label-hint">16:9 for YouTube / TV or 9:16 for TikTok / Reels / Shorts</span></div>
+        <div class="pill-group cols-2" id="sbPlannerAspectGroup">
+          <button type="button" class="pill-btn active" data-sb-aspect="landscape" onclick="sbSetAspect('landscape')">
+            16:9 Landscape<span class="sub">YouTube / Facebook / TV</span>
+          </button>
+          <button type="button" class="pill-btn" data-sb-aspect="vertical" onclick="sbSetAspect('vertical')">
+            9:16 Vertical<span class="sub">TikTok / Reels / Shorts</span>
+          </button>
+        </div>
+      </div>
+
       <!-- The film-level engine. It is a PLANNING input, not a label: the two
            engines want prompts written differently, so this is asked before the
            plan exists and changing it means re-planning (the Re-plan modal
