@@ -25606,6 +25606,7 @@ class Handler(BaseHTTPRequestHandler):
                 bid = f("id", "")
                 board = load(bid)
                 only = [int(x) for x in (f("only", "") or "").split(",") if x.strip().isdigit()]
+                master_ref = board.get("master_ref") or f("master_ref", "") or ""
                 board_aspect = str(board.get("aspect") or board.get("orientation") or f("aspect", "") or "").lower()
                 img_aspect = "9:16" if board_aspect in ("vertical", "portrait", "9:16") else "16:9"
                 if master_ref:
