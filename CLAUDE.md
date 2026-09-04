@@ -570,6 +570,10 @@ When a feature or workflow is built, tested, approved by the user, and verified 
    - **Requirement**: Upstream `ltx-core-mlx` defaults to `yuv420p` without `+faststart`. `patch_ltx_codec.py` patches `video_vae.py` to enforce `yuv444p crf 0 +faststart` (moov atom placed before mdat).
    - **Verification**: Must be verified via `python3 scripts/check_output_codec.py` and `bash scripts/release_gates.sh`. Non-faststart outputs cause face compression artifacts and slow loading in browser controls.
 
+3. **Automatic Deployment Contract (Immediate Push to origin/main)**:
+   - **Requirement**: As soon as any feature, fix, or workflow is built, tested, and verified via `bash scripts/release_gates.sh`, the AI MUST automatically commit and push the changes directly to `origin/main` (`https://github.com/kayed85/MacStudioMLX.git`).
+   - **Purpose**: Enables the user to perform an immediate 1-click update in Pinokio/DMG via `update.js` without manual steps or reminders.
+
 ## 8. Test workflow
 
 ### The gates — run these before pushing anything they cover
