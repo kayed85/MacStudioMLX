@@ -2683,6 +2683,18 @@
         </div>
       </div>
 
+      <div class="cz-control" id="sbPlannerRenderModeRow">
+        <div class="cz-label">Mode <span class="cz-label-hint">generate image stills first to preview shots, or render video directly</span></div>
+        <div class="pill-group cols-2" id="sbPlannerRenderModeGroup">
+          <button type="button" class="pill-btn active" data-sb-rendermode="images" onclick="sbSetRenderMode('images')">
+            📸 Generate Images First<span class="sub">preview &amp; edit stills before video</span>
+          </button>
+          <button type="button" class="pill-btn" data-sb-rendermode="video" onclick="sbSetRenderMode('video')">
+            🎬 Direct Video<span class="sub">render video drafts directly</span>
+          </button>
+        </div>
+      </div>
+
       <!-- The film-level engine. It is a PLANNING input, not a label: the two
            engines want prompts written differently, so this is asked before the
            plan exists and changing it means re-planning (the Re-plan modal

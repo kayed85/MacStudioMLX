@@ -1728,6 +1728,9 @@ function sbFixError(fix, n, code) {
 function sbSetRenderMode(mode) {
   SB.renderMode = mode || 'images';
   try { localStorage.setItem('phos_sb_render_mode', SB.renderMode); } catch (e) {}
+  document.querySelectorAll('[data-sb-rendermode]').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.sbRendermode === SB.renderMode);
+  });
   if (SB.payload) sbRenderPlan(SB.payload);
 }
 
