@@ -680,6 +680,7 @@ Rules:
 5. Some beats have no dialogue at all. Those are where the scene breathes; say what the
    person is DOING instead.
 6. Keep it short: 8-14 beats, one or two sentences each. This is a 30-60 second scene.
+7. PRESERVE THE EXACT DIALOGUE LANGUAGE. If the brief provides dialogue lines in Arabic or any other non-English language, write the dialogue lines EXACTLY in that language inside double quotes. Do not translate them to English.
 
 Output plain text, one beat per line, in this form:
 
@@ -710,7 +711,7 @@ def _screenplay_text(resp: Dict[str, Any]) -> str:
 # A beat line or an attributed line of dialogue. Anything else is chatter.
 # The class carries parentheses so a sung attribution — NAME (sings): "..." —
 # survives the filter; without them every lyric line was silently dropped.
-_SCREENPLAY_LINE_RE = re.compile(r"^(?:BEAT\b|[A-Z][A-Za-z0-9 _\'()-]{0,30}:)")
+_SCREENPLAY_LINE_RE = re.compile(r"^(?:BEAT\b|[\u0600-\u06FFA-Z][\u0600-\u06FFA-Za-z0-9 _\'()-]{0,30}:)")
 
 
 def _build_screenplay_prompt(concept: str, n_shots: int, style: str,
