@@ -556,6 +556,20 @@ and are killed by the PID you saved when you started them.
   download --local-dir`, not the cache. Don't reintroduce HF cache
   symlinks.
 
+### Verified Feature Contracts & Persistent Rules (User Memory)
+
+When a feature or workflow is built, tested, approved by the user, and verified by tests, its exact technical contracts MUST be documented here to ensure future context windows adhere to them without breaking or re-architecting:
+
+1. **Image-First Storyboard Workflow & Master Reference Locker**:
+   - **Render Modes**: Storyboard supports `mode="image"` (generates still images first using Qwen/Ideogram) and `mode="video"` (direct LTX 2.3/2.5 video generation).
+   - **Master Reference Locker**: `#sbMasterRefRow` / `master_reference` field pins a reference image URL across all shots in a storyboard sequence for character/product consistency.
+   - **Reconciliation**: When an image job finishes, `_sb_reconcile` updates `image_output` on the target shot.
+   - **Shot-to-Video Conversion**: Image shots are converted to video via `/storyboard/render_images`, `/storyboard/shot/convert_to_video`, or `/storyboard/convert_all_to_video`, passing `mode="i2v"` with `image_path = shot["image_output"]`.
+
+2. **Codec Patch Verification (`patch_ltx_codec.py`)**:
+   - **Requirement**: Upstream `ltx-core-mlx` defaults to `yuv420p` without `+faststart`. `patch_ltx_codec.py` patches `video_vae.py` to enforce `yuv444p crf 0 +faststart` (moov atom placed before mdat).
+   - **Verification**: Must be verified via `python3 scripts/check_output_codec.py` and `bash scripts/release_gates.sh`. Non-faststart outputs cause face compression artifacts and slow loading in browser controls.
+
 ## 8. Test workflow
 
 ### The gates — run these before pushing anything they cover

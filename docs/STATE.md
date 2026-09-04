@@ -1,5 +1,8 @@
 # Phosphene — project state, history, open work
 
+> **📸 2026-09-04 — Image-First Storyboard & Master Reference Locker + Codec Patch Verification (d3f6309).**
+> Implemented `📸 Generate Images First` mode in Storyboard with Master Reference Locker (`#sbMasterRefRow`) to fix character/product consistency across shots. Added `/storyboard/render_images`, `/storyboard/shot/convert_to_video`, `/storyboard/convert_all_to_video`. Re-verified `patch_ltx_codec.py` codec enforcement (`yuv444p crf 0 +faststart`). Verified full release gates (57/57 PASS). Persistent memory rules logged in `GEMINI.md`.
+
 > **🩹 2026-09-03 — v4.9.3: the full-review fixes, shipped as a plain bugfix.**
 > Everything in the 09-02 review entry below, plus #74 (Update now moves the
 > H3 engine checkout to `codex/h3-engine-v2` via the new shared
