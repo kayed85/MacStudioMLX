@@ -6192,6 +6192,7 @@ def _download_thread(repo: dict) -> None:
         # anonymous HF is throttled hard. Neither applies to the mirror lane,
         # which is why they live inside this branch.
         env["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+        env["HF_XET_HIGH_PERFORMANCE"] = "1"
         hf_token = _active_hf_token()
         if hf_token:
             env["HF_TOKEN"] = hf_token

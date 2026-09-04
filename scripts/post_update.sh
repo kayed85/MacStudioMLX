@@ -84,6 +84,7 @@ PY="$ROOT/ltx-2-mlx/env/bin/python3.11"
 VENV_PY="$ROOT/ltx-2-mlx/env/bin/python"
 HF="$ROOT/ltx-2-mlx/env/bin/hf"
 export HF_HUB_ENABLE_HF_TRANSFER=1
+export HF_XET_HIGH_PERFORMANCE=1
 
 echo "=== Phosphene post-update — app root: $ROOT ==="
 
