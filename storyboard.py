@@ -1061,8 +1061,9 @@ def shot_pacing_problem(prompt: str, duration_s: float) -> str | None:
                     f"~{int(allowed)} fit, so the line is cut off "
                     f"mid-sentence. Shorten the line, or lengthen the shot to "
                     f"at least {speech_fit_frames(words, slow=slow, sung=sung)} frames")
-    last = spans[-1].rstrip()
-    if last and last[-1] not in ".!?":
+    last = spans[-1].strip()
+    has_punct = any(c in ".!?؛؟" for c in last) or (last and last[-1] in ".!?؛؟\"'”’»«") or (last and last[0] in ".!?؛؟\"'”’»«")
+    if last and not has_punct:
         return (f"the line ends {last[-12:]!r} — no full stop, so it plays as "
                 f"a sentence that never finishes. Close the thought")
     return None
