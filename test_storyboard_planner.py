@@ -691,6 +691,42 @@ class TestFeedback(unittest.TestCase):
             _plan([_plan_json(6)], feedback="shot 2: colder")
 
 
+class TestAutoBindRefs(unittest.TestCase):
+    def test_coerce_spec_autobinds_cast_and_location_reference_images(self):
+        cast = [{
+            "id": "apple",
+            "name": "Apple",
+            "trigger": "APPLE",
+            "ref_image": "/path/to/apple_ref.png"
+        }]
+        locs = [{
+            "id": "kitchen",
+            "name": "Kitchen",
+            "ref_image": "/path/to/kitchen_ref.png"
+        }]
+        raw = {
+            "title": "Pixar Fruit Story",
+            "shots": [{
+                "n": 1,
+                "title": "Apple arrives in the Kitchen",
+                "description": "3D Pixar red apple character APPLE enters the warm Kitchen with a smile.",
+                "duration_s": 5,
+                "camera": "static",
+                "face": "medium",
+                "settle": "Apple stands smiling",
+                "soundscape": "Kitchen ambience.",
+                "music": "N/A"
+            }]
+        }
+        spec, warnings = P.coerce_spec(raw, concept="Pixar Fruit", n_shots=1, cast=cast, locations=locs)
+        shots = spec.get("shots") or []
+        self.assertEqual(len(shots), 1)
+        shot = shots[0]
+        self.assertIn("/path/to/apple_ref.png", shot.get("refs") or [])
+        self.assertIn("/path/to/kitchen_ref.png", shot.get("refs") or [])
+        self.assertEqual(shot.get("mode"), "remix")
+
+
 class TestPromptContent(unittest.TestCase):
     """The prompt IS the product. If a law silently falls out, a test should notice."""
 

@@ -2224,6 +2224,36 @@ def coerce_spec(
             "soundscape": sound,
             "music": music,
         }
+
+        # Auto-bind entity reference images (characters, locations) to shot refs
+        shot_refs: List[str] = []
+        raw_refs = s.get("refs")
+        if isinstance(raw_refs, list):
+            shot_refs.extend([str(r).strip() for r in raw_refs if str(r).strip()])
+
+        for c in (cast or []):
+            if isinstance(c, dict):
+                c_ref = c.get("ref") or c.get("ref_image") or c.get("image_output")
+                c_name = str(c.get("name") or c.get("id") or "").lower()
+                c_trig = str(c.get("trigger") or "").lower()
+                if c_ref and str(c_ref) not in shot_refs:
+                    if char and char.get("id") == c.get("id"):
+                        shot_refs.append(str(c_ref))
+                    elif c_name and (c_name in desc.lower() or c_name in str(s.get("title") or "").lower()):
+                        shot_refs.append(str(c_ref))
+                    elif c_trig and c_trig in desc.lower():
+                        shot_refs.append(str(c_ref))
+
+        for loc in (locs or []):
+            if isinstance(loc, dict):
+                l_ref = loc.get("ref") or loc.get("ref_image") or loc.get("image_output")
+                l_name = str(loc.get("name") or loc.get("id") or "").lower()
+                if l_ref and str(l_ref) not in shot_refs and l_name and l_name in desc.lower():
+                    shot_refs.append(str(l_ref))
+
+        shot["refs"] = shot_refs
+        if shot_refs and shot["mode"] == "text":
+            shot["mode"] = "remix"
         # Which place this shot happens in. Matched on the NAME the model was
         # given; if it answers with something not on the list, or answers with
         # nothing, a film with exactly ONE location falls back to that one —
