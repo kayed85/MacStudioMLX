@@ -1321,7 +1321,7 @@ function sbShotCard(s, r, errs) {
     <div class="sb-shot-out car-card sb-shot-imgcard" style="margin-top:6px;border:1px solid rgba(139,123,255,0.4);background:rgba(139,123,255,0.04);border-radius:8px;padding:8px;">
       <div style="display:flex;align-items:center;gap:12px;">
         <div class="car-thumb-wrap" onclick="selectOutput('${escapeHtml(imgPath)}')" style="width:110px;height:65px;border-radius:6px;overflow:hidden;cursor:pointer;flex-shrink:0;">
-          <img class="car-thumb" src="/file?path=${encodeURIComponent(imgPath)}" alt="Shot ${n} image still" style="width:100%;height:100%;object-fit:cover;">
+          <img class="car-thumb" src="/image?path=${encodeURIComponent(imgPath)}" alt="Shot ${n} image still" style="width:100%;height:100%;object-fit:cover;">
         </div>
         <div class="info" style="flex:1;">
           <span class="name" style="font-weight:600;font-size:13px;display:block;">📸 Shot ${n} Image Still</span>
