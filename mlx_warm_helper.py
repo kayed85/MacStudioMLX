@@ -41,8 +41,8 @@ for _p in [
 
 try:
     import mlx_lm.utils
-    mlx_lm.utils.MODEL_REMAPPING["gemma4_unified"] = "gemma2"
-    mlx_lm.utils.MODEL_REMAPPING["gemma4_unified_text"] = "gemma2"
+    for _gkey in ("gemma4_unified", "gemma4_unified_text", "gemma4_unified_audio", "gemma4", "Gemma4UnifiedForConditionalGeneration", "Gemma4UnifiedTextForConditionalGeneration"):
+        mlx_lm.utils.MODEL_REMAPPING[_gkey] = "gemma2"
 except Exception:
     pass
 
