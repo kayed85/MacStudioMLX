@@ -3579,6 +3579,12 @@ def _worker_serve() -> int:
             continue
         try:
             import mlx.core as mx
+            try:
+                import mlx_lm.utils
+                mlx_lm.utils.MODEL_REMAPPING["gemma4_unified"] = "gemma2"
+                mlx_lm.utils.MODEL_REMAPPING["gemma4_unified_text"] = "gemma2"
+            except Exception:
+                pass
             from mlx_lm import load as mlx_lm_load, generate as mlx_generate
             from mlx_lm.sample_utils import make_sampler
 
