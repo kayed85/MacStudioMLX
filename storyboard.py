@@ -1010,7 +1010,9 @@ def spoken_spans(prompt: str) -> list[str]:
     """Every spoken line in `prompt`, tag form and quote form both."""
     p = prompt or ""
     out = [m.group(1).strip() for m in _D_SPAN_RE.finditer(p)]
-    stripped = _D_SPAN_RE.sub(" ", p)
+    # Audio section contains sound effects (e.g. Audio: ... a quiet 'click'.) which are sound cues, not spoken dialogue
+    dialogue_part = p.split("Audio:", 1)[0]
+    stripped = _D_SPAN_RE.sub(" ", dialogue_part)
     out += [m.group(1).strip() for m in _Q_SPAN_RE.finditer(stripped)]
     return [s for s in out if s]
 
