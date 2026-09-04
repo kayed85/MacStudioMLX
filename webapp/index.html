@@ -2667,6 +2667,11 @@
         <textarea class="composer-prompt sb-concept" id="sbConcept" rows="4"
           oninput="sbConceptInput()"
           placeholder="A retired boxer walks his old neighbourhood at dawn and remembers a fight he lost."></textarea>
+        <div style="display:flex;justify-content:flex-end;margin-top:6px;padding:0 4px 4px 0;">
+          <button type="button" class="ghost-btn" id="sbEnhanceBtn" onclick="sbEnhanceConcept()" title="Use Gemma AI to enhance your story prompt">
+            <svg class="ph" aria-hidden="true" style="margin-right:6px"><use href="#ph-sparkle-fill"/></svg>✨ Enhance Prompt / تحسين النص
+          </button>
+        </div>
       </div>
 
       <div class="cz-control" id="sbLengthRow">
@@ -2776,7 +2781,10 @@
                   aria-controls="sbRamHelpNote" title="Why?" onclick="sbToggleRamHelp()">?</button>
         </div>
         <div class="h3-winhelp" id="sbRamHelpNote" hidden></div>
-        <button type="button" class="primary" id="sbPlanBtn" onclick="sbPlan()">Plan film</button>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button type="button" class="ghost-btn" id="sbClearQueueBtn" onclick="sbClearQueueToPlan()" style="display:none;color:var(--danger);font-weight:600;font-size:12px;padding:6px 12px;" title="Clear queued jobs to release memory for film planning">Clear Queue to Plan</button>
+          <button type="button" class="primary" id="sbPlanBtn" onclick="sbPlan()">Plan film</button>
+        </div>
       </div>
     </div>
 

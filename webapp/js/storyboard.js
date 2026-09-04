@@ -1742,6 +1742,50 @@ function sbSetAspect(asp) {
   });
 }
 
+async function sbEnhanceConcept() {
+  const ta = sbEl('sbConcept');
+  if (!ta) return;
+  const original = (ta.value || '').trim();
+  if (!original) {
+    phosToast('Write a couple of sentences about your film idea first.');
+    return;
+  }
+  const btn = sbEl('sbEnhanceBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Enhancing concept…'; }
+  try {
+    const fd = new URLSearchParams({ prompt: original, mode: 't2v' });
+    const res = await (await fetch('/prompt/enhance', { method: 'POST', body: fd })).json();
+    if (res.ok && res.enhanced) {
+      ta.value = res.enhanced;
+      sbConceptInput();
+      phosToast('Concept enhanced!', { kind: 'success' });
+    } else {
+      phosToast(res.error || 'Could not enhance concept.', { kind: 'danger' });
+    }
+  } catch (e) {
+    phosToast('Error enhancing concept: ' + e, { kind: 'danger' });
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:6px"><use href="#ph-sparkle-fill"/></svg>✨ Enhance Prompt / تحسين النص';
+    }
+  }
+}
+
+async function sbClearQueueToPlan() {
+  const btn = sbEl('sbClearQueueBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Clearing…'; }
+  try {
+    const r = await (await fetch('/queue/clear', { method: 'POST' })).json();
+    phosToast(`Cleared ${r.cleared || 0} queued job(s). You can plan your film now!`, { kind: 'success' });
+  } catch (e) {
+    phosToast('Failed to clear queue: ' + e, { kind: 'danger' });
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+  if (typeof poll === 'function') poll();
+}
+
 async function sbRenderImages(only) {
   if (!SB.id) return;
   const mref = (sbEl('sb_master_ref') || {}).value || '';
@@ -2138,12 +2182,22 @@ function sbPollHook(s) {
   if (add) add.style.display = SB.boards.length ? '' : 'none';
   // Plan film is blocked while the worker is busy — constraint 1, made visible.
   const btn = sbEl('sbPlanBtn');
+  const clearBtn = sbEl('sbClearQueueBtn');
   if (btn && btn.dataset.busy !== '1') {
-    const busy = !!s.running || !!(s.queue || []).length;
+    const qlen = (s.queue || []).length;
+    const busy = !!s.running || !!qlen;
     const empty = !((sbEl('sbConcept') || {}).value || '').trim();
     btn.disabled = busy || empty;
     btn.title = busy ? 'The renderer is using the memory. Planning can start when the queue is empty.'
               : empty ? 'Write a couple of sentences about the film first.' : '';
+    if (clearBtn) {
+      if (qlen > 0) {
+        clearBtn.style.display = 'inline-flex';
+        clearBtn.textContent = `Clear Queue (${qlen}) to Plan`;
+      } else {
+        clearBtn.style.display = 'none';
+      }
+    }
   }
   if (document.body.dataset.workflow === 'storyboard' && SB.id) sbRenderRunBar(SB.payload || {});
 }
@@ -2306,7 +2360,7 @@ Object.assign(globalThis, {
   sbSetStage, sbRenderPlan, sbRenderRemaining, sbAddShot,
   sbTitleSave, sbRenderDrafts, sbFinish, sbRewrite,
   sbStopShot, sbStopFilm, sbExport, sbFilmOpen,
-  sbSetRenderMode, sbSetAspect, sbRenderImages, sbConvertShotToVideo, sbConvertAllToVideo,
+  sbSetRenderMode, sbSetAspect, sbEnhanceConcept, sbClearQueueToPlan, sbRenderImages, sbConvertShotToVideo, sbConvertAllToVideo,
   sbFilmPaint, sbBoardChip, sbRowAction, sbAddActiveToBoard,
   sbOpenFromClip, sbPollHook,
   // inline-handler targets: generated markup resolves these through the
