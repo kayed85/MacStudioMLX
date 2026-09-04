@@ -54,7 +54,11 @@
       "icon.png",
       "icon.icns",
       "required_files.json",
+      "VERSION",
       "*.py",
+      "panel/**/*",
+      "webapp/**/*",
+      "assets/**/*",
       "scripts/**/*",
       "lora_lab/**/*"
     ]

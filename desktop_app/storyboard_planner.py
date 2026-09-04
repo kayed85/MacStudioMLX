@@ -327,18 +327,25 @@ L12 A CAST CHARACTER'S APPEARANCE IS FIXED, AND YOU CANNOT SEE IT. A cast charac
     them. Do not write a sentence explaining why they look different. Give the cast
     character a role, a uniform and an action, describe everyone else exactly as the
     premise demands, and let the trained face answer the only question you left open.
-L13 NEVER WRITE SPEECH THE VIEWER CANNOT HEAR. A shot is either SPOKEN or SILENT, and you
+L13 NEVER WRITE SPEECH THE VIEWER CANNOT HEAR. A shot is SPOKEN, SUNG or SILENT, and you
     must choose one on purpose.
       SPOKEN  the exact words are in the shot, in the dialogue form: <d>[English] Move out,
               and keep to the treeline.</d> Short - one or two sentences. The words being
               present IN THAT TAG is what switches the voice on. Quotation marks are not a
               substitute: He says, "Move out" leaves the voice switched OFF and the model
               guessing. The tag, every time.
+      SUNG    the exact lyric is in the shot in the same dialogue form, and the description
+              says the character SINGS it: He sings <d>[English] Love your fate.</d> The
+              mouth then performs the lyric — this is how a music video's lip-sync shot is
+              written, and the real track is laid over the cut afterwards. Sung delivery is
+              SLOW: budget about 1.5 words per second against speech's 2.5. A "sings" or
+              "chants" with no lyric written is the same violation as a wordless "explains".
       SILENT  no speech happens at all. Then the description must not say that speech
               happens: no explains, briefs, tells, discusses, talks, orders, argues,
-              murmurs, mutters, whispers, addresses, announces - and no describing a voice
-              ("his voice low and authoritative"). The soundscape must not carry speech
-              either: no murmur, chatter, voices, conversation, talking.
+              murmurs, mutters, whispers, addresses, announces, sings, chants - and no
+              describing a voice ("his voice low and authoritative"). The soundscape must
+              not carry speech either: no murmur, chatter, voices, conversation, talking,
+              singing.
     "He explains the mission, his voice low and authoritative" with no words written is the
     worst of both: the model is told a man is speaking and given nothing to say, so it
     invents mouth noise. If the beat needs him to brief the unit, WRITE THE LINE. If it
@@ -524,9 +531,11 @@ ACID TEST before you write a shot: can a reader point at exactly one subject the
 will hold? If not, rewrite it.
 
 DURATION: 3 s for a beat or a cutaway, 5 s for one action or one short spoken line, 10 s
-only when a line genuinely needs it. Speech runs about 2.5 words per second; add one second
-of breath before the line and about one and a half seconds of silence after it, then round
-up. Never trim a line the brief gave you in order to fit a duration - lengthen the shot.
+only when a line genuinely needs it. Speech runs about 2.5 words per second; a SUNG line
+runs about 1.5 - a lyric stretches over the beat, so a sung shot needs noticeably more
+seconds than its spoken twin. Add one second of breath before the line and about one and a
+half seconds of silence after it, then round up. Never trim a line the brief gave you in
+order to fit a duration - lengthen the shot.
 
 VARIETY IS A HARD REQUIREMENT, not a preference. Before you answer, look down the list of
 "camera" values you have written: no two consecutive shots may share one, and a six-shot
@@ -665,6 +674,8 @@ Rules:
    equally-weighted moments is not a scene.
 3. WRITE THE ACTUAL LINES. Every line of dialogue is words a person says out loud, in double
    quotes, attributed by name. Never "he explains the situation" — write what he says.
+   A sung line works the same way: write the exact lyric in double quotes and mark the
+   attribution "(sings)" after the name. Never "she sings the chorus" — write the words.
 4. Spread the dialogue across the scene. Do not put every line in the first beat.
 5. Some beats have no dialogue at all. Those are where the scene breathes; say what the
    person is DOING instead.
@@ -697,7 +708,9 @@ def _screenplay_text(resp: Dict[str, Any]) -> str:
 
 
 # A beat line or an attributed line of dialogue. Anything else is chatter.
-_SCREENPLAY_LINE_RE = re.compile(r"^(?:BEAT\b|[A-Z][A-Za-z0-9 _\'-]{0,30}:)")
+# The class carries parentheses so a sung attribution — NAME (sings): "..." —
+# survives the filter; without them every lyric line was silently dropped.
+_SCREENPLAY_LINE_RE = re.compile(r"^(?:BEAT\b|[A-Z][A-Za-z0-9 _\'()-]{0,30}:)")
 
 
 def _build_screenplay_prompt(concept: str, n_shots: int, style: str,
@@ -1499,7 +1512,10 @@ _SPEECH_VERB_RE = re.compile(
     r"announc(?:es|ing)|declar(?:es|ing)|recit(?:es|ing)|narrat(?:es|ing)|"
     r"chat(?:s|ting)?|converse(?:s)?|conversing|reply|replies|replying|"
     r"answer(?:s|ing)?|ask(?:s|ing)?|shout(?:s|ing)?|call(?:s|ing) out|"
-    r"read(?:s|ing)? (?:it )?(?:aloud|out))\b", re.IGNORECASE)
+    r"read(?:s|ing)? (?:it )?(?:aloud|out))\b"
+    # SUNG counts: a singing mouth with no lyric babbles exactly like a
+    # speaking one. Bird guards keep "birds singing" scenery out of the law.
+    r"|(?<!birds )(?<!bird )\b(?:sing(?:s|ing)|chant(?:s|ing))\b", re.IGNORECASE)
 
 # Describing a voice is describing speech, even with no verb.
 _VOICE_DESC_RE = re.compile(
@@ -1552,6 +1568,10 @@ _SILENT_VERB_SWAP = (
                 r"|\baddress(?:es|ing)?\b|\brecit(?:es|ing)\b|\bnarrat(?:es|ing)\b"
                 r"|\bask(?:s|ing)?\b|\banswer(?:s|ing)?\b|\brepl(?:y|ies|ying)\b"
                 r"|\bshout(?:s|ing)?\b", re.IGNORECASE), "looks up"),
+    # A wordless singing shot must not keep the claim that a mouth carries a
+    # melody — swaying keeps the musical beat in the body instead.
+    (re.compile(r"(?<!birds )(?<!bird )\bsing(?:s|ing)\b|\bchant(?:s|ing)\b",
+                re.IGNORECASE), "sways"),
 )
 
 
@@ -2580,6 +2600,7 @@ def plan_film(
     python_exe: Optional[Any] = None,
     session: Optional[PlannerSession] = None,
     timeout_s: float = DEFAULT_TIMEOUT_S,
+    allow_fallback: bool = False,
 ) -> Dict[str, Any]:
     """Concept -> film spec that `storyboard.validate_storyboard()` accepts.
 
@@ -2745,7 +2766,7 @@ def plan_film(
             known_ids=known_ids, ref_root=ref_root, temperature=temperature,
             budget=budget, model_path=model_path, t_start=t_start,
             allow_hidden_faces=allow_hidden, locs=locs,
-            pass_warnings=pass_warnings)
+            pass_warnings=pass_warnings, allow_fallback=allow_fallback)
     finally:
         # The model is gone before this function returns, on every path including an
         # exception. Peak RSS is only final once the child has been reaped, so the
@@ -2761,7 +2782,7 @@ def _plan_with_session(sess, *, system, user, fb_mode, fb_shot, previous, valida
                        concept, n_shots, style, cast, board_id, engine, tier, duration_s,
                        seed_base, max_dim, known_ids, ref_root, temperature, budget,
                        model_path, t_start, allow_hidden_faces,
-                       locs=(), pass_warnings=()) -> Dict[str, Any]:
+                       locs=(), pass_warnings=(), allow_fallback=False) -> Dict[str, Any]:
     """The generate -> extract -> coerce -> validate -> ONE repair loop.
 
     Split out of plan_film() so the `finally:` that releases the model is three lines with
@@ -2815,13 +2836,18 @@ def _plan_with_session(sess, *, system, user, fb_mode, fb_shot, previous, valida
     try:
         resp = sess.generate(system, user, max_tokens=budget,
                              temperature=temperature, seed=seed_base % 100000)
-    except Exception as exc:
-        sys.stderr.write("[planner] model generate failed (%s) — using fallback plan\n" % exc)
-        return _fallback_plan_film(
-            concept=concept, n_shots=n_shots, style=style, cast=cast,
-            board_id=board_id, engine=engine, tier=tier, duration_s=duration_s,
-            seed_base=seed_base
-        )
+    except PlannerError as exc:
+        if allow_fallback:
+            sys.stderr.write("[planner] model generate failed (%s) — using fallback plan\n" % exc)
+            return _fallback_plan_film(
+                concept=concept, n_shots=n_shots, style=style, cast=cast,
+                board_id=board_id, engine=engine, tier=tier, duration_s=duration_s,
+                seed_base=seed_base
+            )
+        return _error("model_unavailable", str(exc),
+                      hint="Check that the planner model exists and that ltx-2-mlx/env "
+                           "has mlx-lm installed.",
+                      meta=dict(meta, elapsed_s=round(time.time() - t_start, 2)))
     meta["attempts"] = 1
     raw_text = resp.get("text") or ""
     obj = extract_json_object(raw_text)

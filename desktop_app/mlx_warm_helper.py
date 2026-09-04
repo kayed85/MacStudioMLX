@@ -145,6 +145,75 @@ def _log_memory_pressure() -> None:
         pass
 
 
+# =============================================================================
+# PER-PHASE MLX MEMORY — the number that decides whether a render fits
+# =============================================================================
+#
+# WHY THIS EXISTS
+# ---------------
+# `_log_memory_pressure()` above measures the whole MACHINE via vm_stat. That
+# answers "is this Mac under pressure", which is not the same question as
+# "which part of OUR render is the spike". H3's staged runner has printed a
+# per-phase peak since the port, and that is exactly why its memory questions
+# get answered in minutes; LTX had no equivalent, so the 2026-08 allocator-cache
+# win (a third of peak, free) was found by a global A/B rather than by looking
+# at a profile. 38.8% of the fleet renders below 48 GB, where the peak phase is
+# the difference between a finished clip and a swap storm — those users deserve
+# a log line that names the phase, and so do we.
+#
+# Peak is RESET at each phase boundary so every line is that phase's own high
+# water mark rather than a running maximum that only ever reports the worst
+# phase. The run maximum is tracked separately and emitted once at the end.
+
+_MLX_RUN_PEAK_GIB = 0.0
+
+
+def _mlx_mem_reset_run() -> None:
+    """Start a fresh per-run memory profile."""
+    global _MLX_RUN_PEAK_GIB
+    _MLX_RUN_PEAK_GIB = 0.0
+    try:
+        import mlx.core as mx                                    # noqa: PLC0415
+        mx.reset_peak_memory()
+    except Exception:                                            # noqa: BLE001
+        pass
+
+
+def _mlx_phase_mem(label: str) -> float | None:
+    """Log this phase's MLX peak, then reset so the next phase stands alone.
+
+    Returns the phase peak in GiB, or None when MLX cannot be queried (an old
+    library, or a build without the memory API) — callers treat it as optional
+    telemetry and never branch on it.
+    """
+    global _MLX_RUN_PEAK_GIB
+    try:
+        import mlx.core as mx                                    # noqa: PLC0415
+        gib = 1024.0 ** 3
+        peak = mx.get_peak_memory() / gib
+        active = mx.get_active_memory() / gib
+        cache = mx.get_cache_memory() / gib
+    except Exception:                                            # noqa: BLE001
+        return None
+    if peak > _MLX_RUN_PEAK_GIB:
+        _MLX_RUN_PEAK_GIB = peak
+    emit({"event": "log",
+          "line": f"[mlx] {label}: peak {peak:.2f} GiB · active {active:.2f} · cache {cache:.2f}"})
+    try:
+        mx.reset_peak_memory()
+    except Exception:                                            # noqa: BLE001
+        pass
+    return peak
+
+
+def _mlx_mem_summary() -> float:
+    """Emit the whole run's peak — the one number a Compact Mac cares about."""
+    if _MLX_RUN_PEAK_GIB > 0:
+        emit({"event": "log",
+              "line": f"[mlx] run peak {_MLX_RUN_PEAK_GIB:.2f} GiB"})
+    return _MLX_RUN_PEAK_GIB
+
+
 def _aggressive_cleanup_before_generate() -> None:
     """Minimize Metal heap fragmentation before pipeline generation."""
     try:
@@ -152,6 +221,101 @@ def _aggressive_cleanup_before_generate() -> None:
         _ac()
     except Exception:
         pass
+
+
+# =============================================================================
+# A2V AUDIO ADHESION — the slider that was never connected (on the Q8 path)
+# =============================================================================
+#
+# The panel has shipped an "Audio conditioning strength" control (0.5-5.0,
+# "Higher = stronger audio adhesion") since A2V landed. On the Q8 two-stage
+# path the engine has never had a parameter by that name: the vendored
+# `A2VidPipelineTwoStage.generate_and_save()` does not accept
+# `audio_conditioning_scale`, so `_filter_unsupported_kwargs` DROPPED it on
+# every render. Verified by introspection, not by reading:
+#
+#     DROPPED every a2v render: ['audio_conditioning_scale']
+#
+# The real knob there is `modality_scale` on MultiModalGuiderParams — "how
+# strongly the model reacts to the modality perturbation" — and
+# `_denoise_stage1` hardcodes it: video 3.0, audio bare default. Nobody had
+# ever swept it, because the control that looked like it did was inert.
+#
+# The Q4 distilled path is DIFFERENT and this patch must stay away from it:
+# `A2VidDistilledPipeline` (local a2vid_distilled.py) natively accepts
+# `audio_conditioning_scale` (it amplifies the audio tokens before the DiT)
+# and its overridden generate_and_save uses plain `denoise_loop` — no
+# guiders, so no `modality_scale` exists on that path at all. The distilled
+# branch passes the kwarg through natively and does not touch this state.
+#
+# Patched here rather than in the vendored engine so it costs no fork tag and
+# an older pipeline simply keeps its own defaults.
+# Holder dict, not a module global: the a2v branch lives deep inside the
+# main loop where a `global` statement collides with earlier assignments.
+_A2V_STATE = {"modality_scale": None}
+
+
+def _a2v_modality_scale_value(raw):
+    """Parse the slider off the job params: '14.0' -> 14.0; ''/None/0/'0'/
+    garbage/negative -> None (= keep the engine's own 3.0 default)."""
+    try:
+        value = float(raw or 0)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _a2v_stage1_guider_params(guider_params_cls, cfg_scale, stg_scale):
+    """The (video, audio) guider params for a2v stage 1, exactly as the
+    vendored `_denoise_stage1` builds them — except `modality_scale` reads
+    `_A2V_STATE` instead of the hardcoded 3.0. Split out so the test suite
+    can drive the real MultiModalGuiderParams class through it."""
+    ms = _A2V_STATE.get("modality_scale")
+    ms = 3.0 if ms is None else float(ms)
+    video_gp = guider_params_cls(cfg_scale=cfg_scale, stg_scale=stg_scale,
+                                 rescale_scale=0.7, modality_scale=ms,
+                                 stg_blocks=[28])
+    audio_gp = guider_params_cls()
+    return video_gp, audio_gp
+
+
+def _install_a2v_modality_patch() -> bool:
+    """Make `_denoise_stage1` read `_A2V_STATE['modality_scale']`. Idempotent."""
+    try:
+        from ltx_pipelines_mlx.a2vid_two_stage import (             # noqa: PLC0415
+            A2VidPipelineTwoStage as _P,
+        )
+        from ltx_core_mlx.components.guiders import (               # noqa: PLC0415
+            MultiModalGuiderParams as _GP,
+            create_multimodal_guider_factory as _mk,
+        )
+        from ltx_pipelines_mlx.utils.samplers import (               # noqa: PLC0415
+            guided_denoise_loop as _loop,
+        )
+    except Exception:                                                # noqa: BLE001
+        return False
+    if getattr(_P, "_phos_modality_patched", False):
+        return True
+
+    def _denoise_stage1(self, x0_model, video_state, audio_state, video_embeds,
+                        audio_embeds, neg_video_embeds, neg_audio_embeds,
+                        sigmas, cfg_scale=3.0, stg_scale=1.0):
+        video_gp, audio_gp = _a2v_stage1_guider_params(_GP, cfg_scale, stg_scale)
+        # Build the factories BEFORE the flush, exactly as upstream does — the
+        # flush frees memory and the original ordering is part of its contract.
+        video_factory = _mk(video_gp, negative_context=neg_video_embeds)
+        audio_factory = _mk(audio_gp, negative_context=neg_audio_embeds)
+        self._pre_denoise_flush(video_state, audio_state)
+        return _loop(
+            model=x0_model, video_state=video_state, audio_state=audio_state,
+            video_text_embeds=video_embeds, audio_text_embeds=audio_embeds,
+            video_guider_factory=video_factory,
+            audio_guider_factory=audio_factory,
+            sigmas=sigmas)
+
+    _P._denoise_stage1 = _denoise_stage1
+    _P._phos_modality_patched = True
+    return True
 
 
 def _apply_vae_streaming_decision(num_frames: int) -> None:
@@ -1046,6 +1210,45 @@ _t2v_model_dir: str | None = None
 _i2v_model_dir: str | None = None
 
 
+def _install_gemma_model_not_loaded_patch() -> None:
+    """Ensure PromptEncoder.load() reloads GemmaLanguageModel if _model is None,
+    preventing 'Model not loaded. Call load() first.' runtime crashes.
+    """
+    try:
+        import ltx_pipelines_mlx.utils.blocks as _blocks
+        import ltx_core_mlx.text_encoders.gemma.encoders.base_encoder as _base_enc
+
+        _orig_load = _blocks.PromptEncoder.load
+
+        def _guarded_load(self):
+            if self._text_encoder is None or getattr(self._text_encoder, "_model", None) is None:
+                self._text_encoder = _base_enc.GemmaLanguageModel()
+                self._text_encoder.load(self.gemma_model_id)
+            return _orig_load(self)
+
+        _blocks.PromptEncoder.load = _guarded_load
+
+        _orig_tokenize = _base_enc.GemmaLanguageModel.tokenize
+
+        def _guarded_tokenize(self, text, max_length=1024):
+            if self._tokenizer is None and getattr(self, "_model_path", None):
+                self.load(self._model_path)
+            return _orig_tokenize(self, text, max_length)
+
+        _base_enc.GemmaLanguageModel.tokenize = _guarded_tokenize
+
+        _orig_get_all = _base_enc.GemmaLanguageModel.get_all_hidden_states
+
+        def _guarded_get_all(self, token_ids, attention_mask=None):
+            if self._model is None and getattr(self, "_model_path", None):
+                self.load(self._model_path)
+            return _orig_get_all(self, token_ids, attention_mask=attention_mask)
+
+        _base_enc.GemmaLanguageModel.get_all_hidden_states = _guarded_get_all
+    except Exception:
+        pass
+
+
 def get_pipe(kind: str, loras: list[dict] | None = None,
              model_dir: str | None = None,
              dev_transformer: str | None = None):
@@ -1116,6 +1319,7 @@ def get_pipe(kind: str, loras: list[dict] | None = None,
     _install_lora_fusion_patches()
     _install_video_decoder_patch()  # fps/frame_rate kwarg shim
     _install_a2v_frame_rate_patch()  # A2V missing frame_rate= on combined_image_conditionings
+    _install_gemma_model_not_loaded_patch()
 
     fp = _lora_fingerprint(loras)
 
@@ -1618,8 +1822,9 @@ def get_gemma_lm():
             # transformer is ~12-19 GB, having both resident risks pushing
             # us past 64 GB on standard tier.
             release_pipelines(keep_kind=None)
-            _gemma_lm = GemmaLanguageModel()
-            _gemma_lm.load(target_path)
+            _candidate = GemmaLanguageModel()
+            _candidate.load(target_path)
+            _gemma_lm = _candidate
         emit({"event": "log", "line": "Gemma loaded — subsequent enhances will be fast."})
     return _gemma_lm
 
@@ -2438,6 +2643,128 @@ emit({"event": "log",
                f"chip={_RUNTIME_ENV.get('chip')} | "
                f"macOS={_RUNTIME_ENV.get('macos')} ({_RUNTIME_ENV.get('arch')})")})
 
+# ---- MLX allocator cache policy ---------------------------------------------
+# MLX does not return freed Metal buffers to the driver; it keeps them in an
+# allocator cache so the next same-size allocation is free. The CEILING on that
+# cache is derived from the MACHINE, not the workload — MLX defaults it to
+# `0.95 * hw.memsize`, about 61 GB on a 64 GB Mac. Phosphene set no cache policy
+# at all, so a five-second clip's cache grew until it was near the machine's
+# ceiling and the footprint the render reported had nothing to do with what a
+# five-second clip needs. (`_base.py` and `a2vid_distilled.py` call
+# `set_cache_limit(0)`, but only on the low-memory/streaming paths the warm
+# helper does not take.)
+#
+# The cap is a FRACTION OF PHYSICAL RAM, so it scales with the Mac the way the
+# capability tiers do: ONE EIGHTH, floored at 2 GiB, ceilinged at 8 GiB.
+#
+#     16 GiB Compact      -> 2 GiB        64 GiB Comfortable -> 8 GiB
+#     32 GiB Compact      -> 4 GiB        96 GiB Roomy       -> 8 GiB (ceiling)
+#     48 GiB Comfortable  -> 6 GiB       128 GiB Studio      -> 8 GiB (ceiling)
+#
+# MEASURED, not chosen — mlx 0.31.1 (this repo's pin), Q4 768x432 121f, same
+# prompt and seed, `/usr/bin/time -l` peak memory footprint:
+#
+#     no cap (what shipped) ....... 25.53 GB / 71.45 s
+#     16 GB cap ................... 23.15 GB / 71.78 s
+#     8 GiB cap (THIS policy) ..... 16.50 GB / 68.84 s
+#
+# and Q8 1024x576 121f at the 48 GiB Comfortable tier's own ceiling, where the
+# policy asks for 6 GiB: 39.49 GB / 139.84 s -> 25.39 GB / 138.71 s. So about a
+# THIRD of the peak footprint goes away on both, and the wall time does not pay
+# for it. Output is sha256-identical to the uncapped render in both cases
+# (144da74a... and f47d4dc8...): the cap changes the allocator's bookkeeping,
+# never the arithmetic.
+#
+# The CEILING is measured too, not taste: on mlx 0.32.1, 8 GB -> 16 GB of cache
+# bought 0.5 s and cost 7.7 GB of footprint. So is the FLOOR: a cache of zero
+# gives back the most memory of all but pays ~1% wall, which makes it the
+# override, not the default.
+#
+# Override: `LTX_MLX_CACHE_GIB` — a number in GiB, `0` for no cache at all,
+# `off` to restore MLX's machine-sized default (the pre-policy behaviour).
+# Unset / empty / `auto` runs the policy. An unparseable value runs the policy
+# rather than failing a render over a typo in an env var.
+MLX_CACHE_RAM_DIVISOR = 8
+MLX_CACHE_FLOOR_BYTES = 2 * 1024**3
+MLX_CACHE_CEIL_BYTES = 8 * 1024**3
+
+
+def mlx_cache_limit_bytes(total_ram_bytes: int, override: str | None = None) -> int | None:
+    """Bytes MLX may hold in its allocator cache. `None` = leave MLX's default.
+
+    Pure on purpose: the policy for a 16 GB Mac has to be assertable from a
+    64 GB one, and the tier table this was measured against is a simulation of
+    exactly this number.
+    """
+    raw = (override or "").strip().lower()
+    if raw in ("off", "default", "unset"):
+        return None
+    if raw and raw != "auto":
+        try:
+            gib = float(raw)
+        except ValueError:
+            gib = -1.0
+        if gib >= 0:
+            return int(gib * 1024**3)
+        # Unparseable: fall through to the policy.
+    if total_ram_bytes <= 0:
+        # sysctl failed. Take the smallest cap rather than the machine's.
+        return MLX_CACHE_FLOOR_BYTES
+    return max(MLX_CACHE_FLOOR_BYTES,
+               min(MLX_CACHE_CEIL_BYTES, int(total_ram_bytes) // MLX_CACHE_RAM_DIVISOR))
+
+
+def _physical_ram_bytes() -> int:
+    try:
+        import subprocess as _sp
+        out = _sp.run(["sysctl", "-n", "hw.memsize"],
+                      capture_output=True, text=True, timeout=3).stdout.strip()
+        return int(out)
+    except Exception:
+        return 0
+
+
+_MLX_CACHE_RAM_BYTES = _physical_ram_bytes()
+_MLX_CACHE_LIMIT = mlx_cache_limit_bytes(
+    _MLX_CACHE_RAM_BYTES, os.environ.get("LTX_MLX_CACHE_GIB"))
+_MLX_CACHE_ANNOUNCED = False
+
+
+def apply_mlx_cache_policy() -> None:
+    """Set — or RE-assert — the allocator cache cap. Cheap and idempotent.
+
+    Re-asserted before every render, not only at startup, because the pipelines
+    move it themselves: the low-memory and streaming paths call
+    `mx.set_cache_limit(0)` and never put it back, so a policy applied once at
+    boot would silently become "no cache" for the rest of a warm helper's life
+    after a single A2V job.
+    """
+    global _MLX_CACHE_ANNOUNCED
+    if _MLX_CACHE_LIMIT is None:
+        return
+    try:
+        import mlx.core as mx
+        mx.set_cache_limit(int(_MLX_CACHE_LIMIT))
+    except Exception as exc:                          # noqa: BLE001
+        if not _MLX_CACHE_ANNOUNCED:
+            _MLX_CACHE_ANNOUNCED = True
+            emit({"event": "log",
+                  "line": f"[mlx] cache policy not applied: {exc}"})
+        return
+    if not _MLX_CACHE_ANNOUNCED:
+        _MLX_CACHE_ANNOUNCED = True
+        _ram_gib = _MLX_CACHE_RAM_BYTES / 1024**3
+        _default_gib = 0.95 * _ram_gib
+        emit({"event": "log",
+              "line": (f"[mlx] allocator cache capped at "
+                       f"{_MLX_CACHE_LIMIT / 1024**3:.1f} GiB "
+                       f"(1/{MLX_CACHE_RAM_DIVISOR} of {_ram_gib:.0f} GiB RAM; "
+                       f"MLX would default to {_default_gib:.1f} GiB here)")})
+
+
+apply_mlx_cache_policy()
+
+
 def _live_preview_supported() -> bool:
     """Does the INSTALLED engine carry the live-preview module?
 
@@ -2474,8 +2801,15 @@ emit({
     # explanation. The panel can only tell the user the truth if the helper
     # tells the panel.
     "live_preview_supported": _live_preview_supported(),
+    "gemma4_tower_supported": (
+        importlib.util.find_spec("ltx_core_mlx.text_encoders.gemma.gemma4")
+        is not None),
     "mlx_version": _RUNTIME_ENV.get("mlx"),
     "mlx_metal_version": _RUNTIME_ENV.get("mlx_metal"),
+    # None when the policy is off (LTX_MLX_CACHE_GIB=off) — i.e. MLX's own
+    # machine-sized default, which is what every install ran before v4.7.
+    "mlx_cache_limit_gib": (None if _MLX_CACHE_LIMIT is None
+                            else round(_MLX_CACHE_LIMIT / 1024**3, 3)),
     "chip": _RUNTIME_ENV.get("chip"),
     "macos": _RUNTIME_ENV.get("macos"),
 })
@@ -2510,6 +2844,13 @@ for line in sys.__stdin__:
         emit({"event": "pong"})
         continue
 
+    # THE OTHER choke point, same reason as the one above: the MLX allocator
+    # cache cap is re-asserted here rather than in each generate_* lane,
+    # because the pipelines drop it to zero on their low-memory paths and a
+    # lane added tomorrow would otherwise inherit whatever the last job left.
+    if isinstance(action, str) and action.startswith(("generate", "extend")):
+        apply_mlx_cache_policy()
+
     if action == "generate":
         job_id = msg.get("id", "?")
         p = msg.get("params", {}) or {}
@@ -2525,6 +2866,7 @@ for line in sys.__stdin__:
         _is_busy = True
         try:
             t0 = time.time()
+            _mlx_mem_reset_run()
             # Granular breadcrumbs so a silent helper death is traceable:
             # if the panel's last log line is "step:get_pipe" then we died
             # during pipeline init (likely OOM or weight-load issue). If
@@ -2551,6 +2893,12 @@ for line in sys.__stdin__:
                             model_dir=p.get("model_dir"))
             emit({"event": "log", "line": "step:get_pipe done"})
             _log_memory_pressure()
+            # NOT "weights": measured on a live 4.7.0 render, this reads
+            # 0.00 GiB because `get_pipe` is lazy — the pack is faulted in
+            # during generate, so its residency lands in the denoise figure.
+            # Labelling it "weights" would have every reader conclude the
+            # model is free.
+            _mlx_phase_mem("pipeline init")
             accel_mode = configure_acceleration(p.get("accel", "off"))
             negative_prompt = _clean_text(p.get("negative_prompt"))
             effective_prompt = _prompt_with_soft_negative(p["prompt"], negative_prompt)
@@ -2646,6 +2994,7 @@ for line in sys.__stdin__:
                 # Step 1: generate latents (no save)
                 video_latent, audio_latent = _generate_latents(pipe, needs_image=needs_image, kwargs=kwargs)
                 emit({"event": "log", "line": "step:generate done"})
+                _mlx_phase_mem("denoise")
                 # Free DiT + text encoder before the upscale + VAE decode peak.
                 emit({"event": "log", "line": "step:free_generation_modules start"})
                 _free_pipe_for_decode(pipe)
@@ -2654,6 +3003,7 @@ for line in sys.__stdin__:
                 emit({"event": "log", "line": "step:latent_upscale_x2 start"})
                 video_latent = _model_upscale_video_latent(pipe, video_latent)
                 emit({"event": "log", "line": f"step:latent_upscale_x2 done — latent {video_latent.shape[-2]}×{video_latent.shape[-1]}"})
+                _mlx_phase_mem("latent upscale")
                 # Free the upscaler before VAE decode (can be ~2-3 GB peak).
                 _free_upscaler()
                 # Step 3: VAE decode + save (decoder loads inside _decode_and_save_video).
@@ -2664,11 +3014,14 @@ for line in sys.__stdin__:
                 # panel's wait_done while MLX tears down ~10 GB of Metal
                 # buffers + lazy graph nodes synchronously.
                 emit({"event": "log", "line": "step:decode_and_save done"})
+                _mlx_phase_mem("decode+save")
+                _mlx_mem_summary()
             _aggressive_cleanup_before_generate()
             if not use_model_upscale:
                 emit({"event": "log", "line": f"step:generate mode={mode} {kwargs['width']}x{kwargs['height']} {kwargs['num_frames']}f @{kwargs['frame_rate']:.1f}fps steps={kwargs['num_steps']} accel={accel_mode}"})
                 video_latent, audio_latent = _generate_latents(pipe, needs_image=needs_image, kwargs=kwargs)
                 emit({"event": "log", "line": "step:generate done"})
+                _mlx_phase_mem("denoise")
                 emit({"event": "log", "line": "step:free_generation_modules start"})
                 _free_pipe_for_decode(pipe)
                 emit({"event": "log", "line": "step:free_generation_modules done"})
@@ -2687,6 +3040,8 @@ for line in sys.__stdin__:
                 # FIX 2026-05-14: upstream renamed fps= → frame_rate= (keyword-only).
                 out_path = pipe._decode_and_save_video(video_latent, audio_latent, kwargs["output_path"], frame_rate=kwargs["frame_rate"])
                 emit({"event": "log", "line": "step:decode_and_save done"})
+                _mlx_phase_mem("decode+save")
+                _mlx_mem_summary()
             elapsed = round(time.time() - t0, 2)
             _last_activity = time.time()
             done_event = {
@@ -2740,6 +3095,19 @@ for line in sys.__stdin__:
                 emit({"event": "stopped", "id": job_id, "reason": str(exc),
                       "exit_code": 75})
             else:
+                # DROP THE WARM PIPELINE ON REAL FAILURES TOO. The abort
+                # branch above learned this lesson first: an exception can
+                # leave the pipeline (or a half-loaded encoder) mid-state,
+                # and the helper's job is to keep such objects alive for the
+                # NEXT job — which then inherits the wreckage and fails with
+                # a misleading second-order error ("Model not loaded. Call
+                # load() first.", 14 fleet events). One pipeline reload
+                # (~7 s) is the price of a clean slate after any failure.
+                try:
+                    with _pipe_lock:
+                        release_pipelines(None)
+                except Exception:
+                    pass
                 emit({"event": "error", "id": job_id, "error": str(exc),
                       "trace": traceback.format_exc()})
         finally:
@@ -2763,6 +3131,7 @@ for line in sys.__stdin__:
         _is_busy = True
         try:
             t0 = time.time()
+            _mlx_mem_reset_run()
             configure_acceleration("off")
             # Extend supports LoRAs via the same _pending_loras hook;
             # the dev transformer picks them up at load time just like T2V/I2V.
@@ -2868,6 +3237,7 @@ for line in sys.__stdin__:
         _is_busy = True
         try:
             t0 = time.time()
+            _mlx_mem_reset_run()
             configure_acceleration("off")
             # LoRAs flow through the same wire shape as t2v/i2v. HQ is the
             # only path where dev-base character LoRAs actually transfer
@@ -3061,6 +3431,7 @@ for line in sys.__stdin__:
         _is_busy = True
         try:
             t0 = time.time()
+            _mlx_mem_reset_run()
             configure_acceleration("off")
             num_frames = int(p["frames"])
 
@@ -3178,6 +3549,7 @@ for line in sys.__stdin__:
         _is_busy = True
         try:
             t0 = time.time()
+            _mlx_mem_reset_run()
             configure_acceleration("off")
             audio_path = p.get("audio_path") or ""
             if not audio_path:
@@ -3205,6 +3577,18 @@ for line in sys.__stdin__:
                 stg_scale=float(p.get("stg_scale", 1.0)),
                 audio_start_time=float(p.get("audio_start_time", 0.0)),
             )
+            # Route the "Audio conditioning strength" slider to the knob that
+            # exists. It was sent for years as an `audio_conditioning_scale`
+            # kwarg that `generate_and_save` does not accept, so the signature
+            # filter dropped it on EVERY render. The real control is
+            # `modality_scale` on the stage-1 video guider, hardcoded to 3.0.
+            _A2V_STATE["modality_scale"] = _a2v_modality_scale_value(
+                p.get("audio_conditioning_scale"))
+            if _A2V_STATE["modality_scale"] is not None:
+                ok = _install_a2v_modality_patch()
+                emit({"event": "log",
+                      "line": f"[a2v] audio adhesion modality_scale="
+                              f"{_A2V_STATE['modality_scale']:.2f} (patched={ok})"})
             # Optional reference image — when present, conditions frame 0
             # so the audio-driven generation opens on the user's still.
             ref_image = p.get("image") or None
@@ -3286,6 +3670,7 @@ for line in sys.__stdin__:
         _is_busy = True
         try:
             t0 = time.time()
+            _mlx_mem_reset_run()
             configure_acceleration("off")
             audio_path = p.get("audio_path") or ""
             if not audio_path:
@@ -3307,7 +3692,13 @@ for line in sys.__stdin__:
                 stage1_steps=int(p.get("stage1_steps", 8)),
                 stage2_steps=int(p.get("stage2_steps", 3)),
                 audio_start_time=float(p.get("audio_start_time", 0.0)),
-                audio_conditioning_scale=float(p.get("audio_conditioning_scale", 1.0)),
+                # NATIVE here, unlike the Q8 path: A2VidDistilledPipeline
+                # accepts this kwarg and amplifies the audio tokens with it
+                # before the DiT. Its denoise is plain `denoise_loop` — no
+                # guiders — so the modality_scale patch has nothing to drive
+                # on this path and must not claim otherwise in the log.
+                audio_conditioning_scale=float(
+                    p.get("audio_conditioning_scale") or 1.0),
             )
             ref_image = p.get("image") or None
             if ref_image:
@@ -3372,6 +3763,7 @@ for line in sys.__stdin__:
         _is_busy = True
         try:
             t0 = time.time()
+            _mlx_mem_reset_run()
             configure_acceleration("off")
             from ltx_pipelines_mlx.hdr_ic_lora import HDRICLoraPipeline
             loras = p.get("loras") or []
@@ -3484,6 +3876,7 @@ for line in sys.__stdin__:
         _is_busy = True
         try:
             t0 = time.time()
+            _mlx_mem_reset_run()
             configure_acceleration("off")
             from ltx_pipelines_mlx.ic_lora import ICLoraPipeline
             loras = p.get("loras") or []
@@ -3637,6 +4030,7 @@ for line in sys.__stdin__:
         _is_busy = True
         try:
             t0 = time.time()
+            _mlx_mem_reset_run()
             lm = None
             try:
                 lm = get_gemma_lm()

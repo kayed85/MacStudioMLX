@@ -37,7 +37,7 @@ Toggle:
                                           detail-recovery layers alive.
 
 Pin contract:
-  This patch is line-targeted against `mflux==0.17.5`. Bumping mflux
+  This patch is line-targeted against `mflux==0.18.0`. Bumping mflux
   WITHOUT re-validating this patch will silently break: either the patch
   marker is already present and we skip (potentially leaving the new
   mflux running unaccelerated) or our text-search fails and the install
@@ -269,7 +269,7 @@ def _patch_qwen() -> int:
         return 0
     if QWEN_LOOP_OLD not in src:
         print(f"[qwen] {target.name}: target loop NOT FOUND — mflux version drift?")
-        print(f"       Pin contract: this script targets mflux==0.17.5.")
+        print(f"       Pin contract: this script targets mflux==0.18.0.")
         print(f"       Either bump the pin + re-validate this script, or skip.")
         return 1
     if QWEN_HELPER_INSERT_AFTER not in src:

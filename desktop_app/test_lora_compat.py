@@ -469,11 +469,21 @@ class AGreenTallyIsNotProof(unittest.TestCase):
         import mlx_ltx_panel as panel
         self.assertIn("ungraded", panel.TRAIN_PRESETS["quick"]["subtitle"])
         self.assertIn("ungraded", panel.TRAIN_PRESETS["medium"]["subtitle"])
-        self.assertNotIn("ungraded", panel.TRAIN_PRESETS["high"]["subtitle"])
-        self.assertIn("validated", panel.TRAIN_PRESETS["high"]["subtitle"])
+        if panel.TRAIN_PROFILE.get("compact"):
+            self.assertIn("NOT the rank-32 recipe", panel.TRAIN_PRESETS["high"]["subtitle"])
+            self.assertIn("ungraded", panel.TRAIN_PRESETS["high"]["subtitle"])
+        else:
+            self.assertNotIn("ungraded", panel.TRAIN_PRESETS["high"]["subtitle"])
+            self.assertIn("validated", panel.TRAIN_PRESETS["high"]["subtitle"])
 
     def test_the_trainer_event_is_read_and_a_weak_run_is_not_a_plain_done(self):
-        src = (Path(__file__).resolve().parent / "mlx_ltx_panel.py").read_text()
+        root = Path(__file__).resolve().parent
+        # Server source + the page (webapp/index.html since slice 2 of
+        # the extraction — docs/ARCHITECTURE.md): the asserts span both.
+        src = (root / "mlx_ltx_panel.py").read_text() + "\n" + (
+            root / "webapp" / "index.html").read_text()
+        for _m in sorted((root / "webapp" / "js").glob("*.js")):
+            src += "\n" + _m.read_text()
         self.assertIn('elif evt == "adapter_strength":', src)
         self.assertIn("[train] adapter strength: delta_rms", src)
         self.assertIn("delta_rms_median", src)
@@ -481,6 +491,133 @@ class AGreenTallyIsNotProof(unittest.TestCase):
         # ...and the job carries the warning rather than reporting success.
         self.assertIn('job["warning"]', src)
         self.assertIn('if train_verdict not in ("ok", "unknown"):', src)
+
+
+class TheDefaultIsTheRecommendation(unittest.TestCase):
+    """#62: the Train tab both pre-selected AND badged "Recommended" on Quick,
+    which trains at rank 8 — the one tier that has never carried a face. Two
+    users walked into it. Deleting the badge and leaving Quick pre-selected
+    would have fixed nothing: to most people the default IS the recommendation.
+    """
+
+    def test_character_recommends_and_defaults_to_the_graded_recipe(self):
+        import mlx_ltx_panel as panel
+        self.assertEqual(panel.TRAIN_DEFAULT_PRESET["character"], "high")
+        # Style is what rank 8/16 is genuinely good at — a look, cheaply.
+        self.assertEqual(panel.TRAIN_DEFAULT_PRESET["style"], "quick")
+
+    def test_the_pill_that_is_preselected_is_the_pill_that_is_badged(self):
+        root = Path(__file__).resolve().parent
+        # Server source + the page (webapp/index.html since slice 2 of
+        # the extraction — docs/ARCHITECTURE.md): the asserts span both.
+        src = (root / "mlx_ltx_panel.py").read_text() + "\n" + (
+            root / "webapp" / "index.html").read_text()
+        for _m in sorted((root / "webapp" / "js").glob("*.js")):
+            src += "\n" + _m.read_text()
+        pills = [ln for ln in src.splitlines() if "data-train-preset=" in ln]
+        self.assertEqual(len(pills), 3, pills)
+        quick = next(p for p in pills if 'data-train-preset="quick"' in p)
+        high = next(p for p in pills if 'data-train-preset="high"' in p)
+        # Quick is no longer pre-selected and its badge slot ships hidden.
+        self.assertNotIn("pill-btn active", quick)
+        self.assertIn("data-rec-slot hidden", quick)
+        # High is pre-selected and carries the visible badge.
+        self.assertIn("pill-btn active", high)
+        self.assertIn("<span class=\"rec-badge\" data-rec-slot>", high)
+        # And the badge follows the server's table at runtime rather than
+        # being nailed to one pill, so pill and make_job cannot drift.
+        self.assertIn("function trainRecommendedPreset()", src)
+        self.assertIn("train_default_preset", src)
+
+    def test_quick_says_what_it_is_for_rather_than_only_that_it_is_fast(self):
+        import mlx_ltx_panel as panel
+        if panel.TRAIN_PROFILE.get("compact"):
+            self.assertIn("identity ungraded", panel.TRAIN_PRESETS["quick"]["subtitle"])
+        else:
+            self.assertIn("a look, not a face",
+                          panel.TRAIN_PRESETS["quick"]["subtitle"])
+
+
+class TheSub64GbHighIsNotTheGradedRecipe(unittest.TestCase):
+    """`_select_train_profile` rewrites the whole preset table under 64 GB.
+    "High" there is rank 8 / 500 steps / 448px on HALF the projections — less
+    adapter than the >=64 GB *Quick* that has measured 1.54e-04 and 1.98e-04.
+    Telling those users "just use High" would be advice their Mac cannot
+    honour, so the table and the advice both have to say so.
+    """
+
+    def setUp(self):
+        import copy
+        import mlx_ltx_panel as panel
+        self._panel = panel
+        self._saved = (copy.deepcopy(panel.TRAIN_PRESETS),
+                       copy.deepcopy(panel.TRAIN_STYLE_PRESETS),
+                       copy.deepcopy(panel.TRAIN_PROFILE))
+
+    def tearDown(self):
+        panel = self._panel
+        panel.TRAIN_PRESETS.clear()
+        panel.TRAIN_PRESETS.update(self._saved[0])
+        panel.TRAIN_STYLE_PRESETS.clear()
+        panel.TRAIN_STYLE_PRESETS.update(self._saved[1])
+        panel.TRAIN_PROFILE = self._saved[2]
+
+    def test_high_on_a_48gb_mac_is_rank_8_on_two_projections(self):
+        panel = self._panel
+        profile = panel._select_train_profile(48.0, "compact")
+        self.assertTrue(profile["compact"])
+        high = panel.TRAIN_PRESETS["high"]
+        self.assertEqual(high["rank"], 8)
+        self.assertEqual(high["max_steps"], 500)
+        self.assertEqual(high["resolution"], 448)
+        self.assertEqual(high["target_modules"], ["to_q", "to_v"])
+        # The graded recipe is rank 32 on all four projections. Nothing in
+        # this table reaches it, so the pill has to stop implying it does.
+        self.assertIn("NOT the rank-32 recipe", high["subtitle"])
+        for key in ("quick", "medium", "high"):
+            self.assertIn("ungraded", panel.TRAIN_PRESETS[key]["subtitle"])
+
+    def test_the_advice_does_not_tell_a_48gb_mac_to_use_high(self):
+        panel = self._panel
+        panel.TRAIN_PROFILE = panel._select_train_profile(48.0, "compact")
+        advice = panel._train_weak_advice("weak", "high", False)
+        self.assertIn("compact profile", advice)
+        self.assertNotIn("Train again on the High preset", advice)
+
+
+class AVerdictWithoutARemedyIsNotAnAnswer(unittest.TestCase):
+    """The number shipped in v4.6.0 and was correct; a first-time user still
+    had to read a 21-comment GitHub thread to learn what his own 1.98e-04
+    meant for him. The remedy travels with the verdict now."""
+
+    def test_a_weak_quick_run_is_told_to_train_on_high(self):
+        import mlx_ltx_panel as panel
+        advice = panel._train_weak_advice("weak", "quick", False)
+        self.assertIn("High", advice)
+        self.assertIn("rank 8", advice)
+
+    def test_inert_is_a_failed_run_not_a_weak_one(self):
+        import mlx_ltx_panel as panel
+        advice = panel._train_weak_advice("inert", "high", False)
+        self.assertIn("no weight delta at all", advice)
+        self.assertIn("failed", advice)
+
+    def test_the_library_carries_the_remedy_and_the_ui_renders_it(self):
+        root = Path(__file__).resolve().parent
+        # Server source + the page (webapp/index.html since slice 2 of
+        # the extraction — docs/ARCHITECTURE.md): the asserts span both.
+        src = (root / "mlx_ltx_panel.py").read_text() + "\n" + (
+            root / "webapp" / "index.html").read_text()
+        for _m in sorted((root / "webapp" / "js").glob("*.js")):
+            src += "\n" + _m.read_text()
+        # /train/list ships the remedy beside the verdict...
+        self.assertIn('"adapter_advice"', src)
+        # ...the trained-LoRA list renders both...
+        self.assertIn("function trainRenderVerdictBanner(", src)
+        self.assertIn("train-lora-verdict", src)
+        # ...and a job that finished WEAK no longer reads as a plain "done"
+        # in the history row.
+        self.assertIn("warn-inline", src)
 
 
 if __name__ == "__main__":

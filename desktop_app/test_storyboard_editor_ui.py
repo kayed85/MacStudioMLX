@@ -62,7 +62,7 @@ FUNCTIONS = (
     "sbeAdoptGaps", "sbeLayout",
     "sbeFilmDuration", "sbeClipAt", "sbeHoles", "sbeBeatGrid",
     "sbeGridIsAGuess", "sbeSnapTime", "sbeById", "sbeMoveTo", "sbeTrim",
-    "sbeRippleDelete", "sbeSplitAt", "sbeNewId", "sbePlaceUnplaced",
+    "sbeRippleDelete", "sbeLiftDelete", "sbeSplitAt", "sbeNewId", "sbePlaceUnplaced",
     "sbeCleanClip", "sbeSaveBody", "sbeErrorsByClip", "sbeDecodePeaks",
     "sbeFmtTime", "sbeMutate", "sbeUndo", "sbeRedo", "sbeSave",
     # Wave 2 — kinds, the one adjustment, and the drop maths.
@@ -435,6 +435,17 @@ out.ripple = shape(r.clips);
 out.rippleLengths = lengthsAgree(r.clips);
 cs = lay([clip({ id: 'a', end: 2, locked: true })]);
 out.rippleLocked = sbeRippleDelete(cs, 'a').why;
+
+// ---- lift: the shot leaves, ITS HOLE STAYS, nothing downstream moves ------
+cs = lay([clip({ id: 'a', end: 2 }), clip({ id: 'b', end: 3 }), clip({ id: 'c', end: 1.5 })]);
+out.liftWindowsBefore = cs.map(c => [c.id, c.film_start, c.film_end]);
+r = sbeLiftDelete(cs, 'b');
+out.liftWindows = r.clips.map(c => [c.id, c.film_start, c.film_end]);
+out.liftKinds = r.clips.map(c => sbeKind(c));
+out.liftLengths = lengthsAgree(r.clips);
+out.liftHole = (() => { const h = sbeById(r.clips, 'b'); return [h.path, h.proxy, h.source]; })();
+out.liftLocked = sbeLiftDelete(lay([clip({ id: 'a', end: 2, locked: true })]), 'a').why;
+out.liftTwice = sbeLiftDelete(r.clips, 'b').why;
 
 cs = lay([clip({ id: 'a', end: 2 }), clip({ id: 'b', end: 3 })]);
 r = sbeSplitAt(cs, 1.2, 'a2');
@@ -2270,6 +2281,17 @@ class TimelineClient(unittest.TestCase):
                          [["a", 0, 2, 0, 2], ["c", 0, 1.5, 2, 3.5]])
         self.assertTrue(self.r["rippleLengths"])
 
+
+    def test_a_lift_leaves_the_hole_and_moves_nothing_downstream(self):
+        # The whole point: every film window is IDENTICAL before and after.
+        self.assertEqual(self.r["liftWindows"], self.r["liftWindowsBefore"])
+        self.assertEqual(self.r["liftKinds"], ["video", "slug", "video"])
+        self.assertTrue(self.r["liftLengths"])
+        self.assertEqual(self.r["liftHole"], [None, None, "human"])
+
+    def test_a_lift_refuses_a_locked_clip_and_an_existing_hole(self):
+        self.assertEqual(self.r["liftLocked"], "locked")
+        self.assertEqual(self.r["liftTwice"], "already a hole")
     def test_a_locked_clip_refuses_to_be_deleted(self):
         self.assertEqual(self.r["rippleLocked"], "locked")
 
@@ -2954,8 +2976,11 @@ class SplitEditsInTheBrowser(unittest.TestCase):
             r"\{ key: '(\w+)',\s+base:\s*(\d+), cap:\s*(\d+), share: ([\d.]+) \}",
             self.src)
         self.assertEqual([l[0] for l in lanes], ["ov", "track", "alane", "wave"])
-        floor = int(re.search(r"const SBE_TL_MIN_H = (\d+);", self.src).group(1))
-        ceil_ = int(re.search(r"const SBE_TL_MAX_H = (\d+);", self.src).group(1))
+        # These two are read by the layout harness's injected probe JS, so
+        # the editor module publishes them as globalThis properties rather
+        # than module-private consts (slice 3, docs/ARCHITECTURE.md).
+        floor = int(re.search(r"globalThis\.SBE_TL_MIN_H = (\d+);", self.src).group(1))
+        ceil_ = int(re.search(r"globalThis\.SBE_TL_MAX_H = (\d+);", self.src).group(1))
         self.assertEqual(floor, chrome + sum(int(l[1]) for l in lanes))
         self.assertEqual(ceil_, chrome + sum(int(l[2]) for l in lanes))
         # And the CSS fallback — what the page shows for the frame before the
@@ -3006,10 +3031,12 @@ class ThePanelsClientPARSES(unittest.TestCase):
     def test_the_served_script_parses_as_javascript(self):
         if NODE is None:
             raise unittest.SkipTest("node not on PATH")
-        src = panel_source()
-        m = re.search(r'HTML = r"""(.*?)"""', src, re.S)
-        self.assertIsNotNone(m, "the panel's HTML template moved")
-        blocks = re.findall(r"<script>(.*?)</script>", m.group(1), re.S)
+        # The page lives on disk since slice 2 of the extraction
+        # (docs/ARCHITECTURE.md) — webapp/index.html IS the file the
+        # browser is handed, placeholders aside.
+        page = (Path(__file__).resolve().parent
+                / "webapp" / "index.html").read_text(encoding="utf-8")
+        blocks = re.findall(r"<script>(.*?)</script>", page, re.S)
         self.assertTrue(blocks, "no <script> block found in the panel HTML")
         for i, js in enumerate(blocks):
             with tempfile.NamedTemporaryFile("w", suffix=".js",

@@ -3313,6 +3313,35 @@
           <div class="h3-winhelp" id="sbEngineHelpNote" style="flex:1 1 100%" hidden></div>
         </div>
 
+        <div class="cz-control" id="sbRenderModeRow" style="margin: 12px 0 8px;">
+          <div class="cz-label">Storyboard Mode <span class="cz-label-hint">generate image stills first to preview shots, or render video directly</span></div>
+          <div class="pill-group cols-2" id="sbRenderModeGroup">
+            <button type="button" class="pill-btn active" data-sb-rendermode="images" onclick="sbSetRenderMode('images')">
+              📸 Generate Images First<span class="sub">preview &amp; edit stills before video</span>
+            </button>
+            <button type="button" class="pill-btn" data-sb-rendermode="video" onclick="sbSetRenderMode('video')">
+              🎬 Direct Video<span class="sub">render video drafts directly</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="cz-control" id="sbMasterRefRow" style="margin-bottom:12px;">
+          <div class="cz-label">Character / Product Master Reference <span class="cz-label-hint">optional · lock character, product, or style reference image across all shots</span></div>
+          <div class="picker" data-key="sb_master_ref">
+            <div class="picker-drop" id="picker_drop_sb_master_ref">
+              <div class="picker-empty">
+                <div class="picker-icon"><svg class="ph"><use href="#ph-image"/></svg></div>
+                <div class="picker-cta">Drop reference image here, or <strong>click to browse</strong></div>
+                <div class="hint">PNG / JPG / WEBP — reference image locked across shot stills &amp; video</div>
+              </div>
+              <img class="picker-preview" id="picker_preview_sb_master_ref" alt="" style="display:none">
+              <button type="button" class="picker-clear" id="picker_clear_sb_master_ref" title="Clear" style="display:none"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>
+            </div>
+            <input type="file" id="picker_file_sb_master_ref" accept="image/*" style="display:none">
+            <input type="hidden" name="sb_master_ref" id="sb_master_ref" value="">
+          </div>
+        </div>
+
         <details class="customize-section" id="sbQualitySection">
           <summary class="cz-summary">
             <span class="cz-chevron"><svg class="ph" aria-hidden="true"><use href="#ph-caret-down"/></svg></span>
@@ -3345,6 +3374,7 @@
 
         <div class="sb-actionbar" id="sbActionBar">
           <button type="button" class="ghost-btn" onclick="sbOpenReplan()">Re-plan…</button>
+          <button type="button" class="ghost-btn" id="sbConvertAllBtn" onclick="sbConvertAllToVideo()" style="display:none">🎞️ Convert Approved Images to Video</button>
           <span class="sb-actionbar-spacer"></span>
           <span class="sb-actionbar-note" id="sbActionNote"></span>
           <button type="button" class="primary" id="sbRenderBtn" onclick="sbRenderDrafts()">Render all drafts</button>

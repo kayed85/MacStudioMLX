@@ -33,6 +33,14 @@ from ltx_trainer_mlx.trainer import LtxvTrainer
 logger = logging.getLogger(__name__)
 
 
+# The dev transformer the patched loader ACTUALLY chose, recorded so the
+# sidecar can state the truth. Before this existed, train_character.py stamped
+# a hardcoded "base_model" literal into every sidecar — which is exactly the
+# provenance users pasted into issue #62 while we tried to diagnose their
+# training runs against a fiction. None until the first load resolves.
+RESOLVED_BASE: dict | None = None
+
+
 def _patch_loader_prefer_dev_transformer() -> None:
     """Force `load_transformer` to pick `transformer-dev.safetensors` when present.
 
@@ -119,6 +127,10 @@ def _patch_loader_prefer_dev_transformer() -> None:
                         "(%.1f GB) from %s (not distilled)",
                         chosen[1] / 1e9, chosen[2],
                     )
+                global RESOLVED_BASE
+                RESOLVED_BASE = {"dir": str(chosen[2]), "bytes": int(chosen[1]),
+                                 "file": "transformer-dev.safetensors",
+                                 "full_precision": True}
                 return _orig(chosen[0], transformer_file="transformer-dev.safetensors")
 
             if candidates:
@@ -132,6 +144,9 @@ def _patch_loader_prefer_dev_transformer() -> None:
                     "capture will be weak; re-download it via Train Character -> Preflight.",
                     chosen[1] / 1e9, chosen[2],
                 )
+                RESOLVED_BASE = {"dir": str(chosen[2]), "bytes": int(chosen[1]),
+                                 "file": "transformer-dev.safetensors",
+                                 "full_precision": False}
                 return _orig(chosen[0], transformer_file="transformer-dev.safetensors")
 
             raise FileNotFoundError(

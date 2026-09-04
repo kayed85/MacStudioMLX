@@ -218,7 +218,7 @@ MODEL_ID = os.environ.get(
 )
 MODEL_ID_HQ = os.environ.get("LTX_MODEL_HQ", "dgrauet/ltx-2.3-mlx-q8")
 # Q8 model is detected on disk so the High quality tier can be conditionally enabled.
-Q8_LOCAL_PATH = Path(os.environ.get("LTX_Q8_LOCAL", str(ROOT / "mlx_models/ltx-2.3-mlx-q8")))
+Q8_LOCAL_PATH = Path(os.environ.get("LTX_Q8_LOCAL", str(MODELS_DIR / "ltx-2.3-mlx-q8")))
 COMFY_PATTERN = os.environ.get("LTX_COMFY_PATTERN", "pinokio/api/comfy.git.*main\\.py")
 # State files (queue + hidden + settings) live in <ROOT>/state/, which
 # Pinokio's fs.link maps to a virtual drive that survives Reset. The
@@ -15162,7 +15162,8 @@ def _sb_reconcile(board: dict) -> bool:
     for s in (board.get("shots") or []):
         if not isinstance(s, dict):
             continue
-        for key, out_key in (("draft_job_id", "draft_output"),
+        for key, out_key in (("image_job_id", "image_output"),
+                             ("draft_job_id", "draft_output"),
                              ("final_job_id", "final_output")):
             jid = s.get(key)
             if not jid:
@@ -25465,7 +25466,7 @@ class Handler(BaseHTTPRequestHandler):
                 # Only the fields the plan screen can edit. Everything else on
                 # disk (job ids, outputs, planner metadata) is the server's and
                 # a stale tab must not be able to roll it back.
-                for k in ("title", "concept", "style", "must", "shots_target", "policy"):
+                for k in ("title", "concept", "style", "must", "shots_target", "policy", "render_mode", "master_ref"):
                     if k in incoming:
                         board[k] = incoming[k]
                 if isinstance(incoming.get("shots"), list):
@@ -25477,7 +25478,7 @@ class Handler(BaseHTTPRequestHandler):
                         self._json({"ok": False,
                                     "error": f"shots {bad} are not objects"}, 400)
                         return
-                    keep = {"draft_job_id", "final_job_id", "draft_output",
+                    keep = {"image_job_id", "image_output", "draft_job_id", "final_job_id", "draft_output",
                             "final_output", "error"}
                     by_n = {s.get("n"): s for s in (board.get("shots") or [])
                             if isinstance(s, dict)}
@@ -25598,6 +25599,126 @@ class Handler(BaseHTTPRequestHandler):
                     _SB_RENDERS[bid]["thread"] = th
                 th.start()
                 self._json({"ok": True, "queued": len(only) if only else None}, 202)
+                return
+
+            if action == "render_images":
+                bid = f("id", "")
+                board = load(bid)
+                only = [int(x) for x in (f("only", "") or "").split(",") if x.strip().isdigit()]
+                master_ref = board.get("master_ref") or f("master_ref", "") or ""
+                if master_ref:
+                    board["master_ref"] = master_ref
+                queued_count = 0
+                for s in (board.get("shots") or []):
+                    if not isinstance(s, dict):
+                        continue
+                    n = s.get("n")
+                    if only and n not in only:
+                        continue
+                    if s.get("status") == "skipped":
+                        continue
+                    refs = []
+                    if master_ref:
+                        refs.append(master_ref)
+                    if isinstance(s.get("refs"), list):
+                        for r in s["refs"]:
+                            if r and r not in refs:
+                                refs.append(r)
+                    job_form = {
+                        "mode": "image",
+                        "prompt": s.get("prompt") or "A scene",
+                        "aspect": "16:9",
+                        "n": "1",
+                        "seed": str(s.get("seed", -1)),
+                        "refs": json.dumps(refs),
+                        "session_tag": f"sb:{bid}#image_{n}",
+                    }
+                    try:
+                        job = make_job(job_form)
+                    except Exception:
+                        continue
+                    with QUEUE_COND:
+                        STATE["queue"].append(job)
+                        QUEUE_COND.notify_all()
+                    s["image_job_id"] = job["id"]
+                    s["status"] = "queued"
+                    queued_count += 1
+                persist_queue()
+                storyboard.save_storyboard(STATE_DIR, board)
+                self._json({"ok": True, "queued": queued_count})
+                return
+
+            if action == "convert_shot_to_video":
+                bid = f("id", "")
+                board = load(bid)
+                try:
+                    n = int(f("n", "0"))
+                except (TypeError, ValueError):
+                    n = 0
+                shot = next((s for s in (board.get("shots") or []) if isinstance(s, dict) and s.get("n") == n), None)
+                if not shot:
+                    self._json({"ok": False, "error": f"shot {n} not found"}, 404)
+                    return
+                img_path = shot.get("image_output") or (shot.get("refs", [""])[0] if isinstance(shot.get("refs"), list) and shot.get("refs") else "")
+                if not img_path:
+                    self._json({"ok": False, "error": f"shot {n} has no image output to convert"}, 400)
+                    return
+                job_form = {
+                    "mode": "i2v",
+                    "prompt": shot.get("prompt") or "",
+                    "image_path": img_path,
+                    "duration_s": str(shot.get("duration_s", 5)),
+                    "seed": str(shot.get("seed", -1)),
+                    "session_tag": f"sb:{bid}#{n}",
+                }
+                try:
+                    job = make_job(job_form)
+                except Exception as exc:
+                    self._json({"ok": False, "error": f"failed to create video job: {exc}"}, 400)
+                    return
+                with QUEUE_COND:
+                    STATE["queue"].append(job)
+                    QUEUE_COND.notify_all()
+                shot["draft_job_id"] = job["id"]
+                shot["status"] = "queued"
+                persist_queue()
+                storyboard.save_storyboard(STATE_DIR, board)
+                self._json({"ok": True, "job_id": job["id"], "n": n})
+                return
+
+            if action == "convert_all_to_video":
+                bid = f("id", "")
+                board = load(bid)
+                queued_count = 0
+                for s in (board.get("shots") or []):
+                    if not isinstance(s, dict):
+                        continue
+                    if s.get("status") == "skipped":
+                        continue
+                    img_path = s.get("image_output")
+                    if not img_path:
+                        continue
+                    job_form = {
+                        "mode": "i2v",
+                        "prompt": s.get("prompt") or "",
+                        "image_path": img_path,
+                        "duration_s": str(s.get("duration_s", 5)),
+                        "seed": str(s.get("seed", -1)),
+                        "session_tag": f"sb:{bid}#{s['n']}",
+                    }
+                    try:
+                        job = make_job(job_form)
+                    except Exception:
+                        continue
+                    with QUEUE_COND:
+                        STATE["queue"].append(job)
+                        QUEUE_COND.notify_all()
+                    s["draft_job_id"] = job["id"]
+                    s["status"] = "queued"
+                    queued_count += 1
+                persist_queue()
+                storyboard.save_storyboard(STATE_DIR, board)
+                self._json({"ok": True, "queued": queued_count})
                 return
 
             if action == "stop":
