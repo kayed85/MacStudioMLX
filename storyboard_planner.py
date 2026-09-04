@@ -277,7 +277,7 @@ L4  ONE CONTINUOUS ACTION per 5 seconds for a human subject. Two beats maximum i
 L5  NO UNANCHORED NEGATIONS. There is no negative prompt. Never write "not blurry", "high
     quality", "no distortion". The only refusals allowed are against things the model adds
     by itself: camera drift (L1) and unwanted lettering ("No text appears at any point.").
-L6  DIALOGUE lives inside <d>[English] ...</d> and nowhere else. The speaker, their voice
+L6  DIALOGUE lives inside <d>[Language] ...</d> (e.g. <d>[Arabic] ...</d> or <d>[English] ...</d>) and nowhere else. The speaker, their voice
     and their delivery are described OUTSIDE the tag. Immediately after the tag, stop the
     mouth: "his jaw ceases speaking motion and his mouth settles closed". One or two short
     sentences per 5 s. If a shot has no dialogue, it has no <d> at all.
@@ -1607,14 +1607,16 @@ def _prose_dialogue(text: str) -> List[str]:
 
 
 def _convert_prose_dialogue(text: str) -> Tuple[str, int]:
-    """Rewrap prose-quoted lines as <d>[English] ...</d>. Returns (text, count)."""
+    """Rewrap prose-quoted lines as <d>[Language] ...</d>. Returns (text, count)."""
     if _has_dialogue(text):
         return text, 0
     n = [0]
 
     def repl(m):
         n[0] += 1
-        return "%s<d>[English] %s</d>" % (m.group(1), m.group(2).strip())
+        val = m.group(2).strip()
+        lang = "Arabic" if re.search(r"[\u0600-\u06FF]", val) else "English"
+        return "%s<d>[%s] %s</d>" % (m.group(1), lang, val)
 
     out = _PROSE_DIALOGUE_RE.sub(repl, text or "")
     if n[0] and "ceases speaking motion" not in out:
