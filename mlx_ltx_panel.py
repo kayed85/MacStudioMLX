@@ -27493,9 +27493,9 @@ def page() -> str:
             .replace("__SEQCAP__", SEQ_NOUN_CAP)
             .replace("__SEQS__", SEQ_NOUN_PL)
             .replace("__SEQ__", SEQ_NOUN)
-            .replace("<title>Phosphene</title>",
-                     "<title>Phosphene TEST</title>" if is_test
-                     else "<title>Phosphene</title>")
+            .replace("<title>MacStudio MLX</title>",
+                     "<title>MacStudio MLX TEST</title>" if is_test
+                     else "<title>MacStudio MLX</title>")
             .replace("__BOOTSTRAP__", bootstrap)
             .replace("__PROFILE_BADGE__", profile_badge)
             .replace("__Q8_CHARACTER_INSTALL_COPY__",

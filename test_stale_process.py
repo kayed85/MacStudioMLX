@@ -309,7 +309,7 @@ class ATestPanelCannotImpersonateTheRealOne(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.object(panel, "STATE_DIR", Path(tmp)):
                 page = panel.page()
-        self.assertIn("<title>Phosphene TEST</title>", page)
+        self.assertIn("<title>MacStudio MLX TEST</title>", page)
         self.assertIn("TEST PANEL", page)
         self.assertIn("test-badge", page)
 
@@ -317,7 +317,7 @@ class ATestPanelCannotImpersonateTheRealOne(unittest.TestCase):
         import mlx_ltx_panel as panel
         with mock.patch.object(panel, "STATE_DIR", panel.ROOT / "state"):
             page = panel.page()
-        self.assertIn("<title>Phosphene</title>", page)
+        self.assertIn("<title>MacStudio MLX</title>", page)
         self.assertNotIn("TEST PANEL", page)
 
 

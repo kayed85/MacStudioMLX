@@ -267,7 +267,11 @@ class ThePageAnswersWhichBuildItIs(unittest.TestCase):
         """The decoy lived in this function's comments. Nothing in the code
         that RENDERS the stamp may carry a SHA of its own."""
         import re
-        page = panel.page()
+        # renderVersionPill ships to the browser from webapp/js/health.js
+        # since the slice-3 extraction (docs/ARCHITECTURE.md) — the module
+        # file IS served bytes, so the guard reads it there.
+        page = (Path(__file__).resolve().parent
+                / "webapp" / "js" / "health.js").read_text(encoding="utf-8")
         start = page.index("function renderVersionPill(")
         end = page.index("\nfunction ", start + 1)
         body = page[start:end]
@@ -305,7 +309,7 @@ class ATestPanelCannotImpersonateTheRealOne(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.object(panel, "STATE_DIR", Path(tmp)):
                 page = panel.page()
-        self.assertIn("<title>Phosphene TEST</title>", page)
+        self.assertIn("<title>MacStudio MLX TEST</title>", page)
         self.assertIn("TEST PANEL", page)
         self.assertIn("test-badge", page)
 
@@ -313,7 +317,7 @@ class ATestPanelCannotImpersonateTheRealOne(unittest.TestCase):
         import mlx_ltx_panel as panel
         with mock.patch.object(panel, "STATE_DIR", panel.ROOT / "state"):
             page = panel.page()
-        self.assertIn("<title>Phosphene</title>", page)
+        self.assertIn("<title>MacStudio MLX</title>", page)
         self.assertNotIn("TEST PANEL", page)
 
 
