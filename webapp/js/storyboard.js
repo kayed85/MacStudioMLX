@@ -1753,7 +1753,8 @@ async function sbEnhanceConcept() {
   const btn = sbEl('sbEnhanceBtn');
   if (btn) { btn.disabled = true; btn.textContent = 'Enhancing concept…'; }
   try {
-    const fd = new URLSearchParams({ prompt: original, mode: 't2v' });
+    const promptText = `A detailed cinematic story concept for a short film about: ${original}`;
+    const fd = new URLSearchParams({ prompt: promptText, mode: 't2v' });
     const res = await (await fetch('/prompt/enhance', { method: 'POST', body: fd })).json();
     if (res.ok && res.enhanced) {
       ta.value = res.enhanced;
