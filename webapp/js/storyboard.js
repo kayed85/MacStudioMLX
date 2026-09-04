@@ -1740,6 +1740,11 @@ function sbSetAspect(asp) {
   document.querySelectorAll('[data-sb-aspect]').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.sbAspect === SB.aspect);
   });
+  if (SB.payload && SB.payload.board) {
+    SB.payload.board.aspect = SB.aspect;
+    SB.payload.board.orientation = SB.aspect;
+  }
+  sbQueueSave(true);
 }
 
 async function sbEnhanceConcept() {
@@ -1794,6 +1799,7 @@ async function sbRenderImages(only) {
   fd.set('id', SB.id);
   if (only && only.length) fd.set('only', only.join(','));
   if (mref) fd.set('master_ref', mref);
+  if (SB.aspect) fd.set('aspect', SB.aspect);
   let r;
   try { r = await (await fetch('/storyboard/render_images', { method: 'POST', body: fd })).json(); }
   catch (e) { r = { ok: false, error: String(e) }; }

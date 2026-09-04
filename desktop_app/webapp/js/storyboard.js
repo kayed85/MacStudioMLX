@@ -582,6 +582,75 @@ function sbEngineSnapWarning(mode) {
 }
 
 // ---- plan ------------------------------------------------------------------
+function sbSetAspect(asp) {
+  SB.aspect = asp || 'landscape';
+  try { localStorage.setItem('phos_sb_aspect', SB.aspect); } catch (e) {}
+  document.querySelectorAll('[data-sb-aspect]').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.sbAspect === SB.aspect);
+  });
+  if (SB.payload && SB.payload.board) {
+    SB.payload.board.aspect = SB.aspect;
+    SB.payload.board.orientation = SB.aspect;
+  }
+  sbQueueSave(true);
+}
+
+async function sbEnhanceConcept() {
+  const ta = sbEl('sbConcept');
+  if (!ta) return;
+  const original = (ta.value || '').trim();
+  if (!original) {
+    phosToast('Write a couple of sentences about your film idea first.');
+    return;
+  }
+  const btn = sbEl('sbEnhanceBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Enhancing concept…'; }
+  try {
+    const promptText = `A detailed cinematic story concept for a short film about: ${original}`;
+    const fd = new URLSearchParams({ prompt: promptText, mode: 't2v' });
+    const res = await (await fetch('/prompt/enhance', { method: 'POST', body: fd })).json();
+    if (res.ok && res.enhanced) {
+      ta.value = res.enhanced;
+      sbConceptInput();
+      phosToast('Concept enhanced!', { kind: 'success' });
+    } else {
+      phosToast(res.error || 'Could not enhance concept.', { kind: 'danger' });
+    }
+  } catch (e) {
+    phosToast('Error enhancing concept: ' + e, { kind: 'danger' });
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:6px"><use href="#ph-sparkle-fill"/></svg>✨ Enhance Prompt / تحسين النص';
+    }
+  }
+}
+
+async function sbClearQueueToPlan() {
+  const btn = sbEl('sbClearQueueBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Clearing…'; }
+  try {
+    const r = await (await fetch('/queue/clear', { method: 'POST' })).json();
+    phosToast(`Cleared ${r.cleared || 0} queued job(s). You can plan your film now!`, { kind: 'success' });
+  } catch (e) {
+    phosToast('Failed to clear queue: ' + e, { kind: 'danger' });
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+  if (typeof poll === 'function') poll();
+}
+
+async function sbRenderImages(only) {
+  if (!SB.id) return;
+  const mref = (sbEl('sb_master_ref') || {}).value || '';
+  const fd = new URLSearchParams();
+  fd.set('id', SB.id);
+  if (only && only.length) fd.set('only', only.join(','));
+  if (mref) fd.set('master_ref', mref);
+  if (SB.aspect) fd.set('aspect', SB.aspect);
+  // ... rest of implementation
+}
+
 async function sbPlan() {
   const concept = (sbEl('sbConcept') || {}).value || '';
   if (!concept.trim()) { phosToast('Write a couple of sentences about the film first.'); return; }
