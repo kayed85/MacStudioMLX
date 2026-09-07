@@ -8,6 +8,18 @@
 > **Optimized for Apple Silicon Macs (MacBook Pro M1 Pro / M1 / M2 / M3 / M4)**  
 
 <p align="center">
+  <img src="assets/the_commuter_hero.gif" alt="The Commuter — a 75-second One Shot made in Phosphene" width="100%">
+  <br>
+  <sub><b>The Commuter</b> — a 75-second One Shot, rendered overnight on one Mac at native 1344×768 with Hailuo H3 and the new One Shot mode, from a single designed still. <a href="https://github.com/mrbizarro/phosphene/releases/latest">Watch the full film in the release</a>.</sub>
+</p>
+
+<p align="center">
+  <strong>Generative video, image, and character training on your Mac.</strong><br>
+  MLX. No PyTorch, no CUDA, no cloud, no API key.<br>
+  <a href="https://x.com/PhospheneAI">@PhospheneAI</a> on X · <a href="https://github.com/mrbizarro/phosphene">github.com/mrbizarro/phosphene</a>
+</p>
+
+<p align="center">
   <a href="https://github.com/kayed85/MacStudioMLX/releases/latest">
     <img src="https://img.shields.io/badge/Download_for_Mac-.dmg-6366f1?style=for-the-badge&logo=apple&logoColor=white" alt="Download DMG">
   </a>
@@ -15,7 +27,7 @@
 
 ### 📥 [Click Here to Download MacStudio MLX for Mac (.dmg)](https://github.com/kayed85/MacStudioMLX/releases/latest)
 
-> **Current release: v4.9.3.** Fixes from a full review of the fast 4.9.x releases. Storyboard works again on Macs that cap at 768 (24 GB): new films are planned at a size the Mac can deliver, the fix button offers the real size, and the Quality section is visible at Pinokio window widths (#71). Renaming a character works again. A freshly trained character clicked "Use in video" now actually rides on the render. Image Studio tells 8/24 GB Macs up front which engines fit instead of refusing at the last second. High/Keyframes/Extend without the Q8 pack point to Settings → Models. Image mode with no image is stopped at the button. Update moves the H3 engine to its pinned branch before building the half-memory engine (#74, thanks @blackest). Full notes on the [releases page](https://github.com/kayed85/MacStudioMLX/releases).
+> **Current release: v4.11.1.** Estimates follow the chip; Control, HiDream, training and image pre-flight guards read from fleet telemetry. One Shot mode, LTX 2x upscale, Hailuo H3 LoRA stacking, HuggingFace/CivitAI LoRA browser search, and high-quality generation. Full notes on the [releases page](https://github.com/kayed85/MacStudioMLX/releases).
 
 ---
 
@@ -35,6 +47,9 @@
 * **🎨 Custom macOS Futuristic Icon:** High-resolution 3D Apple squircle app icon.
 
 ---
+=======
+> **Current release: v4.11.1.** Time estimates now follow your chip (an M4 Pro or M1 Max renders two to four times slower than the M4 Max the numbers were measured on; an M5 Max or M3 Ultra much faster). Control asks for a clip before it queues, a saved HiDream pick falls back to Auto instead of failing, training says no on Macs under 24 GB, and the image pre-flight frees the idle video helper before refusing a 32 GB Mac. Includes 4.11.0: **One Shot** as its own mode, LTX one shots that hold together, the planner placing a One Shot inside a film. Full notes on the [releases page](https://github.com/mrbizarro/Phosphene/releases).
+>>>>>>> upstream/main
 
 ## Overview
 

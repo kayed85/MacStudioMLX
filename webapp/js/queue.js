@@ -426,7 +426,16 @@ function setEngine(engine, opts) {
     // which LTX rejects — it needs 8k+1. Snap on the way out so the field the
     // user is now looking at is a value LTX will actually accept, and the
     // bound Duration stays truthful.
-    if (typeof snapFramesTo8kPlus1 === 'function') {
+    //
+    // ...unless One Shot is open. Its Length strip is FOLDED, so the user
+    // cannot see that H3's tier just wrote 73 into #frames, and cannot fix
+    // it: an LTX → H3 → LTX round trip left the folded length on "3s". A
+    // shot IS the length there, so the LTX length the user had goes back
+    // exactly as it was (the hidden #ltx_length is H3's one field it never
+    // touches) instead of being snapped from H3's number.
+    if (typeof currentMode !== 'undefined' && currentMode === 'oneshot') {
+      try { restoreFoldedLtxLength(); } catch (e) {}
+    } else if (typeof snapFramesTo8kPlus1 === 'function') {
       try { snapFramesTo8kPlus1(); } catch (e) {}
     }
     // Give the active quality preset its upscale back (H3 forced it off).
@@ -456,7 +465,36 @@ function setEngine(engine, opts) {
   // reads the engine this call actually settled on rather than the one that
   // was requested — a gate may have bounced it back to the built-in.
   try { _syncLoraPickerForEngine(); } catch (e) {}
+  // A One Shot is priced and labelled per engine: 15 s parts on H3, 10 s
+  // parts on LTX. The estimate and the chip labels both follow the switch.
+  try { if (typeof oneshotRefreshLabels === 'function') oneshotRefreshLabels(); } catch (e) {}
+  // And the mode's own state is re-asserted after the surface swap — the
+  // active length chip, the folded strips, the beats row — because the swap
+  // above re-rendered the strips it folds. takeRefresh rides inside it.
+  if (typeof currentMode !== 'undefined' && currentMode === 'oneshot'
+      && typeof setTakeSeconds === 'function') {
+    try { setTakeSeconds((document.getElementById('take_seconds') || {}).value || 0); } catch (e) {}
+  } else {
+    try { if (typeof takeRefresh === 'function') takeRefresh(); } catch (e) {}
+  }
   return target;
+}
+
+// The LTX length the user had before an engine round trip, put back from the
+// hidden #ltx_length — the one length field H3's shape writer never touches.
+// Only called while One Shot has the Length strip folded (see setEngine); on
+// the open strip the snap-to-8k+1 path stays, because there the user can see
+// the number and choose.
+function restoreFoldedLtxLength() {
+  const key = (document.getElementById('ltx_length') || {}).value
+           || (BOOT.ltx || {}).default_length || '5s';
+  const hit = ((BOOT.ltx || {}).lengths || []).find(l => l.key === key);
+  if (!hit || !Number.isFinite(Number(hit.frames))) return false;
+  const frames = document.getElementById('frames');
+  const duration = document.getElementById('duration');
+  if (frames) frames.value = hit.frames;
+  if (duration) duration.value = framesToDuration(Number(hit.frames));
+  return true;
 }
 
 // The composer tools that SURVIVE an engine switch but change meaning across
@@ -825,6 +863,9 @@ function snapFramesTo8kPlus1() {
 }
 
 function updateDerived() {
+  // The per-window hint counts windows for the CURRENT length, so it has to
+  // move when the length does, not only when the pill is clicked.
+  if (typeof windowPromptsInput === 'function') { try { windowPromptsInput(); } catch (e) {} }
   const mode = document.getElementById('mode').value;
   const w = parseInt(document.getElementById('width').value || 0);
   const h = parseInt(document.getElementById('height').value || 0);
@@ -865,7 +906,16 @@ function updateDerived() {
   // expanded Customize body).
   const derivedFooter = document.getElementById('derivedFooter');
   if (derivedFooter) {
-    derivedFooter.innerHTML = `<strong>${dur}s</strong> · ${finalRes}${temporalText}${accelText}`;
+    // A One Shot is not a 5 s clip: take_seconds is non-zero only while that
+    // mode is open, and then the strip says the shot — "1 min · 6 parts of
+    // 10 s" — in front of the same canvas line. The per-part duration in
+    // #frames is the engine's business, not the user's.
+    const takeS = parseInt(document.getElementById('take_seconds')?.value || '0', 10) || 0;
+    const shot = (takeS && typeof oneshotSummary === 'function')
+      ? oneshotSummary(takeS, document.body.dataset.engine || 'ltx') : '';
+    derivedFooter.innerHTML = shot
+      ? `<strong>${shot}</strong> · ${finalRes}`
+      : `<strong>${dur}s</strong> · ${finalRes}${temporalText}${accelText}`;
   }
   // Also update the Quality strip's right-side meta line (e.g. "5s · 1024×576")
   // so the Quality picker block reads as a self-contained summary.
@@ -913,7 +963,9 @@ function updateDerived() {
   // Mode-aware visibility
   const inI2V = mode === 'i2v' || mode === 'i2v_clean_audio';
   const inImageFlow = inI2V || currentMode === 'keyframe';
-  document.getElementById('imageSection').classList.toggle('show', inI2V && currentMode !== 'keyframe');
+  // One Shot ships i2v when its anchor is set, but the anchor has its own
+  // surface inside the One Shot panel — Image mode's picker stays folded.
+  document.getElementById('imageSection').classList.toggle('show', inI2V && currentMode !== 'keyframe' && currentMode !== 'oneshot');
   // The reference-use row lives inside that section and follows the same
   // mode question, plus the server's 2.5-only availability flag.
   if (typeof _applyI2vRefModeVisibility === 'function') {
@@ -925,6 +977,11 @@ function updateDerived() {
   // drive the output, but the prompt + seed still apply).
   const _restoreSection = document.getElementById('restoreSection');
   if (_restoreSection) _restoreSection.classList.toggle('show', currentMode === 'restore');
+  // Upscale ×2 — its own source picker + "keep the shot" slider. The source
+  // drives dims (×2, capped) and length, so the sizing/quick-metrics rows
+  // are hidden below, like Extend.
+  const _upscaleSection = document.getElementById('upscaleSection');
+  if (_upscaleSection) _upscaleSection.classList.toggle('show', currentMode === 'upscale');
   // Ingredients (multi-reference) — its own multi-image picker + action field.
   // Like Colorize it KEEPS the sizing/quick-metrics rows (frames apply; the
   // sheet drives the rest).
@@ -944,18 +1001,19 @@ function updateDerived() {
     maybeScaleTouchedKeyframeTiming(window._kfTimingLastFrames, f);
   }
   syncKeyframeTiming();
-  document.getElementById('sizingSection').classList.toggle('show', currentMode !== 'extend');
+  document.getElementById('sizingSection').classList.toggle('show', currentMode !== 'extend' && currentMode !== 'upscale');
   // quickMetricsRow (Duration / Frames / Seed) doesn't apply to Extend
   // (extend_seconds drives the new content; the source video provides
-  // the rest). Hide it in extend, show otherwise.
+  // the rest) nor to Upscale ×2 (source dims ×2 + source length). Hide it
+  // there, show otherwise.
   const qmr = document.getElementById('quickMetricsRow');
-  if (qmr) qmr.classList.toggle('show', currentMode !== 'extend');
+  if (qmr) qmr.classList.toggle('show', currentMode !== 'extend' && currentMode !== 'upscale');
   document.getElementById('audioSection').classList.toggle('show', mode === 'i2v_clean_audio');
   // I2V audio source picker (Advanced) — only relevant in I2V flow.
   // In T2V/Extend/FFLF the model generates audio jointly; there's nothing
   // to swap out, so the dropdown is just noise.
   const i2vAudioSec = document.getElementById('i2vAudioModeSection');
-  if (i2vAudioSec) i2vAudioSec.classList.toggle('show', inI2V);
+  if (i2vAudioSec) i2vAudioSec.classList.toggle('show', inI2V && currentMode !== 'oneshot');
   // Width/height stays visible in image flows too. (Restored 2026-06-03: the
   // 2026-05-17 simplification hid it for I2V/FFLF, which cost users the custom
   // I2V sizing they relied on.) The image still drives the DEFAULT —
@@ -1123,6 +1181,12 @@ function pickerSetImage(key, path, opts = {}) {
     if (els.recentStrip) {
       els.recentStrip.querySelectorAll('img').forEach(img => img.classList.remove('selected'));
     }
+  }
+  // The One Shot panel mirrors this same field as its anchor image, and the
+  // hidden #mode follows it (i2v with an anchor, t2v without) while that mode
+  // is open. Before updateDerived so the visibility pass reads the new mode.
+  if (key === 'image' && typeof oneshotSyncAnchor === 'function') {
+    try { oneshotSyncAnchor(); } catch (e) {}
   }
   updateDerived();
 }
@@ -1700,6 +1764,65 @@ function friendlyJobError(raw) {
   return { friendly: 'Job failed.', hint: raw };
 }
 
+// ---- Completion alerts ------------------------------------------------------
+// A render is minutes long. When one finishes — or fails — the tab says so
+// with a short chime, and the browser says so when the tab is in the
+// background and notifications were allowed. Keyed on the history: a job id
+// that was not done on the previous poll and is now. The first poll of a
+// page load only records what is already done, so opening the panel is never
+// a burst of alerts for last night.
+let _doneSeen = null;
+function notifyJobsDone(s) {
+  const hist = Array.isArray(s && s.history) ? s.history : [];
+  const now = new Set();
+  for (const j of hist) if (j && j.id && (j.status === 'done' || j.status === 'failed')) now.add(j.id);
+  if (_doneSeen === null) { _doneSeen = now; return; }
+  const cur = (globalThis._settingsCache && _settingsCache.settings) || {};
+  const on = cur.notify_done !== false;
+  for (const j of hist) {
+    if (!j || !j.id || !now.has(j.id) || _doneSeen.has(j.id)) continue;
+    if (on) notifyOneJob(j);
+  }
+  _doneSeen = now;
+}
+function notifyOneJob(j) {
+  const failed = j.status === 'failed';
+  const what = (j.params && (j.params.label || j.params.preset_label)) ||
+               (j.params && j.params.prompt ? String(j.params.prompt).slice(0, 60) : '') ||
+               (j.params && j.params.mode) || 'a render';
+  playDoneChime(failed);
+  try {
+    if (document.hidden && typeof window.Notification !== 'undefined' && window.Notification.permission === 'granted') {
+      const n = new window.Notification(failed ? 'Phosphene — a render failed' : 'Phosphene — render done',
+                                 { body: what, tag: 'phos-' + j.id, silent: true });
+      n.onclick = () => { try { window.focus(); n.close(); } catch (e) {} };
+    }
+  } catch (e) {}
+}
+// Two short tones from the Web Audio API — no asset, no download, and a
+// falling pair for a failure so the ear knows without looking.
+let _chimeCtx = null;
+function playDoneChime(failed) {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    if (!_chimeCtx) _chimeCtx = new AC();
+    const ctx = _chimeCtx;
+    if (ctx.state === 'suspended') { ctx.resume().catch(() => {}); }
+    const t0 = ctx.currentTime + 0.01;
+    const notes = failed ? [[440, 0], [330, 0.16]] : [[660, 0], [880, 0.14]];
+    for (const [f, dt] of notes) {
+      const o = ctx.createOscillator(); const g = ctx.createGain();
+      o.type = 'sine'; o.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, t0 + dt);
+      g.gain.exponentialRampToValueAtTime(0.12, t0 + dt + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dt + 0.22);
+      o.connect(g); g.connect(ctx.destination);
+      o.start(t0 + dt); o.stop(t0 + dt + 0.25);
+    }
+  } catch (e) {}
+}
+
 async function poll() {
   // Reflect HDR-vs-character mutual exclusion every poll cycle. character_id
   // gets set from multiple code paths (manual chip click, load-params,
@@ -1713,6 +1836,7 @@ async function poll() {
   const url = '/status' + (filterMode === 'hidden' ? '?include_hidden=1' : '');
   try {
     s = await (await fetch(url)).json();
+    notifyJobsDone(s);
     _POLL_FAILS = 0;
     _setOfflineBanner(false);
   } catch (e) {
@@ -1892,7 +2016,9 @@ async function poll() {
   const jp = document.getElementById('jobPill');
   if (s.running && s.current) {
     const elapsed = Math.max(0, Math.round(s.server_now - s.current.started_ts));
-    jp.innerHTML = `<span class="dot"></span>${s.current.params.label || s.current.params.mode} · ${elapsed}s`;
+    const _cp = s.current.params || {};
+    const _cpName = _cp.label || ((_cp.take && _cp.take.seconds) ? `One Shot · ${_cp.take.seconds} s` : _cp.mode);
+    jp.innerHTML = `<span class="dot"></span>${_cpName} · ${elapsed}s`;
     jp.className = 'pill pill-running';
   } else {
     jp.innerHTML = `<span class="dot"></span>idle`;
@@ -2187,8 +2313,13 @@ async function poll() {
     if (!s.queue.length) ql.innerHTML = '<li class="empty-state"><span></span><span>Queue empty</span><span></span><span></span></li>';
     else ql.innerHTML = s.queue.map((j, i) => {
       // Image jobs don't have width/height/frames; show n × aspect instead.
+      // A One Shot is named as one: the t2v/i2v underneath is how it is
+      // rendered, not what was asked for.
+      const _take = j.params.take && j.params.take.seconds;
       const params = (j.params.mode === 'image')
         ? `image · ${j.params.aspect || '?'} · n=${j.params.n || '?'}`
+        : _take
+        ? `One Shot · ${_take} s · ${j.params.width}×${j.params.height}`
         : `${j.params.mode} · ${j.params.width}×${j.params.height} · ${j.params.frames}f`;
       // Which film this job is a shot of. A pure function of immutable params,
       // so the qSig memoisation above needs no change.
@@ -2343,7 +2474,7 @@ async function poll() {
     // destroy the last estimate one line before the seamless swap can use it.
     if (stageMayAutoSelectOutput()) {
       const visible = filteredMainOutputs();
-      if (visible.length) selectOutput(visible[0].path);
+      if (visible.length) selectOutput(visible[0].path, { autoplay: false });
     }
     // If the saved filter (from localStorage) selects a kind that's not
     // in /status's top-60, the carousel is empty on boot and the user
@@ -2365,6 +2496,9 @@ async function poll() {
     // Colorize (restore) source dropdown — same video-only list as Extend.
     const restoreSel = document.getElementById('restoreSrcSelect');
     if (restoreSel) restoreSel.innerHTML = _videoOpts;
+    // Upscale ×2 source dropdown — same video-only list.
+    const upscaleSel = document.getElementById('upscaleSrcSelect');
+    if (upscaleSel) upscaleSel.innerHTML = _videoOpts;
     // Control (Union) control-video dropdown — same video-only list.
     const controlSel = document.getElementById('controlSrcSelect');
     if (controlSel) controlSel.innerHTML = _videoOpts;
@@ -2381,10 +2515,8 @@ async function poll() {
   // cells. "Outputs · 23 photos" when Photos is active, plain "Outputs · N"
   // when All. Hidden override stays unchanged.
   const _visible = filteredMainOutputs();
-  const _kindLabel = mainOutputsFilter === 'all' ? '' : ` ${mainOutputsFilter}`;
   document.getElementById('carouselTitle').textContent =
-    filterMode === 'hidden' ? 'Hidden outputs'
-                            : `Outputs · ${_visible.length}${_kindLabel}`;
+    filterMode === 'hidden' ? 'Hidden outputs' : outputsTitleText();
 
   // "Show all (N)" button — reveal whenever the server reports more
   // outputs total than the polling fast path returned, and the user
@@ -2783,7 +2915,9 @@ function renderCarousel() {
   const el = document.getElementById('carousel');
   const visible = filteredMainOutputs();
   if (!visible.length) {
-    const msg = mainOutputsFilter === 'photos' ? 'No photo outputs yet.'
+    const q = (typeof outputsQueryText === 'function') ? outputsQueryText() : '';
+    const msg = q ? ('No matches for \u201c' + escapeHtml(q) + '\u201d.')
+              : mainOutputsFilter === 'photos' ? 'No photo outputs yet.'
               : mainOutputsFilter === 'videos' ? 'No video outputs yet.'
               : 'No outputs in this view yet.';
     el.innerHTML = `<div class="empty-msg">${msg}</div>`;
@@ -2995,6 +3129,12 @@ function stageMayAutoSelectOutput() {
 }
 function selectOutput(path, options) {
   options = options || {};
+  // AUTOPLAY IS FOR A CLICK, NOT FOR BOOT. The stage selects the newest
+  // output on load and after every refresh or filter change; those used to
+  // build the player with `autoplay`, so the panel opened already playing
+  // the last clip, sound and all. A selection the person did not make shows
+  // the clip paused on its first frame; a click plays.
+  const autoplay = options.autoplay !== false;
   activePath = path;
   const _uev = (typeof window !== 'undefined') ? window.event : null;
   const userSelected = !!(_uev && _uev.isTrusted);
@@ -3056,7 +3196,7 @@ function selectOutput(path, options) {
   } else if (liveBackdrop) {
     wrap.innerHTML =
       `<img class="player-handoff-backdrop" src="${escapeHtml(liveBackdrop)}" alt="">` +
-      `<video class="player-handoff-media" controls autoplay src="${escapeHtml(playerSrc)}"></video>`;
+      `<video class="player-handoff-media" controls${autoplay ? ' autoplay' : ''} src="${escapeHtml(playerSrc)}"></video>`;
     const handoffVideo = wrap.querySelector('.player-handoff-media');
     _wireStageMutePersistence(handoffVideo);
     const revealFinished = () => {
@@ -3075,7 +3215,7 @@ function selectOutput(path, options) {
     // settles; controls must never stay transparent forever.
     setTimeout(revealFinished, 4000);
   } else {
-    wrap.innerHTML = `<video controls autoplay src="${escapeHtml(playerSrc)}"></video>`;
+    wrap.innerHTML = `<video controls${autoplay ? ' autoplay' : ''} src="${escapeHtml(playerSrc)}"></video>`;
     _wireStageMutePersistence(wrap.querySelector('video'));
   }
   // Surface aspect adapts to actual media dimensions so vertical clips
@@ -3158,6 +3298,10 @@ function selectOutput(path, options) {
   //   about the next render and says nothing about this clip.
   const outIsH3 = !!(o && o.engine === 'h3');
   if (useExtBtn) useExtBtn.style.display = (isPhoto || outIsH3) ? 'none' : '';
+  // Upscale ×2 is video-only but engine-agnostic: an H3 draft is exactly the
+  // clip it was built for.
+  const useUpBtn = document.getElementById('useAsUpscaleBtn');
+  if (useUpBtn) useUpBtn.style.display = isPhoto ? 'none' : '';
   if (animBtn) animBtn.style.display = isPhoto ? '' : 'none';
   // "Finish at …" — for a completed H3 render that has a higher canvas to be
   // committed at. Decided from o.engine / o.h3_tier (both sidecar-derived,
@@ -3362,6 +3506,28 @@ function useAsExtendSourcePath(path) {
   document.querySelector('aside.form-pane').scrollTop = 0;
 }
 function useAsExtendSource() { if (!activePath) return alert('Pick an output first.'); useAsExtendSourcePath(activePath); }
+// Upscale ×2 — same hand-off shape as Extend: switch to the Remix tool,
+// point the picker at this clip, scroll the form to the top.
+function useAsUpscaleSourcePath(path) {
+  setMode('upscale');
+  const inp = document.getElementById('upscale_source_path');
+  if (inp) inp.value = path;
+  const sel = document.getElementById('upscaleSrcSelect');
+  if (sel) sel.value = path;
+  updateDerived();
+  const pane = document.querySelector('aside.form-pane');
+  if (pane) pane.scrollTop = 0;
+}
+function useAsUpscaleSource() { if (!activePath) return alert('Pick an output first.'); useAsUpscaleSourcePath(activePath); }
+// Upscale ×2 presets — one hidden number (keep_shot) the server maps to how
+// the render starts; the pills are the only thing the user touches.
+function setUpscalePreset(btn) {
+  const v = (btn && btn.dataset && btn.dataset.keep) || '1.0';
+  const inp = document.getElementById('keep_shot');
+  if (inp) inp.value = v;
+  document.querySelectorAll('#upscalePresetGroup .pill-btn').forEach(b =>
+    b.classList.toggle('active', b === btn));
+}
 
 async function loadParams() {
   if (!activePath) return;
@@ -3415,7 +3581,14 @@ async function loadParams() {
   // Text. Fixed 2026-05-18: snap to Character mode when the sidecar
   // carries a character_id so the form's UI state matches the saved
   // intent, not the under-the-hood implementation.
-  if (p.mode === 'extend') setMode('extend');
+  // A One Shot reopens as One Shot — the sidecar's `take` block is the intent;
+  // the t2v/i2v underneath is the implementation (the same shape as
+  // character_id above). Checked FIRST because a One Shot with an anchor is
+  // stored as mode=i2v and would otherwise land in Image mode with its
+  // length gone.
+  const _isTake = !!(p.take && p.take.seconds);
+  if (_isTake) setMode('oneshot');
+  else if (p.mode === 'extend') setMode('extend');
   else if (p.mode === 'keyframe') setMode('keyframe');
   else if (p.mode === 'i2v_clean_audio' || p.mode === 'i2v') { setMode('i2v'); document.getElementById('i2vMode').value = p.mode; document.getElementById('mode').value = p.mode; }
   else if (p.character_id) setMode('character');
@@ -3447,6 +3620,21 @@ async function loadParams() {
     try { setI2vRefMode(p.i2v_reference_mode || 'anchor'); } catch (e) {}
   }
   if (p.temporal_mode) setTemporalMode(p.temporal_mode);
+  // A take restores as a take (length + beats), not as the fields it was
+  // turned into — those are derived, and would re-derive differently.
+  if (_isTake && typeof setTakeSeconds === 'function') {
+    // The beats as WRITTEN (`beats`), not the beat_prompts the light lock
+    // decorated — restoring those would re-append the continuity sentence.
+    setTakeSeconds(p.take.seconds, p.take.beats || p.take.beat_prompts || null);
+    // The two continuity toggles: light_lock is the sentence the server
+    // appended ('' when it was off); retake is a boolean.
+    if (typeof setTakeLightLock === 'function') {
+      setTakeLightLock(('light_lock' in p.take && !p.take.light_lock) ? 'off' : 'on');
+    }
+    if (typeof setTakeRetake === 'function') {
+      setTakeRetake(p.take.retake === false ? 'off' : 'on');
+    }
+  } else if (typeof setTakeSeconds === 'function') setTakeSeconds(0);
   if (p.upscale) setUpscale(p.upscale);
   if (p.upscale_method) setUpscaleMethod(p.upscale_method);
   document.getElementById('prompt').value = p.prompt || '';
@@ -3881,13 +4069,17 @@ function renderOutputInfoBody(path, data) {
       return 'Multi-keyframe';
     }
   })();
-  const modeLabel = ({
+  const _baseModeLabel = ({
     t2v: 'Text → Video',
     i2v: 'Image → Video',
     i2v_clean_audio: 'Image → Video (clean audio)',
     keyframe: keyframeModeLabel,
     extend: 'Extend',
   })[p.mode] || (p.mode || '—');
+  // One Shot is the mode the user chose; t2v/i2v is what it ran as.
+  const modeLabel = (p.take && p.take.seconds)
+    ? `One Shot · ${p.take.seconds} s (${_baseModeLabel})`
+    : _baseModeLabel;
 
   // Compose the dimensions + duration into a single "Format" line — fewer
   // grid rows, easier to scan. We separate technical metadata (Format,
@@ -4232,6 +4424,14 @@ document.getElementById('genForm').addEventListener('submit', async e => {
     reenable();
     return;
   }
+  // Same class of silent failure for Control: seven installs queued it with
+  // no clip and got "control video not found" as a red card (fleet, 2026-09-07).
+  if (_modeNow === 'control' && !String(fd.get('control_video_path') || '').trim()) {
+    alert('Control needs a clip to follow — pick one in the Control video picker, '
+        + 'or switch to Text mode.');
+    reenable();
+    return;
+  }
 
   // Safety net: if the prompt mentions a trigger word from a LoRA the user
   // has installed but NOT toggled active for this render, ask before
@@ -4470,6 +4670,7 @@ document.getElementById('genForm').addEventListener('submit', async e => {
 // Inline handlers in the markup and the other files resolve these through
 // the global scope; everything NOT listed here is private to this module.
 Object.assign(globalThis, {
+  notifyJobsDone, notifyOneJob, playDoneChime,
   h3FinishSetTier, h3FinishActive, setEngine, _syncEnginePromptTools,
   currentEngine, _syncEngineForMode, openH3InstallCard, closeH3InstallCard,
   enhancePrompt, applyAspect, applyQuality, updateDerived,
@@ -4480,7 +4681,7 @@ Object.assign(globalThis, {
   retryJob, renderCarousel, findOutputByPath, stageMayAutoSelectOutput,
   selectOutput, openExpandLightbox, closeExpandLightbox, phosToast,
   animateActive, hide, openOutputsFolder, hideActive,
-  useAsExtendSource, loadParams, _flashActionDone, closeOutputInfoModal,
+  useAsExtendSource, useAsUpscaleSource, useAsUpscaleSourcePath, setUpscalePreset, loadParams, _flashActionDone, closeOutputInfoModal,
   togglePause, openBatch, closeBatch, queueBatch,
   // inline-handler targets: generated markup resolves these through the
   // global scope (the v4.9.0 regression, PR #69)

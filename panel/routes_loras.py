@@ -279,8 +279,139 @@ def get_civitai_search(h, parsed) -> None:
             results["available_families"] = list(_fams.keys())
         h._json(results)
     except Exception as exc:
-        h._json({"error": f"civitai search failed: {exc}",
+        h._json({"error": f"CivitAI search failed — {exc}",
                     "items": []}, 502)
+
+
+@get("/loras/updates")
+def get_loras_updates(h, parsed) -> None:
+    """Which installed CivitAI LoRAs have a newer version on CivitAI.
+
+    One request per LoRA that carries a `civitai_id` in its sidecar; the
+    newest `modelVersions[0]` is compared with the sidecar's
+    `civitai_version_id`. Each item carries what /civitai/download needs
+    (download_url + meta), so the update is the same one-click install the
+    browser tab does — the new file lands beside the old one."""
+    rows = []
+    try:
+        rows = [r for r in P.list_user_loras() if r.get("civitai_id")]
+    except Exception:                                              # noqa: BLE001
+        rows = []
+    items, errors = [], []
+    for r in rows:
+        mid = r.get("civitai_id")
+        try:
+            m = P._civitai_request(f"/models/{mid}", timeout=12.0)
+        except Exception as exc:                                   # noqa: BLE001
+            errors.append({"path": r.get("path"), "error": str(exc)[:160]})
+            continue
+        versions = [v for v in (m.get("modelVersions") or []) if isinstance(v, dict)]
+        if not versions:
+            continue
+        latest = versions[0]
+        have = r.get("civitai_version_id")
+        try:
+            newer = int(latest.get("id") or 0) != int(have or 0)
+        except (TypeError, ValueError):
+            newer = str(latest.get("id")) != str(have)
+        if not newer:
+            continue
+        files = latest.get("files") or []
+        primary = (next((f for f in files if f.get("primary") and
+                         str(f.get("name", "")).endswith(".safetensors")), None)
+                   or next((f for f in files if str(f.get("name", "")).endswith(".safetensors")), None))
+        if not primary or not primary.get("downloadUrl"):
+            continue
+        images = latest.get("images") or []
+        preview = next((i.get("url") for i in images if i.get("url")), None)
+        items.append({
+            "path": r.get("path"), "name": r.get("name"),
+            "current_version_id": have, "latest_version_id": latest.get("id"),
+            "latest_version_name": latest.get("name"),
+            "published_at": latest.get("publishedAt") or latest.get("createdAt"),
+            "base_model": latest.get("baseModel"),
+            "download_url": primary.get("downloadUrl"),
+            "meta": {
+                "id": m.get("id"), "version_id": latest.get("id"),
+                "name": m.get("name") or r.get("name"),
+                "description": P.re.sub(r"<[^>]+>", " ", str(m.get("description") or ""))[:600].strip(),
+                "preview_url": preview,
+                "filename": primary.get("name"),
+                "download_url": primary.get("downloadUrl"),
+                "trigger_words": list(latest.get("trainedWords") or []),
+                "base_model": latest.get("baseModel"),
+                "civitai_url": f"https://civitai.com/models/{m.get('id')}",
+            },
+        })
+    h._json({"ok": True, "checked": len(rows), "items": items, "errors": errors})
+
+
+@post("/loras/guide")
+def post_loras_guide(h, path, qs, ctype) -> None:
+    """Write a one-paragraph guide for an installed LoRA and keep it in the
+    sidecar under `guide`. The planner model writes it from what the sidecar
+    already knows (name, description, trigger words, base model, strength) —
+    nothing is fetched. Refused while a render runs: the planner is a 12B
+    model and the GPU is taken."""
+    _rb = h._read_form_body()
+    if _rb is None:
+        return
+    body, form = _rb
+    lp = form.get("path", [""])[0] if isinstance(form.get("path"), list) else (form.get("path") or "")
+    row = next((r for r in P.list_user_loras() if r.get("path") == lp), None)
+    if not row:
+        h._json({"ok": False, "error": "that LoRA is not in the list"}, 404)
+        return
+    if P.STATE.get("current"):
+        h._json({"ok": False, "error": "a render is running — write the guide when it finishes"}, 409)
+        return
+    trig = ", ".join(row.get("trigger_words") or []) or "none"
+    system = ("You write short, practical guides for video-model LoRA adapters. Plain English, "
+              "second person, no marketing. One paragraph of 3 to 5 sentences: what the LoRA "
+              "does to the picture, how to prompt it (name the trigger words if there are any, "
+              "and say when to leave them out), what strength to start from and what happens "
+              "above and below it, and one thing it is bad at or fights with. No headings, no lists.")
+    user = (f"LoRA name: {row.get('name')}\n"
+            f"Base model: {row.get('base_model') or 'unknown'}\n"
+            f"Trigger words: {trig}\n"
+            f"Recommended strength: {row.get('recommended_strength', 1.0)}\n"
+            f"Author's description: {(row.get('description') or '').strip()[:1200] or 'none given'}\n"
+            "Write the guide.")
+    session = None
+    try:
+        session = P.storyboard_planner.PlannerSession()
+        resp = session.generate(system, user, max_tokens=320, temperature=0.4)
+        text = str((resp or {}).get("text") or "").strip()
+    except Exception as exc:                                       # noqa: BLE001
+        h._json({"ok": False, "error": f"the planner could not write it: {exc}"}, 502)
+        return
+    finally:
+        for m in ("release", "close", "stop", "shutdown"):
+            if session is not None and hasattr(session, m):
+                try:
+                    getattr(session, m)()
+                except Exception:                                  # noqa: BLE001
+                    pass
+                break
+    text = P.re.sub(r"\s+", " ", text).strip().strip('"')
+    if len(text) < 40:
+        h._json({"ok": False, "error": "the planner returned nothing usable"}, 502)
+        return
+    sidecar = P.Path(lp).with_suffix(".json")
+    try:
+        raw = P.json.loads(sidecar.read_text()) if sidecar.is_file() else {}
+        if not isinstance(raw, dict):
+            raw = {}
+    except (OSError, ValueError):
+        raw = {}
+    raw["guide"] = text
+    raw.setdefault("name", row.get("name"))
+    try:
+        sidecar.write_text(P.json.dumps(raw, indent=2, ensure_ascii=False))
+    except OSError as exc:
+        h._json({"ok": False, "error": f"could not save the guide: {exc}"}, 500)
+        return
+    h._json({"ok": True, "guide": text})
 
 
 @post("/loras/refresh")
@@ -376,8 +507,52 @@ def post_loras_rename(h, path, qs, ctype) -> None:
         h._json({"ok": False, "error": str(exc)}, 400)
 
 
+@get("/hf/loras")
+def get_hf_loras(h, parsed) -> None:
+    """LoRAs on Hugging Face for one lane, in the CivitAI grid's shape.
+    `?lane=h3|ltx&q=<a name, author:someone, or owner/repo>&refresh=1`."""
+    qs = P.parse_qs(parsed.query)
+    lane = (qs.get("lane", ["h3"])[0] or "h3").strip().lower()
+    q = (qs.get("q", [""])[0] or "").strip()
+    if lane not in ("h3", "ltx"):
+        h._json({"ok": False, "error": "unknown lane", "items": []}, 400)
+        return
+    try:
+        items = P.hf_lora_catalog(lane, q, force=qs.get("refresh", ["0"])[0] == "1")
+    except Exception as exc:                                       # noqa: BLE001
+        h._json({"ok": False, "error": f"Hugging Face could not be reached: {exc}", "items": []}, 502)
+        return
+    kind, value = P.hf_lora_query_params(lane, q)
+    h._json({"ok": True, "label": "Hugging Face", "query": {"kind": kind, "value": value},
+                "lane": lane, "items": items, "has_more": False})
+
+
+@post("/hf/loras/download")
+def post_hf_loras_download(h, path, qs, ctype) -> None:
+    _rb = h._read_form_body()
+    if _rb is None:
+        return
+    body, form = _rb
+    def f(k):
+        v = form.get(k, "")
+        return (v[0] if isinstance(v, list) and v else (v if isinstance(v, str) else "")) or ""
+    repo, filename = f("repo").strip(), f("filename").strip()
+    try:
+        meta = P.json.loads(f("meta") or "{}")
+    except P.json.JSONDecodeError:
+        meta = {}
+    if not repo or "/" not in repo or not filename:
+        h._json({"ok": False, "error": "repo and filename are required"}, 400)
+        return
+    try:
+        h._json(P._hf_lora_download(repo, filename, meta if isinstance(meta, dict) else {}))
+    except Exception as exc:                                       # noqa: BLE001
+        h._json({"ok": False, "error": str(exc)}, 400)
+
+
 @post("/civitai/download")
 def post_civitai_download(h, path, qs, ctype) -> None:
+    P._analytics_feature("civitai_download")
     _rb = h._read_form_body()
     if _rb is None:
         return

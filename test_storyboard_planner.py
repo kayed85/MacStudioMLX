@@ -759,13 +759,15 @@ class TestPromptContent(unittest.TestCase):
         sys_p = P._build_system_prompt("auto", True)
         # Strip L11 itself, which necessarily quotes the phrases it forbids.
         body = sys_p.split("L11 THE FACE IS THE WHOLE POINT")[0]
-        for phrase in ("tips his face up", "tipped up", "off-camera", "obscur",
-                       "from behind", "seen from behind", "back to the camera"):
-            self.assertNotIn(phrase, body, "exemplars still teach %r" % phrase)
-        self.assertEqual(P._FACE_BLOCK_RE.findall(body), [])
-        # Every exemplar declares a face level.
+        # The One Shot exemplar sits AFTER the laws, so it is audited on its own.
+        for text in (body, P._ONE_SHOT):
+            for phrase in ("tips his face up", "tipped up", "off-camera", "obscur",
+                           "from behind", "seen from behind", "back to the camera"):
+                self.assertNotIn(phrase, text, "exemplars still teach %r" % phrase)
+            self.assertEqual(P._FACE_BLOCK_RE.findall(text), [])
+        # Every exemplar declares a face level — the last one is the One Shot.
         self.assertEqual(re.findall(r'"face": "(\w+)"', sys_p),
-                         ["close", "medium", "close", "none", "close"])
+                         ["close", "medium", "close", "none", "close", "medium"])
 
     def test_ltx_example_appears_only_when_there_is_a_cast(self):
         self.assertNotIn("letterbox", P._build_system_prompt("auto", False))
@@ -1393,9 +1395,9 @@ class TestScreenplayPass(unittest.TestCase):
     Owner, on the films this planner produced before it existed: "the prompt
     writing should be like a movie director... The action is well planned. You
     understand what I mean? It is not working properly. It's just a succession
-    of shots." Maestro does screenplay -> shot breakdown -> per-model polish;
-    this had no screenplay step at all, so structure and coverage were being
-    invented in the same breath.
+    of shots." A film is written screenplay -> shot breakdown -> per-shot
+    polish; this had no screenplay step at all, so structure and coverage were
+    being invented in the same breath.
     """
     SCENE = "\n".join([
         "BEAT - He throws both arms wide in front of the soapy car.",

@@ -1,7 +1,490 @@
 # Phosphene — project state, history, open work
 
+> **🚀 2026-09-07 — v4.11.1 ships: the fleet fixes** (chip-scaled estimates,
+> Control gate, HiDream fallback, training floor, image pre-flight frees the
+> helper). Carries 4.11.0.
+
 > **📸 2026-09-04 — Image-First Storyboard & Master Reference Locker + Codec Patch Verification (d3f6309).**
 > Implemented `📸 Generate Images First` mode in Storyboard with Master Reference Locker (`#sbMasterRefRow`) to fix character/product consistency across shots. Added `/storyboard/render_images`, `/storyboard/shot/convert_to_video`, `/storyboard/convert_all_to_video`. Re-verified `patch_ltx_codec.py` codec enforcement (`yuv444p crf 0 +faststart`). Verified full release gates (57/57 PASS). Persistent memory rules logged in `GEMINI.md`.
+
+> **🔬 2026-09-07 — fleet study after v4.11.0 (on dev).** Queried PostHog by
+> version, mode, engine, chip and RAM. Findings and what was done:
+> **(1) Estimates ignored the chip** — fleet medians for the same tier: LTX
+> Balanced 121f M5 Max 60 s … M4 Max 180 … M4 Pro 300 … M1 Pro 600 … M2/M3
+> 900; H3 draft_5s M5 Max 120 … M4 Max 300 … M4 Pro/M3 Max 600 … M1 Max 900,
+> H3 standard_10s on an M4 Pro 2400 vs 600. Every chip promised the M4 Max
+> number ("~30 s left" for forty minutes, the report that started this).
+> `HW_SPEED_FACTOR_LTX/H3` + `_hw_speed_factor()` scale `ltx_estimate_minutes`
+> and `h3_estimate_minutes` (so every chip, Speed pill, take estimate and
+> Storyboard price follow); `PHOSPHENE_SPEED_FACTOR` overrides;
+> `test_fleet_calibration.py`. **(2) Control queued with no clip** (seven
+> installs, "control video not found: ''") — client gate beside the Image one.
+> **(3) HiDream still reachable** from a saved pick / Load Params on installs
+> without its venv (5 installs, 4.8.1 → 4.11.0) — the queue path now falls
+> back to Auto with a log line (`_hidream_available`). **(4) Training on
+> 16 GB Macs**: 10 failures to 1 success — `/train/start` refuses below
+> `TRAIN_MIN_RAM_GB = 24` with the reason. **(5) `image_ram` refusals**: 46 of
+> 70 on 32 GB Macs — the idle video helper was holding the memory; the image
+> pre-flight now releases it and measures again before refusing.
+> **Not bugs (noise to know about):** the 7-day error-rate tile (23 %) and the
+> 16 GB "67 % failure" are ONE 4.9.3 install with a broken model dir (380
+> failures: "model incomplete / Missing 262 parameters / no safetensors"); one
+> install's FLUX.2-klein download stuck at 4.6 GB for days (disk); watchdog
+> kills scattered 1–5 per install on old versions; "H3 render exited with code
+> 1" clusters on 4.9.3/4.9.4 (stale engine packs). 4.11.0 after one day: 30
+> installs, 56 renders, 7 failures, none new. H3 dense 10 s tiers run 50–60 min
+> at p50 on M4 Pro (memory-bound chain) — the chip factor covers the chip,
+> not the RAM tier; a RAM-aware H3 factor is the next step if it recurs.
+
+> **🚀 2026-09-07 — v4.11.0 ships: One Shot.** The mode chip + panel, LTX
+> one shots by last-frame handoff (proven on a 40 s bar conversation:
+> four 10 s parts, same people, same room, camera moving), the planner's
+> One Shot rule, the UX-walk fixes, the stray `_w0` gallery clip. Carries
+> 4.10.5–4.10.8.
+
+> **🎬 2026-09-07 — One Shot: its own mode, LTX by last-frame handoff, the planner
+> may place one in a film (on dev).** Measured tonight: an LTX 45 s take through
+> the windows chain (Extend with 121 f tail context) turns to mush at the FIRST
+> extension — faces smear, audio of the new piece peaks at −38 dB — at 27 min a
+> window (`mlx_outputs/.experiments/night_ltx_take45/`). So an LTX one shot now
+> renders like H3's: parts by last-frame handoff (10 s / 2 beats on LTX, 15 s /
+> 3 beats on H3), part 1 t2v or from the user's anchor image, later parts i2v
+> anchored on the previous last frame; `take_plan` carries `part_frames` /
+> `beats_per_part`; `run_take_job_inner` is engine-aware and calls
+> `run_job_inner` for LTX parts; new fields `take_light_lock` / `take_retake`;
+> `/take/estimate` returns parts for both engines (`test_take.py`, 22). The
+> windows chain stays only behind Long clips → windows. **UI:** the owner named
+> the feature **One Shot** and wanted it "a different part of the tooling": a
+> `data-mode="oneshot"` chip after Image with its own panel (#takeAxes: length,
+> beats + "Write the beats for me", anchor image reusing the i2v `image` field,
+> Lock the light / Retake toggles, estimate, engine note); leaving the mode
+> resets `take_seconds`; Load Params reopens it from `take.seconds`; "One take"
+> renamed everywhere users read it (`test_storyboard_editor_ui.py`
+> OneShotIsAMode, 16). **Planner:** `_ONE_SHOT` rule block + example in
+> storyboard_planner.py — a shot may carry `take_seconds` + `beats`, chosen for
+> a walk-and-talk / chase or POV / monologue / reveal / arrival, at most one or
+> two per film; storyboard.py validates, prices per engine's parts and posts
+> ONE job (`test_storyboard_one_shot.py`, 14; docs/STORYBOARD.md).
+
+> **🚀 2026-09-06 — v4.10.8 ships (dev promoted whole; main = dev tree).**
+> Upscale ×2 / LTX Upscale goes public: the card button, Remix → Upscale ×2,
+> and LTX ×2 in the H3 form (chain), presets Faithful (3 refine steps from
+> the clip) / Quick (2) / Re-imagine (4 from noise); engine tag
+> `v0.14.19+ltx25.7`, adapter `ic_upscale_x2` (0.33 GB) fetched by Update
+> from the weights-ltx25-v1 mirror. Also carries v4.10.7 (Extend fix, One
+> take strip, stats totals + growth), v4.10.6 and v4.10.5.
+
+> **🩹 2026-09-06 — v4.10.6 ships: Browse CivitAI search.** Any word typed
+> into the LoRA browser returned nothing ("turbo" → 0 while "Minimax H3
+> Turbo Loras" was on page one un-queried): CivitAI's text search ignores
+> `baseModels` and answers an empty page when both are sent. Typed searches
+> now drop the server-side base filter, hint the query with the engine's
+> word ("minimax turbo" ranks all-H3), and filter base models on the
+> results while paging; "All" runs one hinted search per engine and merges
+> ("anime" on Video: 0 → 24). CivitAI's intermittent 502/503/504 is retried
+> ×3 with back-off and the message says what to do. The search bar has a
+> magnifier, a placeholder that names CivitAI, and a Search button.
+> `test_spicy_contract` green; verified live against civitai.com. Promoted
+> by cherry-pick onto origin/main (dev carries the unreleased Upscale ×2
+> headline).
+
+> **🔍 2026-09-06 — Upscale ×2 with LTX-2.5 (on dev, HEADLINE — waits for
+> owner USE before public).** "H3 mind, LTX pixels": a finished clip (an H3
+> draft above all) goes through the LTX-2.5 Pixel Spatial Upscaler IC-LoRA
+> and comes out at twice the size with generated detail and its own sound.
+> Three doors: the **Upscale ×2** button on every video card, **Remix →
+> Upscale ×2** for any clip, and **LTX ×2** in the H3 form's Upscale row —
+> which queues the ×2 behind the draft by itself (one Generate click; job
+> `source=chain`). Presets, not a slider: **Faithful** (face and lips stay,
+> 1 refine step), **Balanced** (2 steps), **Re-imagine** (the adapter's own
+> 4-step re-render from noise — sharpest, faces drift). Measured on M4 Max,
+> 640×384 5 s draft → 1280×768: draft 4:19 + Faithful 2:17 = **6:36**;
+> Balanced 3:44; Re-imagine 6:35 (8 steps looked identical to 4). The
+> per-step cost is attention-bound: Q4 is no faster than Q8 (≈87–92 s/step
+> at that canvas), so speed came from starting at the clip's own latent
+> (fork `v0.14.19+ltx25.7`: `ICLoraPipeline.generate(source_video=…)` —
+> Stage 1 skipped, VAE encode → pack's spatial ×2 latent upsampler →
+> control-aware refine of N tail steps with the adapter + the clip as
+> reference). Fused Q4 destroys the adapter (fork measures ~150 % delta
+> loss) → helper `lora_mode="unfused"` on the IC lane, routed for Q4; Q8
+> fused == unfused by eye. **Bug found on the way:** the helper built
+> ICLoraPipeline without `gemma_model_id`, so every IC lane (Colorize,
+> Ingredients, Control) on a 2.5 checkpoint encoded prompts with Gemma 3
+> from the HF cache; now `GEMMA_PATH`. Adapter: gated on HF (owner clicked
+> the license; token account has access), 327,322,640 B, sha256
+> `984851b7…283c1d`, `reference_downscale_factor=2`; `required_files.json`
+> `ic_upscale_x2` with a mirror block on `weights-ltx25-v1` — **asset not
+> published yet** (`publish_pack_release.py --repo-key ic_upscale_x2`, owner
+> call); until then the mode refuses by name (`pack_missing`) and
+> `ltx25_weights.sh` fetches it best-effort. Frames snap DOWN to 1+8k (an
+> H3 72 f clip → 65 f, ≤0.3 s trimmed; audio muxed `-shortest`), fps from
+> the source. `_h3_export_notes` carries the LTX ×2 sentence per canvas.
+> Gates `--fast` green; `test_control_discoverability` counts 6
+> `ltx_floor_canvas(` call sites now. Analytics: mode `upscale`, source
+> `chain` (docs/ANALYTICS.md).
+
+> **📈 2026-09-06 — /stats gets totals and growth (on dev).** Two new tiles,
+> **Total renders** (completed, all installs, since the first day the fleet
+> pinged) and **Total installs**, plus a Growth chart: cumulative installs by
+> first-boot day against renders per day (30 d), weekly actives in the
+> caption. Fleet queries `total_renders`, `total_installs`, `installs_by_day`,
+> `renders_by_day`, `active_by_week` (no window on the totals); the local
+> aggregator produces the same shape. First fleet read: **19,443 renders,
+> 1,315 installs since 2026-08-09**, weekly actives 298 → 552 over four full
+> weeks. Also: the "Renders this week" tile was a 14-day count wearing a 7-day
+> label (the `outcomes` query is 14 DAY); it now says 14d. `test_stats_growth.py`.
+
+> **🩹 2026-09-06 — Extend has been dead since 4.10.2 (on dev, hotfix
+> candidate).** The fleet read after v4.10.5 showed 35 `render_failed` on
+> 4.10.4 from one install, all "RetakePipeline.__init__() got an unexpected
+> keyword argument 'low_ram_streaming'": the low-RAM streaming change passed
+> the kwarg to every pipeline and the vendored RetakePipeline (Extend) has its
+> own __init__ without it, so EVERY Extend render on 4.10.2–4.10.5 fails at
+> construction, on every Mac. Fix: `_construct_pipeline` builds each pipeline
+> with the kwargs its class accepts (same introspection as generate kwargs),
+> logging what it dropped; `test_pipeline_construct_kwargs.py`. Rest of the
+> read: 4.10.4 is the most-booted version a day after release (42 installs
+> today), H3 12 ok / 1 failed on 4.10.x, refusals only `image_ram`; the big
+> 7-day error counts ("model incomplete, missing 9 files" 176, "Missing 262
+> parameters" 121) are ONE 4.9.3 install each, not a release defect.
+
+> **🚀 2026-09-06 — v4.10.5 ships.** H3 LoRA stacking (engine `codex/h3-engine-v2`
+> at 21e8824 = live-preview merged: repeatable `--lora`, the qkv-permute fix),
+> kohya conversion, the LoRA browser toolbar + kind filter + deeper search +
+> no key prompt on Hugging Face, the autoplay fix. Proof render: Turbo v4 +
+> a character LoRA, native 1344×768×73f, both adapters on 208 modules,
+> 20.8 min wall (6 forwards × 177 s + 166 s VAE decode; the tier's Turbo
+> chip must price SIX forwards — see `_h3_retune_turbo_estimates`).
+
+> **🧩 2026-09-06 — H3 LoRAs stack (on dev, rides the next release).** The
+> H3 runner took ONE `--lora`; Turbo and a character LoRA could not both
+> run. Engine (`mrbizarro/minimax-h3-mlx`, commit on `codex/live-preview`,
+> to be merged to the shipped `codex/h3-engine-v2`): `LoRALinear` holds N
+> adapters, `apply_lora` appends to an existing wrapper instead of nesting
+> (nesting hid the quantized base's `scales` from `plan()` → applied=0),
+> `--lora` is `action="append"` in generate_staged and serve_staged, the
+> draft-cache key carries the sorted set, adaLN deltas accumulate;
+> `tests/test_lora_stack.py`. Panel: `h3_supports_lora_stack()` probes the
+> runner's help text ("Repeat the flag to stack adapters"), `max_stack`
+> is 4 on a stacking runner and 1 on an old pack, the argv posts Turbo
+> then every user LoRA as its own `--lora PATH:SCALE`, the Turbo-or-LoRA
+> slot control only renders for a single-slot pack, and a combined
+> strength above 1.5 logs the community's motion-coherence warning.
+> `test_h3_lora_stack.py`. **Also found:** the shipped `codex/h3-engine-v2`
+> lacks 9c0f0bf (2026-08-15: the unconditional qkv permute measured
+> ORTHOGONAL to the adapter, cosine +0.012, running on every LoRA incl.
+> Turbo) — the merge that ships stacking ships that fix too.
+
+> **🪶 2026-09-06 — low-RAM block streaming for ≤24 GB Macs (on dev, rides the next release).**
+> The vendored engine already had `low_ram_streaming` (BlockStreamer); the
+> helper never used it. Now `LTX_LOW_RAM_STREAM` (panel sets it when
+> SYSTEM_RAM_GB ≤ 24; env forces either way) → t2v/i2v/extend pipelines get
+> `low_ram_streaming=_stream_for(loras)`; LoRA jobs keep the exact unfused
+> branch (the streamer cannot carry per-block adapters; the library refuses
+> rather than fusing lossily on a quantized pack); the pipeline cache key
+> carries the decision; apply_mlx_cache_policy keeps the Metal cache at 0
+> while streaming; /status reports `low_ram_stream`. **Measured (64 GB Mac,
+> forced on, Q4 Balanced i2v 1024×576×121, seed 4242):** denoise peak
+> 16.13 → 13.77 GiB, active between phases 10.58 → 1.04 GiB, wall 141 →
+> 151 s, frames bit-identical (framemd5) at 768×432×49 and 1024×576×121.
+> `test_low_ram_stream.py`. RELEASE NOTE for whoever cuts 4.10.x next: "Macs
+> with 24 GB or less stream the video model from disk during a render —
+> peak memory 16.1 → 13.8 GB on a heavy Image render, ~7% slower, frames
+> identical; renders with a LoRA/character keep the previous path."
+> **AdaLN dedupe (upstream ltx-2-mlx #86/#119/#121) PARKED:** cherry-picked
+> cleanly onto our fork (local branch `adaln-dedupe-0152` in ltx-2-mlx; 17
+> upstream tests + 971 fork tests pass) and proven bitwise-identical on both
+> canvases, but ZERO measured gain on our lane (142 vs 144 s, same peak) —
+> our 2.5 i2v pins the reference by sample re-composition, not per-token
+> timesteps, so there is nothing to dedupe. Revisit with the full rebase
+> onto upstream 0.15.x (push to fork refused: a cherry-pick touches
+> .github/workflows; token lacks `workflow` scope). Landscape research:
+> ~/AI/projects/phosphene/notes/ltx25_landscape_2026-09-06.md.
+
+> **🚀 2026-09-06 — v4.10.0 ships.** Everything on this branch since v4.9.5
+> goes public as one release: Editor v2 (transitions, speed, titles, the
+> Director + song map, retake, completion alerts, deliver-as, duplicate,
+> search, framing), the timeline's NLE gestures, anchor stills, long shots,
+> LoRA guides + update checks, closed-tab alerts, light theme, **One take**
+> on both engines, Turbo v4-600 EMA, the constant-time windows chain, and the
+> three 4.9.x hotfixes. The release media is *The Commuter*, a 75 s H3 one
+> take at native. Also in: `docs/PROMPTING.md` served at `/docs/prompting`
+> with a copy button; the planner's take brief carries the night's rules
+> (a scene change or a reveal is a beat of its own, a settle before it); H3
+> native exports are no longer shrunk to 720p by default.
+> **Same morning, continuity.** The Commuter turned from night to grey day
+> inside part 2 and back. `take_light_lock` reads the time of day and
+> weather out of the prompt and appends one continuity sentence to every
+> beat (both engines); `take_drift` measures mean luma first-vs-last frame
+> per part and the runner retakes a drifting part once (lock doubled, seed
+> +101), keeping the steadier clip and hiding the other; the planner brief
+> states the light once and forbids a beat that implies another hour.
+> **Same day, a second LoRA source.** The LoRA browser has a source row:
+> CivitAI, or **Hugging Face**, searched the same way — a name, an author
+> (`author:someone`) or an `owner/repo`. Phosphene names no org and endorses
+> nothing (the owner's call: the H3 character LoRAs live in third-party
+> repos now, and listing one by name would read as ours). `hf_lora_catalog`
+> searches the public API, keeps a lane by repo name and tags, and each card
+> plays the repo's own clip when it has one;
+> Install goes through `_hf_lora_download` into the lane's directory with
+> the same sidecar and layout probe as a CivitAI install. 22 H3 characters
+> at the time of writing. `test_hf_loras` pins lane detection, names, the
+> catalog shape and the install.
+> **Then the browser itself.** Results carry a `kind` (character / style /
+> motion / speed / other, from the repo's name and tags; actions count as
+> motion) and the modal filters in place with counts and a "with example"
+> toggle. The controls are one toolbar — Source and Engine as segmented
+> controls, NSFW at the right, the search line, the kind chips — instead of
+> three stacked rows of full-width pills. An empty query runs the model's
+> three spellings and merges (87 H3 results, 16 characters, vs 50 and 1).
+
+> **🎬 2026-09-05 — Editor v2 on dev/beta, UNRELEASED: speed, titles, transitions, the Director, sliding windows.**
+> From the long-form editing brief (the measured gaps only, built our way).
+> **Transitions** are a typed object on a BOUNDARY (`transitions[]`,
+> `after_clip`), never a picture overlap: the clips' slots do not move, the
+> film stays the timeline's length, the render pulls half the duration of
+> source handle either side of the cut and joins the two concat runs with
+> `xfade` centred on it; the sound takes the J-cut lane path untouched. No
+> handles → refused with the side and the shortfall named; every code is an
+> error, `WARNING_CODES` untouched. Even-frame quantised (0.8 s came out one
+> frame long before). **Speed** on the clip (0.25–4x, never automatic):
+> `setpts` + chained `atempo`, `(end-start)/speed` everywhere, envelopes on
+> the strip's PLAYED clock (decided once in `audio_gain_points`). **Titles**
+> are overlays with `kind: "text"`, rasterised with Pillow from an
+> explicitly resolved font FILE into the same overlay chain an uploaded card
+> takes — not `drawtext`, which the Homebrew ffmpeg this panel resolves on
+> the owner's Mac does not carry; DOM preview at the same anchor/size. UI:
+> a mark on every cut → inspector; Add title beside Add black; Speed in the
+> Clip section. **The Director**: a soundtrack on the storyboard brief →
+> `beat_map` slots → the planner writes one movement per slot (lead with
+> the move; no dialogue) → shots get slot+1 s → the Editor opens the film
+> cut on the downbeats under the track (`_sb_director_grid`,
+> `_sbe_auto_edit` fallback). **Sliding windows** for LTX (`ltx_windows.py`
+> — stride/count arithmetic over LTX windows, our code): third answer on the Long
+> clips row, one `generate` + N `extend` on the kept tail with one prompt
+> per window and re-injected invariants, trimmed to length; needs Q8, refused
+> with Extend's own sentences otherwise. Markers deliberately not built.
+> Proven: `smoke_dissolve.mp4` (2x clip + dissolve + boxed title, 5.00 s,
+> real ffmpeg) and 1456 tests green incl. `test_editor_v2`,
+> `test_director`, `test_ltx_windows`; fast gates green. Not carried to the
+> NLE export: transitions (butt join) and titles (no path); speed rides as
+> in/out vs start/end. A real windows render has NOT run (GPU, Q8) — the
+> chain is exercised with a mocked helper only.
+> **Same day, the next gap: the SONG MAP.** `storyboard_edit.song_map`
+> — per-bar RMS + spectral centroid on the fitted downbeat grid, section
+> boundaries at the peaks of a 4-bar level jump (non-maximum suppressed),
+> labels by position and relative energy — and `director_pacing` (chorus
+> cuts 2x as often, intro/outro half). The Director's slots follow it and
+> the brief names the arc ("shots 3–10 are the chorus, peak energy");
+> the Editor ruler paints the sections. Measured on AMOR FATI: 126.7 bpm,
+> intro 0–37 s (0.39), chorus 37–67 s (0.94), then verses, in 2.1 s. numpy
+> only — no librosa, no whisper. Labels are a heuristic and are said to be.
+> **Same day, two more gaps:** **Retake** — the Editor's inspector
+> sends a clip back through the renderer (`edit/generate` with
+> `retake_of`, which clones the clip's own shot and changes only prompt /
+> length / seed); the finished take comes back flagged in the relink rows
+> and is adopted per clip (`relink` with `only`) with "Use it / Keep the
+> old one" — never the batch drafts→finals rewrite. **Completion alerts**
+> — `notify_done` (default on): a Web-Audio chime in the tab on done or
+> failed, a browser Notification when the tab is hidden and allowed;
+> Settings row with the permission ask. The poller keys on history ids and
+> the first poll only records what is already done.
+> **Deliver as** on the Editor's Render menu: H.264 / HEVC (VideoToolbox,
+> hvc1) / ProRes 422 HQ (.mov, 10-bit 4:2:2, PCM) × as cut / 1080p / 4K
+> (one Lanczos scale after the overlays, up only). Different delivery,
+> different file name; the films list shows .mov. Proven with real
+> encodes of the v2 smoke doc (test_deliver + ffprobe).
+> **Duplicate** (Clip section, key D) and **gallery search**: each output
+> row carries `q` (sidecar words — prompt, mode, quality, engine, WxH,
+> frames, seed, LoRA stems, model, character); the Outputs head has a
+> search box, every word must match, typing pulls the older outputs in.
+> **Framing** (`clip.frame = {zoom, x, y}`): crop of the source's own
+> pixels before the fit in the render, CSS scale on the stage, Basic
+> Motion / AE scale+position in the exports. Inspector: Effects → Zoom,
+> Across, Down. Two UX-agent passes over the day's work (17 + 8 findings)
+> all applied: stale stage after a title delete, hidden per-window fields,
+> a lagging windows hint, ruler bands too small to read, a search title
+> that went stale on clear, an unnamed Duplicate, "Fill this hole" on a
+> retake — each fixed and re-verified on the :8240 test panel.
+> **Finish** on Deliver as (clean / grain / heavy grain — `noise` t+u after
+> the size, delivery only, named in the file). **Auto** on the storyboard
+> brief: plan → every shot renders (`_sb_auto_after_plan` once the planner
+> gives the memory back) → cut on the beat → film assembled
+> (`_sb_auto_film`), each step the existing one; a shot that failed leaves
+> the film waiting and says so. A **real sliding-windows render** ran on
+> the :8240 panel with both GPU locks taken (the stale 4-day-old ones
+> overridden and announced): 233 f at 512×256 quick, window 1 in 42 s,
+> window 2 an extend on the Q8 dev transformer with its own prompt.
+> Done in 5 min 04 s: 233 delivered frames (9.7 s), continuity held across
+> the seam at 5.0 s and window 2 played its own line (`windows_proof.mp4`,
+> sidecar `windows` block). Locks released after.
+> **Same day, the last eight gaps from the brief, our way:**
+> **Anchor stills** — a brief switch; before a text/character shot renders,
+> an ordinary image job makes its first frame (`still_prompt` drops the
+> camera-move clauses; the character's sheet is the reference through
+> `qwen_edit_inline` when it exists), the render thread waits for the
+> batch, `_sb_reconcile` folds it back as `shot.still`, and the clip
+> renders as **i2v · anchor** from it; a failed still is written on the
+> card and the shot renders unanchored once. **Long windows** — a second
+> switch: an LTX shot over 121 frames becomes `temporal_mode=windows` with
+> style + location as invariants (an anchored long shot is anchored by its
+> first window only — extend cannot re-inject an image). **LoRA guides**
+> (`POST /loras/guide`, planner-written, kept in the sidecar, released
+> after) and **LoRA update checks** (`GET /loras/updates` vs
+> `modelVersions[0]`; the install is the ordinary `/civitai/download`).
+> **Closed-tab push** — Web Push with a panel-generated VAPID pair, `/sw.js`
+> at the root scope, `/push/*`; every done/failed job pushes its label off
+> the GPU lock while Completion alerts are on; `pywebpush` on both install
+> lanes, the button appears only when it imports. **Light theme**
+> (Settings → Appearance, a token block on `html[data-theme="light"]`) and a
+> live "N left" on the Storyboard run bar. Reference Edit already covers
+> image editing (Qwen-Image-Edit engines); inpaint/outpaint would need a
+> mask model and were not built. `test_anchor_stills` pins it; fast gates
+> green. A UX review pass then fixed fifteen findings: the still phase is
+> visible while it runs (card placeholder + "Still for shot N" on the run
+> bar), a **New still** button per card (`POST /storyboard/restill`),
+> stills skipped for H3 shots, the three brief switches read back from the
+> board and carry a "?" note, the long-shot switch is disabled without Q8,
+> the light palette is stamped on `<html>` from a cookie before first paint
+> and its hard-coded dark surfaces are overridden, the invented CSS tokens
+> are real ones, the LoRA Update badge is a button with a download icon and
+> the check is remembered per browser, guides have a busy state and are
+> disabled while a render runs, and Completion alerts say "closed-tab
+> alerts" instead of "push". Proven on :8240: still (FLUX, 13 s) → i2v
+> anchor (41 s), frame 0 = the still; `/loras/updates` found one real
+> update (EditAnything → LTX 2.5 v2.0); `/loras/guide` wrote a real guide
+> (6.5 s).
+> **Same day, ONE TAKE.** A 60 s H3 ride (a hen on a skateboard through
+> twelve city environments, camera behind her) was first made by a script
+> driving four 15 s jobs, each from the last frame of the one before. That
+> script is now the panel: the Video tab's "One take" row (30 s … 2 min) with
+> one beat per 5 s, prefilled from the prompt; `take_plan` / `take_beats` /
+> `take_estimate_minutes` in the panel; on LTX it is the windows chain, on H3
+> `run_take_job_inner` runs ordinary H3 renders per part and joins them; the
+> engine's own length pills lock while a take is on; `/take/estimate` prices
+> it (a minute at H3 high ≈ 3 h 50 on this Mac). No user copy says "windows",
+> "chain" or "passes". `test_take` pins the arithmetic, the make_job mapping
+> and the runner with a stubbed engine. The Storyboard has the same door:
+> a fifth chip on the Shots row, **1 · one take**, with a length; the planner
+> writes beats instead of shots, the board keeps one shot with the beats
+> (editable on the card), and it renders as the same take.
+> **Same day, the timeline learns the NLE contract.** Dragging a clip's body
+> moves that clip alone, between its neighbours, and stops at them; pulling an
+> edge changes that clip's length and leaves everything after it where it was
+> (a hole opens or closes). The old behaviour — every gesture repacked the
+> sequence and slid the whole tail — is a RIPPLE now: hold ⌘ (or Ctrl) while
+> dragging (a badge on the track says so); Shift still reorders. An edge is a
+> trim anywhere within 10 px of it. Drags re-apply from the pointerdown
+> snapshot so a clamped clip cannot creep through a neighbour. Seven timeline
+> scenarios that meant "slide the rest" now pass the ripple flag; two new ones
+> pin the defaults.
+> **Same evening, the windows chain runs in constant time.** Measured on a
+> 30 s LTX take at 640×448: window 2 took 10 min, window 3 17, window 4 26 —
+> each extend was handed the WHOLE clip so far and Extend encodes and
+> conditions on every frame it is given. `_run_windows_chain` now cuts the
+> last window (121 f, after the plan's discard) as the context for each
+> extend, keeps only the new frames of each pass as a piece, and joins the
+> pieces at the end (frame-exact `select` filters; the exact strings are
+> proven on a real clip in the test and by hand). A one-minute ride on H3
+> (four 15 s parts from each other's last frame) took 3 h 53 at 1024×576.
+> **Same evening, Turbo moves to the community's adapter.** larryvrh's
+> **v4 step-600 EMA** (780 MB, bare runner layout, sha `5f3a626c…a416d3`)
+> resolves FIRST in `H3_TURBO_LORA_CANDIDATES`; the LightX2V v1.0 repack,
+> the folded v0.1 and ckpt500 stay as fallbacks so no install loses Turbo.
+> Steps follow the adapter (`h3_turbo_steps`: 7 sigma points = 6 forwards for
+> v4, the card's sweet spot — 4 smears fast motion; 4 points for the 4-step
+> adapters), and `_h3_retune_turbo_estimates` re-prices every tier cell for
+> the installed adapter after the resolver exists (high_15s Turbo ~25 → ~44
+> min, native_15s ~57 min → ~1 h 44; honest, not optimistic). The managed
+> download fetches v4 from its author's repo, digest-pinned
+> (`H3_TURBO_ASSETS` / `_h3_turbo_asset`); the release asset stays reachable
+> by key. `test_h3_turbo_adapter` 13. A/B against exact and the old adapter
+> pending on the test panel.
+
+> **🚨 2026-09-06 — v4.9.8: H3 install/update broken for everyone by a deleted HF repo — fixed.**
+> `madebyollin/taeh3` on Hugging Face is gone (401/404); install_h3.js fetched
+> the 22 MB TAE draft decoder from it, so every H3 install and "Update Hailuo
+> H3" died at that step (Pinokio, @macstephen). New
+> `scripts/pinokio/h3_fetch_tae.py`: pinned GitHub commit of
+> madebyollin/taehv, size + sha256 verified, atomic, idempotent, HF fallback.
+> The LTX live-preview TAE was never at risk (mirrored on weights-ltx25-v1).
+> Lesson: any third-party download in the install path must be mirrored or
+> hash-pinned — HF repos vanish. #62: Piotr's clean-folder run still shows no
+> identity; sidecar shows base = LTX-2.3 Q8 (by design — trainer is 2.3-based
+> and adapters transfer, the sample character proves it); asked him for the
+> adapter file to test here.
+
+> **📈 2026-09-05 — v4.9.7: the fleet picture gets its blind spots filled (analytics only).**
+> `source` on every render event; `feature_used` (storyboard_plan/export,
+> editor_open/export, civitai_download, sample_character, train_start);
+> `app_updated`; `update_prompt` (shown/later/update_now/banner_*/
+> restart_needed); `broadcast_seen`; `queue_paused_breaker`. One browser
+> route `POST /analytics/ui` with a strict allowlist. Validated offline on a
+> scratch panel; 59 analytics tests. The 12 HogQL tile queries for the
+> PostHog "Phosphene Fleet" board are in docs/ANALYTICS.md — the panel's
+> query key lacks `insight:write`/`dashboard:write`, so adding them to the
+> board needs a scoped key (owner) or a paste per tile. Stats page: weights
+> release shows complete pack downloads (~1.2K), not the 84K per-file sum.
+> NOTE: promoted by cherry-pick onto origin/main — dev/beta also carry the
+> other window's unreleased UX batch + Director (835b2c5, 14592a8…).
+
+> **🩹 2026-09-05 — v4.9.6: H3 sidecars follow the clip to Trash (#77).**
+> `post_output_delete._expand_for_media` now collects `<stem>.wav`,
+> `<stem>_source.wav`, `<stem>.stage_a.npz` (+ bare `.stage_a`). Validated on
+> a scratch panel: H3 clip → 5 files trashed, LTX clip → the same 2 as
+> before, an unrelated .wav untouched. #76 closed (reporter confirmed the
+> Update path). Pinokio posts for 4.9.4→4.9.6 still pending (owner login).
+
+> **🩹 2026-09-05 — v4.9.5: character training actually re-trains (#62 cache), H3 shutdown abort (#76).**
+> Both validated end-to-end before promote: real Gemma preprocess twice on
+> a 3-image set — one changed caption re-encoded exactly that one file,
+> unchanged inputs reused; stub H3 engine that writes the clip then aborts
+> → job done + log line, stub that aborts before writing → still failed.
+> Full gates green. Owner rule from today: bug fixes ship same day, validated
+> (memory feedback_ship_bugfixes_validated).
+
+> **🩹 2026-09-05 — after v4.9.4: two more on dev/beta (fe31e41), UNRELEASED.**
+> **#76 (PhantombrainM):** H3 helper aborted at interpreter shutdown AFTER
+> the MP4 was written (mlx#4248 stream teardown → PyThreadState_Get /
+> SIGABRT); panel called finished renders failures. Engine fix pushed to
+> minimax-h3-mlx `codex/h3-engine-v2` 79c252b (+ cherry-picked to the
+> owner's `codex/live-preview` 7cdcf99): guarded `atexit.register(
+> mx.clear_streams)`. Panel guard `_h3_clip_is_complete` keeps a whole clip
+> (mtime/size/ffprobe) when the helper exits non-zero. **#62 root cause
+> candidate FOUND on our side:** the vendored preprocess skips cached
+> conditions/latents by INDEX FILENAME only — a re-train from the same
+> folder with a new trigger trained on the OLD captions, a dropped photo
+> misaligned every later latent. `lora_lab/preprocess_images.py` now
+> writes `.precomputed/manifest.json` and invalidates exactly what changed
+> (`_reconcile_precomputed`, 5 tests). Asked PiotrAstroCamp for one
+> fresh-folder run to confirm (his sample-character test proved his
+> render path is fine). Fleet 12 h after 4.9.4: 35 installs on it, no new
+> failure class; the "[Errno 2]" venv_broken signature is pre-existing.
+> Pinokio post for 4.9.4 still NOT made (Chrome logged out of pinokio.co).
+
+> **🩹 2026-09-04 — v4.9.4: the four follow-ups from 4.9.3's first day, shipped.**
+> Queue circuit breaker (3 identical failures → pause + why), H3 failures
+> carry their last engine line, stage step counts capped at the checkpoint's
+> tables, dead HiDream image setting falls back. Fleet-driven, all verified
+> on scratch panels / tests; full gates green. Promoted by the snapshot ritual.
+
+> **📈 2026-09-04 — first 12 h of v4.9.3 (UNRELEASED follow-ups on dev/beta: b1ffb4b).**
+> 40 installs on 4.9.3 within 12 h, 15 new installs. Its raw failure count
+> (394) is ONE 16 GB install with an incomplete Q4 pack failing 371 times
+> (227 in ten minutes; it had failed 479× on 4.6.0) — not a regression. Fix
+> on dev: the queue pauses itself after three identical failures in a row
+> (`_CONSEC_FAIL` in worker_loop, verified on a scratch panel). H3: 20
+> failures / 3 installs all read "exited with code 1 — see the log above";
+> per-install history shows those installs failed on older versions too
+> and an old-branch install (cf14779a) renders fine after the #74 branch
+> move — no sign the move broke anything. Fix on dev: the H3 failure now
+> carries the last engine line. Also fixed on dev (same day): explicit stage step counts are capped at
+> what the checkpoint's own tables hold (`_clamp_stage_steps_to_tables`,
+> the "cannot thin … up to 12 steps" class); a saved HiDream image engine
+> with no venv promotes to an installed mflux family instead of failing
+> every Studio render. Pinokio: no replies to the 4.9.3 post or from @vxlab
+> yet; no new threads. GitHub: no new activity on any open issue.
+>>>>>>> upstream/main
 
 > **🩹 2026-09-03 — v4.9.3: the full-review fixes, shipped as a plain bugfix.**
 > Everything in the 09-02 review entry below, plus #74 (Update now moves the

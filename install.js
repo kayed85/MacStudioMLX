@@ -180,7 +180,7 @@ module.exports = {
     //      LAUNCHER SCRIPT. Both lanes now call the one implementation in
     //      `scripts/pinokio/ltx_checkout.sh`, which holds the literal:
     //
-    //          v0.14.19+ltx25.6   on mrbizarro/ltx-2-mlx
+    //          v0.14.19+ltx25.7   on mrbizarro/ltx-2-mlx
     //
     //      Two reasons, both structural. (1) A SHA on a branch is not a pin:
     //      v3.8.x fetched `feat/ltx-2.5` and checked out a SHA that the branch
@@ -442,7 +442,7 @@ module.exports = {
           // only ever a transitive dep — if a future dep change drops it, the
           // SSL_CERT_FILE path vanishes and ALL panel stdlib HTTPS breaks.
           // Naming it here keeps the cert bundle guaranteed-present.
-          "uv pip install --python env/bin/python certifi pillow numpy 'huggingface-hub>=1.5.0,<2.0' 'hf_transfer>=0.1.6' 'litellm>=1.83.14' 'smolagents>=1.24.0'",
+          "uv pip install --python env/bin/python certifi pillow numpy 'huggingface-hub>=1.5.0,<2.0' 'hf_transfer>=0.1.6' 'litellm>=1.83.14' 'smolagents>=1.24.0' 'pywebpush>=2.0'",
           // v2.0.3: post-install confirmation that the local packages
           // actually landed in site-packages. The Y1.034+ patch script's
           // i2v target tolerates a missing ltx_pipelines_mlx — without
