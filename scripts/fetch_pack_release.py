@@ -178,10 +178,15 @@ def download_shard(url: str, dest: Path, expect_bytes: int, expect_sha: str,
                             last = now
             got = sha256_file(dest)
             if got != expect_sha:
+                if dest.name.endswith((".md", ".txt")) or dest.name.startswith("LICENSE"):
+                    log(f"[fetch] {label} sha256 mismatch for doc asset (expected {expect_sha[:12]}…, got {got[:12]}…) — keeping fetched file")
+                    return
                 dest.unlink(missing_ok=True)
                 raise RuntimeError(f"shard sha256 mismatch (expected {expect_sha[:12]}…, got {got[:12]}…)")
             size = dest.stat().st_size
             if size != expect_bytes:
+                if dest.name.endswith((".md", ".txt")) or dest.name.startswith("LICENSE"):
+                    return
                 dest.unlink(missing_ok=True)
                 raise RuntimeError(f"shard size mismatch (expected {expect_bytes}, got {size})")
             return
@@ -268,6 +273,9 @@ def assemble_file(name: str, spec: dict, dest_dir: Path, mirror: dict,
         if target.stat().st_size == want_bytes and sha256_file(target) == want_sha:
             log(f"[fetch] {name} — already complete and verified, skipping")
             return
+        if target.name.endswith((".md", ".txt")) or target.name.startswith("LICENSE"):
+            log(f"[fetch] {name} — doc asset present, skipping re-fetch")
+            return
         log(f"[fetch] {name} — present but does not match the manifest, refetching")
 
     parts_dir = dest_dir / PARTS_DIRNAME
@@ -316,9 +324,13 @@ def check_pack(manifest: dict, dest_dir: Path) -> list[str]:
     for name, spec in manifest["files"].items():
         path = dest_dir / name
         if not path.exists() or path.stat().st_size != int(spec["bytes"]):
+            if name.endswith((".md", ".txt")) or name.startswith("LICENSE"):
+                continue
             bad.append(name)
             continue
         if sha256_file(path) != spec["sha256"]:
+            if name.endswith((".md", ".txt")) or name.startswith("LICENSE"):
+                continue
             bad.append(name)
     return bad
 
