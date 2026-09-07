@@ -524,7 +524,7 @@ def post_panel_bug_report(h, path, qs, ctype) -> None:
         body = body[:6000] + "\n\n…(truncated; remaining log on disk)…"
     from urllib.parse import quote as _urlq
     issue_url = (
-        f"https://github.com/mrbizarro/phosphene/issues/new"
+        f"https://github.com/kayed85/MacStudioMLX/issues/new"
         f"?title={_urlq(title)}&body={_urlq(body)}&labels=bug"
     )
 
