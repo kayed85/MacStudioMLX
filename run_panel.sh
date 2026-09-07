@@ -36,7 +36,7 @@ MLX="$ROOT/ltx-2-mlx"
 # the install first" at someone who had a perfectly good one. `env` is checked
 # first because it is what the installer actually creates; `.venv` stays as a
 # fallback so a hand-rolled uv venv still works.
-for _cand in "$MLX/env/bin/python3.11" "$MLX/.venv/bin/python3.11"; do
+for _cand in "$MLX/env/bin/python3.14" "$MLX/env/bin/python3.11" "$MLX/env/bin/python3" "$MLX/env/bin/python" "$MLX/.venv/bin/python3"; do
   if [[ -x "$_cand" ]]; then PY="$_cand"; break; fi
 done
 
