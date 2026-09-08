@@ -452,6 +452,9 @@ def post_prompt_enhance(h, path, qs, ctype) -> None:
     # the dev transformer.
     user_prompt = (form.get("prompt", [""])[0] or "").strip()
     mode = (form.get("mode", ["t2v"])[0] or "t2v").lower()
+    aspect = (form.get("aspect", [""])[0] or form.get("orientation", [""])[0] or "").strip()
+    width = (form.get("width", [""])[0] or "").strip()
+    height = (form.get("height", [""])[0] or "").strip()
     if mode not in ("t2v", "i2v"):
         mode = "t2v"
     if not user_prompt:
@@ -492,13 +495,15 @@ def post_prompt_enhance(h, path, qs, ctype) -> None:
         pass
     preserve_tokens = sorted(preserve_set)
     P.push(f"[enhance] {mode}: {user_prompt[:80]}…"
+         + (f"  aspect={aspect}" if aspect else "")
          + (f"  preserve={preserve_tokens}" if preserve_tokens else ""))
     try:
         result = P.HELPER.run({
             "action": "enhance_prompt",
             "id": f"enh-{int(P.time.time()*1000)}",
             "params": {"prompt": user_prompt, "mode": mode, "seed": 10,
-                       "preserve_tokens": preserve_tokens},
+                       "preserve_tokens": preserve_tokens,
+                       "aspect": aspect, "width": width, "height": height},
         }, timeout=P.PROMPT_ENHANCE_TIMEOUT)
     except Exception as exc:
         P.push(f"[enhance] failed: {exc}")

@@ -754,6 +754,9 @@ async function enhancePrompt() {
     const charIdEl = document.getElementById('characterIdInput');
     if (charIdEl && charIdEl.value) preserveTokens.push(charIdEl.value);
     const fd = new URLSearchParams({ prompt: original, mode });
+    const aspEl = document.querySelector('[name="aspect"]:checked') || document.getElementById('aspect') || document.querySelector('[data-sb-aspect].active');
+    const aspVal = (aspEl ? (aspEl.value || aspEl.dataset.sbAspect) : '') || (typeof SB !== 'undefined' ? SB.aspect : '');
+    if (aspVal) fd.set('aspect', aspVal);
     if (preserveTokens.length) fd.set('preserve_tokens', JSON.stringify(preserveTokens));
     const r = await fetch('/prompt/enhance', { method: 'POST', body: fd });
     res = await r.json();

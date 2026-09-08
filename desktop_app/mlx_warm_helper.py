@@ -4020,6 +4020,9 @@ for line in sys.__stdin__:
         if mode not in ("t2v", "i2v"):
             mode = "t2v"
         seed = int(p.get("seed", 10))
+        aspect = str(p.get("aspect") or p.get("orientation") or "").strip()
+        width = str(p.get("width") or "").strip()
+        height = str(p.get("height") or "").strip()
         preserve_tokens = p.get("preserve_tokens") or []
         if not isinstance(preserve_tokens, list):
             preserve_tokens = []
@@ -4056,6 +4059,18 @@ for line in sys.__stdin__:
                     "- Audio sentence stays as one trailing line that begins",
                     "  with 'Audio:'.",
                 ]
+                asp_lower = aspect.lower()
+                is_vert = asp_lower in ("portrait", "vertical", "9:16") or (width.isdigit() and height.isdigit() and int(height) > int(width))
+                is_horiz = asp_lower in ("landscape", "widescreen", "16:9", "4:3") or (width.isdigit() and height.isdigit() and int(width) > int(height))
+                if is_vert or is_horiz or aspect:
+                    target_orient = "portrait / vertical (9:16)" if is_vert else ("landscape / widescreen (16:9)" if is_horiz else aspect)
+                    addendum_lines += [
+                        "",
+                        f"#### Target Aspect Ratio & Composition Directive ({target_orient}):",
+                        f"- The target rendering aspect ratio is {target_orient}.",
+                        "- Describe framing, subject scale, and composition naturally suited for this exact aspect ratio.",
+                        "- DO NOT introduce descriptions that distort, stretch, reshape, or alter proportions (e.g. no letterboxing, forced widescreen distortion on vertical frames, or stretched subjects). Preserve native proportions.",
+                    ]
                 if preserve_tokens:
                     addendum_lines += [
                         "",
