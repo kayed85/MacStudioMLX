@@ -27,7 +27,7 @@
 
 ### 📥 [Click Here to Download MacStudio MLX for Mac (.dmg)](https://github.com/kayed85/MacStudioMLX/releases/latest)
 
-> **Current release: v4.11.1.** Estimates follow the chip; Control, HiDream, training and image pre-flight guards read from fleet telemetry. One Shot mode, LTX 2x upscale, Hailuo H3 LoRA stacking, HuggingFace/CivitAI LoRA browser search, and high-quality generation. Full notes on the [releases page](https://github.com/kayed85/MacStudioMLX/releases).
+> **Current release: v4.12.2.** Upstream release sync: The talking one shot (J-cut speech handoff, lip-sync speaker gate, two-speaker staging), no-beats one-shot prefill, Q8 H3 compact build validation, Krea 2 Turbo photorealistic model for 16 GB Macs, vertical aspect ratio fixes, and prompt enhancer aspect preservation. Full notes on the [releases page](https://github.com/kayed85/MacStudioMLX/releases).
 
 ---
 
@@ -42,14 +42,11 @@
 ## ✨ What's New in This Release?
 
 * **📱 Native macOS App & DMG Installer:** No command line or external browser runners required. Double-click the `.dmg` file to install `MacStudioMLX.app` directly into `/Applications`.
-* **🎛️ Interactive Model Hub (Manager):** Lightweight 120 MB installer. Select and download only the AI models you want (`LTX-Video 2.5 4-bit`, `Gemma 3 4-bit`, `FLUX.2 Edit`, `IC-LoRAs`) directly into your local Mac application data directory.
-* **💻 Tailored for MacBook Pro M1 Pro (16GB RAM+):** Pre-tuned low-memory precision profiles, half-memory H3 engine, and TeaCache acceleration for high-speed local generation on M1 Pro chips.
+* **🎛️ Interactive Model Hub (Manager):** Lightweight 120 MB installer. Select and download only the AI models you want (`LTX-Video 2.5 4-bit`, `Gemma 3 4-bit`, `FLUX.2 Edit`, `Krea 2 Turbo`, `IC-LoRAs`) directly into your local Mac application data directory.
+* **💻 Tailored for MacBook Pro M1 Pro (16GB RAM+):** Pre-tuned low-memory precision profiles, half-memory H3 engine, Krea 2 Turbo, and TeaCache acceleration for high-speed local generation on M1 Pro chips.
 * **🎨 Custom macOS Futuristic Icon:** High-resolution 3D Apple squircle app icon.
 
 ---
-=======
-> **Current release: v4.11.1.** Time estimates now follow your chip (an M4 Pro or M1 Max renders two to four times slower than the M4 Max the numbers were measured on; an M5 Max or M3 Ultra much faster). Control asks for a clip before it queues, a saved HiDream pick falls back to Auto instead of failing, training says no on Macs under 24 GB, and the image pre-flight frees the idle video helper before refusing a 32 GB Mac. Includes 4.11.0: **One Shot** as its own mode, LTX one shots that hold together, the planner placing a One Shot inside a film. Full notes on the [releases page](https://github.com/mrbizarro/Phosphene/releases).
->>>>>>> upstream/main
 
 ## Overview
 
