@@ -282,11 +282,30 @@ def _patch_qwen() -> int:
     return 0
 
 
+def _patch_krea2() -> int:
+    target = _find("mflux/models/krea2/weights/krea2_weight_definition.py")
+    if target is None:
+        return 0
+    src = target.read_text()
+    if "*.safetensors" in src:
+        print(f"[krea2] {target.name}: already patched for sharded root safetensors")
+        return 0
+    old_code = '        return ["turbo.safetensors", *shared]'
+    new_code = '        return ["turbo.safetensors", "*.safetensors", "*.json", "transformer/*.safetensors", "transformer/*.json", *shared]'
+    if old_code in src:
+        src = src.replace(old_code, new_code)
+    old_variant = '        if (root_path / "transformer").is_dir():'
+    new_variant = '        if (root_path / "model.safetensors.index.json").exists() or (root_path / "0.safetensors").exists():\n            component = Krea2WeightDefinition._native_transformer()\n            component.weight_files = None\n            return component\n        if (root_path / "transformer").is_dir():'
+    if old_variant in src and "0.safetensors" not in src:
+        src = src.replace(old_variant, new_variant)
+    target.write_text(src)
+    print(f"[krea2] {target.name}: patched for sharded root safetensors")
+    return 0
+
+
 def main() -> int:
     rc = _patch_qwen()
-    # Future: _patch_flux2() — flux2 transformer has a more complex
-    # double-stream + single-stream loop; deferred until Qwen FBCache is
-    # benched and proven.
+    _patch_krea2()
     return rc
 
 
