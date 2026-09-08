@@ -41,8 +41,8 @@ for _p in [
 
 try:
     import mlx_lm.utils
-    mlx_lm.utils.MODEL_REMAPPING["gemma4_unified"] = "gemma2"
-    mlx_lm.utils.MODEL_REMAPPING["gemma4_unified_text"] = "gemma2"
+    for _gkey in ("gemma4_unified", "gemma4_unified_text", "gemma4_unified_audio", "gemma4", "Gemma4UnifiedForConditionalGeneration", "Gemma4UnifiedTextForConditionalGeneration"):
+        mlx_lm.utils.MODEL_REMAPPING[_gkey] = "gemma2"
 except Exception:
     pass
 
@@ -105,6 +105,19 @@ ENHANCE_GEMMA_PATH = os.environ.get(
 )
 IDLE_TIMEOUT = int(os.environ.get("LTX_IDLE_TIMEOUT", "1800"))
 LOW_MEMORY = os.environ.get("LTX_LOW_MEMORY", "true").lower() in ("true", "1", "yes")
+# Low-RAM block streaming (v4.9.9): stream transformer blocks from disk instead
+# of holding the whole DiT resident. The panel sets this for small-memory Macs
+# (see HELPER_LOW_RAM_STREAM in mlx_ltx_panel.py). Slower per step, far
+# smaller peak — the difference between a 16 GB Mac finishing a clip and
+# being jetsam-killed. Renders that carry LoRAs keep the exact unfused
+# runtime branch and skip streaming (the streamer cannot carry per-block
+# adapters; the library refuses rather than silently fusing on a quantized
+# pack), so the flag is applied per pipeline, not blindly.
+LOW_RAM_STREAM = os.environ.get("LTX_LOW_RAM_STREAM", "0").lower() in ("true", "1", "yes")
+
+
+def _stream_for(loras) -> bool:
+    return bool(LOW_RAM_STREAM) and not loras
 MODEL_UPSCALE_ENABLED = os.environ.get("LTX_ENABLE_MODEL_UPSCALE", "").lower() in ("1", "true", "yes", "on")
 
 # Y1.037 — VAE temporal-streaming decision.
@@ -585,7 +598,7 @@ _extend_lora_key: tuple | None = None
 _extend_dev_name: str | None = None
 
 
-def _lora_fingerprint(loras: list[dict] | None) -> tuple:
+def _lora_fingerprint_base(loras: list[dict] | None) -> tuple:
     """Stable hashable representation of a LoRA list. Order-insensitive
     so [{a,1},{b,2}] and [{b,2},{a,1}] hash to the same set — fusing
     is commutative."""
@@ -595,6 +608,13 @@ def _lora_fingerprint(loras: list[dict] | None) -> tuple:
         (str(l.get("path", "")), float(l.get("strength", 1.0)))
         for l in loras
     ))
+
+def _lora_fingerprint(loras: list[dict] | None) -> tuple:
+    """The pipeline cache key: the LoRA set AND whether this job streams
+    blocks (v4.9.9). A LoRA-free job after a LoRA job must not reuse a
+    pipeline built the other way round."""
+    return _lora_fingerprint_base(loras) + (("stream",) if _stream_for(loras) else ())
+
 
 
 def _resolve_lora_path(path: str) -> str:
@@ -634,6 +654,16 @@ def _resolve_lora_path(path: str) -> str:
         ) from exc
     try:
         repo_dir = snapshot_download(repo_id=p, allow_patterns=["*.safetensors"])
+    except (ValueError, OSError) as exc:
+        # huggingface_hub's HFValidationError is a ValueError: "Repo id must be
+        # in the form 'repo_name' or 'namespace/repo_name'". A user never typed
+        # an id — the value is a LoRA path that no longer resolves (moved,
+        # renamed, a relative path with a space). Name the file, not the rule.
+        if type(exc).__name__ in ("HFValidationError",) or "Repo id must be" in str(exc):
+            raise FileNotFoundError(
+                f"LoRA file not found: {p} — it is not on disk and it is not a Hugging Face "
+                f"repo id. It was probably moved or deleted after it was picked; pick it again.") from exc
+        raise
     except GatedRepoError as exc:
         # Most Lightricks LoRAs are gated — they require accepting a
         # license on the model page AND an HF token authenticated with
@@ -689,6 +719,25 @@ def _resolve_lora_path(path: str) -> str:
           "line": f"  resolved {p} -> {os.path.basename(chosen)} "
                   f"({candidates[0][0] // (1024*1024)} MB)"})
     return chosen
+
+
+def _construct_pipeline(cls, **kwargs):
+    """Build a pipeline, passing only the constructor kwargs THIS vendored
+    class accepts.
+
+    4.10.2 added `low_ram_streaming=` to every pipeline construction. The
+    text/image pipelines take it through `BasePipeline`; `RetakePipeline`
+    (the Extend lane) declares its own `__init__` without it, so every Extend
+    render on 4.10.2–4.10.5 died at construction with "unexpected keyword
+    argument 'low_ram_streaming'" — 35 failures from one install in the fleet
+    on the day 4.10.4 shipped. A dropped kwarg is logged, never fatal."""
+    accepted = _filter_unsupported_kwargs(cls.__init__, dict(kwargs))
+    dropped = sorted(set(kwargs) - set(accepted))
+    if dropped:
+        emit({"event": "log",
+              "line": f"{cls.__name__} does not take {', '.join(dropped)} on this engine; "
+                      f"constructing without."})
+    return cls(**accepted)
 
 
 def _filter_unsupported_kwargs(fn, kwargs: dict) -> dict:
@@ -1340,8 +1389,10 @@ def get_pipe(kind: str, loras: list[dict] | None = None,
                     _ac()
                 emit({"event": "log",
                       "line": "Loading I2V pipeline (first job is the slow one)..."})
-                pipe = ImageToVideoPipeline(
+                pipe = _construct_pipeline(
+                    ImageToVideoPipeline,
                     model_dir=i2v_dir, gemma_model_id=GEMMA_PATH, low_memory=LOW_MEMORY,
+                    low_ram_streaming=_stream_for(loras),
                 )
                 _attach_loras(pipe, loras)
                 _i2v_pipe = pipe
@@ -1366,8 +1417,10 @@ def get_pipe(kind: str, loras: list[dict] | None = None,
                     _ac()
                 emit({"event": "log",
                       "line": f"Loading Extend pipeline (heavier — uses dev transformer at {ext_dir})..."})
-                pipe = ExtendPipeline(
+                pipe = _construct_pipeline(
+                    ExtendPipeline,
                     model_dir=ext_dir, gemma_model_id=GEMMA_PATH, low_memory=LOW_MEMORY,
+                    low_ram_streaming=_stream_for(loras),
                     dev_transformer=ext_dev,
                 )
                 _attach_loras(pipe, loras)
@@ -1389,8 +1442,10 @@ def get_pipe(kind: str, loras: list[dict] | None = None,
                 _ac()
             emit({"event": "log",
                   "line": "Loading T2V pipeline (first job is the slow one)..."})
-            pipe = TextToVideoPipeline(
+            pipe = _construct_pipeline(
+                TextToVideoPipeline,
                 model_dir=t2v_dir, gemma_model_id=GEMMA_PATH, low_memory=LOW_MEMORY,
+                low_ram_streaming=_stream_for(loras),
             )
             _attach_loras(pipe, loras)
             _t2v_pipe = pipe
@@ -2525,7 +2580,7 @@ def configure_acceleration(mode: str) -> str:
 # of letting it surface as an un-triageable TypeError mid-render.
 #
 # 2026-08-12: this is a FORK BUILD, not an upstream tag. The vendored checkout
-# is mrbizarro/ltx-2-mlx at the immutable tag `v0.14.19+ltx25.6` — v0.14.19 plus
+# is mrbizarro/ltx-2-mlx at the immutable tag `v0.14.19+ltx25.7` — v0.14.19 plus
 # the LTX-2.5 port (keyframe pos-emb, Gemma 4 tower, ancestral sampler). The
 # release segment stays 0.14.19 because that is genuinely what it branches from;
 # the `+ltx25.N` local segment is what makes the two distinguishable.
@@ -2550,7 +2605,7 @@ def configure_acceleration(mode: str) -> str:
 # — a skew gate blind to the one skew that mattered. Bumping the pin here
 # without bumping the packages (or the reverse) puts it back into permanent
 # SKEW warnings, so the two move together or not at all.
-_LTX_EXPECTED_VERSION = "0.14.19+ltx25.6"
+_LTX_EXPECTED_VERSION = "0.14.19+ltx25.7"
 
 
 def _detect_ltx_version() -> dict:
@@ -2744,6 +2799,16 @@ def apply_mlx_cache_policy() -> None:
         return
     try:
         import mlx.core as mx
+        if LOW_RAM_STREAM:
+            # Streaming only pays if freed block buffers actually leave the
+            # heap; a retained cache re-pins them. Keep the pipeline's own
+            # set_cache_limit(0) instead of re-asserting the fractional cap.
+            mx.set_cache_limit(0)
+            if not _MLX_CACHE_ANNOUNCED:
+                _MLX_CACHE_ANNOUNCED = True
+                emit({"event": "log",
+                      "line": "[mlx] low-RAM streaming: transformer blocks are read from disk as needed and the Metal cache is off — slower per step, far smaller peak."})
+            return
         mx.set_cache_limit(int(_MLX_CACHE_LIMIT))
     except Exception as exc:                          # noqa: BLE001
         if not _MLX_CACHE_ANNOUNCED:
@@ -2804,6 +2869,7 @@ emit({
     "gemma4_tower_supported": (
         importlib.util.find_spec("ltx_core_mlx.text_encoders.gemma.gemma4")
         is not None),
+    "low_ram_stream": bool(LOW_RAM_STREAM),
     "mlx_version": _RUNTIME_ENV.get("mlx"),
     "mlx_metal_version": _RUNTIME_ENV.get("mlx_metal"),
     # None when the policy is off (LTX_MLX_CACHE_GIB=off) — i.e. MLX's own
@@ -3906,11 +3972,48 @@ for line in sys.__stdin__:
             # ICLoraPipeline — it loads its own DiT + VAE at init, so holding
             # the t2v / i2v caches just doubles the memory footprint.
             release_pipelines("restore render incoming")
-            pipe = ICLoraPipeline(
-                model_dir=Path(model_dir),
-                lora_paths=resolved,
-                low_memory=LOW_MEMORY,
-            )
+            # gemma_model_id was never passed here, so every IC lane (Colorize,
+            # Ingredients, Control, Upscale ×2) encoded its prompt with the
+            # class default — Gemma 3 from the HF cache — even on an LTX-2.5
+            # checkpoint, whose text encoder is the Gemma 4 fine-tune the
+            # panel hands us in LTX_GEMMA. The references carried the shot so
+            # nobody noticed; the prompt was the part being ignored.
+            # lora_mode "unfused": keep the adapter as a runtime wrapper instead
+            # of folding it into the quantized weights. Fusing re-quantizes
+            # W + B@A back onto the int grid — the fork measures 22.6% of this
+            # upscaler's delta lost at int8 and ~150% at int4 (i.e. nothing of
+            # the adapter survives on Q4). The native loader attaches
+            # `_pending_loras` exactly, at any bit width; the IC pipeline's own
+            # fuse step is skipped by handing it an empty list, so the reference
+            # downscale factor it would have read from the file is set by hand.
+            lora_mode = str(p.get("lora_mode") or "fused")
+            if lora_mode == "unfused":
+                try:
+                    _install_lora_fusion_patches()
+                except Exception:                                  # noqa: BLE001
+                    pass
+                from ltx_pipelines_mlx.iclora_utils import read_lora_reference_downscale_factor
+                pipe = ICLoraPipeline(
+                    model_dir=Path(model_dir),
+                    lora_paths=[],
+                    gemma_model_id=GEMMA_PATH,
+                    low_memory=LOW_MEMORY,
+                )
+                pipe._pending_loras = list(resolved)
+                for _lp, _ in resolved:
+                    _scale = read_lora_reference_downscale_factor(_lp)
+                    if _scale != 1:
+                        pipe.reference_downscale_factor = _scale
+                emit({"event": "log",
+                      "line": f"IC-LoRA applied UNFUSED (exact runtime wrapper), "
+                              f"reference downscale ×{pipe.reference_downscale_factor}"})
+            else:
+                pipe = ICLoraPipeline(
+                    model_dir=Path(model_dir),
+                    lora_paths=resolved,
+                    gemma_model_id=GEMMA_PATH,
+                    low_memory=LOW_MEMORY,
+                )
             emit({"event": "log",
                   "line": f"step:generate_restore {p['width']}x{p['height']} "
                           f"{num_frames}f @{float(p.get('frame_rate', 24.0)):.1f}fps "
@@ -3944,6 +4047,23 @@ for line in sys.__stdin__:
             # asked for it, so the pipeline default still wins otherwise.
             if p.get("skip_stage_2"):
                 kwargs["skip_stage_2"] = True
+            # Upscale ×2 (v4.11): one pass at the full target size — the
+            # reference IS the low-res clip, so a half-res stage 1 would only
+            # throw its detail away — and the "keep the shot" slider rides on
+            # the reference's attention strength.
+            if p.get("single_stage"):
+                kwargs["single_stage"] = True
+            if p.get("conditioning_attention_strength") is not None:
+                kwargs["conditioning_attention_strength"] = float(
+                    p["conditioning_attention_strength"])
+            # Upscale ×2 from the clip itself (Stage 1 skipped, see
+            # ICLoraPipeline.generate): the clip's latent is upsampled and only
+            # `refine_steps` of the distilled tail run at full res.
+            if p.get("source_video"):
+                kwargs["source_video"] = str(p["source_video"])
+                kwargs.pop("single_stage", None)
+            if p.get("refine_steps") is not None:
+                kwargs["refine_steps"] = int(p["refine_steps"])
             kwargs = _filter_unsupported_kwargs(pipe.generate_and_save, kwargs)
             # Ingredients is single-stage ONLY (the public Space's recipe). If the
             # imported pipeline package is an older/pinned build whose

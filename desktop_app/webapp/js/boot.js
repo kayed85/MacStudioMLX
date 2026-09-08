@@ -264,7 +264,7 @@ window._liveStagePendingOutput = null;
 // REMIX_MODES — the IC-LoRA reference tools grouped under the single "Remix"
 // mode pill. These are REAL backend modes (the #mode field + the dispatch see
 // them); "remix" itself is a UI-only pseudo-mode that resolves to one of these.
-globalThis.REMIX_MODES = ['ingredients', 'control', 'restore'];
+globalThis.REMIX_MODES = ['ingredients', 'control', 'restore', 'upscale'];
 
 // Main right-pane gallery kind filter (All / Videos / Photos). Independent
 // of `filterMode` (which is visible/hidden) and independent of
@@ -317,9 +317,48 @@ function filteredMainOutputs() {
   } else {
     all = currentOutputs;
   }
-  if (mainOutputsFilter === 'all') return all;
-  if (mainOutputsFilter === 'photos') return all.filter(isPhotoOutputMain);
-  return all.filter(o => !isPhotoOutputMain(o));
+  if (mainOutputsFilter === 'photos') all = all.filter(isPhotoOutputMain);
+  else if (mainOutputsFilter !== 'all') all = all.filter(o => !isPhotoOutputMain(o));
+  return applyOutputsQuery(all);
+}
+
+// THE SEARCH. Every word typed must appear somewhere in the output's name
+// or its sidecar words (`q`, built server-side); order does not matter.
+// "aria 1280 turbo" finds the Aria clips rendered at 1280 wide on the turbo
+// tier, and nothing else.
+let _outputsQuery = '';
+function applyOutputsQuery(rows) {
+  const words = String(_outputsQuery || '').toLowerCase().split(/\s+/).filter(Boolean);
+  if (!words.length) return rows;
+  return rows.filter(o => {
+    const hay = (String(o.name || '') + ' ' + String(o.q || '')).toLowerCase();
+    return words.every(w => hay.indexOf(w) >= 0);
+  });
+}
+function setOutputsQuery(v) {
+  _outputsQuery = String(v || '');
+  // A search over what is on screen is a search over the newest 60 unless
+  // the older ones are in: pull them the first time a word is typed.
+  if (_outputsQuery && !window._showingAllOutputs && typeof outputsLoadAll === 'function') {
+    try { outputsLoadAll().then(() => { if (typeof renderCarousel === 'function') renderCarousel(); paintOutputsCount(); }); } catch (e) {}
+  }
+  if (typeof renderCarousel === 'function') renderCarousel();
+  paintOutputsCount();
+}
+// ONE FORMATTER for the header, derived from (query, chip, count) every
+// time — the review caught "Outputs · 1507" losing its word after a search
+// was cleared, and "0 photos" where "0 matches" was true.
+function outputsTitleText() {
+  const n = filteredMainOutputs().length;
+  const kind = mainOutputsFilter === 'all' ? '' : (' ' + mainOutputsFilter);
+  if (_outputsQuery) return 'Outputs · ' + n + ' match' + (n === 1 ? '' : 'es') + kind;
+  return 'Outputs · ' + n + (kind || (n === 1 ? ' output' : ' outputs'));
+}
+function outputsQueryText() { return _outputsQuery; }
+function paintOutputsCount() {
+  const t = document.getElementById('carouselTitle');
+  if (!t) return;
+  t.textContent = outputsTitleText();
 }
 
 // "Show all (N)" button handler — fetches the full unified gallery from
@@ -382,7 +421,7 @@ function _maybeAutoLoadAllForEmptyFilter(mode) {
   outputsLoadAll().then(() => {
     const visible = filteredMainOutputs();
     if (visible.length && !visible.some(o => o.path === activePath)) {
-      selectOutput(visible[0].path);
+      selectOutput(visible[0].path, { autoplay: false });   // not a click
     }
   });
   return true;
@@ -408,7 +447,7 @@ function setMainOutputsFilter(mode) {
   const visible = filteredMainOutputs();
   // If the active selection was filtered out, switch to the first match.
   if (visible.length && !visible.some(o => o.path === activePath)) {
-    selectOutput(visible[0].path);
+    selectOutput(visible[0].path, { autoplay: false });   // not a click
   }
   renderCarousel();
   // Reset scroll position on filter change so the user lands at the
@@ -432,7 +471,7 @@ function _autoMainOutputsFilterForMode(mode) {
   // Auto-set NEVER lands on 'all' — that's user-only, per spec.
   let target = null;
   if (mode === 'image') target = 'photos';
-  else if (mode === 't2v' || mode === 'i2v' || mode === 'keyframe' || mode === 'extend' || mode === 'restore' || mode === 'ingredients' || mode === 'control') target = 'videos';
+  else if (mode === 't2v' || mode === 'i2v' || mode === 'oneshot' || mode === 'keyframe' || mode === 'extend' || mode === 'restore' || mode === 'ingredients' || mode === 'control') target = 'videos';
   if (!target) return;
   // Same-filter early-return is conditional now: if the filter is already
   // on `target` but the visible list is empty AND we haven't loaded the
@@ -460,7 +499,7 @@ function _autoMainOutputsFilterForMode(mode) {
   // off-filter (e.g. mode=image but the viewer is showing a video).
   const visible = filteredMainOutputs();
   if (visible.length && !visible.some(o => o.path === activePath)) {
-    selectOutput(visible[0].path);
+    selectOutput(visible[0].path, { autoplay: false });   // not a click
   }
 }
 
@@ -604,6 +643,13 @@ function setMode(mode) {
     mode = 't2v';
   }
   currentMode = mode;
+  // ONE SHOT is a UI mode with its own panel (#takeAxes). Every OTHER mode
+  // closes it and zeroes take_seconds here, before any early return below,
+  // so a normal clip never carries a take — the field is hidden and FormData
+  // would post it regardless of which chip is lit.
+  if (mode !== 'oneshot' && typeof oneshotLeave === 'function') {
+    try { oneshotLeave(); } catch (e) {}
+  }
   // HDR vs Character mutual exclusion — reflect mode change in pill state.
   // Runs in a microtask so the rest of setMode finishes setting UI bits
   // first (character chip strip visibility, etc.).
@@ -735,7 +781,11 @@ function setMode(mode) {
   // picker keeps the previous mode's filter when flipping back from
   // Studio to a video mode.
   if (typeof renderLorasList === 'function') renderLorasList();
-  document.getElementById('mode').value = mode;
+  // One Shot ships a real backend mode: t2v, or i2v when its anchor image is
+  // set (the same hidden #image field Image mode fills). make_job reads
+  // take_seconds + beats off the same form and turns the clip into parts.
+  document.getElementById('mode').value =
+    (mode === 'oneshot' && typeof oneshotBackendMode === 'function') ? oneshotBackendMode() : mode;
   document.querySelectorAll('#modeGroup .pill-btn').forEach(b => {
     if (mode === 'keyframe') {
       b.classList.toggle('active', isKeyframeModeChipActive(b, window._kfMode));
@@ -776,6 +826,11 @@ function setMode(mode) {
   // same "Q8 not installed" hint as elsewhere.
   if (mode === 'keyframe') {
     setQuality('high');
+  }
+  // Open the One Shot panel: length chips (default 1 min), beats, anchor,
+  // continuity toggles; the engine's own Length strip folds while it is open.
+  if (mode === 'oneshot' && typeof oneshotEnter === 'function') {
+    try { oneshotEnter(); } catch (e) { console.warn('oneshotEnter failed', e); }
   }
   updateAccelAvailability();
   updateTemporalAvailability();
@@ -834,6 +889,7 @@ function _portalLoraPicker(dest) {
 Object.assign(globalThis, {
   applyTierTimes, setKeyframeMode, keyframeTimingSlots, renderKeyframeDynamicSlots,
   maybeScaleTouchedKeyframeTiming, syncKeyframeTiming, isPhotoOutputMain, filteredMainOutputs,
+  applyOutputsQuery, setOutputsQuery, paintOutputsCount, outputsTitleText, outputsQueryText,
   outputsLoadAll, _updateMainFilterChips, _maybeAutoLoadAllForEmptyFilter, setMainOutputsFilter,
   updateModelCredit, toggleAvoidRow, syncAvoidRowFromValue, ingredientsServed,
   _paintControlGenNote, defaultRemixMode, setMode, _portalLoraPicker,
