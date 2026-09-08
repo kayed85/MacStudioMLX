@@ -1,5 +1,14 @@
 # Phosphene — project state, history, open work
 
+> **💻 Persistent Customizations & Device-Specific Features (MacStudio MLX - 16 GB Mac):**
+> 1. **Prompt Enhancement (`/prompt/enhance`):** Preserves target aspect ratio (`aspect`, `width`, `height`) and surfaces explicit `✨ Enhance Prompt` buttons across Image Studio (`#imgStudioEnhanceBtn`), Storyboard (`#sbEnhanceBtn`), and Audio Studio (`#audioStudioEnhanceBtn`).
+> 2. **Storyboard Vertical (9:16) Aspect Ratio:** `storyboard.py`, `mlx_ltx_panel.py`, and `storyboard.js` preserve vertical 9:16 portrait video jobs and canvases without falling back to horizontal 16:9.
+> 3. **Image Models & Mirrors:**
+>    - `Krea 2 Turbo` (`krea2_inline`): Uses `mflux-community/krea-2-turbo-mflux-q4` (4.5 GB) with sharded safetensors patch in `patch_mflux_fbcache.py`.
+>    - `Ideogram 4` (`ideogram4_inline`): Supports `mflux-community/ideogram-4-mflux-q4` (14 GB) & `cocktailpeanut/ideogram-4-fp8` un-gated mirror + `ideo_quantize=4` Fast Mode (4-bit).
+>    - `FLUX.2 Klein Edit` (`flux2_edit_inline`): Surfaced in `imgStudioEngine` dropdown (~6 GB RAM, 4-step ultra-fast image-to-image).
+> 4. **Arabic RTL Dialogue:** Storyboard planner and screenplay parser support RTL Arabic text, tags, and punctuation.
+
 > **🎙️ 2026-09-07, evening — the handoff is a J-cut, and audio-first is out.**
 > Two questions from the owner. (1) *Can he keep talking through a cut?* Yes,
 > when the next part is anchored on a frame where his mouth is mid-word:
