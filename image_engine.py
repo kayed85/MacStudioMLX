@@ -517,6 +517,7 @@ MFLUX_FAMILY_BIN = {
     # (the prompt is a JSON document, so it can't go on the shell as
     # --prompt). fp8 weights at ideogram-ai/ideogram-4-fp8. mflux 0.18+.
     "ideogram":       "mflux-generate-ideogram4",
+    "krea2":          "mflux-generate-krea2",
 }
 
 # Sensible per-family defaults so a user who picks a model from the
@@ -538,24 +539,10 @@ MFLUX_FAMILY_DEFAULTS = {
     "z_image_turbo": {"steps": 9,  "guidance": 0.0,  "base_model": ""},
     "fibo":          {"steps": 30, "guidance": 5.0,  "base_model": ""},
     "qwen":          {"steps": 30, "guidance": 5.0,  "base_model": ""},
-    # qwen_edit default: 8 steps. The Qwen card recommends 30-40 for
-    # final-quality, but the agent + Image Studio are iteration tools —
-    # ~1 min/image at Q4-8steps, then bump to 30 steps once the user
-    # picks a composition they like. Pair with a Lightning 4-step LoRA
-    # (mflux_lora_paths) to drop further to ~10-15 s. Guidance 4.0 from
-    # the model card.
     "qwen_edit":     {"steps": 8,  "guidance": 4.0,  "base_model": ""},
     "kontext":       {"steps": 30, "guidance": 4.5,  "base_model": ""},
-    # Ideogram 4: steps + guidance are INERT — the preset (V4_TURBO_12 /
-    # V4_DEFAULT_20 / V4_QUALITY_48) defines the step count and guidance
-    # schedule, and the CLI warns-and-ignores --steps / --guidance. The
-    # values below are placeholders only (the ideogram argv branch in
-    # _generate_mflux never reads them). base_model points the loader at
-    # the fp8 weights when --model is an HF id / path.
-    # base_model feeds the mflux `--base-model` ARCHITECTURE enum (dev/…/ideogram4),
-    # NOT the HF repo path (that's config.mflux_model → `--model`). Must be the enum
-    # or argparse exits 2. steps/guidance are inert (Ideogram presets define them).
     "ideogram":      {"steps": 20, "guidance": 0.0,  "base_model": "ideogram4"},
+    "krea2":         {"steps": 8,  "guidance": 1.0,  "base_model": "krea2"},
 }
 
 
@@ -588,6 +575,8 @@ def _infer_mflux_family(model: str) -> str:
         return "kontext"
     if "fibo" in s or "briaai/fibo" in s:
         return "fibo"
+    if "krea2" in s or "krea-2" in s or "krea_2" in s:
+        return "krea2"
     # qwen_edit must be matched BEFORE plain qwen — "qwen-image-edit-2509"
     # contains "qwen" + "image" so the plain qwen branch would steal it.
     if "qwen" in s and ("image-edit" in s or "image_edit" in s or "qwen-edit" in s):

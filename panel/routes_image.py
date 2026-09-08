@@ -278,6 +278,7 @@ def get_image_engine_status(h, parsed) -> None:
             ("qwen_edit_lightning_inline", "Qwen/Qwen-Image-Edit-2511", 24.0,  35.0,  50.0),
             ("qwen_edit_inline",           "Qwen/Qwen-Image-Edit-2511", 24.0,  75.0,  50.0),
             ("qwen_edit_high_inline",      "Qwen/Qwen-Image-Edit-2511", 24.0, 170.0,  60.0),
+            ("krea2_inline",               "krea/Krea-2-Turbo",          4.5,  20.0,  15.0),
             # Ideogram 4 fp8 — ~28 GB gated download. sec_per_image is
             # the default V4_DEFAULT_20 (20-step) baseline; the canvas
             # Quality dropdown can switch to V4_TURBO_12 (faster) or
@@ -299,6 +300,7 @@ def get_image_engine_status(h, parsed) -> None:
             "qwen_edit_lightning_inline": "qwen_edit",
             "qwen_edit_inline":           "qwen_edit",
             "qwen_edit_high_inline":      "qwen_edit",
+            "krea2_inline":               "krea2",
             "ideogram4_inline":           "ideogram",
         }
         out = []

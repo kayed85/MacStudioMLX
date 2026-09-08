@@ -20063,6 +20063,7 @@ def _preflight_model_cached(cfg) -> bool:
 
 _IMAGE_ENGINE_LABELS = {
     "auto": "the Auto engine",
+    "krea2_inline": "Krea 2 Turbo",
     "qwen_edit_lightning_inline": "Reference Edit — Fast",
     "qwen_edit_inline": "Reference Edit — Standard",
     "qwen_edit_high_inline": "Reference Edit — Quality",
@@ -24211,6 +24212,15 @@ def _build_image_engine_config(
             mflux_family="flux2",
             mflux_quantize=4,
             mflux_steps=4,
+        )
+    if engine_override == "krea2_inline":
+        return agent_image_engine.ImageEngineConfig(
+            kind="mflux",
+            mflux_model="krea/Krea-2-Turbo",
+            mflux_family="krea2",
+            mflux_quantize=4,
+            mflux_steps=8,
+            mflux_guidance=1.0,
         )
     if engine_override == "qwen_edit_lightning_inline":
         # Qwen FAST — 4-step Lightning distillation LoRA, Q6. The
