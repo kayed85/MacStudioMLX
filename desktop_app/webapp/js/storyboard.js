@@ -591,6 +591,17 @@ function sbSetAspect(asp) {
   if (SB.payload && SB.payload.board) {
     SB.payload.board.aspect = SB.aspect;
     SB.payload.board.orientation = SB.aspect;
+    const isPort = (SB.aspect === 'portrait' || SB.aspect === 'vertical' || SB.aspect === '9:16');
+    ['draft', 'final'].forEach(pass => {
+      const p = (SB.payload.board.policy || {})[pass];
+      if (p && p.width && p.height) {
+        if (isPort && p.width > p.height) {
+          const tmp = p.width; p.width = p.height; p.height = tmp;
+        } else if (!isPort && p.height > p.width) {
+          const tmp = p.width; p.width = p.height; p.height = tmp;
+        }
+      }
+    });
   }
   sbQueueSave(true);
 }
@@ -665,6 +676,7 @@ async function sbPlan() {
   fd.set('wardrobe', (sbEl('sbWardrobe') || {}).value || '');
   fd.set('engine', _sbEngineMode);
   if (_sbCastId) fd.set('character_id', _sbCastId);
+  if (SB.aspect) fd.set('aspect', SB.aspect);
   let r;
   try {
     r = await (await fetch('/storyboard/plan', { method: 'POST', body: fd })).json();

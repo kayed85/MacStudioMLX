@@ -16633,27 +16633,36 @@ _SB_QUALITY_CANVAS = {
 }
 
 
-def _sb_canvases() -> dict:
+def _sb_canvases(aspect: str = "landscape") -> dict:
     """Quality key -> the canvas THIS Mac actually delivers, already clamped."""
     cap = _sb_max_dim()
+    is_portrait = str(aspect or "").lower() in ("portrait", "vertical", "9:16")
     out = {}
     for q, (w, h) in _SB_QUALITY_CANVAS.items():
+        if is_portrait and w > h:
+            w, h = h, w
         fw, fh = storyboard.fit_canvas(w, h, cap)
         out[q] = {"width": fw, "height": fh}
     return out
 
 
-def _sb_policy_for(draft_quality: str, final_quality: str) -> dict:
+def _sb_policy_for(draft_quality: str, final_quality: str, aspect: str = "landscape") -> dict:
     """The board's two passes, in the panel's own geometry vocabulary, clamped
     to what this Mac can actually render."""
     cap = _sb_max_dim()
+    is_portrait = str(aspect or "").lower() in ("portrait", "vertical", "9:16")
 
     def cell(q, default):
         q = (q or default).strip().lower()
         w, h = _SB_QUALITY_CANVAS.get(q, _SB_QUALITY_CANVAS[default])
+        if is_portrait and w > h:
+            w, h = h, w
+        elif not is_portrait and h > w:
+            w, h = h, w
         w, h = storyboard.fit_canvas(w, h, cap)
         return {"quality": q, "width": w, "height": h,
-                "frames": storyboard.ltx_frames_for(5)}
+                "frames": storyboard.ltx_frames_for(5),
+                "aspect": "portrait" if is_portrait else "landscape"}
 
     return {"draft": cell(draft_quality, "quick"),
             "final": cell(final_quality, "standard")}
@@ -28076,9 +28085,13 @@ class Handler(BaseHTTPRequestHandler):
                     # clamp never ran. Invisible on a 1024+ Mac; on a 24 GB Mac
                     # (768px cap) every fresh plan came back with an illegal
                     # delivery pass, an over_cap error, and Render disabled.
+                    aspect_choice = str(f("aspect", "") or board.get("aspect") or board.get("orientation") or "landscape").strip().lower()
+                    board["aspect"] = aspect_choice
+                    board["orientation"] = aspect_choice
                     board["policy"] = _sb_policy_for(
                         get_settings().get("storyboard_draft_quality", "quick"),
-                        get_settings().get("storyboard_final_quality", "standard"))
+                        get_settings().get("storyboard_final_quality", "standard"),
+                        aspect=aspect_choice)
                 # Offer the number or refuse it — never quietly render a
                 # different film. A brief that asked for 4 shots used to come
                 # back as a 12-shot board with no message anywhere. The four

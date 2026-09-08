@@ -1339,14 +1339,20 @@ def shot_to_job(shot: dict, policy_pass: dict, *,
     # the scheduling bucket and this job dict can never disagree about what will run.
     engine = resolve_engine(shot, engine_mode=engine_mode, h3_available=h3_available)
 
+    w = policy_pass.get("width")
+    h = policy_pass.get("height")
+    board_aspect = str(shot.get("aspect") or shot.get("orientation") or policy_pass.get("aspect") or "").lower()
+    if board_aspect in ("portrait", "vertical", "9:16") and w and h and int(w) > int(h):
+        w, h = h, w
+
     job = {
         # The panel has ONE backend mode for text and character alike; see _PANEL_MODE.
         "mode": _PANEL_MODE.get(shot.get("mode"), "t2v"),
         "engine": engine,
         "prompt": prompt,
         "quality": policy_pass.get("quality", "balanced"),
-        "width": policy_pass.get("width"),
-        "height": policy_pass.get("height"),
+        "width": w,
+        "height": h,
         "frames": policy_pass.get("frames"),
         "enhance": "off",            # never let Gemma touch a planned prompt
         # `auto_open` was never in make_job's allowlist, so it silently did nothing. The field
@@ -1354,6 +1360,11 @@ def shot_to_job(shot: dict, policy_pass: dict, *,
         # must not pop a QuickTime window per shot.
         "open_when_done": "off",
     }
+
+    if board_aspect in ("portrait", "vertical", "9:16"):
+        job["aspect"] = "portrait"
+        if engine == "h3":
+            job["h3_orientation"] = "portrait"
 
     # Duration. Without this every shot rendered at the pass's frame count, so the per-shot
     # length control was decoration. Each engine gets its OWN grid — LTX snaps to frames%8==1

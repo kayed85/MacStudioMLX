@@ -655,6 +655,7 @@ async function sbPlan() {
   if (sbEl('sbAuto')) fd.set('auto', sbEl('sbAuto').checked ? '1' : '0');
   if (sbEl('sbAnchorStills')) fd.set('anchor_stills', sbEl('sbAnchorStills').checked ? '1' : '0');
   if (sbEl('sbLongWindows')) fd.set('long_windows', sbEl('sbLongWindows').checked ? '1' : '0');
+  if (SB.aspect) fd.set('aspect', SB.aspect);
   let r;
   try {
     r = await (await fetch('/storyboard/plan', { method: 'POST', body: fd })).json();
@@ -1863,6 +1864,17 @@ function sbSetAspect(asp) {
   if (SB.payload && SB.payload.board) {
     SB.payload.board.aspect = SB.aspect;
     SB.payload.board.orientation = SB.aspect;
+    const isPort = (SB.aspect === 'portrait' || SB.aspect === 'vertical' || SB.aspect === '9:16');
+    ['draft', 'final'].forEach(pass => {
+      const p = (SB.payload.board.policy || {})[pass];
+      if (p && p.width && p.height) {
+        if (isPort && p.width > p.height) {
+          const tmp = p.width; p.width = p.height; p.height = tmp;
+        } else if (!isPort && p.height > p.width) {
+          const tmp = p.width; p.width = p.height; p.height = tmp;
+        }
+      }
+    });
   }
   sbQueueSave(true);
 }
