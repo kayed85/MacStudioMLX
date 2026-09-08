@@ -1875,6 +1875,39 @@ function imgStudioCopyPath(path) {
 }
 
 
+async function imgStudioEnhancePrompt() {
+  const ta = document.getElementById('imgStudioPrompt');
+  if (!ta) return;
+  const original = (ta.value || '').trim();
+  if (!original) {
+    if (typeof phosToast === 'function') phosToast('Type a prompt first to enhance it.', { kind: 'warning' });
+    return;
+  }
+  const btn = document.getElementById('imgStudioEnhanceBtn');
+  if (btn) { btn.disabled = true; btn.innerHTML = '✨ Enhancing…'; }
+  try {
+    const aspect = document.getElementById('imgStudioAspect')?.value || '16:9';
+    const fd = new URLSearchParams({ prompt: original, mode: 'image', aspect: aspect });
+    const r = await fetch('/prompt/enhance', { method: 'POST', body: fd });
+    const res = await r.json();
+    if (res.error) {
+      if (typeof phosToast === 'function') phosToast('Enhance failed: ' + res.error, { kind: 'danger' });
+      return;
+    }
+    if (res.enhanced) {
+      ta.value = res.enhanced;
+      if (typeof phosToast === 'function') phosToast('Prompt enhanced!', { kind: 'success' });
+    }
+  } catch (e) {
+    if (typeof phosToast === 'function') phosToast('Enhance failed: ' + (e.message || e), { kind: 'danger' });
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:6px"><use href="#ph-sparkle-fill"/></svg>✨ Enhance Prompt / تحسين النص';
+    }
+  }
+}
+
 // ---- published to the page --------------------------------------------------
 // Inline handlers in the markup and the other files resolve these through
 // the global scope; everything NOT listed here is private to this module.
@@ -1887,6 +1920,7 @@ Object.assign(globalThis, {
   ideoSetSelType, ideoDeleteSel, ideoRender, ideoAddImagePaletteColor,
   ideoBuildCaption, ideoOnRawInput, ideoApplyRaw, ideoLoadExample,
   ideoStagePointerDown, imgStudioGenerate, imgStudioRefreshLibrary, imgStudioCopyPath,
+  imgStudioEnhancePrompt,
   // inline-handler targets: generated markup resolves these through the
   // global scope (the v4.9.0 regression, PR #69)
   imgStudioClearRef, openExternal,
