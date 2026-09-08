@@ -1,6 +1,6 @@
 {
   "name": "macstudio-mlx",
-  "version": "4.6.0",
+  "version": "4.11.1",
   "description": "MacStudio MLX Native Desktop App",
   "author": "MacStudio Team",
   "main": "main.js",

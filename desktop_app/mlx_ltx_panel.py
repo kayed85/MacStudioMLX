@@ -4607,6 +4607,28 @@ def _resolve_ideogram_repo() -> str:
     return IDEOGRAM_REPO_OFFICIAL if _ideogram_repo_cached(IDEOGRAM_REPO_OFFICIAL) else IDEOGRAM_REPO_UNGATED
 
 
+# ---- Krea 2 Turbo weights source -----------------------------------------
+# The official krea/Krea-2-Turbo repo is license-gated, returning 401
+# GatedRepoError for unauthenticated users. mflux-community published an
+# UN-GATED mirror with identical MLX weights, so we default to that mirror.
+KREA2_REPO_UNGATED = "mflux-community/krea-2-turbo-mflux-q4"
+KREA2_REPO_OFFICIAL = "krea/Krea-2-Turbo"
+
+def _krea2_repo_cached(repo_id: str) -> bool:
+    snap = _repo_hf_cache_dir(repo_id)
+    if snap is None:
+        return False
+    if agent_image_engine.hf_repo_partial_download(repo_id):
+        return False
+    return True
+
+def _krea2_any_cached() -> bool:
+    return _krea2_repo_cached(KREA2_REPO_OFFICIAL) or _krea2_repo_cached(KREA2_REPO_UNGATED)
+
+def _resolve_krea2_repo() -> str:
+    return KREA2_REPO_OFFICIAL if _krea2_repo_cached(KREA2_REPO_OFFICIAL) else KREA2_REPO_UNGATED
+
+
 def _repo_missing_in_cache(repo: dict) -> list[str] | None:
     """Files missing from the HF cache snapshot for this repo, or None if
     the repo isn't in the cache at all (caller treats None as "fall back to
@@ -24216,7 +24238,7 @@ def _build_image_engine_config(
     if engine_override == "krea2_inline":
         return agent_image_engine.ImageEngineConfig(
             kind="mflux",
-            mflux_model="krea/Krea-2-Turbo",
+            mflux_model=_resolve_krea2_repo(),
             mflux_family="krea2",
             mflux_quantize=4,
             mflux_steps=8,

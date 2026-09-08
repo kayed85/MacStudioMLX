@@ -8,15 +8,15 @@
 > **Optimized for Apple Silicon Macs (MacBook Pro M1 Pro / M1 / M2 / M3 / M4)**  
 
 <p align="center">
-  <img src="assets/the_commuter_hero.gif" alt="The Commuter — a 75-second One Shot made in Phosphene" width="100%">
+  <img src="assets/the_commuter_hero.gif" alt="The Commuter — a 75-second One Shot made in MacStudio MLX" width="100%">
   <br>
-  <sub><b>The Commuter</b> — a 75-second One Shot, rendered overnight on one Mac at native 1344×768 with Hailuo H3 and the new One Shot mode, from a single designed still. <a href="https://github.com/mrbizarro/phosphene/releases/latest">Watch the full film in the release</a>.</sub>
+  <sub><b>The Commuter</b> — a 75-second One Shot, rendered overnight on one Mac at native 1344×768 with Hailuo H3 and the new One Shot mode, from a single designed still. <a href="https://github.com/kayed85/MacStudioMLX/releases/latest">Watch the full film in the release</a>.</sub>
 </p>
 
 <p align="center">
   <strong>Generative video, image, and character training on your Mac.</strong><br>
   MLX. No PyTorch, no CUDA, no cloud, no API key.<br>
-  <a href="https://x.com/PhospheneAI">@PhospheneAI</a> on X · <a href="https://github.com/mrbizarro/phosphene">github.com/mrbizarro/phosphene</a>
+  <a href="https://github.com/kayed85/MacStudioMLX">github.com/kayed85/MacStudioMLX</a>
 </p>
 
 <p align="center">
