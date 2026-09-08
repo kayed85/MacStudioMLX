@@ -4655,20 +4655,31 @@ def _repo_hf_cache_dir(repo_id: str) -> Path | None:
 # mirror with identical fp8 weights, so we pull from that: no token, no license
 # click, no 403. We still prefer an already-downloaded official copy so existing
 # users don't re-fetch 28 GB.
+IDEOGRAM_REPO_PREQUANT_Q4 = "mflux-community/ideogram-4-mflux-q4"
 IDEOGRAM_REPO_UNGATED = "cocktailpeanut/ideogram-4-fp8"
 IDEOGRAM_REPO_OFFICIAL = "ideogram-ai/ideogram-4-fp8"
 
 def _ideogram_repo_cached(repo_id: str) -> bool:
     snap = _repo_hf_cache_dir(repo_id)
-    return snap is not None and (snap / "transformer" / "diffusion_pytorch_model.safetensors").exists()
+    if snap is None:
+        return False
+    return (snap / "transformer" / "model.safetensors.index.json").exists() or \
+           (snap / "transformer" / "diffusion_pytorch_model.safetensors").exists() or \
+           (snap / "transformer" / "0.safetensors").exists()
 
 def _ideogram_any_cached() -> bool:
-    return _ideogram_repo_cached(IDEOGRAM_REPO_OFFICIAL) or _ideogram_repo_cached(IDEOGRAM_REPO_UNGATED)
+    return (_ideogram_repo_cached(IDEOGRAM_REPO_PREQUANT_Q4) or
+            _ideogram_repo_cached(IDEOGRAM_REPO_OFFICIAL) or
+            _ideogram_repo_cached(IDEOGRAM_REPO_UNGATED))
 
 def _resolve_ideogram_repo() -> str:
-    # Reuse an existing official download; otherwise the un-gated mirror so a
-    # first-time user needs no Hugging Face token.
-    return IDEOGRAM_REPO_OFFICIAL if _ideogram_repo_cached(IDEOGRAM_REPO_OFFICIAL) else IDEOGRAM_REPO_UNGATED
+    if _ideogram_repo_cached(IDEOGRAM_REPO_PREQUANT_Q4):
+        return IDEOGRAM_REPO_PREQUANT_Q4
+    if _ideogram_repo_cached(IDEOGRAM_REPO_OFFICIAL):
+        return IDEOGRAM_REPO_OFFICIAL
+    if _ideogram_repo_cached(IDEOGRAM_REPO_UNGATED):
+        return IDEOGRAM_REPO_UNGATED
+    return IDEOGRAM_REPO_PREQUANT_Q4
 
 
 # ---- Krea 2 Turbo weights source -----------------------------------------
