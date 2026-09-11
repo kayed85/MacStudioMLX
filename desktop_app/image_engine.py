@@ -1147,7 +1147,8 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
                 try:
                     repo_id, filename = lp_str.split(":", 1)
                 except ValueError:
-                    resolved_paths.append(lp_str)
+                    if Path(lp_str).exists():
+                        resolved_paths.append(lp_str)
                     continue
                 try:
                     from huggingface_hub import hf_hub_download
@@ -1159,12 +1160,12 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
                     resolved_paths.append(cached)
                 except Exception as e:        # noqa: BLE001
                     if on_log is not None:
-                        try: on_log(f"[lora] WARN: could not resolve {lp_str}: {e}")
+                        try: on_log(f"[lora] WARN: skipping unresolvable LoRA {lp_str}: {e}")
                         except Exception:  # noqa: BLE001
                             pass
-                    resolved_paths.append(lp_str)
             else:
-                resolved_paths.append(lp_str)
+                if Path(lp_str).exists() or not ":" in lp_str:
+                    resolved_paths.append(lp_str)
         if fam in ("flux2", "flux2_edit"):
             _filtered_paths: list[str] = []
             _filtered_scales: list[float] = []
