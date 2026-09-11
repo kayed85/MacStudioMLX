@@ -3103,6 +3103,54 @@ document.querySelectorAll('#aspectGroup .pill-btn').forEach(b => b.onclick = () 
 document.querySelectorAll('#extendModeGroup .pill-btn').forEach(b => b.onclick = () => setExtendMode(b.dataset.extendMode));
 
 
+async function triggerAutoDatasetGen() {
+  const fileInput = document.createElement('input');
+  fileInput.type = 'file';
+  fileInput.accept = 'image/png,image/jpeg,image/webp';
+  fileInput.onchange = async () => {
+    if (!fileInput.files || !fileInput.files[0]) return;
+    const file = fileInput.files[0];
+    const typeSelect = document.getElementById('autoDatasetTypeSelect');
+    const stype = typeSelect ? typeSelect.value : 'character';
+    const triggerInput = document.getElementById('trainTriggerInput');
+    const trigger = (triggerInput && triggerInput.value || 'subject').trim();
+
+    const btn = document.getElementById('autoDatasetGenBtn');
+    const originalText = btn ? btn.innerHTML : '⚡ Generate 10x Dataset';
+    if (btn) { btn.disabled = true; btn.innerHTML = '⚡ Uploading reference…'; }
+
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const upRes = await fetch('/train/upload', { method: 'POST', body: formData });
+      const upData = await upRes.json();
+      if (upData.error) throw new Error(upData.error);
+
+      const refPath = upData.saved_path || upData.path || upData.filename;
+      if (btn) btn.innerHTML = '⚡ Generating 10x Dataset… (~45s)';
+
+      const genRes = await fetch('/characters/generate_dataset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ref_path: refPath, subject_type: stype, trigger: trigger })
+      });
+      const genData = await genRes.json();
+      if (genData.job_id) {
+        TRAIN.jobId = genData.job_id;
+      }
+      alert(`✅ Success! Generated ${genData.image_count} multi-angle cropped training images for ${trigger}.\n\nSaved to dataset folder: ${genData.images_dir}`);
+      if (typeof trainRefreshDataset === 'function') await trainRefreshDataset();
+      if (typeof trainInit === 'function') trainInit();
+    } catch (e) {
+      alert('Dataset generation failed: ' + (e.message || e));
+    } finally {
+      if (btn) { btn.disabled = false; btn.innerHTML = originalText; }
+    }
+  };
+  fileInput.click();
+}
+
+
 // ---- published to the page --------------------------------------------------
 // Inline handlers in the markup and the other files resolve these through
 // the global scope; everything NOT listed here is private to this module.
@@ -3126,5 +3174,5 @@ Object.assign(globalThis, {
   // inline-handler targets: generated markup resolves these through the
   // global scope (the v4.9.0 regression, PR #69)
   audioStudioClearAudio, charactersPickChip, trainInstall, trainRemoveImage,
-  trainUseInVideo,
+  trainUseInVideo, triggerAutoDatasetGen,
 });

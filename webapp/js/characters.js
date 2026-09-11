@@ -3135,9 +3135,11 @@ async function triggerAutoDatasetGen() {
         body: JSON.stringify({ ref_path: refPath, subject_type: stype, trigger: trigger })
       });
       const genData = await genRes.json();
-      if (genData.error) throw new Error(genData.error);
-
+      if (genData.job_id) {
+        TRAIN.jobId = genData.job_id;
+      }
       alert(`✅ Success! Generated ${genData.image_count} multi-angle cropped training images for ${trigger}.\n\nSaved to dataset folder: ${genData.images_dir}`);
+      if (typeof trainRefreshDataset === 'function') await trainRefreshDataset();
       if (typeof trainInit === 'function') trainInit();
     } catch (e) {
       alert('Dataset generation failed: ' + (e.message || e));
