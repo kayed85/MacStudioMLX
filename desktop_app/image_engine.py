@@ -1107,12 +1107,31 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
         _kept_p: list = []
         _kept_s: list = []
         for _i, _lp in enumerate(_lora_paths_in):
-            if "qwen" in str(_lp).lower():
+            lp_str = str(_lp)
+            lp_lower = lp_str.lower()
+            if "qwen" in lp_lower:
                 if on_log is not None:
                     try: on_log(f"[lora] skipping Qwen LoRA on {fam} family (incompatible): {_lp}")
                     except Exception:  # noqa: BLE001
                         pass
                 continue
+            if fam in ("flux2", "flux2_edit"):
+                is_flux1 = any(k in lp_lower for k in ("flux1", "flux-1", "flux.1", "fluxv1", "flux_v1"))
+                if not is_flux1 and Path(lp_str).exists():
+                    try:
+                        from lora_compat import read_tensor_header
+                        hdr = read_tensor_header(lp_str)
+                        hdr_keys = " ".join(hdr.keys())
+                        if "single_transformer_blocks" in hdr_keys or "double_blocks" in hdr_keys or "lora_unet" in hdr_keys:
+                            is_flux1 = True
+                    except Exception:  # noqa: BLE001
+                        pass
+                if is_flux1:
+                    if on_log is not None:
+                        try: on_log(f"[lora] skipping FLUX.1 LoRA on {fam} family (incompatible architecture): {_lp}")
+                        except Exception:  # noqa: BLE001
+                            pass
+                    continue
             _kept_p.append(_lp)
             if _i < len(_lora_scales_in):
                 _kept_s.append(_lora_scales_in[_i])
