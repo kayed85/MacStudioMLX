@@ -25948,13 +25948,17 @@ def run_job_inner(job: dict) -> None:
     #   Q8 tier  → A2VidPipelineTwoStage (dev + CFG + TeaCache)
     #   Q4 tier  → A2VidDistilledPipeline (distilled, no CFG, 8+3 steps)
     if mode == "a2v":
-        uses_q8 = SYSTEM_CAPS["allows_q8"]
+        tot_mem = float(get_memory().get("total_gb") or 0.0)
+        uses_q8 = SYSTEM_CAPS["allows_q8"] and tot_mem > 24.0
         if uses_q8:
             a2v_missing = hq_surface_missing()
             if a2v_missing:
                 push(f"Q8 not available ({len(a2v_missing)} file(s) missing) "
                      f"— falling back to Q4 distilled A2V pipeline")
                 uses_q8 = False
+        else:
+            if SYSTEM_CAPS["allows_q8"]:
+                push(f"A2V on {tot_mem:.0f} GB Mac: using Q4 distilled pipeline to fit RAM budget")
         if uses_q8:
             action = "generate_a2v"
             model_dir = str(pack_path("q8"))
