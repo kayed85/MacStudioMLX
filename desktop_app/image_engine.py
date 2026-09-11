@@ -1165,19 +1165,47 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
                     resolved_paths.append(lp_str)
             else:
                 resolved_paths.append(lp_str)
-        cmd.append("--lora-paths")
-        cmd.extend(resolved_paths)
-        if _lora_scales_in:
-            # 2026-05-31 review fix (C3): catch a scales/paths length mismatch
-            # HERE rather than letting mflux discover it after a ~50s model
-            # load and crash with an opaque error.
-            if len(_lora_scales_in) != len(resolved_paths):
-                raise ValueError(
-                    f"LoRA scales/paths length mismatch: {len(_lora_scales_in)} "
-                    f"scale(s) vs {len(resolved_paths)} path(s) — check "
-                    f"mflux_lora_scales / mflux_lora_paths in the engine config")
-            cmd.append("--lora-scales")
-            cmd.extend(str(s) for s in _lora_scales_in)
+        if fam in ("flux2", "flux2_edit"):
+            _filtered_paths: list[str] = []
+            _filtered_scales: list[float] = []
+            for _idx, rp in enumerate(resolved_paths):
+                is_incompatible = False
+                if Path(rp).exists():
+                    try:
+                        from lora_compat import read_tensor_header
+                        hdr = read_tensor_header(rp)
+                        hdr_keys = " ".join(hdr.keys())
+                        if "single_transformer_blocks" in hdr_keys or "double_blocks" in hdr_keys or "lora_unet" in hdr_keys:
+                            is_incompatible = True
+                    except Exception:  # noqa: BLE001
+                        pass
+                if is_incompatible:
+                    if on_log is not None:
+                        try: on_log(f"[lora] skipping incompatible FLUX.1 LoRA on {fam} engine: {rp}")
+                        except Exception:  # noqa: BLE001
+                            pass
+                    continue
+                _filtered_paths.append(rp)
+                if _idx < len(_lora_scales_in):
+                    _filtered_scales.append(_lora_scales_in[_idx])
+            resolved_paths = _filtered_paths
+            _lora_scales_in = _filtered_scales
+
+        if resolved_paths:
+            cmd.append("--lora-paths")
+            cmd.extend(resolved_paths)
+            if _lora_scales_in:
+                # 2026-05-31 review fix (C3): catch a scales/paths length mismatch
+                # HERE rather than letting mflux discover it after a ~50s model
+                # load and crash with an opaque error.
+                if len(_lora_scales_in) != len(resolved_paths):
+                    raise ValueError(
+                        f"LoRA scales/paths length mismatch: {len(_lora_scales_in)} "
+                        f"scales vs {len(resolved_paths)} paths. Adjust "
+                        f"mflux_lora_scales / mflux_lora_paths in the engine config"
+                    )
+                cmd.append("--lora-scales")
+                cmd.extend(str(s) for s in _lora_scales_in)
     # When `--model` is a HuggingFace id or local path (contains a
     # slash or starts with `~`), mflux needs `--base-model` to know
     # which architecture to instantiate. Fall through to the per-family
