@@ -622,3 +622,32 @@ def post_character_rename(h, path, qs, ctype) -> None:
         h._json({"ok": True, "id": cid, "name": new_name})
     except Exception as exc:
         h._json({"ok": False, "error": str(exc)}, 500)
+
+
+@post("/characters/generate_dataset")
+def post_character_generate_dataset(h, path, qs, ctype) -> None:
+    try:
+        length = int(h.headers.get("Content-Length") or "0")
+    except ValueError:
+        h._json({"error": "invalid Content-Length"}, 400); return
+    payload: dict = {}
+    if length > 0:
+        try:
+            payload = P.json.loads(h.rfile.read(length).decode() or "{}")
+        except Exception:
+            h._json({"error": "invalid JSON body"}, 400); return
+    ref_path = payload.get("ref_path")
+    if not ref_path:
+        h._json({"error": "ref_path is required"}, 400); return
+    stype = payload.get("subject_type", "character")
+    trigger = payload.get("trigger", "subject")
+    try:
+        res = P.generate_training_dataset_batch(
+            ref_image_path=ref_path,
+            subject_type=stype,
+            trigger_name=trigger
+        )
+        h._json(res)
+    except Exception as e:
+        h._json({"error": str(e)}, 500)
+

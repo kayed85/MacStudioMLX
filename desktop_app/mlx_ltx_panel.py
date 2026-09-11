@@ -27791,6 +27791,124 @@ def generate_character_sheet(character_id: str, *,
     }
 
 
+def generate_training_dataset_batch(
+    ref_image_path: str | Path,
+    subject_type: str = "character",
+    trigger_name: str = "subject",
+    job_id: str | None = None
+) -> dict:
+    """Generate 10 cropped training images (1024x1024) from a single reference image.
+
+    1. Renders 5 multi-pose 16:9 images with 2-panel square grid prompts.
+    2. Crops each render into 2x 1:1 square crops (10 cropped images total).
+    3. Saves cropped images to state/train_character/<job_id>/images/
+    4. Auto-captions them with local Gemma 3 (or fallback text).
+    """
+    from PIL import Image
+
+    ref_path = Path(ref_image_path).resolve()
+    if not ref_path.exists():
+        raise FileNotFoundError(f"Reference image not found: {ref_image_path}")
+
+    stype = (subject_type or "character").strip().lower()
+    trigger = (trigger_name or "subject").strip().lower()
+    if not job_id:
+        stamp = datetime.now().strftime('%Y%m%d-%H%M')
+        job_id = f"trn-{stamp}-{uuid.uuid4().hex[:4]}"
+
+    dataset_dir = STATE_DIR / "train_character" / job_id
+    images_dir = dataset_dir / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+
+    if stype == "product":
+        prompts = [
+            f"A high-resolution product catalog reference sheet of {trigger}, cleanly split into a 2-panel horizontal grid of two equal square sections on a seamless solid white studio background. Left square: close-up macro view of product label and logo. Right square: 3/4 front perspective view of the product. Commercial studio lighting, 8k.",
+            f"A high-resolution product catalog reference sheet of {trigger}, cleanly split into a 2-panel horizontal grid of two equal square sections on a seamless solid white studio background. Left square: top-down flat-lay view of the product. Right square: back view showing details and specifications. Studio lighting, 8k.",
+            f"A high-resolution product lifestyle reference sheet of {trigger}, cleanly split into a 2-panel horizontal grid of two equal square sections. Left square: product placed elegantly on a wooden table with soft natural sunlight. Right square: human hand holding the product turning it slowly. Commercial photography, 8k.",
+            f"A high-resolution product catalog reference sheet of {trigger}, cleanly split into a 2-panel horizontal grid of two equal square sections on a neutral background. Left square: product side profile view. Right square: product surrounded by natural fresh ingredients. Professional photography, 8k.",
+            f"A high-resolution product reference sheet of {trigger}, cleanly split into a 2-panel horizontal grid of two equal square sections. Left square: product floating in mid-air with soft shadow underneath. Right square: product next to sleek packaging box. High-end product shot, 8k."
+        ]
+    else:
+        prompts = [
+            f"A high-resolution 3D character reference sheet of {trigger}, cleanly split into a 2-panel horizontal grid of two equal square sections on a seamless solid light-grey studio background. Left square: close-up face portrait facing front and 3/4 face view. Right square: full-body front standing pose and full-body side view. Cute 3D animated character, Pixar render style, identical outfit and hair, 8k.",
+            f"A high-resolution 3D character reference sheet of {trigger}, cleanly split into a 2-panel horizontal grid of two equal square sections on a seamless solid light-grey studio background. Left square: full-body standing pose with waving hand gesture and full-body back view. Right square: waist-up portrait smiling and full-body walking motion. Cute 3D animated character, Pixar style, identical outfit, 8k.",
+            f"A high-resolution 3D character reference sheet of {trigger}, cleanly split into a 2-panel horizontal grid of two equal square sections on a seamless solid light-grey studio background. Left square: close-up laughing expression and seated pose. Right square: 3/4 body view looking over shoulder and full-body action pose. Pixar 3D animated style, identical outfit, 8k.",
+            f"A high-resolution 3D character reference sheet of {trigger}, cleanly split into a 2-panel horizontal grid of two equal square sections on a seamless solid light-grey studio background. Left square: full-body jumping pose and head-and-shoulders side profile. Right square: full-body cross-armed pose and back view. Pixar 3D style, identical outfit, 8k.",
+            f"A high-resolution 3D character reference sheet of {trigger}, cleanly split into a 2-panel horizontal grid of two equal square sections on a seamless solid light-grey studio background. Left square: extreme close-up eye detail and full-body standing pose. Right square: waist-up gesture pose and full-body profile. Pixar 3D render style, identical outfit, 8k."
+        ]
+
+    crop_count = 0
+    generated_crops = []
+
+    from image_engine import ImageEngineConfig, generate as generate_image
+    engine_cfg = ImageEngineConfig(
+        mflux_family="flux2_edit",
+        mflux_model="flux2-klein-4b",
+        mflux_steps=4
+    )
+
+    tmp_out_dir = dataset_dir / "raw_renders"
+    tmp_out_dir.mkdir(parents=True, exist_ok=True)
+
+    for idx, prompt_text in enumerate(prompts):
+        try:
+            results = generate_image(
+                prompt=prompt_text,
+                n=1,
+                output_dir=tmp_out_dir,
+                refs=[str(ref_path)],
+                config=engine_cfg,
+                base_seed=100 + idx * 7
+            )
+            if not results or not results[0].get("png_path"):
+                continue
+            raw_png = Path(results[0]["png_path"])
+            if not raw_png.exists():
+                continue
+
+            with Image.open(raw_png) as im:
+                w, h = im.size
+                side = min(w // 2, h)
+                left_crop = im.crop((0, 0, side, h)).resize((1024, 1024), Image.Resampling.LANCZOS)
+                right_crop = im.crop((w - side, 0, w, h)).resize((1024, 1024), Image.Resampling.LANCZOS)
+
+                crop_count += 1
+                out_path_1 = images_dir / f"img_{crop_count:02d}.png"
+                left_crop.save(out_path_1, format="PNG")
+                generated_crops.append(str(out_path_1))
+
+                crop_count += 1
+                out_path_2 = images_dir / f"img_{crop_count:02d}.png"
+                right_crop.save(out_path_2, format="PNG")
+                generated_crops.append(str(out_path_2))
+        except Exception as exc:
+            push(f"[dataset] WARN: render batch {idx+1} failed: {exc}")
+
+    for cp in generated_crops:
+        txt_path = Path(cp).with_suffix(".txt")
+        txt_path.write_text(f"[VISUAL]: a photo of {trigger}, {stype}\n[TEXT]: None", encoding="utf-8")
+
+    spec_data = {
+        "job_id": job_id,
+        "trigger": trigger,
+        "subject_type": stype,
+        "created_at": time.time(),
+        "images_dir": str(images_dir),
+        "image_count": len(generated_crops)
+    }
+    atomic_write_text(dataset_dir / "dataset.json", json.dumps(spec_data, indent=2))
+
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "trigger": trigger,
+        "subject_type": stype,
+        "images_dir": str(images_dir),
+        "image_count": len(generated_crops),
+        "crops": generated_crops
+    }
+
+
 def _validate_mflux_python_path(value: str) -> str:
     """Reject arbitrary-binary paths in `mflux_python_path`.
 

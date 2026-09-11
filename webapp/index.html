@@ -2542,6 +2542,17 @@
           <span class="train-caption-counter" id="trainCaptionCounter" hidden>0 captioned</span>
           <span class="qchip-spacer"></span>
           <button type="button" class="qchip" id="trainClearAllBtn" onclick="trainClearAll()" hidden><svg class="ph" aria-hidden="true" style="margin-right:6px;vertical-align:-2px"><use href="#ph-x"/></svg>Clear all</button>
+        <!-- ============== AUTO 10x DATASET GENERATOR ============== -->
+        <div class="train-auto-dataset-row" style="margin-top:12px;margin-bottom:12px;padding:12px;background:rgba(255,255,255,0.03);border:1px dashed rgba(255,255,255,0.15);border-radius:8px;display:flex;flex-wrap:wrap;align-items:center;gap:10px;">
+          <div style="flex:1;min-width:200px;">
+            <strong style="font-size:13px;display:block;margin-bottom:2px;">⚡ Auto-Generate 10x Training Dataset</strong>
+            <span style="font-size:11px;opacity:0.7;">Upload 1 photo (Character or Product) &rarr; Auto-generate 10 multi-angle cropped training images + captions</span>
+          </div>
+          <select id="autoDatasetTypeSelect" style="background:#111;color:#fff;border:1px solid #333;padding:6px 10px;border-radius:6px;font-size:12px;">
+            <option value="character">👤 Character (شخصية)</option>
+            <option value="product">📦 Product (منتج)</option>
+          </select>
+          <button type="button" class="primary-btn" id="autoDatasetGenBtn" onclick="triggerAutoDatasetGen()" style="font-size:12px;padding:6px 14px;">⚡ Generate 10x Dataset</button>
         </div>
 
         <!-- ============== BULK BUNDLE DROP ============== -->
