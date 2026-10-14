@@ -659,11 +659,9 @@ def _infer_mflux_family(model: str) -> str:
         return "fibo"
     if "krea2" in s or "krea-2" in s or "krea_2" in s:
         return "krea2"
-    # qwen_edit must be matched BEFORE plain qwen — "qwen-image-edit-2509"
-    # contains "qwen" + "image" so the plain qwen branch would steal it.
     if "qwen" in s and ("image-edit" in s or "image_edit" in s or "qwen-edit" in s):
         return "qwen_edit"
-    if "qwen" in s and "image" in s:
+    if "qwen" in s and ("image" in s or "2.1" in s or "2" in s):
         return "qwen"
     if "ideogram" in s:
         return "ideogram"
@@ -1194,7 +1192,7 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
                 except Exception:  # noqa: BLE001
                     pass
         _lora_paths_in, _lora_scales_in = [], []
-    elif fam != "qwen_edit" and _lora_paths_in:
+    elif fam not in ("qwen_edit", "qwen") and _lora_paths_in:
         _kept_p: list = []
         _kept_s: list = []
         for _i, _lp in enumerate(_lora_paths_in):

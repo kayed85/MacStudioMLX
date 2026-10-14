@@ -32996,6 +32996,9 @@ _PREFLIGHT_BASE_GB: dict[tuple[str, int], float] = {
     ("qwen_edit", 4): 18.0,
     ("qwen_edit", 6): 24.0,
     ("qwen_edit", 8): 32.0,
+    ("qwen", 4):      10.0,
+    ("qwen", 6):      14.0,
+    ("qwen", 8):      20.0,
     # Ideogram 4 — 9.3B fp8 DiT + 8B text encoder, quantized on load. The
     # default is now -q 6 (M1-safe); -q 4 is fast mode for ≤16 GB Macs.
     # Numbers cocktailpeanut validated getting it to run on an M1 Max 64 GB:
@@ -33090,6 +33093,7 @@ def _preflight_model_cached(cfg) -> bool:
 
 _IMAGE_ENGINE_LABELS = {
     "auto": "the Auto engine",
+    "qwen2_turbo_inline": "Qwen 2.1 + Turbo LoRA",
     "krea2_inline": "Krea 2 Turbo",
     "qwen_edit_lightning_inline": "Reference Edit — Fast",
     "qwen_edit_inline": "Reference Edit — Standard",
@@ -40812,6 +40816,24 @@ def _build_image_engine_config(
             mflux_steps=8,
             mflux_guidance=1.0,
         )
+    if engine_override in ("qwen2_turbo_inline", "qwen_2_1_turbo_inline"):
+        # Qwen-Image-2.1 + Turbo LoRA — 4-step Lightning/Turbo distillation LoRA.
+        # Uses Qwen/Qwen-Image-2.1 as base model and lightx2v Turbo/Lightning LoRA.
+        # Fast (~30 s on Apple Silicon at Q4), supports both text-to-image and reference conditioning.
+        has_refs = bool(form.get("refs") or form.get("ref_images") or form.get("image_paths"))
+        fam = "qwen_edit" if has_refs else "qwen"
+        return agent_image_engine.ImageEngineConfig(
+            kind="mflux",
+            mflux_model="Qwen/Qwen-Image-2.1",
+            mflux_family=fam,
+            mflux_quantize=4,
+            mflux_steps=4,
+            mflux_lora_paths=[
+                "lightx2v/Qwen-Image-2.1-Lightning:pytorch_lora_weights.safetensors"
+            ],
+            mflux_lora_scales=[1.0],
+            mflux_guidance=1.0,
+        )
     if engine_override == "qwen_edit_lightning_inline":
         # Qwen FAST — 4-step Lightning distillation LoRA, Q6. The
         # `repo:filename` collection-format syntax pins the bf16 4-step
@@ -40944,6 +40966,7 @@ CHARACTER_SHEET_VIEWS: dict[str, str] = {
 # happily render a stranger and call it a sheet — refuse up front instead.
 # mock_inline stays allowed: it marks refs_ignored and exists for tests.
 _CHARACTER_SHEET_ENGINES = {
+    "qwen2_turbo_inline",
     "hidream_fast_inline", "hidream_inline", "hidream_quality_inline",
     "qwen_edit_lightning_inline", "qwen_edit_inline", "qwen_edit_high_inline",
     "mock_inline",

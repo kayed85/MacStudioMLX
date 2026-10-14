@@ -85,6 +85,34 @@
       "blurb": "Drives motion, structure, and composition from an existing control video.",
       "repo_id": "Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control",
       "local_dir": "mlx_models/loras/ic"
+    },
+    {
+      "id": "qwen2_1_turbo",
+      "key": "qwen2_1_turbo",
+      "name": "Qwen-Image-2.1 + Turbo LoRA",
+      "version": "2.1",
+      "category": "Image Engine",
+      "size_gb": 18.0,
+      "recommended_ram": "16 GB RAM",
+      "default_selected": false,
+      "required": false,
+      "blurb": "Qwen 2.1 photorealistic image generator with 4-step Turbo/Lightning LoRA acceleration.",
+      "repo_id": "Qwen/Qwen-Image-2.1",
+      "local_dir": "mlx_models/qwen-image-2.1"
+    },
+    {
+      "id": "flux2_klein",
+      "key": "flux2_klein",
+      "name": "FLUX.2 Klein 4B (Image Engine)",
+      "version": "2.0",
+      "category": "Image Engine",
+      "size_gb": 4.3,
+      "recommended_ram": "16 GB RAM",
+      "default_selected": false,
+      "required": false,
+      "blurb": "Ultra-fast text-to-image and editing engine for 16 GB Apple Silicon.",
+      "repo_id": "Runpod/FLUX.2-klein-4B-mflux-4bit",
+      "local_dir": "mlx_models/flux2-klein-4b"
     }
   ]
 }

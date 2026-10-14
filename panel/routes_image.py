@@ -269,6 +269,7 @@ def get_image_engine_status(h, parsed) -> None:
         # made N=1 understate and N=4+ overstate the wall-time. The
         # studio now estimates correctly across all batch sizes.
         ENGINES = [
+            ("qwen2_turbo_inline",         "Qwen/Qwen-Image-2.1",        18.0,  30.0,  45.0),
             # Qwen-Image-Edit-2511 — three-tier ladder. ~24 GB
             # download (one-time) shared across all three tiers.
             # ALL tiers use FBCache via the mflux patch — at 8+
@@ -298,6 +299,7 @@ def get_image_engine_status(h, parsed) -> None:
         # check). HiDream lives outside mflux; we surface its
         # install status via the lab-model existence check below.
         ENGINE_FAMILY = {
+            "qwen2_turbo_inline":         "qwen",
             "qwen_edit_lightning_inline": "qwen_edit",
             "qwen_edit_inline":           "qwen_edit",
             "qwen_edit_high_inline":      "qwen_edit",

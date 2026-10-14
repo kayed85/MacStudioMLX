@@ -144,6 +144,23 @@ def hf_repo_partial_download(repo_id: str, env: "dict | None" = None) -> "dict |
     except OSError:
         return None
     partial = [p for p in entries if p.name.endswith(".incomplete")]
+    # An `.incomplete` whose finished blob is ALREADY here is litter: the file
+    # was fetched again and completed under its real name, and huggingface_hub
+    # never goes back for the leftover. Counting it kept a COMPLETE download
+    # "partial" forever — the repair found nothing to fetch, the size never
+    # moved, and the panel said "stuck at 4.6 GB" about a 4.6 GB model (fleet,
+    # FLUX.2 klein, 14 renders on 3 installs).
+    names = {p.name for p in entries}
+    live = []
+    for p in partial:
+        if p.name[: -len(".incomplete")] in names:
+            try:
+                p.unlink()
+                continue
+            except OSError:
+                pass
+        live.append(p)
+    partial = live
     if not partial:
         return None
     total = 0
@@ -182,13 +199,43 @@ def repair_partial_hf_download(repo_id: str, env: "dict | None" = None) -> "dict
     # left the download exactly where it was, wiping and re-fetching again
     # on every render just burns time — say what's stuck instead.
     on_disk = round(float(info.get("on_disk_gb") or 0.0), 2)
-    if _REPAIR_MEMO.get(str(repo_id)) == on_disk:
+    import time as _time
+    prev = _REPAIR_MEMO.get(str(repo_id))
+    if prev is not None and prev[0] == on_disk:
+        # A whole download pass ran since the last repair. huggingface_hub
+        # resumes a blob it needs by APPENDING to its `.incomplete`, so a
+        # leftover older than that pass belongs to no file this revision wants
+        # (an older revision, a renamed file) — IF the pass actually reached
+        # the Hub, which is what a re-linked `snapshots/` proves. Then the
+        # download is complete and the leftovers are litter. Without that proof
+        # (offline, Hub down) nothing is deleted and the stall is reported.
+        try:
+            leftovers = [p for p in (info["repo_dir"] / "blobs").iterdir()
+                         if p.name.endswith(".incomplete")]
+        except OSError:
+            leftovers = []
+
+        def _mtime(p):
+            try:
+                return p.stat().st_mtime
+            except OSError:
+                return None
+        untouched = [p for p in leftovers if (_mtime(p) or 0.0) < prev[1]]
+        if (leftovers and len(untouched) == len(leftovers)
+                and (info["repo_dir"] / "snapshots").is_dir()):
+            for p in untouched:
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+            _REPAIR_MEMO.pop(str(repo_id), None)
+            return None
         raise RuntimeError(
             f"The download for {repo_id} is stuck at {on_disk:.1f} GB — it did "
             f"not grow on the last try. Check free disk space and the network, "
             f"then Generate again to resume it."
         )
-    _REPAIR_MEMO[str(repo_id)] = on_disk
+    _REPAIR_MEMO[str(repo_id)] = (on_disk, _time.time())
     snaps = info["repo_dir"] / "snapshots"
     if snaps.is_dir():
         _shutil.rmtree(snaps, ignore_errors=True)
@@ -203,9 +250,44 @@ class ImageJobCancelled(RuntimeError):
     """
 
 
+# Set by the panel: "has Stop been pressed for the queue job this thread is
+# running?" None outside the panel (tests, scripts) = never cancelled.
+_CANCEL_CHECK = None
+
+
 def _register_active_proc(proc) -> None:
+    """Publish a fresh Popen where /stop looks, then honour a Stop that came
+    first.
+
+    THE ORDER IS THE FIX (same shape as the panel's _register_job_pgid). Stop
+    sets the job's cancel flag and then reads this registry; this adds to the
+    registry and then reads the flag. Whichever runs first, the other sees it:
+    Stop finds the process and kills it, or this finds the flag and kills the
+    process itself. Before, a Stop during the image job's preflight found no
+    process to kill, and the engine started anyway and published its image."""
     with _ACTIVE_PROC_LOCK:
         _ACTIVE_PROCS.add(proc)
+    check = _CANCEL_CHECK
+    try:
+        cancelled = bool(check and check())
+    except Exception:        # noqa: BLE001
+        cancelled = False
+    if cancelled:
+        import os
+        import signal
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                proc.kill()
+            except Exception:        # noqa: BLE001
+                pass
+        try:
+            proc.wait(timeout=5)
+        except Exception:        # noqa: BLE001
+            pass
+        _unregister_active_proc(proc)
+        raise ImageJobCancelled("image engine stopped before it started (Stop)")
 
 
 def _unregister_active_proc(proc) -> None:
@@ -577,11 +659,9 @@ def _infer_mflux_family(model: str) -> str:
         return "fibo"
     if "krea2" in s or "krea-2" in s or "krea_2" in s:
         return "krea2"
-    # qwen_edit must be matched BEFORE plain qwen — "qwen-image-edit-2509"
-    # contains "qwen" + "image" so the plain qwen branch would steal it.
     if "qwen" in s and ("image-edit" in s or "image_edit" in s or "qwen-edit" in s):
         return "qwen_edit"
-    if "qwen" in s and "image" in s:
+    if "qwen" in s and ("image" in s or "2.1" in s or "2" in s):
         return "qwen"
     if "ideogram" in s:
         return "ideogram"
@@ -915,6 +995,15 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
     eff_guidance = (config.mflux_guidance
                     if config.mflux_guidance is not None
                     else fam_defaults["guidance"])
+    # A LIGHTNING ADAPTER RUNS AT GUIDANCE 1.0, whatever the family default.
+    # Lightning is a step distillation trained without CFG; the qwen_edit
+    # family default (4.0) is the 40-step Quality recipe's true-CFG. Reference
+    # Edit Fast, the dataclass default and the auto-promotion all carry the
+    # Lightning LoRA with guidance unset, so they sent `--guidance 4.0`
+    # (Codex UI-03, 2026-09-24). An explicit mflux_guidance still wins.
+    if (config.mflux_guidance is None
+            and any("lightning" in str(lp).lower() for lp in (config.mflux_lora_paths or []))):
+        eff_guidance = 1.0
 
     # Build the seed list. mflux's CLI loops `for seed in args.seed`
     # AFTER loading the model exactly once, so passing all seeds at
@@ -992,7 +1081,7 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
                     except Exception:  # noqa: BLE001
                         pass
                 cap_res = subprocess.run(
-                    cap_cmd, capture_output=True, text=True,
+                    cap_cmd, capture_output=True, text=True, errors="replace",
                     env=_clean_subprocess_env(), timeout=180,
                 )
                 if cap_res.returncode != 0:
@@ -1103,7 +1192,7 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
                 except Exception:  # noqa: BLE001
                     pass
         _lora_paths_in, _lora_scales_in = [], []
-    elif fam != "qwen_edit" and _lora_paths_in:
+    elif fam not in ("qwen_edit", "qwen") and _lora_paths_in:
         _kept_p: list = []
         _kept_s: list = []
         for _i, _lp in enumerate(_lora_paths_in):
@@ -1335,7 +1424,7 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         env=env,
-        text=True,
+        text=True, errors="replace",
         bufsize=1,
         # Own process group so the Popen.terminate/kill below escalates
         # to the entire mflux+MLX subtree (mflux can spawn helper procs
@@ -1974,7 +2063,7 @@ def _generate_hidream(prompt: str, n: int, width: int, height: int,
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True,
+        text=True, errors="replace",
         env=_clean_subprocess_env(),
         # Own process group so /stop's killpg cascades to any
         # child procs MLX/Metal might spawn under this generation.
