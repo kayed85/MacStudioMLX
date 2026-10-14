@@ -941,9 +941,17 @@ function renderEngineSwitch() {
       <span class="eng-seg-name">${escapeHtml(act.label)}</span>${
       act.generation ? `<span class="eng-seg-gen">${escapeHtml(act.generation)}</span>` : ''}
       <svg class="ph eng-caret" aria-hidden="true"><use href="#ph-caret-down-bold"/></svg>
-    </button>`;
+    </button>
+    <button type="button" class="ghost-btn" id="activeEngineInfoBtn"
+        title="Engine Details & Bilingual Info / شرح وتفاصيل المحرك"
+        style="margin-left:4px;padding:3px 6px;font-size:12px;border:none;background:transparent;cursor:pointer;opacity:0.8;">ℹ️</button>`;
     const t = box.querySelector('.eng-trigger');
     if (t) t.onclick = (ev) => { ev.stopPropagation(); toggleEngineMenu(); };
+    const inf = box.querySelector('#activeEngineInfoBtn');
+    if (inf) inf.onclick = (ev) => {
+      ev.stopPropagation();
+      if (typeof showEngineInfoModal === 'function') showEngineInfoModal(act.id);
+    };
   }
 
   // ---- The menu: every engine, each stating its own state ----

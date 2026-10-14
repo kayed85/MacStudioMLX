@@ -12,13 +12,16 @@ let lastPythonLogs = '';
 
 function getPhospheneRoot() {
   const candidates = [
-    path.resolve(__dirname, '..'),
-    process.cwd(),
+    path.join(app.getPath('home'), 'MacStudioMLX'),
     path.join(app.getPath('home'), 'EtherReel-releases'),
-    path.join(app.getPath('home'), 'MacStudioMLX')
+    path.resolve(__dirname, '..'),
+    process.cwd()
   ];
   for (const cand of candidates) {
-    if (fs.existsSync(path.join(cand, 'mlx_ltx_panel.py')) && fs.existsSync(path.join(cand, 'ltx-2-mlx/env/bin/python3.11'))) {
+    if (fs.existsSync(path.join(cand, 'mlx_ltx_panel.py')) &&
+        (fs.existsSync(path.join(cand, 'ltx-2-mlx/env/bin/python3')) ||
+         fs.existsSync(path.join(cand, 'ltx-2-mlx/env/bin/python3.14')) ||
+         fs.existsSync(path.join(cand, 'ltx-2-mlx/env/bin/python3.11')))) {
       return cand;
     }
   }
@@ -38,9 +41,10 @@ const defaultModelsDir = fs.existsSync(path.join(projectRoot, 'mlx_models'))
 
 function getPythonBin() {
   const envCandidates = [
-    path.join(projectRoot, 'ltx-2-mlx/env/bin/python3.11'),
     path.join(projectRoot, 'ltx-2-mlx/env/bin/python3'),
-    path.join(projectRoot, 'env/bin/python3.11')
+    path.join(projectRoot, 'ltx-2-mlx/env/bin/python3.14'),
+    path.join(projectRoot, 'ltx-2-mlx/env/bin/python3.11'),
+    path.join(projectRoot, 'env/bin/python3')
   ];
   for (const cand of envCandidates) {
     if (fs.existsSync(cand)) {

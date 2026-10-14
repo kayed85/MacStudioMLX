@@ -54,14 +54,21 @@ function updateModelsCard(s) {
     card.style.display = '';
     card.classList.add('state-downloading');
     icon.textContent = '↓';
-    const labelByKey = { q4: 'Q4 base model', gemma: 'Gemma text encoder', q8: 'Q8 high-quality model' };
+    const labelByKey = {
+      q4: 'Q4 base model',
+      q4_25: 'LTX-2.5 base model',
+      gemma: 'Gemma text encoder',
+      gemma4_25: 'Gemma text encoder',
+      q8: 'Q8 high-quality model',
+      q8_25: 'Q8 high-quality model'
+    };
     title.textContent = `Downloading ${labelByKey[dl.key] || dl.repo_id}`;
     const elapsed = Math.max(0, Math.round((Date.now()/1000) - (dl.started_ts || 0)));
     sub.textContent = `${elapsed}s elapsed · resumable if interrupted`;
     progress.style.display = '';
-    // Try to extract a percent from the last hf line (tqdm format).
-    const m = (dl.last_line || '').match(/\b(\d{1,3})%/);
-    fill.style.width = m ? `${Math.min(100, parseInt(m[1]))}%` : '15%';
+    // Try to extract a percent from the last hf line (tqdm or fetch format).
+    const m = (dl.last_line || '').match(/\b(\d{1,3}(?:\.\d+)?)%/);
+    fill.style.width = m ? `${Math.min(100, parseFloat(m[1]))}%` : '15%';
     last.textContent = dl.last_line || 'starting…';
     actions.innerHTML = `<button class="danger" onclick="cancelDownload()">Cancel</button>`;
     return;

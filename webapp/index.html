@@ -1035,7 +1035,10 @@
           <!-- Stands in for Enhance + Avoid on the H3 surface: both of the
                controls it replaces are LTX mechanisms, and this is the one
                sentence a user needs in their place. -->
-          <span class="ct-hint" data-h3-only>No negative prompt on H3 — write refusals as plain sentences, and only for what it adds unasked: camera drift and on-screen text.</span>
+          <select id="dtPromptStylesSelect" class="ghost-select" onchange="applyDtPromptStyle(this.value)" title="Prompt Styles from Draw Things / أنماط البرومبت الجاهزة" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:var(--fg-dim,#ccc);border-radius:6px;padding:3px 8px;font-size:12px;margin-right:6px;max-width:180px;">
+            <option value="">🎨 Style / النمط...</option>
+          </select>
+          <button type="button" class="ghost-btn" id="dtAutoAnimateBtn" onclick="runDtAutoAnimate()" title="⚡ Auto-Animate (Qwen Vision ➔ MiniMax H3) / تحريك ذكي بضغطة زر"><svg class="ph" aria-hidden="true" style="margin-right:4px"><use href="#ph-lightning-fill"/></svg>Auto-Animate</button>
           <span class="ct-spacer"></span>
           <!-- HDR toggle hidden again 2026-05-21 (Mr Bizarro request):
                "remove the HDR LoRA from this release, you can leave the
@@ -2568,6 +2571,7 @@ The same wizard walks out of frame. Audio: footsteps on leaves."></textarea>
             <span class="engine-status-pill" id="imgStudioEnginePill"
             data-state="unknown" title="Checking engine weights…"
             onclick="imgStudioOnPillClick()">…</span>
+            <button type="button" class="ghost-btn" id="imgStudioEngineInfoBtn" onclick="showEngineInfoModal()" title="Engine Details & Bilingual Info / شرح وتفاصيل المحرك" style="margin-left:4px;padding:3px 8px;font-size:13px;line-height:1.2;cursor:pointer;">ℹ️</button>
           </div>
         </div>
 
@@ -6867,6 +6871,7 @@ const BOOT = __BOOTSTRAP__;</script>
 <script type="module" src="/webapp/js/storyboard.js"></script>
 <script type="module" src="/webapp/js/editor.js"></script>
 <script type="module" src="/webapp/js/oneshot.js"></script>
+<script type="module" src="/webapp/js/drawthings_features.js"></script>
 <script type="module" src="/webapp/js/main.js"></script>
 <div class="phos-toast-container" id="phosToast" aria-live="polite" aria-atomic="false"></div>
 </body>

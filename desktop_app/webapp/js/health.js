@@ -186,7 +186,11 @@ function _phModalShow(opts) {
   document.getElementById('phModalKicker').textContent = opts.kicker || '';
   document.getElementById('phModalKicker').className = toneClass;
   document.getElementById('phModalTitle').textContent = opts.title || '';
-  document.getElementById('phModalBody').textContent = opts.body || '';
+  if (opts.htmlBody) {
+    document.getElementById('phModalBody').innerHTML = opts.htmlBody;
+  } else {
+    document.getElementById('phModalBody').textContent = opts.body || '';
+  }
   const prim = document.getElementById('phModalPrimary');
   const sec = document.getElementById('phModalSecondary');
   prim.textContent = opts.primaryLabel || 'OK';

@@ -41824,11 +41824,12 @@ from panel import routes_queue as _routes_queue
 from panel import routes_storyboard as _routes_storyboard
 from panel import routes_stats as _routes_stats
 from panel import routes_train as _routes_train
+from panel import routes_drawthings as _routes_drawthings
 
 for _routes_mod in (_routes_characters, _routes_files, _routes_image,
                     _routes_loras, _routes_meta, _routes_models, _routes_music,
                     _routes_oneshot, _routes_queue, _routes_stats, _routes_storyboard,
-                    _routes_train):
+                    _routes_train, _routes_drawthings):
     _routes_mod.P = sys.modules[__name__]
 
 

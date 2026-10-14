@@ -954,6 +954,9 @@ function loraRowHtml(r, modeTag) {
   // Rename + download are local-only (need an on-disk file), so they're
   // gated to `user` / `trained` rows; remote (HF) rows skip them.
   const corner = [];
+  // Bilingual Info modal for LoRA (Draw Things + Local)
+  corner.push(`<button class="lora-icon-btn" type="button" title="Info & Bilingual Details / شرح وتفاصيل اللورا"
+                       onclick="event.stopPropagation(); if (typeof showLoraBilingualInfo === 'function') showLoraBilingualInfo(${pathAttr})">ℹ️</button>`);
   if (r.kind === 'user' || r.kind === 'trained') {
     corner.push(`<button class="lora-icon-btn" type="button" title="Rename (display name only — filename stays the same)"
                          onclick="event.stopPropagation(); renameLora(${pathAttr}, ${nameAttr})"><svg class="ph" aria-hidden="true"><use href="#ph-pencil-simple"/></svg></button>`);

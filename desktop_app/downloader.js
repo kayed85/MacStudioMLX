@@ -23,7 +23,7 @@ class ModelDownloader {
 
   getModelsStatus() {
     const home = process.env.HOME || '/Users/mk';
-    return this.manifest.models.map(model => {
+    const list = this.manifest.models.map(model => {
       const relDir = model.local_dir.replace(/^mlx_models\/?/, '');
       const candidates = [
         path.join(this.modelsDir, relDir),
@@ -50,6 +50,37 @@ class ModelDownloader {
         targetPath
       };
     });
+
+    const dtModels = path.join(home, 'Library/Containers/com.liuliu.draw-things/Data/Documents/Models');
+    let hasDt = false;
+    try {
+      if (fs.existsSync(dtModels) && fs.readdirSync(dtModels).some(f => f.endsWith('.ckpt'))) {
+        hasDt = true;
+      }
+    } catch (_) {}
+
+    if (hasDt) {
+      list.unshift({
+        id: 'drawthings_local',
+        key: 'drawthings_local',
+        name: 'Draw Things Local Models & LoRAs',
+        version: 'H3 + Qwen + Krea',
+        category: 'Local Acceleration',
+        size_gb: 120.0,
+        recommended_ram: '16 GB RAM',
+        default_selected: true,
+        required: false,
+        blurb: 'Instant local offline rendering using Draw Things models (MiniMax H3 3-step Turbo, Qwen 2.1, Krea 2 Turbo).',
+        isDownloaded: true,
+        targetPath: dtModels
+      });
+    }
+
+    return list;
+  }
+
+  hasAnyAvailableModel() {
+    return this.getModelsStatus().some(m => m.isDownloaded);
   }
 
   downloadModel(modelId, onProgress, onComplete, onError) {
