@@ -1805,7 +1805,16 @@ async function imgStudioGenerate() {
     // Reference bridge flag — _build_image_engine_config reads it into
     // ImageEngineConfig.ideogram_reference_bridge (ideogram branch).
     if (body.ideo_reference_bridge) fd.set('ideo_reference_bridge', '1');
-    fd.set('aspect', body.aspect || '16:9');
+    const aspect = body.aspect || '16:9';
+    fd.set('aspect', aspect);
+    const aspectDims = {
+      '16:9': [1280, 720], '4:3': [1024, 768], '1:1': [1024, 1024],
+      '9:16': [720, 1280], '3:4': [768, 1024], '21:9': [1280, 544],
+      '16:9s': [768, 432], '1:1s': [512, 512], '9:16s': [432, 768]
+    };
+    const dims = aspectDims[aspect] || [1280, 720];
+    fd.set('width', String(body.width || dims[0]));
+    fd.set('height', String(body.height || dims[1]));
     fd.set('n', String(body.n || 1));
     fd.set('seed', String(body.seed != null ? body.seed : -1));
     // refs is a list of paths — the existing /image/generate code

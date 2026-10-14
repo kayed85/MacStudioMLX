@@ -116,7 +116,6 @@ def ensure_server(
         str(m_dir),
         "--port",
         str(port),
-        "--no-tls",
     ]
 
     try:
@@ -246,6 +245,12 @@ async def generate_dt_image(
     if trigger and not prompt_text.startswith(trigger):
         prompt_text = f"{trigger} {prompt_text}"
 
+    try:
+        safe_w = max(256, (int(width or 512) // 64) * 64)
+        safe_h = max(256, (int(height or 512) // 64) * 64)
+    except (TypeError, ValueError):
+        safe_w, safe_h = 512, 512
+
     config = Configs.create()
     config["model"] = model
     if autoencoder:
@@ -255,8 +260,8 @@ async def generate_dt_image(
 
     config["steps"] = steps
     config["guidanceScale"] = guidance_scale
-    config["width"] = width
-    config["height"] = height
+    config["width"] = safe_w
+    config["height"] = safe_h
     config["numFrames"] = 1
     if seed >= 0:
         config["seed"] = seed
@@ -357,6 +362,12 @@ async def generate_dt_video(
     if trigger and not prompt_text.startswith(trigger):
         prompt_text = f"{trigger} {prompt_text}"
 
+    try:
+        safe_w = max(256, (int(width or 512) // 64) * 64)
+        safe_h = max(256, (int(height or 512) // 64) * 64)
+    except (TypeError, ValueError):
+        safe_w, safe_h = 512, 512
+
     config = Configs.create()
     config["model"] = model
     if autoencoder:
@@ -368,8 +379,8 @@ async def generate_dt_video(
     config["sampler"] = sampler
     config["shift"] = shift
     config["guidanceScale"] = guidance_scale
-    config["width"] = width
-    config["height"] = height
+    config["width"] = safe_w
+    config["height"] = safe_h
     config["numFrames"] = num_frames
     if seed >= 0:
         config["seed"] = seed

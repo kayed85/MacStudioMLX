@@ -31858,6 +31858,16 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             push(f"[image] {engine_override} is not installed on this Mac — rendering with Auto instead.")
             engine_override = "auto"
         aspect = f("aspect", "16:9") or "16:9"
+        try:
+            custom_w = int(f("width", "0") or 0)
+            custom_h = int(f("height", "0") or 0)
+        except (TypeError, ValueError):
+            custom_w, custom_h = 0, 0
+        if custom_w > 0 and custom_h > 0:
+            img_w, img_h = custom_w, custom_h
+        else:
+            img_w, img_h = agent_image_engine.ASPECT_DIMS.get(aspect, (1024, 576))
+
         # refs comes as a JSON-encoded list (e.g. '["panel_uploads/foo.png"]').
         # Plain form fields can't carry a list cleanly; the panel JS already
         # serializes refs this way for /image/generate, so the same shape
@@ -31897,6 +31907,8 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                 "ideo_quantize": f("ideo_quantize", ""),
                 "ideo_reference_bridge": f("ideo_reference_bridge", ""),
                 "aspect": aspect,
+                "width": img_w,
+                "height": img_h,
                 "n": n,
                 "seed": str(seed),
                 "refs": list(refs),

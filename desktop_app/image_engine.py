@@ -2161,6 +2161,9 @@ def _generate_drawthings(prompt: str, n: int, width: int, height: int,
     steps = config.mflux_steps or (6 if "qwen" in model.lower() else 4)
     ref_img = refs[0] if refs and len(refs) > 0 else None
 
+    aligned_w = max(256, (int(width or 512) // 64) * 64)
+    aligned_h = max(256, (int(height or 512) // 64) * 64)
+
     results: list[dict] = []
     for i in range(n):
         seed = (base_seed + i) if base_seed is not None else -1
@@ -2174,8 +2177,8 @@ def _generate_drawthings(prompt: str, n: int, width: int, height: int,
                     model=model,
                     lora_file=lora,
                     steps=steps,
-                    width=width,
-                    height=height,
+                    width=aligned_w,
+                    height=aligned_h,
                     seed=seed,
                     init_image=ref_img,
                     on_log=on_log,

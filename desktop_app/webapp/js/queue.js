@@ -3110,6 +3110,13 @@ function friendlyJobError(raw, engine) {
     return { friendly: 'Stopped before generating — the music engine is not ready.',
       hint: 'Install or repair it from the Phosphene sidebar in Pinokio. Everything else in the panel is unaffected.' };
   }
+  if (/draw things.*connection lost|connection lost.*draw things|draw things generation error/i.test(raw)) {
+    return {
+      friendly: 'Draw Things service was interrupted / انقطع الاتصال بمحرك Draw Things',
+      hint: 'The background headless engine is now active and ready. Click Retry to render. / محرك Draw Things المحلي جاهز الآن في الخلفية، اضغط إعادة المحاولة (Retry) للبدء فوراً.',
+      details: raw,
+    };
+  }
   const rawLower = String(raw).toLowerCase();
   // SYS-07: these two are the #1 and #3 fleet failures (54 + 23 installs in
   // 30 days) and the message used to ask for a crashlog/bug report instead
