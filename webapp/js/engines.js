@@ -1823,16 +1823,16 @@ function h3InsertDialogueLine() {
   const before = ta.value.slice(0, start);
   const after = ta.value.slice(end);
   const needsLeadingSpace = before && !/[\s\n]$/.test(before);
+  const isArabic = (lang.toLowerCase() === 'arabic' || lang === 'العربية');
+  const ph = isArabic ? 'اكتب الحوار هنا' : 'line here';
   const speaker = 'NAME (S1) says: ';
-  const line = `${needsLeadingSpace ? ' ' : ''}${speaker}<d>[${lang}] line here</d> `
+  const line = `${needsLeadingSpace ? ' ' : ''}${speaker}<d>[${lang}] ${ph}</d> `
     + `Exactly as the line ends, NAME's mouth settles closed.`;
   ta.value = before + line + after;
-  // Select "line here" so typing the actual words is one keystroke away.
-  // Numeric, always: `before && …` is '' at position 0, and '' + 1 + … used to
-  // concatenate into a string offset that selected nothing (Codex H3-9).
+  // Select placeholder so typing the actual words is one keystroke away.
   const selStart = before.length + (needsLeadingSpace ? 1 : 0) + speaker.length
     + `<d>[${lang}] `.length;
-  const selEnd = selStart + 'line here'.length;
+  const selEnd = selStart + ph.length;
   ta.focus();
   try { ta.setSelectionRange(selStart, selEnd); } catch (e) {}
   ta.dispatchEvent(new Event('input', { bubbles: true }));
