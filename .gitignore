@@ -33,6 +33,8 @@ usage-fleet.json
 # Manual `.original_<date>` asset backups (e.g. before re-exporting a logo).
 # Kept on disk for the author, never committed / shipped (v3.0.7 review P3).
 *.original_*
+bin/
+scratch/
 
 # =============================================================================
 # Generated / user content — too big or too personal for git

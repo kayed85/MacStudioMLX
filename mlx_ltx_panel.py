@@ -13297,6 +13297,30 @@ def h3_paths() -> dict:
     runner = H3_ROOT / "scripts" / "generate_staged.py"
     python = _h3_python()
     dit = compact_root = text_config = models_root = None
+
+    try:
+        import drawthings_bridge
+        dt_models = drawthings_bridge.DRAWTHINGS_MODELS_DIR
+        if (dt_models / "minimax_h3_fl2va_q8p.ckpt").is_file() or drawthings_bridge.is_server_running():
+            return {
+                "root": str(H3_ROOT),
+                "models": str(dt_models),
+                "models_root": str(dt_models),
+                "runner": runner,
+                "python": python or Path(sys.executable),
+                "dit": (dt_models / "minimax_h3_fl2va_q8p.ckpt"),
+                "compact_root": dt_models,
+                "missing": [],
+                "reason": "ok",
+                "available": True,
+                "venv_ok": True,
+                "venv_broken": False,
+                "weights_ok": True,
+                "repairable": False,
+                "drawthings": True,
+            }
+    except Exception:
+        pass
     for root in _h3_model_roots():
         cand_dit = root / "deepbeep-pruned-bf16" / H3_DIT_FILENAME
         if not cand_dit.is_file():
@@ -13471,14 +13495,17 @@ def h3_dit_choice() -> tuple[str, Path | None]:
 
 
 def h3_capable() -> bool:
-    """True when this Mac has the unified memory H3 needs (~40 GiB peak).
-
-    Reuses the same `hw.memsize` reading the capability tiers are built on
-    (SYSTEM_RAM_GB). LTX_H3_FORCE_CAPABLE=1 is a test override only — it does
-    not make a 32 GB Mac able to render, it just stops the UI hiding the pill.
+    """True when this Mac has the unified memory H3 needs (~40 GiB peak)
+    OR when Draw Things engine is available with MiniMax H3 models (runs on 16GB Macs).
     """
     if os.environ.get("LTX_H3_FORCE_CAPABLE", "").strip() in ("1", "true", "yes"):
         return True
+    try:
+        import drawthings_bridge
+        if drawthings_bridge.is_server_running() or (drawthings_bridge.DRAWTHINGS_MODELS_DIR / "minimax_h3_fl2va_q8p.ckpt").is_file():
+            return True
+    except Exception:
+        pass
     if SYSTEM_RAM_GB >= H3_MIN_RAM_GB:
         return True
     # Reduced-RAM lane: the Q8 DiT pack halves the render peak (27.3 GiB
@@ -33093,6 +33120,8 @@ def _preflight_model_cached(cfg) -> bool:
 
 _IMAGE_ENGINE_LABELS = {
     "auto": "the Auto engine",
+    "dt_qwen2_turbo": "Qwen 2.1 Turbo (Draw Things)",
+    "dt_krea2_turbo": "Krea 2 Turbo (Draw Things)",
     "qwen2_turbo_inline": "Qwen 2.1 + Turbo LoRA",
     "krea2_inline": "Krea 2 Turbo",
     "qwen_edit_lightning_inline": "Reference Edit — Fast",
@@ -35277,7 +35306,115 @@ def _h3_drop_runner_wavs(out_path: Path, since: float, *, keep_main: bool = Fals
                 removed.append(w.name)
         except OSError:
             continue
-    return removed
+def run_dt_h3_job_inner(job: dict) -> None:
+    """Render MiniMax H3 video via Draw Things gRPC service with 3-step Turbo.
+
+    Runs comfortably on 16 GB unified memory Macs without OOM.
+    Streams progressive previews to `live_preview_dir(job['id'])`,
+    assembles MP4, and writes standard sidecars for Gallery, Lip-Sync,
+    and Storyboard compatibility.
+    """
+    import asyncio
+    import drawthings_bridge
+
+    p = job["params"]
+    prompt = (p.get("prompt") or "").strip()
+    if not prompt:
+        raise RuntimeError("H3 prompt required")
+
+    # Stop warm helper to free memory for Draw Things inference
+    try:
+        HELPER.stop()
+    except Exception:
+        pass
+
+    out_path = OUTPUT / f"{job['id']}.mp4"
+    preview_dir = live_preview_dir(job["id"])
+    preview_dir.mkdir(parents=True, exist_ok=True)
+
+    width = int(p.get("width") or 512)
+    height = int(p.get("height") or 512)
+    frames = int(p.get("frames") or 17)
+    steps = int(p.get("steps") or 4)
+    seed = normalize_seed(p.get("seed", -1))
+    fps = int(p.get("fps") or 12)
+
+    init_img = p.get("init_image") or p.get("ref_image_path") or p.get("image")
+    if init_img:
+        init_img_str = str(init_img)
+        init_p = Path(init_img_str)
+        if not init_p.is_absolute():
+            init_p = (UPLOADS / init_img_str).resolve()
+        init_img = str(init_p) if init_p.is_file() else None
+
+    push(f"[dt_h3] Starting MiniMax H3 Turbo ({frames} frames, {width}x{height}, {steps} steps)...")
+    _raise_if_cancelled(job, "the H3 render")
+
+    t0 = time.time()
+
+    def _on_log(line: str):
+        push(f"[dt_h3] {line}")
+        with LOCK:
+            cur = STATE.get("current")
+            if cur and cur.get("id") == job["id"]:
+                cur["progress"] = {
+                    "phase": "denoise",
+                    "phase_label": line,
+                    "pct": 50.0,
+                    "elapsed_sec": time.time() - t0,
+                    "remaining_sec": 30.0,
+                }
+
+    try:
+        final_mp4, saved_frames = asyncio.run(
+            drawthings_bridge.generate_dt_video(
+                prompt=prompt,
+                negative_prompt=p.get("negative_prompt") or "",
+                model="minimax_h3_ref2va_i8x.ckpt" if init_img else "minimax_h3_fl2va_q8p.ckpt",
+                steps=steps,
+                width=width,
+                height=height,
+                num_frames=frames,
+                fps=fps,
+                seed=seed,
+                init_image=init_img,
+                output_mp4=out_path,
+                live_preview_dir=preview_dir,
+                on_log=_on_log,
+            )
+        )
+    except Exception as e:
+        push(f"[dt_h3] Generation failed: {e}")
+        raise RuntimeError(f"Draw Things MiniMax H3 error: {e}")
+
+    _raise_if_cancelled(job, "the H3 render completed")
+    elapsed = round(time.time() - t0, 2)
+    push(f"[dt_h3] MiniMax H3 video complete in {elapsed}s → {out_path.name}")
+
+    # Standard sidecar so gallery and all downstream features work immediately
+    sidecar = {
+        "output": str(out_path),
+        "raw_output": str(out_path),
+        "native_output": str(out_path),
+        "params": {
+            **p,
+            "engine": "dt_h3",
+            "width": width,
+            "height": height,
+            "frames": frames,
+            "steps": steps,
+            "fps": fps,
+            "seed": seed,
+        },
+        "engine": "dt_h3",
+        "elapsed_sec": elapsed,
+        "completed_at": time.time(),
+    }
+    sidecar_path = out_path.with_suffix(".mp4.json")
+    try:
+        sidecar_path.write_text(json.dumps(sidecar, indent=2))
+    except Exception:
+        pass
 
 
 def run_h3_job_inner(job: dict) -> None:
@@ -37619,11 +37756,14 @@ def run_job_inner(job: dict) -> None:
         return run_train_job_inner(job)
     if mode == "sharp_export":
         return run_sharp_export_job_inner(job)
-    # Second video engine. H3 is a self-contained subprocess pack with its own
-    # geometry rules (17n+5 frames, 32-aligned dims) and no warm helper, so it
-    # dispatches BEFORE every LTX-only clamp/validation below — none of which
-    # applies to it.
-    if (p.get("engine") or "ltx").strip().lower() == "h3":
+    # Second video engine: Draw Things / MiniMax H3
+    engine_val = (p.get("engine") or "ltx").strip().lower()
+    if engine_val in ("dt_h3", "drawthings", "drawthings_h3"):
+        return run_dt_h3_job_inner(job)
+    if engine_val == "h3":
+        if not h3_capable():
+            push("[h3] Mac unified memory is < 48 GB — routing automatically to Draw Things MiniMax H3 Turbo!")
+            return run_dt_h3_job_inner(job)
         if p.get("take"):
             return run_take_job_inner(job)
         return run_h3_job_inner(job)
@@ -40816,10 +40956,18 @@ def _build_image_engine_config(
             mflux_steps=8,
             mflux_guidance=1.0,
         )
-    if engine_override in ("qwen2_turbo_inline", "qwen_2_1_turbo_inline"):
-        # Qwen-Image-2.1 + Turbo LoRA — 4-step Lightning/Turbo distillation LoRA.
-        # Uses Qwen/Qwen-Image-2.1 as base model and lightx2v Turbo/Lightning LoRA.
-        # Fast (~30 s on Apple Silicon at Q4), supports both text-to-image and reference conditioning.
+    if engine_override in ("qwen2_turbo_inline", "qwen_2_1_turbo_inline", "dt_qwen2_turbo"):
+        try:
+            import drawthings_bridge
+            if drawthings_bridge.is_server_running() or (drawthings_bridge.DRAWTHINGS_MODELS_DIR / "qwen_image_2.1_i8x.ckpt").is_file():
+                return agent_image_engine.ImageEngineConfig(
+                    kind="drawthings",
+                    mflux_model="qwen_image_2.1_i8x.ckpt",
+                    mflux_steps=6,
+                    mflux_lora_paths=["qwen_image_2.16step_lora_f16.ckpt"],
+                )
+        except Exception:
+            pass
         has_refs = bool(form.get("refs") or form.get("ref_images") or form.get("image_paths"))
         fam = "qwen_edit" if has_refs else "qwen"
         return agent_image_engine.ImageEngineConfig(
@@ -40833,6 +40981,13 @@ def _build_image_engine_config(
             ],
             mflux_lora_scales=[1.0],
             mflux_guidance=1.0,
+        )
+    if engine_override in ("dt_krea2_turbo", "krea2_turbo_inline"):
+        return agent_image_engine.ImageEngineConfig(
+            kind="drawthings",
+            mflux_model="krea_2_turbo_i8x.ckpt",
+            mflux_steps=4,
+            mflux_lora_paths=["krea2_turbo_4step_lora_f16.ckpt"],
         )
     if engine_override == "qwen_edit_lightning_inline":
         # Qwen FAST — 4-step Lightning distillation LoRA, Q6. The

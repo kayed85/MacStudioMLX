@@ -531,6 +531,8 @@ def generate(*, prompt: str, n: int, output_dir: Path,
         return _generate_bfl(prompt, n, width, height, output_dir, base_seed, config)
     if config.kind == "hidream":
         return _generate_hidream(prompt, n, width, height, output_dir, base_seed, config, refs=refs, on_log=on_log)
+    if config.kind == "drawthings":
+        return _generate_drawthings(prompt, n, width, height, output_dir, base_seed, config, refs=refs, on_log=on_log)
     raise ValueError(f"unknown image engine kind: {config.kind!r}")
 
 
@@ -542,6 +544,16 @@ def health_check(config: ImageEngineConfig) -> tuple[bool, str]:
             return True, "mock engine ready (PIL available)"
         except ImportError:
             return False, "PIL not installed — pip install Pillow"
+    if config.kind == "drawthings":
+        try:
+            import drawthings_bridge
+            if drawthings_bridge.is_server_running():
+                return True, "Draw Things gRPC server active on 127.0.0.1:7859"
+            if drawthings_bridge.CLI_SERVER_PATH.is_file() and drawthings_bridge.DRAWTHINGS_MODELS_DIR.is_dir():
+                return True, "Draw Things headless server ready"
+            return False, "Draw Things CLI or Models dir not found"
+        except Exception as e:
+            return False, f"Draw Things probe error: {e}"
     if config.kind == "mflux":
         bin_path = _resolve_mflux_bin(config)
         if not bin_path:
@@ -2128,6 +2140,64 @@ def _generate_hidream(prompt: str, n: int, width: int, height: int,
             "engine": "hidream-o1-dev-bf16",
             "width": aligned_w,
             "height": aligned_h,
+        })
+
+    return results
+
+
+def _generate_drawthings(prompt: str, n: int, width: int, height: int,
+                         output_dir: Path, base_seed: int | None,
+                         config: ImageEngineConfig,
+                         refs: list[str] | None = None,
+                         on_log: "callable | None" = None) -> list[dict]:
+    """Generate candidates via Draw Things gRPC service."""
+    import asyncio
+    import drawthings_bridge
+
+    model = config.mflux_model or "qwen_image_2.1_i8x.ckpt"
+    lora = (config.mflux_lora_paths[0] if (config.mflux_lora_paths and len(config.mflux_lora_paths) > 0) else
+            ("qwen_image_2.16step_lora_f16.ckpt" if "qwen" in model.lower() else
+             "krea2_turbo_4step_lora_f16.ckpt" if "krea" in model.lower() else "none"))
+    steps = config.mflux_steps or (6 if "qwen" in model.lower() else 4)
+    ref_img = refs[0] if refs and len(refs) > 0 else None
+
+    results: list[dict] = []
+    for i in range(n):
+        seed = (base_seed + i) if base_seed is not None else -1
+        if on_log:
+            on_log(f"Rendering candidate {i+1}/{n} via Draw Things ({model})...")
+
+        try:
+            frames = asyncio.run(
+                drawthings_bridge.generate_dt_image(
+                    prompt=prompt,
+                    model=model,
+                    lora_file=lora,
+                    steps=steps,
+                    width=width,
+                    height=height,
+                    seed=seed,
+                    init_image=ref_img,
+                    on_log=on_log,
+                )
+            )
+        except Exception as e:
+            if on_log:
+                on_log(f"Draw Things candidate {i+1} error: {e}")
+            raise RuntimeError(f"Draw Things generation error: {e}")
+
+        if not frames:
+            raise RuntimeError(f"Draw Things candidate {i+1} produced no output.")
+
+        cand_path = output_dir / f"candidate_{i}.png"
+        frames[0].to_file(str(cand_path))
+        results.append({
+            "png_path": str(cand_path),
+            "seed": seed,
+            "engine": f"drawthings:{model}",
+            "width": width,
+            "height": height,
+            "aspect": f"{width}:{height}",
         })
 
     return results

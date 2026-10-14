@@ -269,6 +269,8 @@ def get_image_engine_status(h, parsed) -> None:
         # made N=1 understate and N=4+ overstate the wall-time. The
         # studio now estimates correctly across all batch sizes.
         ENGINES = [
+            ("dt_qwen2_turbo",            None,                         0.0,  15.0,  10.0),
+            ("dt_krea2_turbo",            None,                         0.0,  12.0,  10.0),
             ("qwen2_turbo_inline",         "Qwen/Qwen-Image-2.1",        18.0,  30.0,  45.0),
             # Qwen-Image-Edit-2511 — three-tier ladder. ~24 GB
             # download (one-time) shared across all three tiers.
@@ -311,7 +313,11 @@ def get_image_engine_status(h, parsed) -> None:
         for engine, repo, dl_gb, sec, cold in ENGINES:
             family_installed = True
             partial = None
-            if engine in ("hidream_inline", "hidream_fast_inline", "hidream_quality_inline"):
+            if engine.startswith("dt_"):
+                import drawthings_bridge
+                m_file = "qwen_image_2.1_i8x.ckpt" if "qwen" in engine else "krea_2_turbo_i8x.ckpt"
+                cached = (drawthings_bridge.DRAWTHINGS_MODELS_DIR / m_file).is_file() or drawthings_bridge.is_server_running()
+            elif engine in ("hidream_inline", "hidream_fast_inline", "hidream_quality_inline"):
                 # HiDream lives outside the HF cache (lab venv path).
                 # All three modes share the same Dev-BF16 model dir.
                 cached = (P.agent_image_engine.HIDREAM_DEFAULT_MODEL / "model.safetensors").exists() and \
