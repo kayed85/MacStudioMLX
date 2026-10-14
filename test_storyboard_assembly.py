@@ -39,6 +39,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from extract_panel_js import extract_function  # noqa: E402
 import mlx_ltx_panel as panel  # noqa: E402
+import storyboard_editor as sedit  # noqa: E402
 import storyboard  # noqa: E402
 
 NODE = shutil.which("node")
@@ -877,13 +878,17 @@ class ExportSelection(unittest.TestCase):
     def clip(self, name: str) -> Path:
         return _write_fake_clip(self.src / name, name.encode() * 64)
 
-    def export(self, board, film=None):
+    def export(self, board, film=None, **export_kw):
         """Run the real _sb_export with the assembler mocked. -> (res, clips)."""
         seen = {}
 
-        def fake_assemble(clips, out):
+        def fake_assemble(clips, out, **kw):
             seen["clips"] = [Path(c) for c in clips]
             seen["out"] = Path(out)
+            # The soundtrack arguments are part of the call now (a music video
+            # exports whole clips WITH the song as the bed), so the fake has
+            # to see them or the thing under test cannot be asserted.
+            seen["kw"] = kw
             if film is None:
                 Path(out).write_bytes(b"film")
                 return {"ok": True, "path": str(out), "clips": len(clips),
@@ -892,7 +897,7 @@ class ExportSelection(unittest.TestCase):
             return film
 
         with mock.patch.object(panel, "_sb_assemble_film", side_effect=fake_assemble):
-            res = panel._sb_export(board)
+            res = panel._sb_export(board, **export_kw)
         return res, seen
 
     def test_shots_reach_the_film_in_n_order_however_the_board_stores_them(self):
@@ -903,6 +908,24 @@ class ExportSelection(unittest.TestCase):
                          ["S01_shot-1-happens.mp4", "S02_shot-2-happens.mp4",
                           "S03_shot-3-happens.mp4"])
         self.assertEqual(res["files"], [p.name for p in seen["clips"]])
+
+    def test_a_soundtrack_reaches_the_assembler_on_the_whole_clip_path(self):
+        # THE BUG THIS PINS: the whole-clip branch called the assembler with
+        # the clip list and nothing else, so `_sb_export(music=...)` without
+        # auto_edit accepted a soundtrack at the door and wrote a film with no
+        # soundtrack in it. That is the path a music video wants — its shots
+        # are already cut to the beat, and re-cutting them would slide every
+        # a2v clip off the seconds of the song it was rendered against.
+        song = _write_fake_clip(self.src / "song.wav", b"RIFF" * 64)
+        _res, seen = self.export(_board([_clip(1, self.clip("a.mp4"))]),
+                                 music=str(song), music_mode="replace")
+        self.assertEqual(seen["kw"].get("music"), str(song))
+        self.assertEqual(seen["kw"].get("music_mode"), "replace")
+        self.assertIsNone(seen["kw"].get("plan"))
+
+    def test_an_export_with_no_soundtrack_asks_for_none(self):
+        _res, seen = self.export(_board([_clip(1, self.clip("a.mp4"))]))
+        self.assertIsNone(seen["kw"].get("music"))
 
     def test_skipped_shots_are_excluded_from_the_film_and_the_folder(self):
         a, b = self.clip("a.mp4"), self.clip("b.mp4")
@@ -1026,10 +1049,16 @@ class ExportSelection(unittest.TestCase):
                                 "unreadable": []}
             res = panel._sb_export(_board([_clip(1, a)]))
         planner.assert_not_called()
-        # and the assembler is called EXACTLY as it was before the auto-editor
-        # existed — two positional arguments, no keywords.
+        # and the assembler is asked for EXACTLY what it was asked for before
+        # the auto-editor existed: the clips, where to write them, no plan and
+        # no soundtrack. (It used to be two positional arguments and no
+        # keywords at all; the soundtrack keywords are always passed now, and
+        # `music=None` builds the identical filtergraph — see the comment at
+        # the call site. The assertion is on the ASK, not on the argv shape,
+        # because the argv shape was never the promise.)
         self.assertEqual(len(asm.call_args.args), 2)
-        self.assertEqual(asm.call_args.kwargs, {})
+        self.assertIsNone(asm.call_args.kwargs.get("music"))
+        self.assertIsNone(asm.call_args.kwargs.get("plan"))
         self.assertFalse(res["auto_edit"])
         self.assertNotIn("Auto-edited",
                          (Path(res["dir"]) / "storyboard.md")
@@ -1073,7 +1102,11 @@ class ExportSelection(unittest.TestCase):
                                 "sample_rate": 48000, "duration": 5.0,
                                 "unreadable": []}
             res = panel._sb_export(_board([_clip(1, a)]), auto_edit=True)
-        self.assertEqual(asm.call_args.kwargs, {})     # the old call, exactly
+        # No plan reached the assembler — the whole-clip call. (The soundtrack
+        # keywords ride along on every call now; this export named no song, so
+        # they are empty and the filtergraph is the one that always ran.)
+        self.assertIsNone(asm.call_args.kwargs.get("plan"))
+        self.assertIsNone(asm.call_args.kwargs.get("music"))
         self.assertTrue(res["ok"])
         self.assertFalse(res["auto_edit"])
         md = (Path(res["dir"]) / "storyboard.md").read_text(encoding="utf-8")
@@ -1468,6 +1501,13 @@ function phosToast(msg, opts) { CALLS.toasts.push({ msg: String(msg), opts: opts
 // what is under test here is that the export goes there at all — the screen
 // itself is locked by test_storyboard_film.py.
 function sbFilmOpen(opts) { CALLS.landed.push(opts || {}); }
+// FILM-48: sbExport() now asks sbMusicVideoBlock() whether this board is a
+// music video before choosing its route — the real function, not a stub,
+// so a change to what counts as "is one" cannot drift from what this test
+// exercises. None of these fixtures set SB.payload.board.music_video, so it
+// reads null and every case here takes the ordinary /storyboard/export
+// route (the music-video route itself is test_export_music_video_routing.py).
+__SB_MUSIC_VIDEO_BLOCK__
 class URLSearchParams { constructor() { this.v = {}; } set(k, x) { this.v[k] = x; } }
 let RESPONSE = null;
 async function fetch(url) {
@@ -1498,8 +1538,9 @@ class ExportButton(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.script = SB_EXPORT_SHIM.replace("__SB_EXPORT__",
-                                            extract_function("sbExport"))
+        cls.script = (SB_EXPORT_SHIM
+                     .replace("__SB_MUSIC_VIDEO_BLOCK__", extract_function("sbMusicVideoBlock"))
+                     .replace("__SB_EXPORT__", extract_function("sbExport")))
 
     def run_export(self, response: dict) -> dict:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1666,7 +1707,7 @@ class ImportShotsBetweenFilms(unittest.TestCase):
         self.assertEqual(len(dst["locations"]), 1)
 
     def test_the_cast_comes_too_so_wardrobe_survives(self):
-        cast = [{"id": "ariatrn", "trigger": "ariatrn", "wardrobe": "a red bikini"}]
+        cast = [{"id": "chartest_c", "trigger": "chartest_c", "wardrobe": "a red bikini"}]
         dst = self._board("a", [], cast=[])
         src = self._board("b", [self._shot(1, self.clips[0])], cast=cast)
         panel._sb_import_shots(dst, src)
@@ -1749,14 +1790,23 @@ class SegmentIndexIsNotInputIndex(unittest.TestCase):
             self.assertNotIn("[4:a]atrim", g, mode)
             self.assertEqual(len(inputs), 3)
 
-    def test_an_unreadable_still_is_dropped_and_the_indices_close_up(self):
+    def test_an_unreadable_still_plays_as_black_at_its_own_length(self):
+        # FILM-15: this used to DROP the segment — the film came out one
+        # still's length shorter, indices closed up, and nothing said why.
+        # It now pads the slot with a slug of the still's own duration
+        # instead, so the film's total length and every later clip's
+        # position stay exactly what the timeline said they were.
         with mock.patch.object(panel, "_sb_probe_clip",
                                side_effect=lambda p: _probe(1024, 576, 10.0)), \
              mock.patch.object(panel, "_sb_probe_still", return_value=None):
             segs, unreadable, inputs = panel._sb_timeline_segments(self.TIMELINE)
         self.assertEqual(unreadable, ["card.png"])
-        self.assertEqual([s["kind"] for s in segs], ["video", "slug", "video"])
-        self.assertEqual([s["input"] for s in segs], [0, None, 1])
+        self.assertEqual([s["kind"] for s in segs],
+                         ["video", "slug", "slug", "video"])
+        # The still's own input index is gone; the video after it shifts
+        # down to 1 (not 2), since only TWO `-i`s were ever needed now.
+        self.assertEqual([s["input"] for s in segs], [0, None, None, 1])
+        self.assertEqual(segs[2]["duration"], 3.0)   # the still's own length
         self.assertEqual(len(inputs), 2)
 
     def test_a_slug_needs_no_probe_at_all(self):
@@ -1772,6 +1822,120 @@ class SegmentIndexIsNotInputIndex(unittest.TestCase):
         self.assertEqual(inputs, [])
         self.assertEqual(segs[0]["input"], None)
         self.assertEqual(segs[0]["duration"], 2.0)
+
+
+class MissingAndShortMediaPlayAsBlack(unittest.TestCase):
+    """FILM-15 — an offline or truncated file used to shrink the film by
+    exactly its length, silently, with every later clip sliding earlier to
+    meet it. It now pads the slot with black at the slot's own length.
+    """
+
+    TIMELINE = [
+        {"path": "/x/a.mp4", "start": 0.0, "end": 2.0, "film_start": 0.0},
+        {"path": "/x/gone.mp4", "start": 0.0, "end": 4.0, "film_start": 2.0},
+        {"path": "/x/b.mp4", "start": 1.0, "end": 3.0, "film_start": 6.0},
+    ]
+
+    def test_an_unreadable_video_clip_plays_as_black_at_its_own_length(self):
+        def probe(path):
+            return None if "gone" in str(path) else _probe(1024, 576, 10.0)
+        with mock.patch.object(panel, "_sb_probe_clip", side_effect=probe):
+            segs, unreadable, inputs = panel._sb_timeline_segments(self.TIMELINE)
+        self.assertEqual(unreadable, ["gone.mp4"])
+        self.assertEqual([s["kind"] for s in segs], ["video", "slug", "video"])
+        self.assertEqual([s["input"] for s in segs], [0, None, 1])
+        self.assertEqual(segs[1]["duration"], 4.0)      # the missing clip's own slot
+        self.assertEqual(len(inputs), 2)
+
+    def test_an_unreadable_clip_with_speed_fills_its_FILM_length_not_its_source_length(self):
+        timeline = [dict(self.TIMELINE[1], speed=2.0)]  # 4.0 source / 2.0 = 2.0 on film
+        with mock.patch.object(panel, "_sb_probe_clip", return_value=None):
+            segs, unreadable, _inputs = panel._sb_timeline_segments(timeline)
+        self.assertEqual(unreadable, ["gone.mp4"])
+        self.assertEqual(segs[0]["duration"], 2.0)
+
+    def test_a_file_shorter_than_its_slot_plays_real_footage_then_black(self):
+        # The source has only 3.0s; the slot asks for 4.0 (0.0-4.0).
+        with mock.patch.object(panel, "_sb_probe_clip",
+                               side_effect=lambda p: _probe(1024, 576, 3.0)):
+            segs, unreadable, inputs = panel._sb_timeline_segments(
+                [{"path": "/x/short.mp4", "start": 0.0, "end": 4.0,
+                  "film_start": 0.0}])
+        self.assertEqual(unreadable, ["short.mp4 (short — padded with black)"])
+        self.assertEqual([s["kind"] for s in segs], ["video", "slug"])
+        self.assertEqual(segs[0]["duration"], 3.0)       # everything the file has
+        self.assertEqual(segs[1]["duration"], 1.0)       # the missing tail, in black
+        self.assertEqual(len(inputs), 1)                 # the slug needs no `-i`
+
+    def test_a_file_at_least_as_long_as_its_slot_gets_no_padding(self):
+        with mock.patch.object(panel, "_sb_probe_clip",
+                               side_effect=lambda p: _probe(1024, 576, 10.0)):
+            segs, unreadable, _inputs = panel._sb_timeline_segments(
+                [{"path": "/x/plenty.mp4", "start": 0.0, "end": 4.0,
+                  "film_start": 0.0}])
+        self.assertEqual(unreadable, [])
+        self.assertEqual([s["kind"] for s in segs], ["video"])
+        self.assertEqual(segs[0]["duration"], 4.0)
+
+
+class EditToCutsFillsItsOwnGaps(unittest.TestCase):
+    """FILM-27 — `edit_to_cuts` used to describe only the clips; a hole
+    between two of them simply had no entry, so the concat-based assembler
+    closed it and slid everything after it earlier. It now emits a slug
+    for every gap `edit_gaps` (the same list the header's hole count reads)
+    reports, so the assembler sees the film's real length.
+    """
+
+    def _clip(self, cid, path, fs, fe, **kw):
+        return dict({"id": cid, "path": path, "proxy": None, "start": 0.0,
+                     "end": fe - fs, "film_start": fs, "film_end": fe,
+                     "source": "human", "locked": False, "duration": 20.0},
+                    **kw)
+
+    def test_a_mid_timeline_gap_becomes_a_slug_of_the_right_length_and_place(self):
+        edit = {"clips": [self._clip("a", "/x/a.mp4", 0.0, 2.0),
+                          self._clip("b", "/x/b.mp4", 5.0, 7.0)]}
+        cuts = sedit.edit_to_cuts(edit)
+        self.assertEqual([(c.get("kind", "video"), round(c["film_start"], 3))
+                          for c in cuts],
+                         [("video", 0.0), ("slug", 2.0), ("video", 5.0)])
+        gap = cuts[1]
+        self.assertIsNone(gap["path"])
+        self.assertEqual(gap["end"] - gap["start"], 3.0)
+
+    def test_a_head_gap_becomes_a_leading_slug(self):
+        edit = {"clips": [self._clip("a", "/x/a.mp4", 6.0, 10.0)]}
+        cuts = sedit.edit_to_cuts(edit)
+        self.assertEqual([c.get("kind", "video") for c in cuts], ["slug", "video"])
+        self.assertEqual(cuts[0]["film_start"], 0.0)
+        self.assertEqual(cuts[0]["end"] - cuts[0]["start"], 6.0)
+
+    def test_no_gap_no_extra_entry(self):
+        edit = {"clips": [self._clip("a", "/x/a.mp4", 0.0, 2.0),
+                          self._clip("b", "/x/b.mp4", 2.0, 4.0)]}
+        cuts = sedit.edit_to_cuts(edit)
+        self.assertEqual(len(cuts), 2)
+        self.assertNotIn("kind", cuts[0])
+
+    def test_a_transition_next_to_a_gap_is_not_confused_for_one_across_it(self):
+        # A transition can only ever exist between clips that already touch
+        # (the UI offers it nowhere else), so a gap elsewhere in the film
+        # must not disturb it. Every clip carries a little source handle
+        # (start/end past the visible window) — a dissolve needs room to
+        # pull from, or `resolve_transitions` refuses it for THAT reason,
+        # which is not the thing under test here.
+        def handled(cid, path, fs, fe):
+            return dict(self._clip(cid, path, fs, fe), start=0.5, end=fe - fs + 0.5)
+        edit = {"clips": [handled("a", "/x/a.mp4", 0.0, 2.0),
+                          handled("b", "/x/b.mp4", 2.0, 4.0),
+                          handled("c", "/x/c.mp4", 7.0, 9.0)],
+                "transitions": [{"after_clip": "a", "before_clip": "b",
+                                 "kind": "dissolve", "duration": 0.5}]}
+        cuts = sedit.edit_to_cuts(edit)
+        by_id = {c.get("path"): c for c in cuts}
+        self.assertIn("transition", by_id["/x/a.mp4"])
+        self.assertEqual([c.get("kind", "video") for c in cuts],
+                         ["video", "video", "slug", "video"])
 
 
 class StillsAndSlugsInTheGraph(unittest.TestCase):

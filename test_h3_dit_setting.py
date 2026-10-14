@@ -39,6 +39,22 @@ for _m in sorted((ROOT / "webapp" / "js").glob("*.js")):
     SRC += "\n" + _m.read_text(encoding="utf-8")
 
 
+class _pinned_mac:
+    """This Mac's RAM and whether its H3 Q8 pack is built, pinned for a block."""
+
+    def __init__(self, ram_gb: float, q8_dir: Path | None):
+        self.ram_gb, self.q8_dir = ram_gb, q8_dir
+
+    def __enter__(self):
+        self.saved = (P.SYSTEM_RAM_GB, P._h3_q8_dit_dir)
+        P.SYSTEM_RAM_GB = self.ram_gb
+        P._h3_q8_dit_dir = lambda: self.q8_dir
+        return self
+
+    def __exit__(self, *exc):
+        P.SYSTEM_RAM_GB, P._h3_q8_dit_dir = self.saved
+
+
 class TheSettingRoundTrips(unittest.TestCase):
 
     def test_the_ui_can_read_the_current_value(self):
@@ -57,9 +73,14 @@ class TheSettingRoundTrips(unittest.TestCase):
             self.assertIn(v, err)
 
     def test_the_choice_actually_reaches_the_dit_picker(self):
+        # Pinned to a Mac where a bf16 preference is honoured AND auto would
+        # have chosen otherwise (issue #90): on a 48 GB Mac with the Q8 pack
+        # built, bf16 resolves to q8 by design (BelowTheFullEngineFloor), so
+        # reading the live RAM and the live pack made this pass or fail by
+        # whose Mac ran it.
         P.update_settings({"h3_dit": "bf16"})
-        kind, _ = P.h3_dit_choice()
-        self.assertEqual(kind, "bf16")
+        with _pinned_mac(ram_gb=128.0, q8_dir=Path("/tmp/pretend-q8")):
+            self.assertEqual(P.h3_dit_choice()[0], "bf16")
 
 
 class AutoPrefersTheLightModel(unittest.TestCase):
@@ -68,7 +89,18 @@ class AutoPrefersTheLightModel(unittest.TestCase):
     Before that, `auto` gave any Mac with 60 GB+ the bf16 master, so the machine
     with the most memory was the one that spent the most: 38.89 GiB peak versus
     21.38 GiB for the same shot at the same seed.
+
+    Run as a Mac above the bf16 floor (issue #90): below it, a forced bf16 with
+    the pack present resolves to q8 by design — BelowTheFullEngineFloor owns
+    that case — so the live RAM must not decide this class's answers.
     """
+
+    def setUp(self):
+        self._ram = P.SYSTEM_RAM_GB
+        P.SYSTEM_RAM_GB = 128.0
+
+    def tearDown(self):
+        P.SYSTEM_RAM_GB = self._ram
 
     def test_auto_picks_q8_whenever_the_pack_is_present(self):
         P.update_settings({"h3_dit": "auto"})
@@ -129,6 +161,41 @@ class TheControlExists(unittest.TestCase):
         block = SRC[SRC.index('id="settingsH3DitHint"'):][:900]
         for n in ("38.9", "21.4", "45"):
             self.assertIn(n, block, f"the measured figure {n} is not shown")
+
+
+class BelowTheFullEngineFloor(unittest.TestCase):
+    """A 48 GB Mac with the Q8 pack built, whose Settings said Full: every render
+    loaded the 41 GB master and died of Metal memory (Pinokio, M5 Max 48 GB).
+    Below the floor, Full with Q8 present resolves to Q8."""
+
+    def setUp(self):
+        self._ram = P.SYSTEM_RAM_GB
+        self._q8 = P._h3_q8_dit_dir
+        self._pack = Path(tempfile.mkdtemp(prefix="phos-q8pack-"))
+        P._h3_q8_dit_dir = lambda: self._pack
+        P.update_settings({"h3_dit": "bf16"})
+
+    def tearDown(self):
+        P.SYSTEM_RAM_GB = self._ram
+        P._h3_q8_dit_dir = self._q8
+        P.update_settings({"h3_dit": "auto"})
+
+    def test_48gb_full_preference_renders_q8(self):
+        P.SYSTEM_RAM_GB = 48.0
+        self.assertEqual(P.h3_dit_choice(), ("q8", self._pack))
+
+    def test_64gb_full_preference_is_honoured(self):
+        P.SYSTEM_RAM_GB = 64.0
+        self.assertEqual(P.h3_dit_choice(), ("bf16", None))
+
+    def test_48gb_without_q8_is_not_silently_q8(self):
+        P.SYSTEM_RAM_GB = 48.0
+        P._h3_q8_dit_dir = lambda: None
+        self.assertEqual(P.h3_dit_choice(), ("bf16", None))
+
+    def test_the_menu_is_told(self):
+        self.assertIn('"bf16_fits": SYSTEM_RAM_GB >= H3_MIN_RAM_GB', SRC)
+        self.assertIn("bf16_fits === false", SRC)
 
 
 if __name__ == "__main__":

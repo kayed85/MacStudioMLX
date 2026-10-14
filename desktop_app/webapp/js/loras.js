@@ -142,10 +142,21 @@ function _syncLoraPickerForEngine() {
   if (typeof renderH3LoraSlot === 'function') { try { renderH3LoraSlot(); } catch (_) {} }
 }
 
+// H3-10: import results used to be native alert()s for every outcome — the
+// file-type guard, success, AND failure — which blocks the whole tab and
+// reads as a browser error rather than the panel's own UI. A file trained
+// for LTX (diffusers/PEFT layout, the file people most often try here by
+// mistake) got the raw "PEFT's alpha/rank" engineering explanation with no
+// pointer to what to do about it. Toasts now carry every outcome, and the
+// diffusers-layout refusal gets its own plain-language line.
+function _h3ImportIsLtxLora(message) {
+  return /diffusers layout/i.test(String(message || ''));
+}
 async function importH3Lora(file) {
   if (!file) return;
   if (!/\.safetensors$/i.test(file.name || '')) {
-    alert('Choose a .safetensors Hailuo H3 LoRA file.');
+    phosToast('Choose a .safetensors Hailuo H3 LoRA file.',
+             { icon: 'ph-warning-fill', duration: 4000 });
     return;
   }
   const btn = document.getElementById('h3LoraImportBtn');
@@ -161,6 +172,11 @@ async function importH3Lora(file) {
     const data = await r.json();
     if (!r.ok || !data.ok) throw new Error(data.error || `HTTP ${r.status}`);
     await refreshLoras();
+    // The picker is closed by default since the 2026-09-18 layout pass, so the
+    // file that just landed has to be shown rather than filed away out of
+    // sight — the same thing the CivitAI install path does.
+    const _det = document.getElementById('lorasDetails');
+    if (_det) _det.open = true;
     const pairs = `${data.pairs} module pair${data.pairs === 1 ? '' : 's'}`;
     const converted = data.converted ? ' Key namespace converted safely.' : '';
     // The H3 loader applies no alpha, so when a file's own scale isn't 1.0 the
@@ -169,11 +185,24 @@ async function importH3Lora(file) {
     const strength = (typeof data.recommended_strength === 'number'
                       && Math.abs(data.recommended_strength - 1) > 1e-6)
       ? ` Recommended strength ${Number(data.recommended_strength.toFixed(4))}.` : '';
-    alert(`Imported ${data.filename} (${pairs}).${converted}${strength}`);
+    phosToast(`Imported ${data.filename} (${pairs}).${converted}${strength}`,
+             { kind: 'success', duration: 6000 });
   } catch (e) {
-    alert(`H3 LoRA import failed: ${e.message || e}`);
+    const msg = e.message || String(e);
+    if (_h3ImportIsLtxLora(msg)) {
+      // Name what the user actually did wrong, not the engineering reason
+      // for the refusal — "PEFT's alpha/rank is not in the file" answers a
+      // question nobody but us asked.
+      phosToast("This looks like an LTX LoRA, not an H3 one — its layout "
+               + "only exists in LTX/diffusers exports. Move the file into "
+               + "mlx_models/loras/ to use it on LTX instead; it can't run "
+               + "on H3.", { icon: 'ph-warning-fill', kind: 'danger', duration: 9000 });
+    } else {
+      phosToast(`H3 LoRA import failed: ${msg}`,
+               { icon: 'ph-warning-fill', kind: 'danger', duration: 9000 });
+    }
   } finally {
-    if (btn) { btn.disabled = false; btn.innerHTML = original || 'Import H3 LoRA'; }
+    if (btn) { btn.disabled = false; btn.innerHTML = original || 'Import'; }
   }
 }
 
@@ -234,6 +263,18 @@ function setH3LoraSlot(slot) {
   renderH3LoraSlot();
 }
 
+// 4.18.0: the LTX-lane LoRAs Enhance should know about — the same lane rule
+// _serializeLoras applies to the submit (an H3 adapter is never described to
+// LTX's prompt helper). Enhance is LTX-only, Lip-sync is LTX, so the LTX lane
+// is the only one asked for today. Paths only: the panel reads names, trigger
+// words and notes from the library itself (lora_enhance_context).
+function enhanceLoraPaths() {
+  const active = Array.isArray(globalThis._activeLoras) ? globalThis._activeLoras : [];
+  const known = Array.isArray(globalThis._knownUserLoras) ? globalThis._knownUserLoras : [];
+  const laneOf = (p) => { const u = known.find(x => x.path === p); return (u && u.lane) || 'ltx'; };
+  return active.filter(l => l && l.path && laneOf(l.path) !== 'h3').map(l => l.path);
+}
+
 function _serializeLoras() {
   // What the helper actually needs is path + strength. Keep the rest in
   // the in-memory list for UI rendering, drop it on the wire. Summary
@@ -257,8 +298,13 @@ function _serializeLoras() {
   const _inLane = (l) => (_tag === 'video:h3')
     ? _laneOf(l.path) === 'h3'
     : _laneOf(l.path) !== 'h3';
+  // `scale_v` rides along only on a strength replayed from an older recipe
+  // (Load Params / Finish, _restoreLoraPicker): it tells the server which
+  // meaning of "strength" that number was written in (Codex H3-03).
   const slim = _activeLoras.filter(_inLane)
-    .map(l => ({ path: l.path, strength: l.strength }));
+    .map(l => (typeof l.scale_v === 'number')
+      ? { path: l.path, strength: l.strength, scale_v: l.scale_v }
+      : { path: l.path, strength: l.strength });
   document.getElementById('lorasJson').value = JSON.stringify(slim);
   // Train-Character LoRAs are trained against the dev transformer (HQ
   // path) — Quick/Standard run the distilled model at 8 steps, which is
@@ -311,18 +357,24 @@ function addLoraToActive(entry) {
   }
   renderLorasList();
   _serializeLoras();
+  // H3-08: the closed Shot-setup summary names the active LoRA count — it
+  // has to hear about every activation, not just the ones that happen to
+  // route through a full form re-render.
+  if (typeof updateCustomizeSummary === 'function') { try { updateCustomizeSummary(); } catch (e) {} }
 }
 
 function removeLoraFromActive(path) {
   _activeLoras = _activeLoras.filter(l => l.path !== path);
   renderLorasList();
   _serializeLoras();
+  if (typeof updateCustomizeSummary === 'function') { try { updateCustomizeSummary(); } catch (e) {} }
 }
 
 function setLoraStrength(path, strength) {
   const e = _activeLoras.find(l => l.path === path);
   if (!e) return;
   e.strength = Math.max(-2, Math.min(2, parseFloat(strength) || 0));
+  delete e.scale_v;   // chosen now, in this build's meaning — no longer a replay
   _serializeLoras();
 }
 
@@ -696,6 +748,14 @@ function renderLorasList() {
     // wins — the empty state below tells the user where to install
     // image LoRAs from instead.
   }
+  // H3-09: the header summary used to count allRows.length here — every
+  // LoRA in BOTH libraries, LTX and H3 combined — so an H3 install with 4
+  // H3-compatible adapters and 16 LTX ones read "20 installed". Capture the
+  // MODE-FILTERED count now, before the text search narrows `rows` further,
+  // so the summary can say what's actually usable on the active engine.
+  const modeFilteredCount = rows.length;
+  const modeFilteredActiveRows = rows.filter(r => r.active);
+  const modeFilteredActive = modeFilteredActiveRows.length;
   // Surface the filter input only when 5+ LoRAs (post-mode-filter)
   // remain; below that it's just visual noise.
   if (filterRow) filterRow.style.display = (rows.length >= 5) ? '' : 'none';
@@ -725,19 +785,63 @@ function renderLorasList() {
   if (banner) {
     let bannerHtml = `Library filter: <strong>${escapeHtml(_loraFilterLabel(modeTag))}</strong>`;
     if (hiddenCount > 0) {
-      bannerHtml += ` · <a href="#" style="color:var(--muted)" onclick="event.preventDefault(); window._loraShowOtherModes = true; renderLorasList()">Show ${hiddenCount} from other modes</a>`;
+      // H3-09: on H3 specifically, name what's hidden and say WHY it won't
+      // help — "other modes" reads as "somewhere in this app", not "16 LTX
+      // LoRAs, a different engine's library, that can never load here".
+      const hiddenLabel = (modeTag === 'video:h3')
+        ? `${hiddenCount} LTX LoRAs (won't load on H3)`
+        : `${hiddenCount} from other modes`;
+      bannerHtml += ` · <a href="#" style="color:var(--muted)" onclick="event.preventDefault(); window._loraShowOtherModes = true; renderLorasList()">Show ${hiddenLabel}</a>`;
     } else if (showOtherModes) {
       bannerHtml += ` · <a href="#" style="color:var(--muted)" onclick="event.preventDefault(); window._loraShowOtherModes = false; renderLorasList()">Hide other modes</a>`;
     }
     banner.innerHTML = bannerHtml;
   }
 
-  // Update header summary.
+  // Update header summary. H3-09: counts are MODE-FILTERED (see
+  // modeFilteredCount above), not allRows.length — a mixed LTX+H3 library
+  // must not print a combined total under either engine's picker. H3 gets
+  // its own wording ("N H3 LoRAs") rather than the generic "N installed",
+  // since "installed" invited exactly the "20 installed" misreading.
   const summary = document.getElementById('lorasSummaryCount');
   if (summary) {
-    const total = allRows.length;
-    const active = allRows.filter(r => r.active).length;
-    summary.textContent = `${total} installed · ${active} active${q ? ` · ${rows.length} match` : ''}`;
+    const unit = (modeTag === 'video:h3') ? 'H3 LoRAs' : 'installed';
+    summary.textContent = `${modeFilteredCount} ${unit} · ${modeFilteredActive} active`
+      + (q ? ` · ${rows.length} match` : '');
+  }
+  // H3-09: the Rescan button's tooltip named mlx_models/loras/ unconditionally
+  // — the LTX folder, wrong for the H3 picker, which watches its own
+  // directory (_lorasDirs.h3, filled by refreshLoras() from /loras).
+  const rescanBtn = document.getElementById('lorasRescanBtn');
+  if (rescanBtn) {
+    const dir = (modeTag === 'video:h3')
+      ? (_lorasDirs.h3 || "the Hailuo H3 pack's loras/ folder")
+      : (_lorasDirs.ltx || 'mlx_models/loras/');
+    rescanBtn.title = `Rescan ${dir} for new files`;
+  }
+  // H3-08: no total-strength warning ever showed for stacked H3 LoRAs — the
+  // "keep total near 1.5" advice only rendered inside the single-adapter
+  // slot row (renderH3LoraSlot), which is hidden on every runner that
+  // stacks (today's default), so three LoRAs at 1.0 each (a real total of
+  // 3.0) warned about nothing (shots_h3/h64_lora_three_active.png).
+  const totalEl = document.getElementById('lorasStrengthTotal');
+  if (totalEl) {
+    if (modeFilteredActive >= 2) {
+      const total = modeFilteredActiveRows.reduce(
+        (sum, r) => sum + Math.abs(Number(r.strength) || 0), 0);
+      const level = total > 2.5 ? 'high' : total > 1.5 ? 'mid' : 'ok';
+      const color = level === 'high' ? 'var(--danger,#f85149)'
+        : level === 'mid' ? 'var(--warn,#e8b341)' : 'var(--muted)';
+      const stackNote = (modeTag === 'video:h3')
+        ? ' — H3 stacks every active LoRA into one render'
+        : '';
+      totalEl.hidden = false;
+      totalEl.style.color = color;
+      totalEl.textContent = `Combined strength: ${total.toFixed(2)}${stackNote}`
+        + (level !== 'ok' ? ' — keep the total near 1.5 for a clean result.' : '.');
+    } else {
+      totalEl.hidden = true;
+    }
   }
 
   if (rows.length === 0) {
@@ -774,7 +878,7 @@ function renderLorasList() {
         <div class="hint" style="padding:14px 8px;text-align:center;line-height:1.6;">
           <div style="margin-bottom:4px;color:var(--fg);"><strong>No Hailuo H3 LoRAs in your library.</strong></div>
           <div>H3 has its own library — your LTX LoRAs can't load here, and H3's can't load on LTX.</div>
-          <div style="margin-top:6px;">Already have one? <strong>Import H3 LoRA</strong> above takes a <code>.safetensors</code> file and checks it against your installed H3 transformer before it lands in the library.</div>
+          <div style="margin-top:6px;">Already have one? <strong>Import</strong> above takes a <code>.safetensors</code> file and checks it against your installed H3 transformer before it lands in the library.</div>
           <div style="margin-top:6px;">Drop a converted H3 <code>.safetensors</code> with <code>lora_A</code> / <code>lora_B</code> tensors into <code>${escapeHtml(_lorasDirs.h3 || 'the H3 pack’s loras/ folder')}</code>, then press Rescan — same result, no size limit.</div>
           <div style="margin-top:6px;">Or install one via <strong>Browse CivitAI</strong> above using the <strong>Hailuo H3</strong> CivitAI filter.</div>
         </div>`;
@@ -794,6 +898,16 @@ function renderLorasList() {
 // modeTag is the active engine compat tag (e.g. "image:qwen") — used to
 // render the per-chip warning when an ACTIVE LoRA doesn't fit the
 // current engine, and a `?` indicator for unclassified LoRAs.
+// Stable per-path id for a LoRA row's ⋯ popover (VC-42) — a simple string
+// hash, not cryptographic, just enough that two different paths in the
+// same render pass get two different DOM ids.
+function _loraRowKebabId(path) {
+  let h = 0;
+  const s = String(path || '');
+  for (let i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) | 0; }
+  return 'loraMore' + (h >>> 0);
+}
+
 function loraRowHtml(r, modeTag) {
   const pathHtml = escapeHtml(r.path);
   const pathAttr = JSON.stringify(r.path).replace(/"/g, '&quot;');
@@ -821,6 +935,15 @@ function loraRowHtml(r, modeTag) {
   if (r.layout_ok === false) {
     familyBadges.push(`<span class="badge" style="background:rgba(248,81,73,0.15);color:var(--danger,#f85149)" title="${escapeHtml(r.layout_reason || 'This LoRA is in a key layout the H3 runner cannot read.')}"><svg class="ph" aria-hidden="true"><use href="#ph-warning-fill"/></svg></span>`);
   }
+  // H3-33: a real H3 LoRA can carry "LTX 2.3" in its OWN display name — the
+  // string comes from wherever it was downloaded (e.g. a CivitAI listing
+  // title written before the file was adapted for H3) and the panel has no
+  // business silently rewriting a user's LoRA name. Add a small, honest
+  // lane badge instead, only where the name could actually mislead —
+  // an H3-lane row whose name mentions LTX.
+  if (r.lane === 'h3' && /\bltx\b/i.test(r.name || '')) {
+    familyBadges.push(`<span class="badge" title="This is an H3 LoRA — its own display name mentions LTX, but it lives in the H3 library and only loads on H3.">H3</span>`);
+  }
   // Trigger summary line under the name (when not expanded). Truncated.
   const trigs = r.trigger_words || [];
   const trigSummary = trigs.length
@@ -846,8 +969,26 @@ function loraRowHtml(r, modeTag) {
     corner.push(`<a class="lora-icon-btn" href="${escapeHtml(r.civitai_url)}" target="_blank" rel="noopener" title="Open on CivitAI" onclick="event.stopPropagation()"><svg class="ph" aria-hidden="true"><use href="#ph-arrow-square-out"/></svg></a>`);
   }
   if (r.kind === 'user' || r.kind === 'trained') {
-    corner.push(`<button class="lora-icon-btn danger" type="button" title="Delete from disk"
-                         onclick="event.stopPropagation(); deleteLora(${pathAttr}, ${nameAttr})"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>`);
+    // VC-42: a bare danger X sat right next to Rename/Download in the same
+    // icon row — one fat-finger away from a permanent delete. Moved behind
+    // a ⋯ menu so it takes two deliberate clicks (open the menu, then the
+    // item) before the existing confirm() even shows. kebabToggle/.kebab-pop
+    // are the shared popover component (also used by the clip toolbar's
+    // "More" menu) — id is derived from the path so every row's popover is
+    // independently addressable.
+    const kid = _loraRowKebabId(r.path);
+    corner.push(`<div class="kebab-wrap" onclick="event.stopPropagation()">
+      <button class="lora-icon-btn" type="button" title="More" aria-haspopup="true"
+              onclick="kebabToggle('${kid}')">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <circle cx="3" cy="8" r="1.4" fill="currentColor"/><circle cx="8" cy="8" r="1.4" fill="currentColor"/><circle cx="13" cy="8" r="1.4" fill="currentColor"/>
+        </svg>
+      </button>
+      <div class="kebab-pop" id="${kid}" role="menu">
+        <button type="button" role="menuitem" class="danger"
+                onclick="kebabToggle('${kid}', false); deleteLora(${pathAttr}, ${nameAttr})">Delete from disk</button>
+      </div>
+    </div>`);
   } else {
     corner.push(`<button class="lora-icon-btn" type="button" title="Remove from active set"
                          onclick="event.stopPropagation(); removeLoraFromActive(${pathAttr})"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>`);
@@ -1352,7 +1493,7 @@ function renderCharacterStrip() {
 Object.assign(globalThis, {
   checkLoraUpdates, updateLora, writeLoraGuide,
   _currentLoraModeFilter, _syncLoraPickerForEngine, importH3Lora, renderH3LoraSlot,
-  setH3LoraSlot, _serializeLoras, addLoraToActive, populateIngredientCharLoras,
+  setH3LoraSlot, _serializeLoras, enhanceLoraPaths, addLoraToActive, populateIngredientCharLoras,
   onIngredientCharChange, onIngredientCharStrength, refreshLoras, _loraGenerationCompatible,
   renderLorasList, appendTriggerToPrompt, _updateCharsPickerVisibility, refreshManualCharacters,
   _renderManualCharactersList, _renderCharsAppliedNote, renderCharacterStrip,

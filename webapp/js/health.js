@@ -78,9 +78,12 @@ function renderVersionPill() {
     pill.classList.add('pill-restart');
     pill.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-arrow-clockwise-bold"/></svg>Restart Phosphene';
     const v = s.pull_pulled_to_version || s.pull_pulled_to_short || 'the new code';
+    // SYS-29: the non-full-update case now self-restarts on click
+    // (panelRestart(), same as the stale-process case below) instead of
+    // asking for a manual Stop -> Start.
     pill.title = s.pull_requires_full_update
       ? `Pulled ${v}. This update touched dependencies — use Pinokio's Update button (not just Stop+Start).`
-      : `Pulled ${v}. Click Stop → Start in Pinokio to apply.`;
+      : `Pulled ${v}. Click to restart and apply it.`;
     return;
   }
   // Same restart affordance for a checkout that advanced UNDER this
@@ -174,14 +177,20 @@ window._bcHandled = Object.create(null);
 function _phModalShow(opts) {
   const wrap = document.getElementById('phModalWrap');
   if (!wrap || window._phModalOpen) return false;
+  // `tone` generalizes the old broadcast-only styling: 'broadcast' (cyan,
+  // maintainer notes) or 'danger' (red, a destructive confirm — Stop
+  // mid-render and friends). opts.broadcast still works for callers that
+  // predate this.
+  const tone = opts.tone || (opts.broadcast ? 'broadcast' : '');
+  const toneClass = tone ? 'is-' + tone : '';
   document.getElementById('phModalKicker').textContent = opts.kicker || '';
-  document.getElementById('phModalKicker').className = opts.broadcast ? 'is-broadcast' : '';
+  document.getElementById('phModalKicker').className = toneClass;
   document.getElementById('phModalTitle').textContent = opts.title || '';
   document.getElementById('phModalBody').textContent = opts.body || '';
   const prim = document.getElementById('phModalPrimary');
   const sec = document.getElementById('phModalSecondary');
   prim.textContent = opts.primaryLabel || 'OK';
-  prim.className = opts.broadcast ? 'is-broadcast' : '';
+  prim.className = toneClass;
   prim.onclick = () => { _phModalClose(); if (opts.onPrimary) opts.onPrimary(); };
   if (opts.secondaryLabel) {
     sec.hidden = false;
@@ -190,6 +199,12 @@ function _phModalShow(opts) {
   } else {
     sec.hidden = true;
   }
+  // A confirm the user dismisses with Escape or a click outside must count
+  // as "no" (onCancel), never silently vanish leaving the caller thinking
+  // its onPrimary/onSecondary will still fire.
+  wrap.onclick = (ev) => {
+    if (ev.target === wrap) { _phModalClose(); if (opts.onCancel) opts.onCancel(); }
+  };
   wrap.hidden = false;
   window._phModalOpen = true;
   return true;
@@ -312,15 +327,83 @@ function _ubRestartState(newVersion, requiresFullUpdate) {
   const go = document.getElementById('ubUpdate');
   const later = document.getElementById('ubLater');
   if (title) title.textContent = `Updated to ${newVersion} — restart to finish`;
-  if (sub) {
-    sub.textContent = requiresFullUpdate
-      ? 'This update touched Python dependencies, so use Pinokio\u2019s Update button (not just Stop and Start) so they reinstall.'
-      : 'Click Stop, then Start in Pinokio. Your queue and settings are preserved.';
+  // SYS-29: this used to hide `go` and tell the user to go click Stop
+  // then Start in Pinokio themselves -- a second, manual mechanism
+  // sitting right next to panelRestart() (the one-click, 409-guarded
+  // self-restart this same file already uses for the stale-process
+  // case). No reason the banner's Update needed a human to finish what
+  // it started: when the pull didn't touch dependencies, the SAME
+  // button now finishes the job by calling panelRestart() directly.
+  // When it DID touch dependencies, a self-restart genuinely can't
+  // reinstall them (that needs Pinokio's own Update, which reinstalls
+  // the venv) -- that's the one case still asking for a manual step,
+  // and it says exactly why.
+  // Beta, after 4.17.4: the pull is followed by post_update.sh, run by the
+  // panel itself (the step Pinokio's Update runs). Until it is done the
+  // banner says so and Restart waits; a failure names why.
+  const pu = ((_versionState || {}).post_update) || {};
+  if (pu.pending || pu.active || pu.state === 'failed') {
+    if (title) title.textContent = pu.state === 'failed'
+      ? 'The update did not finish'
+      : `Updated to ${newVersion} \u2014 finishing the update\u2026`;
+    if (sub) sub.textContent = pu.state === 'failed'
+      ? (pu.error || 'post_update.sh failed') + ' \u2014 use Pinokio\u2019s Update (Stop, then Update), or try again.'
+      : 'Installing what the new version needs (the same step Pinokio\u2019s Update runs). '
+        + 'Restart becomes available when it finishes. ' + ((pu.log || []).slice(-1)[0] || '');
+    if (go) {
+      go.hidden = pu.state !== 'failed';
+      go.disabled = false;
+      go.textContent = 'Try again';
+      go.onclick = async () => {
+        go.disabled = true;
+        try { await fetch('/version/finish', { method: 'POST' }); } catch (e) {}
+        _ubFollowPostUpdate(newVersion);
+      };
+    }
+    if (pu.state !== 'failed') _ubFollowPostUpdate(newVersion);
+  } else if (requiresFullUpdate && !pu.state) {
+    if (sub) sub.textContent = 'This update touched Python dependencies, so use Pinokio\u2019s Update button (not just Stop and Start) so they reinstall.';
+    if (go) go.hidden = true;
+  } else {
+    if (sub) sub.textContent = 'Your queue and settings are preserved across the restart.';
+    if (go) {
+      go.hidden = false;
+      go.disabled = false;
+      go.textContent = 'Restart now';
+      go.onclick = async () => {
+        _uiEvent('update_prompt', {action: 'banner_restart'});
+        go.disabled = true;
+        go.textContent = 'Restarting\u2026';
+        // Codex UI-10: a refused restart (409 while a render runs) or a
+        // failed one used to leave this button disabled on "Restarting…"
+        // for good. panelRestart() says whether a restart is under way;
+        // when it isn't, the same button is usable again.
+        const started = await panelRestart();
+        if (!started) {
+          go.disabled = false;
+          go.textContent = 'Restart now';
+        }
+      };
+    }
   }
-  if (go) { go.hidden = true; }
   if (later) { later.textContent = 'Dismiss'; }
   el.classList.add('ub-done');
   return true;
+}
+
+// Poll /version while post_update.sh runs; repaint the banner as it moves,
+// and hand over to the Restart now state when it is done.
+let _ubPostUpdateTimer = null;
+function _ubFollowPostUpdate(newVersion) {
+  clearTimeout(_ubPostUpdateTimer);
+  _ubPostUpdateTimer = setTimeout(async () => {
+    try {
+      const r = await fetch('/version', { cache: 'no-store' });
+      if (r.ok) _versionState = await r.json();
+    } catch (e) { /* keep polling */ }
+    const pu = ((_versionState || {}).post_update) || {};
+    _ubRestartState(newVersion, !!((_versionState || {}).pull_requires_full_update) && !pu.state);
+  }, 2000);
 }
 
 async function _ubSaveSetting(patch) {
@@ -459,7 +542,15 @@ function updateHealthChip() {
     // Name the thing that is wrong. "Attention" tells the user to go looking.
     const bad = [models, helper, mem].find(el => _hcSeverity(el) === worst);
     face.textContent = clean(bad) || 'needs attention';
-    face.dataset.short = 'attention';
+    // VC-32: this used to be the bare word "attention" below 1400px — no
+    // indication of WHAT needs it, on a chip whose whole job is a one-glance
+    // read. Name the row instead ("models"/"helper"/"memory"), same as the
+    // full-width text does; only fall back to the old word if none of the
+    // three pills is even findable (shouldn't happen, but the chip must
+    // never render nothing).
+    const badLabel = bad === models ? 'models' : bad === helper ? 'helper'
+                    : bad === mem ? 'memory' : 'attention';
+    face.dataset.short = badLabel;
   } else {
     face.textContent = clean(mem) || 'all good';
     // The narrow-header face (review 2026-09-02): below 1400px the chip
@@ -497,6 +588,9 @@ document.addEventListener('keydown', (ev) => {
 window.addEventListener('resize', closeHealthPop);
 
 // One click — does the right thing for the current state. Magic button.
+// Returns false when no restart happened (refused, failed, or the panel did
+// not come back) so a caller's own button can be re-armed (UI-10); on success
+// the page reloads.
 async function panelRestart() {
   const pill = document.getElementById('versionPill');
   const say = (t) => { if (pill) pill.textContent = t; };
@@ -505,9 +599,9 @@ async function panelRestart() {
     const d = await r.json().catch(() => ({}));
     if (r.status === 409) {
       phosToast(d.error || 'A render is running — stop it first.', 'warn');
-      return;
+      return false;
     }
-    if (!d.ok) { phosToast(d.error || 'Restart failed.', 'error'); return; }
+    if (!d.ok) { phosToast(d.error || 'Restart failed.', 'error'); return false; }
   } catch (e) {
     // The process may have exec'd before the response reached us. That is a
     // SUCCESSFUL restart, not a failure — fall through to polling.
@@ -520,20 +614,33 @@ async function panelRestart() {
     await new Promise(r => setTimeout(r, 700));
     try {
       const r = await fetch('/version', {cache: 'no-store'});
-      if (r.ok) { location.reload(); return; }
+      if (r.ok) { location.reload(); return true; }
     } catch (e) { /* still down */ }
   }
   phosToast('Panel did not come back within 60s — start it from Pinokio.', 'error');
+  return false;
 }
 
 async function versionPillClick() {
   if (_versionRestartPending) {
-    // Educational click: tell the user what's needed.
     const s = _versionState || {};
-    const tip = s.pull_requires_full_update
-      ? "Pulled. Because this update touched Python deps / patches, use Pinokio's Update button (it reinstalls + reapplies patches). After that click Start."
-      : "Pulled. Click Stop, then Start in Pinokio to apply (your queue and settings are preserved).";
-    alert(tip);
+    const _pu = s.post_update || {};
+    if (_pu.pending || _pu.active || _pu.state === 'failed') {
+      phosToast(_pu.state === 'failed'
+        ? 'The update did not finish: ' + (_pu.error || '') + ' Use Pinokio\u2019s Update.'
+        : 'Finishing the update first \u2014 restart becomes available when it is done.', 'warn');
+      return;
+    }
+    if (s.pull_requires_full_update && !_pu.state) {
+      // Genuinely can't self-restart into this one -- dependencies /
+      // patches changed, and only Pinokio's own Update reinstalls those.
+      alert("Pulled. Because this update touched Python deps / patches, use Pinokio's Update button (it reinstalls + reapplies patches). After that click Start.");
+      return;
+    }
+    // SYS-29: same fix as the update banner's button -- finish the update
+    // the pill already started instead of telling the user to go click
+    // Stop then Start themselves.
+    await panelRestart();
     return;
   }
   if ((_versionState || {}).stale_process) {
@@ -647,11 +754,29 @@ async function versionDoPull(opts) {
             `cases where you have local changes that block a fast-forward.`);
       return;
     }
+    // 4.17.5: a pull that moved nothing is not an update - no restart, no
+    // "Updated to" banner (the restart came back on the same build and was
+    // counted as a failed update). A stale process still gets its own pill.
+    if (data.moved === false) {
+      pill.classList.remove('pill-busy');
+      renderVersionPill();
+      const go = document.getElementById('ubUpdate');
+      if (go) { go.disabled = false; go.textContent = 'Update now'; }
+      try { _ubRender(_versionState); } catch (e) {}
+      if (typeof phosToast === 'function') {
+        phosToast('Already up to date - nothing to restart.', { kind: 'success' });
+      }
+      return;
+    }
     _versionRestartPending = true;
     pill.classList.remove('pill-busy');
     renderVersionPill();
     const newVersion = (data.state && (data.state.pull_pulled_to_version || data.state.pull_pulled_to_short)) || 'new version';
-    const fullUpdateNote = data.state && data.state.pull_requires_full_update
+    const _puNow = (data.state && data.state.post_update) || {};
+    const fullUpdateNote = (_puNow.pending || _puNow.active)
+      ? `\n\nPhosphene is now finishing the update in the background (the same ` +
+        `step Pinokio's Update runs). Restart once the banner says it is done.`
+      : data.state && data.state.pull_requires_full_update
       ? `\n\n⚠ This update touched Python dependencies / patches. Use ` +
         `Pinokio's Update button (not just Stop+Start) so deps reinstall.`
       : '';
@@ -704,12 +829,19 @@ setInterval(refreshVersionPill, 5 * 60 * 1000);
   // .modal-bg.show covers the batch modal (and any future modal that
   // uses the same .modal-bg + .show idiom). Including it here so Esc /
   // Tab focus-trap / body.modal-open scroll-lock all work for it too.
-  const MODAL_SEL = '.models-modal, .model-browser-modal, .expand-lightbox, .modal-bg.show';
+  //
+  // EVERY .modal-bg, not only the ones showing at startup (Codex UI-08). The
+  // selector said `.modal-bg.show`, so the observers below were registered
+  // only on dialogs already open when the page loaded — none — and isVisible()
+  // did not know the `show` class at all: Storyboard's re-plan dialog and the
+  // Editor's Generate-shot dialog open with classList.add('show'), so Escape,
+  // the Tab trap and the scroll lock all ignored them.
+  const MODAL_SEL = '.models-modal, .model-browser-modal, .expand-lightbox, .modal-bg';
   const isVisible = el => {
     const d = el.style.display;
-    // Some modals open by adding an .open class (.model-browser-modal);
-    // others toggle the inline style. Cover both.
-    if (el.classList.contains('open')) return true;
+    // Some modals open by adding an .open class (.model-browser-modal), the
+    // .modal-bg family by adding .show; others toggle the inline style.
+    if (el.classList.contains('open') || el.classList.contains('show')) return true;
     return d === 'flex' || d === 'block';
   };
   const visibleModals = () =>
@@ -726,12 +858,25 @@ setInterval(refreshVersionPill, 5 * 60 * 1000);
   // global subtree observer and avoids the cost of body-wide attribute
   // tracking. Lazy — modals added later (none today, but defensive)
   // need to re-register.
-  document.querySelectorAll(MODAL_SEL).forEach(el => {
+  const watched = new WeakSet();
+  const watch = el => {
+    if (watched.has(el)) return;
+    watched.add(el);
     new MutationObserver(refreshScrollLock).observe(el, {
       attributes: true,
       attributeFilter: ['style', 'class'],
     });
-  });
+  };
+  document.querySelectorAll(MODAL_SEL).forEach(watch);
+  // A modal appended to <body> later (the batch modal) registers itself.
+  // Direct children only — not the body-wide subtree observer ruled out above.
+  new MutationObserver(recs => {
+    for (const r of recs) {
+      for (const n of (r.addedNodes || [])) {
+        if (n.nodeType === 1 && n.matches && n.matches(MODAL_SEL)) { watch(n); refreshScrollLock(); }
+      }
+    }
+  }).observe(document.body, { childList: true });
   refreshScrollLock();
 
   // Esc closes the topmost modal. We find the close button inside it
@@ -744,12 +889,20 @@ setInterval(refreshVersionPill, 5 * 60 * 1000);
     if (!top) return;
     e.preventDefault();
     e.stopPropagation();
+    // Case-insensitive: sbCloseReplan() / sbeGenClose() are the class-based
+    // dialogs' own close functions and never matched a lower-case "close".
     const closeBtn =
       top.querySelector('button[onclick*="close"]') ||
+      Array.from(top.querySelectorAll('button[onclick]'))
+        .find(b => /close/i.test(b.getAttribute('onclick') || '')) ||
       top.querySelector('.close-btn') ||
       top.querySelector('.expand-close');
     if (closeBtn) closeBtn.click();
-    else { top.style.display = 'none'; top.classList.remove('open'); }
+    else if (top.classList.contains('show') || top.classList.contains('open')) {
+      // Class-opened: drop the class. An inline display:none here would
+      // outrank `.modal-bg.show` and the dialog could never open again.
+      top.classList.remove('show', 'open');
+    } else { top.style.display = 'none'; }
   });
 
   // Focus trap — when a modal is visible, Tab cycles inside it.
@@ -779,4 +932,13 @@ setInterval(refreshVersionPill, 5 * 60 * 1000);
 // the global scope; everything NOT listed here is private to this module.
 Object.assign(globalThis, {
   renderVersionPill, updateHealthChip, versionPillClick, _uiEvent,
+  // SYS-19: closeHealthPop wasn't published -- openTierModal (settings.js)
+  // and openModelsModal (preview.js) need it so clicking a health-popover
+  // row closes the popover before its modal opens on top of it.
+  closeHealthPop,
+  // The update/broadcast pop-up is the panel's only real dialog component
+  // (kicker/title/body/two buttons, one at a time via _phModalOpen) — VC-35's
+  // fix is "one in-app confirm/undo component", not a second modal shape, so
+  // Stop's confirm-with-cost (queue.js) reuses this rather than inventing one.
+  _phModalShow, _phModalClose,
 });

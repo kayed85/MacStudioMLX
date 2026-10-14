@@ -13,6 +13,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -189,7 +190,11 @@ class TestH3Orientation(unittest.TestCase):
     def h3_job(self, form: dict) -> dict:
         base = {"mode": "t2v", "engine": "h3", "prompt": "a lighthouse"}
         base.update(form)
-        return P.make_job({k: [str(v)] for k, v in base.items()})
+        # As an H3-capable Mac (issue #90): below the RAM floor make_job falls
+        # back to LTX by design, and a landscape-vs-portrait comparison of an
+        # LTX job says nothing about H3's orientation.
+        with mock.patch.dict(os.environ, {"LTX_H3_FORCE_CAPABLE": "1"}):
+            return P.make_job({k: [str(v)] for k, v in base.items()})
 
     def test_portrait_flips_the_cells_canvas(self):
         land = self.h3_job({})["params"]

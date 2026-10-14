@@ -86,10 +86,62 @@ import os
 import re
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Iterable
 
 SCHEMA_VERSION = 1
+
+
+def is_user_still(shot) -> bool:
+    """True when the shot's still is the USER'S OWN picture, never render cache.
+
+    BOARD-10: `still_source == "user"` is written by the music-video planner
+    since FILM-11, but boards planned before it carry only the provenance the
+    planner always recorded — `music_video.image`, the uploaded cast photo the
+    still was set from. Recognised here too, so "New still" on such a shot
+    keeps the photo (a singing shot has no other image to start from) instead
+    of deleting it.
+    """
+    if not isinstance(shot, dict):
+        return False
+    if shot.get("still_source") == "user":
+        return True
+    block = shot.get("music_video")
+    still = shot.get("still")
+    return bool(isinstance(block, dict) and still and block.get("image")
+                and str(block.get("image")) == str(still))
+
+
+def take_path(entry) -> str:
+    """The file a `takes[]` entry names, whichever shape it was written in.
+
+    BOARD-4: take history has TWO writers — `_sb_reconcile` archives a
+    superseded output as a bare path string, `_sb_new_take` ("Edit &
+    re-render") as `{"path", "pass", "seed", "at"}`. The one reader,
+    `_sbe_relinks`, accepted strings only, so a take archived by Edit &
+    re-render was invisible and the timeline kept exporting the old clip.
+    Every reader resolves entries through here; "" for anything else.
+    """
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict) and isinstance(entry.get("path"), str):
+        return entry["path"]
+    return ""
+
+
+def new_shot_uid() -> str:
+    """A stable per-shot identity, independent of `n` (display order).
+
+    `n` is renumbered constantly (drag, delete, insert) and was, until
+    FILM-10, also the merge key the save route used to graft server-owned
+    fields (draft_output, final_output, still, job ids, ...) from the old
+    shot onto the incoming one — so a reorder or delete could graft one
+    shot's rendered clip onto a completely different, unrendered shot.
+    `uid` never changes once assigned; every merge-by-identity operation
+    must key on this, not on `n`.
+    """
+    return f"shot_{uuid.uuid4().hex[:8]}"
 
 # Modes a shot may use. These MUST exist as real panel modes — the planner is never trusted
 # to invent one. Kept as a plain tuple so validation errors can list the legal set.
@@ -248,6 +300,12 @@ _H3_QUALITY_FOR_PASS = {
 # a benchmark. Tuned against observed two-stage 1536x896 ~11 min for a 5 s clip.
 _SECS_PER_VIDEO_SEC = {"quick": 24.0, "balanced": 60.0, "standard": 96.0, "high": 132.0}
 _PIPELINE_LOAD_SECS = 90.0
+# FILM-46: an anchor still is an ordinary image job and was priced at
+# nothing — "Stills first" (and the plain anchor-stills toggle) let someone
+# see "about 12 m" and have no idea a batch of stills renders before a
+# single video frame does. One rough, pessimistic image-job cost, same
+# spirit as _PIPELINE_LOAD_SECS above.
+_STILL_RENDER_SECS = 25.0
 
 # H3 FALLBACK cost, per second of video, by canvas. The panel passes `h3_cost=` into
 # estimate() and that hook wins every time — it reads H3_TIERS[cell]["eta_min"], which is
@@ -256,11 +314,12 @@ _PIPELINE_LOAD_SECS = 90.0
 # same measurements rather than invented:
 #   draft 3s     3.0 min / 3 s  =  60 s per video-second
 #   standard 5s  9.1 min / 5 s  = 109
-#   high 5s     18.8 min / 5 s  = 226   (no Turbo)
+#   high 5s     34 min / 5 s    = 408   (no Turbo; model-derived at 15 forwards since
+#                                        2026-09-16 — the 18.8 min receipt was 8 forwards)
 #   native 5s   44.9 min / 5 s  = 538   (no Turbo, never selected by a pass)
 # An H3 clip is a fresh subprocess that loads its own weights, so this per-clip number is
 # END TO END — which is why an H3 bucket adds no separate pipeline-load charge below.
-_H3_SECS_PER_VIDEO_SEC = {"draft": 60.0, "standard": 109.0, "high": 226.0, "native": 538.0}
+_H3_SECS_PER_VIDEO_SEC = {"draft": 60.0, "standard": 109.0, "high": 408.0, "native": 538.0}
 
 
 class StoryboardError(Exception):
@@ -333,11 +392,17 @@ def list_storyboards(state_dir: Path) -> list[dict]:
             "id": f.get("id", d.name),
             "title": f.get("title", ""),
             "created_at": f.get("created_at", 0),
+            # FILM-43: every edit, grade and render already bumps this
+            # (_sb_normalize sets it on every save) — it just went unread.
+            # Sorting by it is what "Recent" means; created_at alone left a
+            # board you opened and worked on all day sitting wherever it was
+            # first minted, below whatever else got planned since.
+            "updated_at": f.get("updated_at") or f.get("created_at", 0),
             "shots": len(shots),
             "done": sum(1 for s in shots if s.get("status") == "done"),
             "failed": sum(1 for s in shots if s.get("status") == "failed"),
         })
-    out.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
+    out.sort(key=lambda r: r.get("updated_at") or 0, reverse=True)
     return out
 
 
@@ -373,6 +438,18 @@ def validate_storyboard_detail(
     """
     errs: list[dict] = []
     chars = set(known_character_ids or ())
+    # FILM-55: a music-video board's singing shots are lip-synced to the
+    # song, not to written dialogue — the words are a waveform, same
+    # reasoning as the a2v exemption below. That exemption keys off
+    # `mode == "a2v"`, but a re-plan or an older save can leave a singing
+    # shot's mode reading "text" while `shot["audio"]` (set once by
+    # music_video.emit and never touched by the speech lint) still says
+    # what it really is. Reading the mode alone reproduced the owner's own
+    # board: real singing shots flagged as "'sings' implies someone is
+    # speaking, but no spoken line is written." A board carrying a song at
+    # all is judged the same way, since nothing on a music-video board's
+    # B-roll ever implies speech (ROLE_LINES has no speech verb for it).
+    _has_song = bool((board.get("music_video") or {}).get("song"))
 
     def add(code: str, message: str, *, n: int | None = None,
             field: str | None = None, **data: Any) -> None:
@@ -567,7 +644,29 @@ def validate_storyboard_detail(
         # warning, on the same principle as everything else here: the failure
         # it prevents is a finished clip of somebody babbling, and you only
         # find out after the render.
-        verb = shot_speech_problem(prompt)
+        #
+        # AN A2V SHOT IS EXEMPT, and that is not a loosening. The law asks
+        # "are there words for this mouth to say" and reads the prompt because
+        # on every other mode the prompt is the only place words can be. On
+        # a2v the words are a WAVEFORM — the pipeline drives the mouth from
+        # `audio` at `audio_start_time`, which is the whole mode — so a music
+        # video's "close-up, singing to camera" was refused for having no
+        # lyrics written in it while the lyrics were in the file next to it.
+        # Same reasoning for the pacing check below: a line's length is set by
+        # the recording, not by a word count in a sentence nobody will read.
+        # AN A2V SHOT IS NOT EXEMPT ANY MORE — it is judged by its own law.
+        # The stillness words are the documented cause of a freeze frame with
+        # no lip-sync, and our own planners used to write them mechanically.
+        if mode == "a2v":
+            for phrase in a2v_stillness_problems(prompt):
+                add("a2v_stillness",
+                    f"{where}: {phrase!r} tells the model that nothing moves — "
+                    f"and that includes the singer's lips. An audio-driven "
+                    f"shot renders as a freeze frame with a closed mouth. "
+                    f"Say what the performer DOES instead.",
+                    n=n_for_ui, field="prompt", phrase=phrase)
+        _sung = mode == "a2v" or bool(s.get("audio")) or _has_song
+        verb = shot_speech_problem(prompt) if not _sung else None
         if verb:
             add("speech_without_words",
                 f"{where}: {verb!r} implies someone is speaking, but no spoken "
@@ -579,16 +678,34 @@ def validate_storyboard_detail(
         # clock. Blocks the render for the same reason everything here does —
         # the defect (a sentence cut off mid-word) is only visible AFTER the
         # render time is spent.
-        pacing = shot_pacing_problem(prompt, s.get("duration_s") or 0)
+        pacing = (shot_pacing_problem(prompt, s.get("duration_s") or 0)
+                  if mode != "a2v" else None)
         if pacing:
             add("dialogue_does_not_fit",
                 f"{where}: {pacing}.",
                 n=n_for_ui, field="prompt")
 
+        # A ONE SHOT (take_seconds + beats) is never rejected for its beat
+        # count — take_beats_for() pads blanks and trims extras at job time —
+        # but a take_seconds that is present and not one of TAKE_SECONDS is
+        # an error: shot_to_job would drop the take and render a normal clip
+        # of the wrong length, silently.
+        _ts_raw = s.get("take_seconds")
+        if _ts_raw not in (None, "", 0, "0", "off", False) \
+                and take_seconds_of(s) is None:
+            add("bad_take_seconds",
+                f"{where}: take_seconds must be one of {', '.join(map(str, TAKE_SECONDS))} "
+                f"(got {_ts_raw!r})",
+                n=n_for_ui, field="take_seconds", take_seconds=_ts_raw,
+                valid=list(TAKE_SECONDS))
+
         dur = s.get("duration_s")
-        if not isinstance(dur, (int, float)) or not (0 < float(dur) <= 60):
+        # A take shot is as long as the take (up to 2 min); every other shot
+        # is one clip and stops at 60.
+        _dur_cap = max(TAKE_SECONDS) if take_seconds_of(s) else 60
+        if not isinstance(dur, (int, float)) or not (0 < float(dur) <= _dur_cap):
             add("bad_duration",
-                f"{where}: duration_s must be between 0 and 60 (got {dur!r})",
+                f"{where}: duration_s must be between 0 and {_dur_cap} (got {dur!r})",
                 n=n_for_ui, field="duration_s", duration_s=dur)
 
         refs = s.get("refs") or []
@@ -779,6 +896,25 @@ def shot_render_secs(shot: dict, policy_pass: dict, *, h3_cost=None) -> float:
     """
     dur = float(shot.get("duration_s") or 0)
     quality = policy_pass.get("quality", "balanced")
+    take_secs = take_seconds_of(shot)
+    if take_secs and shot_engine(shot) == "h3":
+        # A take on H3 is parts of 15 s; price the parts, not the duration.
+        parts = take_parts(shot)
+        qk = h3_quality_for(quality)
+        got = None
+        if h3_cost is not None:
+            try:
+                got = h3_cost(qk, "15s")
+            except Exception:
+                got = None
+        per = float(got) if got else _H3_SECS_PER_VIDEO_SEC.get(qk, 109.0) * _H3_LENGTH_SECONDS["15s"]
+        return per * parts
+    if take_secs:
+        # A take on LTX is 10 s parts (two beats each; 45 s ends on a one-beat
+        # part) rendered back to back, and the parts add up to the take — so
+        # it is priced by the take's own seconds, never by a `duration_s` a
+        # hand edit may have left behind.
+        return float(take_secs) * _SECS_PER_VIDEO_SEC.get(quality, 60.0)
     if shot_engine(shot) == "h3":
         lk = h3_length_for(dur)
         qk = h3_quality_for(quality)
@@ -811,6 +947,14 @@ def estimate(board: dict, *, pass_name: str = "final", h3_cost=None) -> dict:
     policy = (board.get("policy") or {}).get(pass_name) or {}
 
     render = sum(shot_render_secs(s, policy, h3_cost=h3_cost) for s in shots)
+    # FILM-46: shots that still need an anchor still made cost that render
+    # too — LTX only; an H3 shot never starts from a still.
+    still_secs = 0.0
+    if board.get("anchor_stills"):
+        still_secs = sum(
+            _STILL_RENDER_SECS for s in shots
+            if shot_wants_still(s) and not s.get("still") and shot_engine(s) != "h3")
+        render += still_secs
 
     grouped = {bucket_key(s) for s in shots}
     grouped_loads = len(grouped)
@@ -836,6 +980,7 @@ def estimate(board: dict, *, pass_name: str = "final", h3_cost=None) -> dict:
         "pass": pass_name,
         "shots": len(shots),
         "render_secs": round(render),
+        "still_secs": round(still_secs),
         "pipeline_loads": grouped_loads,
         "total_secs": round(render + grouped_ltx * _PIPELINE_LOAD_SECS),
         "naive_total_secs": round(render + naive_ltx * _PIPELINE_LOAD_SECS),
@@ -910,8 +1055,18 @@ def ensure_trigger(prompt: str, trigger: str) -> str:
 # ARE PRESENT AT ALL, in either wrapper.
 _SPOKEN_WORDS_RE = re.compile(
     r"<d>\s*(?:\[[^\]]*\]\s*)?[^<]*\w+[^<]*</d>"      # H3: the tag, with content
-    r"|['‘“\"]\s*[^'’”\"]*\w+\s+[^'’”\"]*['’”\"]",
-    re.DOTALL)                                        # LTX: a quoted phrase, 2+ words
+    # LTX, space-separated languages (English, French, ...): a quoted
+    # phrase, 2+ WORDS — the literal space between them is what makes this
+    # "two words" rather than one long one. FILM-45: the quote-mark class
+    # was Western-only; «guillemets» (French) are added here since French
+    # words are space-separated just like English ones.
+    r"|['‘“\"«]\s*[^'’”\"»]*\w+\s+[^'’”\"»]*['’”\"»]"
+    # LTX, Japanese (「…」/『…』 — no spaces between words at all): the same
+    # "not just a single interjection" bar, expressed as 2+ CHARACTERS
+    # instead of 2+ space-separated words, because Japanese has no spaces
+    # to require.
+    r"|[「『][^」』]*\w[^」』]*\w[^」』]*[」』]",
+    re.DOTALL)
 
 # Deliberately narrower than the planner's list: this one BLOCKS A RENDER, so
 # it only carries verbs that unambiguously mean a mouth is producing speech.
@@ -987,6 +1142,205 @@ _SUNG_READ_RE = re.compile(
 SPEECH_SETTLE_S = 1.0
 
 
+# --- THE A2V PROMPT LAW: A SINGING SHOT IS NOT A STILL ----------------------
+# An a2v shot is driven by a WAVEFORM. The one thing it must not be told is
+# that nothing moves - LTX reads a stillness word as "nothing in the scene
+# moves, INCLUDING the singer's lips", and the shot comes back as a freeze
+# frame with a closed mouth. Our own planners were writing exactly that:
+# `storyboard_planner._CAMERA_SENTENCES["static"]` is "The camera holds a
+# static shot, the frame never moves..." and the settle law adds "with no new
+# movement of any kind" - two documented lip-sync killers, as canonical
+# sentences PYTHON wrote, on every planned shot.
+#
+# Three rules, and they live HERE rather than in either planner because both
+# planners and the validator have to agree about them:
+#
+#   1. no stillness words, ever, on an a2v shot (an ERROR, not advice);
+#   2. a literal sync contract, appended AFTER all polish so a re-roll, an
+#      enhance pass or a hand edit cannot paraphrase it away;
+#   3. a SHORT prompt - the more set-dressing there is, the more static the
+#      clip becomes and the further the vocal verb sinks behind it.
+#
+# The contract's wording is deliberate: "lip-syncs" rather than "sings",
+# because a generic "sings" is read as unconstrained performance while the
+# written word binds the mouth to the file the shot was given.
+A2V_SYNC_CONTRACT = (
+    "The singer lip-syncs every vocal syllable to the supplied soundtrack, "
+    "with exact timing, natural mouth shapes and matching breaths.")
+
+#: A window with no vocal in it. Saying nothing is not neutral - the model
+#: keeps the mouth working through an instrumental bar - so a silent window
+#: gets its own contract instead of the singing one.
+A2V_SILENT_CONTRACT = (
+    "Nobody is singing in this moment: the mouth stays at rest with relaxed "
+    "closed lips.")
+
+#: The words that BIND the contract. A re-roll or a hand edit may rewrite the
+#: sentence; these are what `a2v_prompt` looks for before adding another.
+_A2V_CONTRACT_KEYS = ("lip-sync", "relaxed closed lips")
+
+#: How many words of creative direction an a2v shot gets. The contract rides
+#: ON TOP of this, because it is the one sentence that must survive.
+A2V_MAX_WORDS = 40
+
+#: Every stillness phrase, and what it becomes when it is rewritten in place.
+#: The order matters: the specific forms rewrite before the general ones.
+#:
+#: `still` on its own is deliberately absent. "the coffee is still hot" is an
+#: adverb, not a freeze frame, and this list drives a BLOCKING error - so the
+#: phrases are matched with their verbs, and the bare `is still` form only
+#: when nothing follows it inside the clause.
+_A2V_STILLNESS_FIXES = (
+    (r"\bholds? a static (?:shot|hold|frame)\b", "is locked in place"),
+    (r"\bstatic (?:shot|hold|camera|frame|framing)\b", "locked-off camera"),
+    (r"\bthe (?:frame|camera) never moves\b", "the camera is locked in place"),
+    (r"\bbarely mov(?:es|ing)\b", "moves clearly"),
+    (r"\bno new movement(?: of any kind)?\b", "the performance carries on"),
+    (r"\b(holds?|held|stays?|staying|remains?|sits?|sitting|stands?|standing"
+     r"|keeps?|keeping) (?:perfectly |completely |very |utterly |absolutely )?"
+     r"(?:still|motionless)\b", r"\1 steady"),
+    (r"\b(?:is|are|was|were) (?:perfectly |completely |very |utterly "
+     r"|absolutely )?still\b(?!\s+\w)", "is steady"),
+    (r"\b(?:perfectly|completely|utterly|absolutely) (?:still|motionless)\b",
+     "steady"),
+    (r"\bmotionless\b", "steady"),
+    (r"\bfreeze frame\b", "held frame"),
+    (r"\bnothing (?:in the (?:scene|frame) )?moves\b",
+     "the camera is locked in place"),
+    (r"\bwithout moving\b", "steadily"),
+    (r"\b(?:does not|doesn't|never) move\b", "stays steady"),
+)
+
+#: The union of the above - what `a2v_stillness_problems` reports and the
+#: validator refuses. Built from the same tuple so a phrase can never be
+#: refusable and unfixable at the same time.
+_A2V_STILLNESS_RE = re.compile(
+    "|".join(pat for pat, _ in _A2V_STILLNESS_FIXES), re.IGNORECASE)
+
+#: A clause that is NOTHING BUT a refusal of camera movement. Cleaned out of
+#: an a2v prompt but never an error on its own: one of these is a tripod
+#: instruction, and it is only STACKING them that compounds into no motion.
+_A2V_DEAD_CLAUSE_RE = re.compile(
+    r"^(?:and\s+|with\s+)?no\s+(?:new\s+)?"
+    r"(?:pan|push[- ]?in|pull[- ]?back|re-?fram\w+|zoom|drift"
+    r"|camera\s+\w+|movement|motion)\b",
+    re.IGNORECASE)
+
+#: A clause whose subject is the camera or the frame. On an a2v shot a clause
+#: like this is DELETED rather than rewritten: the shot does not need a camera
+#: restraint sentence at all, and rewriting "the camera holds a static shot"
+#: only produces a more polite way of saying the same fatal thing.
+_A2V_CAMERA_SUBJECT_RE = re.compile(r"\b(?:camera|frame|framing|shot)\b",
+                                    re.IGNORECASE)
+
+_A2V_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+
+def a2v_stillness_problems(prompt: str) -> list[str]:
+    """Every stillness phrase in `prompt`, in the order they appear.
+
+    Empty means the prompt is safe to hand to an audio-driven render.
+    """
+    return [m.group(0) for m in _A2V_STILLNESS_RE.finditer(prompt or "")]
+
+
+def _a2v_clean_clause(clause: str) -> str:
+    """One clause, made safe. Empty string when it should disappear."""
+    c = clause.strip()
+    if not c:
+        return ""
+    if _A2V_DEAD_CLAUSE_RE.match(c):
+        return ""
+    if not _A2V_STILLNESS_RE.search(c):
+        return c
+    if _A2V_CAMERA_SUBJECT_RE.search(c):
+        return ""
+    for pattern, replacement in _A2V_STILLNESS_FIXES:
+        c = re.sub(pattern, replacement, c, flags=re.IGNORECASE)
+    return c.strip()
+
+
+def a2v_clean_prompt(text: str) -> str:
+    """`text` with every stillness cue removed, clause by clause.
+
+    CLAUSE-LEVEL, not sentence-level, and the two treatments are different on
+    purpose: a clause about the CAMERA is deleted (an audio-driven shot does
+    not want a restraint sentence at all), a clause about a PERSON is rewritten
+    in place so it keeps its subject - "she stands still at the microphone,
+    singing" has to come out as a woman at a microphone, singing.
+    """
+    out = []
+    for sentence in _A2V_SENTENCE_SPLIT.split(str(text or "").strip()):
+        if not sentence.strip():
+            continue
+        tail = "." if sentence.rstrip()[-1:] in ".!?" else ""
+        kept = [k for k in (_a2v_clean_clause(c)
+                            for c in re.split(r"[,;]", sentence.rstrip(".!?")))
+                if k]
+        if kept:
+            out.append(", ".join(kept) + tail)
+    return " ".join(out).strip()
+
+
+def a2v_direction(line: str, max_words=A2V_MAX_WORDS) -> str:
+    """The CREATIVE DIRECTION of an a2v shot: stillness out, cap on, no
+    contract yet.
+
+    Split from `a2v_prompt` because the cap must fall on the direction and
+    never on the laws: the face law alone is sixty words, and a cap applied to
+    a finished prompt would delete it - along with the style suffix and the
+    sync contract, which are the two things that must survive.
+    """
+    return _a2v_cap_words(a2v_clean_prompt(line), max_words)
+
+
+def _a2v_cap_words(text: str, max_words) -> str:
+    """`text` cut to `max_words`, on a clause boundary when there is one.
+
+    Cutting mid-clause leaves a dangling "in the warm light of" that the model
+    finishes by inventing; a clause boundary always closes an idea.
+    """
+    raw = str(text or "").strip()
+    if max_words is None:
+        return raw
+    words = raw.split()
+    if len(words) <= max_words:
+        return raw
+    clipped = " ".join(words[:max_words])
+    cut = max(clipped.rfind(","), clipped.rfind(";"), clipped.rfind("."))
+    if cut > 0:
+        clipped = clipped[:cut]
+    return clipped.rstrip(" ,;.") + "."
+
+
+def a2v_prompt(line: str, *, silent: bool = False,
+               max_words=A2V_MAX_WORDS) -> str:
+    """One direction, made safe for an audio-driven render.
+
+    Stillness out, capped to `max_words` of creative direction, then the
+    contract LAST - after the cap, so a long prompt loses set-dressing and
+    never the one sentence that makes the mouth move. Idempotent: a prompt
+    that already carries a contract does not collect a second one.
+    `max_words=None` skips the cap, for a prompt whose direction was already
+    capped when it was written (see `a2v_direction`).
+
+    BOARD-5 / LIPSYNC-2: a prompt that ALREADY carries a contract is a
+    prepared prompt (planner: capped direction + style + contract) and is
+    never capped again - the contract check runs BEFORE the cap. Capping it
+    first cut the film's look off the end along with the contract, then
+    appended the SINGING contract to a shot planned as silent. Such a prompt
+    only gets its stillness words scrubbed, and keeps the contract it has.
+    """
+    contract = A2V_SILENT_CONTRACT if silent else A2V_SYNC_CONTRACT
+    raw_low = str(line or "").lower()
+    if any(key in raw_low for key in _A2V_CONTRACT_KEYS):
+        return a2v_direction(line, None).strip()
+    body = a2v_direction(line, max_words).strip()
+    if body and body[-1] not in ".!?":
+        body += "."
+    return (body + " " + contract).strip() if body else contract
+
+
 def is_slow_read(prompt: str) -> bool:
     """True when the voice descriptor asks for slow delivery."""
     return bool(_SLOW_READ_RE.search(prompt or ""))
@@ -1001,20 +1355,60 @@ def is_sung(prompt: str) -> bool:
 # ("There's"), not the end of the line — without that rule the counter stops
 # counting at the first contraction.
 _D_SPAN_RE = re.compile(r"<d>\s*(?:\[[^\]]*\]\s*)?(.*?)</d>", re.DOTALL)
+# FILM-45: the single-quote form was Western-quotes-only. A Japanese line
+# quoted the ordinary way for that language (「…」 or 『…』, a nested quote)
+# or a French one («…») never matched at all — spoken_spans() returned
+# empty, which silently skipped the "dialogue must fit the shot" frame-fit
+# correction AND made the shot register as having no speech to judge for
+# lip-sync. Each bracket pair is its own alternative (no apostrophe-guard
+# needed — none of these characters double as punctuation inside a word,
+# unlike the ASCII apostrophe).
 _Q_SPAN_RE = re.compile(
-    r"(?<![A-Za-z])'((?:[^']|(?<=[A-Za-z])'(?=[A-Za-z]))+?)'(?![A-Za-z])",
+    r"(?<![A-Za-z])'((?:[^']|(?<=[A-Za-z])'(?=[A-Za-z]))+?)'(?![A-Za-z])"
+    r"|「([^」]+)」"     # 「…」
+    r"|『([^』]+)』"     # 『…』
+    r"|«([^»]*)»",    # «…»
     re.DOTALL)
+
+# Every CJK block worth treating as "characters, not space-separated words"
+# for pacing purposes: hiragana/katakana, the CJK unified ideographs (+ the
+# compatibility block), and hangul syllables.
+_CJK_CHAR_RE = re.compile(
+    r"[぀-ヿ㐀-䶿一-鿿豈-﫿가-힯]")
+
+
+def spoken_word_count(text: str) -> int:
+    """How many "words" of spoken `text` there are, for pacing/frame-fit.
+
+    FILM-45: a plain `.split()` count assumes words are separated by
+    whitespace, which is false for Japanese, Chinese and Korean — a spoken
+    line with no spaces in it at all counted as ONE word, so
+    `speech_fit_frames` (and the overstuffed-line check) massively
+    under-timed CJK dialogue. Every CJK character counts as its own word
+    here (a working proxy: CJK words run 1-2 characters); anything else
+    still splits on whitespace exactly as before, so an English/French/
+    German/... line is unaffected.
+    """
+    t = text or ""
+    cjk = len(_CJK_CHAR_RE.findall(t))
+    rest = _CJK_CHAR_RE.sub(" ", t)
+    return cjk + sum(1 for tok in rest.split() if any(c.isalnum() for c in tok))
 
 
 def spoken_spans(prompt: str) -> list[str]:
-    """Every spoken line in `prompt`, tag form and quote form both."""
+    """Every spoken line in `prompt`, tag form and every quote form."""
     p = prompt or ""
     out = [m.group(1).strip() for m in _D_SPAN_RE.finditer(p)]
     # Audio section contains sound effects (e.g. Audio: ... a quiet 'click'.) which are sound cues, not spoken dialogue
     dialogue_part = p.split("Audio:", 1)[0]
     stripped = _D_SPAN_RE.sub(" ", dialogue_part)
-    out += [m.group(1).strip() for m in _Q_SPAN_RE.finditer(stripped)]
+    for m in _Q_SPAN_RE.finditer(stripped):
+        g = next((grp for grp in m.groups() if grp is not None), None)
+        if g:
+            out.append(g.strip())
     return [s for s in out if s]
+
+
 
 
 def speech_fit_frames(word_count: int, fps: int = 24, slow: bool = False,
@@ -1039,9 +1433,10 @@ def shot_pacing_problem(prompt: str, duration_s: float) -> str | None:
     spans = spoken_spans(prompt)
     if not spans:
         return None
-    # Punctuation-only tokens are not words — an em-dash between clauses was
-    # counted once and pushed a delivered-fine line over the budget.
-    words = sum(1 for sp in spans for t in sp.split() if any(c.isalnum() for c in t))
+    # FILM-45: CJK words have no spaces between them — spoken_word_count()
+    # counts each CJK character as its own word rather than folding a whole
+    # unspaced line into one giant "word" that .split() would never catch.
+    words = sum(spoken_word_count(sp) for sp in spans)
     try:
         dur = float(duration_s or 0)
     except (TypeError, ValueError):
@@ -1249,9 +1644,43 @@ def board_wardrobe(board: dict) -> dict[str, str]:
     return out
 
 
+def board_light(board: dict) -> str:
+    """The board's one shared lighting note (FILM-14, item 4), or "".
+
+    `locations` and `board_wardrobe` fixed the same failure on two other
+    axes — a description re-invented per shot drifts across a film that
+    renders one shot at a time. `light` is the third: written once, read
+    here, and appended by `compose_shot_prompt` to every shot that has not
+    rendered yet.
+    """
+    return str((board or {}).get("light") or "").strip()
+
+
+_H3_FIELD_BOUNDARY_RE = re.compile(
+    r"\n\s*(?:overall_soundscape|non_diegetic_music)\s*:", re.IGNORECASE)
+
+
+def split_h3_fields(prompt: str) -> tuple[str, str]:
+    """`(description, the rest)` of an H3 three-field prompt; `(prompt, "")` otherwise.
+
+    The rest starts at the first `overall_soundscape:` / `non_diegetic_music:`
+    line and keeps its own leading newlines, so `head + tail` is the prompt
+    byte for byte. A prose prompt (LTX, or an H3 shot written as one
+    paragraph) has no tail and composes exactly as before.
+    """
+    p = prompt or ""
+    if not p.lstrip().lower().startswith("integrated_multimodal_description:"):
+        return p, ""
+    m = _H3_FIELD_BOUNDARY_RE.search(p)
+    if not m:
+        return p, ""
+    return p[:m.start()].rstrip(), p[m.start():]
+
+
 def compose_shot_prompt(shot: dict, locations: dict[str, dict] | None = None,
-                        wardrobe: dict[str, str] | None = None) -> str:
-    """The prompt that is actually rendered: subject, action, FRAME, PLACE.
+                        wardrobe: dict[str, str] | None = None,
+                        light: str = "") -> str:
+    """The prompt that is actually rendered: subject, action, FRAME, PLACE, LIGHT.
 
     Order is deliberate and matches how these models read a prompt — the
     subject and what it is doing first, then how it is framed, then where it
@@ -1263,9 +1692,36 @@ def compose_shot_prompt(shot: dict, locations: dict[str, dict] | None = None,
     the shot keeps the sentence a human wrote and editing a location — or
     flipping an eyeline to fix the 180-degree line — re-flows every shot that
     uses it without rewriting anybody's text.
+
+    FILM-14 (item 4): `light` is the same idea as a location, one axis over —
+    a cut jumps visibly when each shot re-invents its own lighting the way
+    four shots of "dim room" came back as four different rooms before
+    locations existed. Written ONCE on the board and appended here, so every
+    shot not yet rendered picks it up at its next render with no re-plan —
+    a shot already rendered keeps the clip it has; this only reaches the
+    ones still to come.
     """
+    # THE LAST PLACE A PROMPT CAN BE MADE SAFE. Every shot passes through here
+    # on its way to a render, so an a2v shot gets its sync contract here even
+    # if it was planned before this law existed, hand-edited since, or written
+    # by a caller who never heard of it. `a2v_prompt` is idempotent, so a
+    # planner that already appended the contract does not produce two.
+    if shot.get("mode") == "a2v":
+        # NO CAP HERE. The direction was capped when the shot was written; a
+        # cap applied to a finished prompt would delete the face law and the
+        # style along with the set-dressing, which is not this seam's job.
+        shot = dict(shot, prompt=a2v_prompt(shot.get("prompt") or "",
+                                            max_words=None))
     trigger = (shot.get("trigger") or shot.get("character_id") or "").strip()
-    parts = [ensure_trigger(shot.get("prompt") or "", trigger)]
+    # H3's three-field prompt. The additions below describe the PICTURE, so
+    # they belong in `integrated_multimodal_description` and nowhere after it:
+    # appended to the whole prompt they landed on the LAST field, and a located
+    # 12-shot sitcom rendered with "..., medium shot, a sitcom apartment" on
+    # the end of `non_diegetic_music: N/A` — the room in the score (measured
+    # 2026-09-08). Split the description off, compose into it, put the sound
+    # and the music back untouched.
+    head, tail = split_h3_fields(ensure_trigger(shot.get("prompt") or "", trigger))
+    parts = [head]
 
     # WARDROBE goes right after the person, where a costume note belongs, and
     # only if the shot has not already said it — a board that spells the outfit
@@ -1288,6 +1744,23 @@ def compose_shot_prompt(shot: dict, locations: dict[str, dict] | None = None,
     if scene:
         parts.append(scene)
 
+    # FILM-14 (item 4): the board's one shared light line, last — same
+    # "written once, injected everywhere" shape as the location above, and
+    # skipped when the shot already names it so a hand-written lighting
+    # note is never doubled.
+    light_note = str(light or "").strip().rstrip(",")
+    if light_note and light_note.lower() not in ", ".join(parts).lower():
+        parts.append(light_note)
+
+    if tail:
+        # The description's closing full stop moves to the end of the composed
+        # sentence, so the sound field still follows a finished sentence.
+        if len(parts) > 1 and parts[0].endswith("."):
+            parts[0] = parts[0][:-1]
+        body = ", ".join(p for p in parts if p)
+        if len(parts) > 1 and not body.endswith("."):
+            body += "."
+        return body + tail
     return ", ".join(p for p in parts if p)
 
 
@@ -1306,13 +1779,142 @@ CHARACTER_QUALITY_FOR_PASS: dict[str, str] = {
 }
 
 
+# ---- ONE TAKE on the board --------------------------------------------------
+# A shot that is one unbroken take: `take_seconds` (30 / 45 / 60 / 90 / 120)
+# plus `beats`, one prompt per five seconds. Two ways it gets onto a board:
+#   * the WHOLE FILM is one take — the planner writes N beat-shots and
+#     `collapse_take` folds them into one shot (the Video tab's take, by way
+#     of the Storyboard door);
+#   * ONE SHOT inside an ordinary film — the planner chooses it as a cinematic
+#     tool (a walk-and-talk, a chase, a confession; "One Shot" in the UI) and
+#     emits the shot with `take_seconds` + `beats` of its own, among normal
+#     3 / 5 / 10 s shots. It stays ONE shot: one card, one job, one clip.
+# Either way shot_to_job turns it into the panel's take fields and the panel
+# renders it as parts that continue from each other's last frame: 15 s parts
+# (three beats) on H3, 10 s parts (two beats) on LTX. The part sizes here
+# mirror mlx_ltx_panel.take_plan and exist so the estimate can count parts
+# without importing the panel.
+TAKE_BEAT_SECONDS = 5
+TAKE_SECONDS = (30, 45, 60, 90, 120)
+TAKE_BEATS_PER_PART = {"h3": 3, "ltx": 2}
+
+
+def take_seconds_of(shot: dict) -> int | None:
+    """The take length a shot carries, or None when it is an ordinary shot.
+
+    Strict on purpose: only a value in TAKE_SECONDS counts. Anything else
+    (None, 0, "off", 40) is not a take — `validate_storyboard_detail` reports
+    a present-but-illegal value as `bad_take_seconds`, so a hand-edited board
+    cannot silently render a normal clip where a take was meant.
+    """
+    if not isinstance(shot, dict):
+        return None
+    raw = shot.get("take_seconds")
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        secs = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return secs if secs in TAKE_SECONDS else None
+
+
+def take_beats_for(shot: dict, seconds: int | None = None) -> list[str]:
+    """Exactly take_seconds/5 beat prompts for a take shot: extras are dropped,
+    missing ones are blank (the panel holds the previous moment on a blank
+    beat). A newline-separated string is accepted as well as a list, so a
+    beats box pasted by hand shapes up the same way the planner's list does.
+    `[]` for a shot that is not a take."""
+    secs = seconds if seconds in TAKE_SECONDS else take_seconds_of(shot)
+    if not secs:
+        return []
+    n = secs // TAKE_BEAT_SECONDS
+    raw = shot.get("beats")
+    if isinstance(raw, str):
+        items = [ln.strip() for ln in raw.splitlines()]
+    elif isinstance(raw, (list, tuple)):
+        items = [str(b or "").strip() for b in raw]
+    else:
+        items = []
+    items = items[:n]
+    return items + [""] * (n - len(items))
+
+
+def take_parts(shot: dict) -> int:
+    """How many renders the panel makes for a take shot on its engine: beats
+    in threes on H3 (15 s parts), in twos on LTX (10 s parts). 0 for an
+    ordinary shot. 45 s on LTX is 5 parts (2,2,2,2,1), matching take_plan."""
+    secs = take_seconds_of(shot)
+    if not secs:
+        return 0
+    per = TAKE_BEATS_PER_PART.get(shot_engine(shot), TAKE_BEATS_PER_PART["ltx"])
+    return -(-(secs // TAKE_BEAT_SECONDS) // per)
+
+
+def collapse_take(shots: list[dict], seconds: int) -> list[dict]:
+    """The planner's N beat-shots become ONE take shot: the first shot's
+    identity (mode, character, refs, title) with `beats` = every shot's own
+    prompt, padded to the take's beat count, `duration_s` = the take.
+
+    A beat-shot that is itself a take (the planner chose a One Shot inside a
+    film that was then asked to be one take) contributes its own beats in
+    order rather than just its first, so nothing it wrote is dropped."""
+    beats_n = max(1, int(seconds) // TAKE_BEAT_SECONDS)
+    items = [s for s in (shots or []) if isinstance(s, dict)]
+    if not items:
+        return []
+    first = dict(items[0])
+    beats: list[str] = []
+    for s in items:
+        nested = [b for b in take_beats_for(s) if b] if take_seconds_of(s) else []
+        beats += nested or [str(s.get("prompt") or "").strip()]
+    beats = beats[:beats_n]
+    beats += [""] * (beats_n - len(beats))
+    first.update({
+        "n": 1,
+        "prompt": beats[0] or first.get("prompt") or "",
+        "beats": beats,
+        "take_seconds": int(seconds),
+        "duration_s": float(seconds),
+        "frames": int(seconds) * 24 + 1,
+        "title": first.get("title") or "One take",
+    })
+    for k in ("slot", "section"):
+        first.pop(k, None)
+    return [first]
+
+
+def shot_wants_still(shot: dict) -> bool:
+    """A shot an anchor still can start: text and character shots. Keyframe,
+    extend and a2v already start from media of their own."""
+    return isinstance(shot, dict) and str(shot.get("mode") or "text") in ("text", "character")
+
+
+def still_prompt(prompt: str) -> str:
+    """The shot prompt, re-aimed at ONE frame: camera moves and durations
+    describe a clip, a still needs the composition at the first instant."""
+    move = r"(push(es|ing)?( in)?|pull(s|ing)?( back| out)?|pan(s|ning)?|tilt(s|ing)?|track(s|ing)?|dolly(ing)?|orbit(s|ing)?|zoom(s|ing)?|crane(s)?|glide(s)?|drift(s)?|sweep(s)?|circle(s)?)"
+    # a clause that is about the camera moving, from its start to the next punctuation
+    p = re.sub(r"(,\s*)?(as\s+)?(the\s+|a\s+)?(camera|lens|shot|frame)\s+[^.,;]*?\b" + move + r"\b[^.,;]*", "", prompt, flags=re.I)
+    p = re.sub(r"(,\s*)?(slow(ly)?|smooth(ly)?|gentl[ey]|fast|quick(ly)?)?\s*\b" + move + r"\b\s+(in|out|up|down|left|right|across|around|forward|back)?[^.,;]*", "", p, flags=re.I)
+    p = re.sub(r"\s+([.,;])", r"\1", p)
+    p = re.sub(r"([.,;])\1+", r"\1", p)
+    p = re.sub(r",\s*\.", ".", p)
+    p = re.sub(r"\s{2,}", " ", p).strip(" ,;.")
+    return (p + ". The first frame of the shot, held still: the composition, framing and light exactly as the shot opens.").strip()
+
+
 def shot_to_job(shot: dict, policy_pass: dict, *,
                 board_id: str = "", board_title: str = "",
                 h3_available: bool = True,
                 engine_mode: str = DEFAULT_ENGINE_MODE,
                 h3_chain_prompts: bool = False,
+                h3_first_frame: bool = False,
+                long_windows: bool = False,
+                style: str = "",
                 locations: dict[str, dict] | None = None,
-                wardrobe: dict[str, str] | None = None) -> dict:
+                wardrobe: dict[str, str] | None = None,
+                light: str = "") -> dict:
     """Translate one storyboard shot into the panel's ORDINARY job form fields.
 
     Deliberately produces the same shape a human clicking Generate would produce, so shots
@@ -1330,7 +1932,7 @@ def shot_to_job(shot: dict, policy_pass: dict, *,
     # through on its way to a render. Doing it at the call sites instead would
     # mean the estimate, the re-render and the gap-fill each getting their own
     # chance to forget.
-    prompt = compose_shot_prompt(shot, locations, wardrobe)
+    prompt = compose_shot_prompt(shot, locations, wardrobe, light)
 
     # The engine. Without this the job dict has no `engine` key, make_job falls back to
     # ENGINE_DEFAULT ("ltx"), and every H3 shot the planner wrote renders silently on a
@@ -1381,6 +1983,9 @@ def shot_to_job(shot: dict, policy_pass: dict, *,
             chain = h3_chain_prompts_for(shot)
             if chain:
                 job["h3_chain_prompts"] = json.dumps(chain)
+                # Each entry is the WHOLE window's prompt (a continuation
+                # holds the settled pose), not a beat to add to window 1's.
+                job["h3_chain_prompts_complete"] = "1"
         # make_job re-stamps geometry from the resolved cell; carrying the cell's own frame
         # count means the job dict is already self-consistent (and honest in a log or a test)
         # before it gets there.
@@ -1444,6 +2049,73 @@ def shot_to_job(shot: dict, policy_pass: dict, *,
     # identifies itself in the bottom pane with no bottom-pane code at all. `session_tag`
     # carries the provenance the badge and the gallery group on. Both keys are already in
     # make_job's allowlist — no allowlist edit, which is the point.
+    # ONE TAKE / ONE SHOT. The shot carries `take_seconds` + `beats`; the
+    # panel's make_job does the rest (parts by last-frame handoff: 10 s on
+    # LTX, 15 s on H3). Exactly ONE job for the whole take — the split into
+    # parts is the panel's, never the board's. The beats go out padded /
+    # trimmed to the take's count, and each written beat is composed the way
+    # the main prompt is (trigger, wardrobe, framing, eyeline, place): a later
+    # part is rendered from ITS beats alone, so a location that reached only
+    # beat 1 would be a different room by part 2.
+    take_secs = take_seconds_of(shot)
+    if take_secs:
+        job["take_seconds"] = str(take_secs)
+        job["beats"] = json.dumps([
+            compose_shot_prompt(dict(shot, prompt=b), locations, wardrobe, light) if b else ""
+            for b in take_beats_for(shot, take_secs)])
+        if engine != "h3":
+            job["frames"] = take_secs * 24 + 1
+    # ANCHOR STILL. When the shot has a still, the video STARTS from it: the
+    # ordinary i2v path with the still as the image, anchored (the strict
+    # pin, not Inspire). On H3 the same still is the runner's `--first-frame`
+    # (FL2VA conditioning), which the caller confirms the installed runner has
+    # (`h3_first_frame`) — the panel probes the script for the flag. This is
+    # how a face stays the same face across a board's H3 shots: the still is
+    # made from the character's own frames (2026-09-10, the sitcom's jungle
+    # shots lost the lead's face on every text-only render and kept it on
+    # every render that started from a still).
+    # AUDIO -> VIDEO. The three fields `run_job_inner`'s a2v branch reads are
+    # `audio`, `audio_start_time` and `image`, and all three are in make_job's
+    # allowlist — but nothing here ever wrote them, so an a2v shot enqueued as
+    # a SILENT t2v from its prompt and the reference PNG make_job defaults to.
+    # (The refs note at the bottom is about `shot["refs"]`, which still is not
+    # mapped: a2v does not want a ref list, it wants one still and one file.)
+    if shot.get("mode") == "a2v" and shot.get("audio"):
+        job["audio"] = str(shot["audio"])
+        # Where in the song this shot is looking. The whole of the music-video
+        # lane rides on this number: the clip is rendered against the seconds
+        # of the track it will be playing under once the film is assembled.
+        job["audio_start_time"] = str(
+            max(0.0, float(shot.get("audio_start_time") or 0.0)))
+        # WHAT THE MODEL LISTENS TO, when that is not what the clip plays. A
+        # separated vocal stem conditions the mouth and the panel muxes the
+        # original song back, so the shot still carries `audio` as the file it
+        # is cut against — `audio_stem` only ever changes the conditioning.
+        # Same offset applies to both: the stem is the whole song, separated.
+        if shot.get("audio_stem"):
+            job["audio_stem"] = str(shot["audio_stem"])
+        if shot.get("still"):
+            job["image"] = str(shot["still"])
+    if shot.get("still") and job["mode"] == "t2v" and (engine != "h3" or h3_first_frame):
+        job["mode"] = "i2v"
+        job["image"] = str(shot["still"])
+        job["i2v_reference_mode"] = "anchor"
+    # LONG WINDOWS. A shot longer than one LTX window (121 frames) renders as
+    # a chain of windows on the Q8 dev transformer rather than being cut to
+    # fit. One prompt per window: the shot's own prompt, with the board's
+    # style and the shot's location as the invariants every window repeats.
+    # Extend cannot re-inject an image per window, so an anchored long shot is
+    # anchored by its first window only — the still opens it, the chain
+    # carries it. See ltx_windows.py.
+    # A take is exempt: it is parts by last-frame handoff, not the chain, and
+    # the panel overrules a stray windows flag on a take anyway — this keeps
+    # the job dict honest about what will run.
+    if long_windows and engine != "h3" and int(job.get("frames") or 0) > 121 \
+            and job["mode"] in ("t2v", "i2v") and not take_secs:
+        job["temporal_mode"] = "windows"
+        inv = [s for s in (style.strip(), str((shot.get("location") or "")).strip()) if s]
+        if inv:
+            job["window_invariants"] = "; ".join(inv)
     n = shot.get("n")
     if board_id and isinstance(n, int):
         job["session_tag"] = f"sb:{board_id}#{n}"

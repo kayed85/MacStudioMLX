@@ -60,6 +60,119 @@ class TheChoice(unittest.TestCase):
         self.assertNotIn("+faststart", p)
 
 
+class TheLoudness(unittest.TestCase):
+    """FILM-28: loudnorm is a fourth, independent delivery axis — off by
+    default, on request it names the file, labels the pill, and appends
+    one `-af loudnorm` pass after the mix ffmpeg already built."""
+
+    def test_off_by_default_and_not_in_the_label(self):
+        d = panel._sb_deliver("h264", "native")
+        self.assertEqual(d["loudnorm"], False)
+        self.assertNotIn("LUFS", d["label"])
+
+    def test_on_asks_for_minus_14_lufs_and_says_so(self):
+        d = panel._sb_deliver("h264", "1080p", None, True)
+        self.assertEqual(d["loudnorm"], True)
+        self.assertEqual(d["label"], "H.264 · 1080p · -14 LUFS")
+
+    def test_it_does_not_rename_the_file(self):
+        # Unlike format/size/finish, loudnorm is not a different picture —
+        # it's the same file, just leveled. Naming it would mean a repeat
+        # render with loudnorm toggled silently orphans the un-leveled one
+        # instead of replacing it.
+        b = {"title": "The car wash"}
+        self.assertEqual(
+            panel._sb_film_name(b, panel._sb_deliver("h264", "native", None, True)),
+            panel._sb_film_name(b, panel._sb_deliver("h264", "native", None, False)))
+
+    def test_the_assembler_appends_one_loudnorm_link_only_when_asked(self):
+        info = {"has_audio": True, "duration": 10.0, "w": 768, "h": 416,
+                "sample_rate": 48000}
+        seen = {}
+
+        def fake_ffmpeg(cmd, label):
+            seen["cmd"] = cmd
+            Path(cmd[-1]).write_bytes(b"x")
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(panel, "_sb_probe_clip", return_value=info), \
+                mock.patch.object(panel, "run_ffmpeg_tracked", side_effect=fake_ffmpeg), \
+                mock.patch.object(panel, "_sb_write_film_sidecar"):
+            panel._sb_assemble_film(
+                ["/x/a.mp4"], Path(d) / "f.mp4",
+                timeline=[{"path": "/x/a.mp4", "start": 0.0, "end": 4.0,
+                           "film_start": 0.0}],
+                deliver={"format": "h264", "size": "native", "loudnorm": True})
+        cmd = seen["cmd"]
+        # EDITOR-2 (Codex 4.17.0): NOT `-af` on the mapped stream — ffmpeg
+        # refuses simple filtering on a stream fed from -filter_complex. One
+        # link appended to the graph after the final mix, and its label is
+        # what gets mapped.
+        self.assertNotIn("-af", cmd)
+        graph = cmd[cmd.index("-filter_complex") + 1]
+        self.assertEqual(graph.count("loudnorm"), 1)
+        self.assertTrue(graph.endswith(";[aout]loudnorm=I=-14:TP=-1.5:LRA=11[aoutln]"))
+        maps = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-map"]
+        self.assertIn("[aoutln]", maps)
+        self.assertNotIn("[aout]", maps)
+
+    def test_off_leaves_the_old_command_untouched(self):
+        info = {"has_audio": True, "duration": 10.0, "w": 768, "h": 416,
+                "sample_rate": 48000}
+        seen = {}
+
+        def fake_ffmpeg(cmd, label):
+            seen["cmd"] = cmd
+            Path(cmd[-1]).write_bytes(b"x")
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(panel, "_sb_probe_clip", return_value=info), \
+                mock.patch.object(panel, "run_ffmpeg_tracked", side_effect=fake_ffmpeg), \
+                mock.patch.object(panel, "_sb_write_film_sidecar"):
+            panel._sb_assemble_film(
+                ["/x/a.mp4"], Path(d) / "f.mp4",
+                timeline=[{"path": "/x/a.mp4", "start": 0.0, "end": 4.0,
+                           "film_start": 0.0}], deliver=None)
+        self.assertNotIn("-af", seen["cmd"])
+        self.assertNotIn("loudnorm", " ".join(seen["cmd"]))
+        self.assertIn("[aout]", seen["cmd"])
+
+
+class TheVersioning(unittest.TestCase):
+    """FILM-28: a second render at the same delivery gets `_r2`, not a
+    silent overwrite of the first."""
+
+    def test_dest_none_keeps_every_caller_byte_for_byte(self):
+        b = {"title": "The car wash"}
+        self.assertEqual(panel._sb_film_name(b), "the-car-wash_film.mp4")
+
+    def test_first_render_takes_the_plain_name(self):
+        b = {"title": "The car wash"}
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(panel._sb_film_name(b, dest=Path(d)),
+                             "the-car-wash_film.mp4")
+
+    def test_repeat_renders_at_the_same_delivery_count_up(self):
+        b = {"title": "The car wash"}
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d)
+            (dest / "the-car-wash_film.mp4").write_bytes(b"x")
+            self.assertEqual(panel._sb_film_name(b, dest=dest),
+                             "the-car-wash_film_r2.mp4")
+            (dest / "the-car-wash_film_r2.mp4").write_bytes(b"x")
+            self.assertEqual(panel._sb_film_name(b, dest=dest),
+                             "the-car-wash_film_r3.mp4")
+
+    def test_versioning_is_per_delivery_not_global(self):
+        b = {"title": "The car wash"}
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d)
+            (dest / "the-car-wash_film.mp4").write_bytes(b"x")
+            # A different delivery (HEVC) is a different name and so gets
+            # the plain name, not "_r2" — the counters don't share state.
+            self.assertEqual(
+                panel._sb_film_name(b, panel._sb_deliver("hevc", None), dest=dest),
+                "the-car-wash_film_hevc.mp4")
+
+
 class TheGraph(unittest.TestCase):
     def test_no_size_is_the_graph_it_always_was(self):
         with mock.patch.object(panel, "bt709_vf", return_value=""):
@@ -149,7 +262,10 @@ class TheRoute(unittest.TestCase):
         self.assertEqual(h.status, 200, h.payload)
         kw = rend.call_args.kwargs
         self.assertEqual(kw["out_name"], "the-car-wash_film_prores_2160p.mov")
-        self.assertEqual(kw["deliver"], {"format": "prores", "size": "2160p", "finish": ""})
+        # FILM-28: loudnorm rides the same deliver dict, off unless the
+        # client sends `loudnorm=on`.
+        self.assertEqual(kw["deliver"], {"format": "prores", "size": "2160p",
+                                         "finish": "", "loudnorm": False})
 
 
 if __name__ == "__main__":

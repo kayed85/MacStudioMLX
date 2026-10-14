@@ -40,6 +40,14 @@ globalThis.SB = {
   filmShort: '',
   filmOpen: '',           // the film being played, by name
   boardsSig: '',          // last painted board-row signature (see sbPollHook)
+  // FILM-41: 'list' (the full editable cards) | 'grid' (a dense contact
+  // sheet). Session-scoped like stageMode — a working preference, not a
+  // setting to hunt down and undo.
+  shotView: (function () {
+    try { return sessionStorage.getItem('phos.sb.shotView') || 'list'; }
+    catch (e) { return 'list'; }
+  })(),
+  playlist: null,          // {paths, idx, boardId} — see sbPlayBoard()
 };
 const SB_BOOT = (typeof BOOT !== 'undefined' && BOOT.storyboard) ? BOOT.storyboard : {};
 
@@ -189,6 +197,17 @@ function sbInit() {
   sbRenderFinalQualities();
   const help = sbEl('sbRamHelpNote');
   if (help && !help.textContent) help.textContent = SB_BOOT.ram_help || '';
+  // FILM-56: this line sits right next to the Plan button, before a shot
+  // count even exists to scale by — so it gets the RAM half of the fix
+  // (the modal's own copy, once planning is running, adds the shot-count
+  // half via _sbPlanningTimeCopy). Said once, at boot, from the same
+  // ram_status the modal reads.
+  const ramLine = sbEl('sbRamLine');
+  const ramStatus = SB_BOOT.ram_status || {};
+  if (ramLine && !ramStatus.ok && ramStatus.message) {
+    const span = ramLine.querySelector('span');
+    if (span) span.textContent = ramStatus.message;
+  }
   // Draft restore — a restart must not eat what someone typed.
   try {
     const draft = localStorage.getItem('phos_sb_draft');
@@ -216,7 +235,20 @@ function sbInit() {
   // Restore the last board the user was on, same idiom as phos_workflow.
   let last = '';
   try { last = localStorage.getItem('phos_sb_open') || ''; } catch (e) {}
+  // FILM-02: sbInit() runs on every tab entry, including the entries a
+  // caller makes ON PURPOSE to land on a SPECIFIC board — Plan the video,
+  // a finished render, the gallery's "open this film" badge. Every one of
+  // those calls workflowSwitch('storyboard') (which runs sbInit) and THEN
+  // sbOpen(theBoardItMeans) — synchronously, before any await, so SB.id is
+  // already the caller's target the instant sbOpen runs. But this restore
+  // is async too: if /storyboard/list is still in flight when that happens,
+  // this .then() used to fire anyway and call sbOpen(last) — overwriting
+  // the caller's board with whatever tab was open last time. Snapshot the
+  // id this restore started with; if it's different by the time the list
+  // comes back, someone already moved on and this restore has nothing to do.
+  const sbInitId = SB.id;
   sbRefreshBoards().then(() => {
+    if (SB.id !== sbInitId) return;
     if (last && SB.boards.some(b => b.id === last)) sbOpen(last);
     else if (SB.boards.length) sbShow('list');
     else sbShow('empty');
@@ -350,15 +382,22 @@ function sbParseLocations(text) {
   ((text || '').split('\n')).forEach(line => {
     const raw = line.trim();
     if (!raw) return;
-    const at = raw.indexOf(':');
+    // FILM-45: a Japanese location line uses the full-width colon ("：")
+    // rather than the ASCII one — checked first so it wins when both a
+    // name and a "：" appear (mirrors the server's own fallback order).
+    let at = raw.indexOf(':');
+    if (at <= 0) { const fw = raw.indexOf('：'); if (fw > 0) at = fw; }
     // No colon = the whole line is the description and the name is derived.
     // Refusing the line instead would lose what somebody just typed.
     const name = (at > 0 ? raw.slice(0, at) : raw.split(/[,.]/)[0]).trim().slice(0, 60);
     const desc = (at > 0 ? raw.slice(at + 1) : raw).trim();
     if (!name || !desc) return;
-    let id = name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40);
+    // Unicode-aware: \p{L}/\p{N} keep any script's letters/digits, not just
+    // a-z0-9, so a Japanese location name gets its own id instead of every
+    // one collapsing to loc1/loc2/loc3 with no distinguishing text.
+    let id = name.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '_').replace(/^_+|_+$/g, '').slice(0, 40);
     if (!id) id = 'loc' + (out.length + 1);
-    if (!/^[a-z0-9]/.test(id)) id = 'l' + id;
+    if (!/^[\p{L}\p{N}]/u.test(id)) id = 'l' + id;
     while (seen[id]) id = id.replace(/\d*$/, m => String((parseInt(m || '1', 10) || 1) + 1));
     seen[id] = 1;
     out.push({ id: id, name: name, description: desc });
@@ -381,6 +420,10 @@ let _sbShots = 12;
 // ONE SHOT is the fifth answer on the Shots row: a film that is one shot,
 // planned as beats. `_sbTake` is 0 (off) or the shot's length in seconds.
 let _sbTake = 0;
+// FILM-56: the shot count the planner is actually running on, captured at
+// submit time so the "About a minute" copy can scale with it instead of
+// quoting the same line for a 4-shot board and a 20-shot one.
+let _sbPlanShotsSubmitted = 12;
 function sbSetShots(n, persist) {
   const take = (n === 'take');
   if (take) { if (!_sbTake) _sbTake = 60; }
@@ -416,6 +459,18 @@ function sbToggleSwitchHelp() {
   btn.setAttribute('aria-expanded', open ? 'false' : 'true');
   note.hidden = open;
 }
+// FILM-46: "Stills first" implies "start each shot from a still" — a still
+// to approve has to exist. Checking Stills first force-checks and locks
+// Anchor stills; unchecking Anchor stills (when it was carrying Stills
+// first) turns Stills first back off, since approving a still that will
+// never be made makes no sense.
+function sbStillsFirstSync() {
+  const first = sbEl('sbStillsFirst');
+  const anchor = sbEl('sbAnchorStills');
+  if (!first || !anchor) return;
+  if (first.checked) { anchor.checked = true; anchor.disabled = true; }
+  else { anchor.disabled = false; }
+}
 // The long-shot switch needs the Q8 pack (the chain runs on the dev
 // transformer). Say so on the switch, from the status the panel already has,
 // rather than at render time per shot.
@@ -440,6 +495,43 @@ async function sbRestill(n) {
   catch (e) { r = { ok: false, error: String(e) }; }
   if (!r.ok) { phosToast(r.error || 'Could not start a new still.', { kind: 'danger', duration: 6000 }); return; }
   phosToast(`A new still for shot ${n} is being made; the shot renders from it when it lands.`, { duration: 6000 });
+  sbLoad(SB.id, true);
+}
+
+// FILM-22: "Edit & re-render" on a done card. No planner call — the shot's
+// current clip is archived (never deleted) and the shot goes back to
+// pending with a fresh seed, so it's an ordinary renderable shot again: the
+// prompt unlocks, and the next Render (or Retry) picks it up like any other.
+async function sbNewTake(n) {
+  const fd = new FormData();
+  fd.set('id', SB.id); fd.set('n', String(n));
+  let r;
+  try { r = await (await fetch('/storyboard/new-take', { method: 'POST', body: fd })).json(); }
+  catch (e) { r = { ok: false, error: String(e) }; }
+  if (!r.ok) { phosToast(r.error || 'Could not start a new take.', { kind: 'danger', duration: 6000 }); return; }
+  phosToast(`Shot ${n} is ready to edit and re-render — the old clip is kept.`, { duration: 6000 });
+  sbLoad(SB.id, true);
+}
+
+// FILM-46: "Stills first" approve step — no render is queued by this call,
+// it only releases the hold the render thread put on the shot; the next
+// Render/Retry picks it up.
+async function sbApproveStill(n) {
+  const fd = new FormData();
+  fd.set('id', SB.id); fd.set('n', String(n));
+  let r;
+  try { r = await (await fetch('/storyboard/approve-still', { method: 'POST', body: fd })).json(); }
+  catch (e) { r = { ok: false, error: String(e) }; }
+  if (!r.ok) { phosToast(r.error || 'Could not approve that still.', { kind: 'danger', duration: 6000 }); return; }
+  sbLoad(SB.id, true);
+}
+async function sbApproveAllStills() {
+  const fd = new FormData(); fd.set('id', SB.id);
+  let r;
+  try { r = await (await fetch('/storyboard/approve-all-stills', { method: 'POST', body: fd })).json(); }
+  catch (e) { r = { ok: false, error: String(e) }; }
+  if (!r.ok) { phosToast(r.error || 'Could not approve those stills.', { kind: 'danger', duration: 6000 }); return; }
+  if (r.approved) phosToast(`Approved ${r.approved} still${r.approved === 1 ? '' : 's'}.`, { kind: 'success' });
   sbLoad(SB.id, true);
 }
 
@@ -633,6 +725,15 @@ function sbEngineSnapWarning(mode) {
 async function sbPlan() {
   const concept = (sbEl('sbConcept') || {}).value || '';
   if (!concept.trim()) { phosToast('Write a couple of sentences about the film first.'); return; }
+  // FILM-56: the planner's own memory footprint used to OOM on an 8-16 GB
+  // Mac after several minutes' wait, with nothing said before it started.
+  // The server already knows whether this Mac clears its floor — say so
+  // now, once, rather than let the timeout say it later.
+  const ramStatus = SB_BOOT.ram_status || {};
+  if (!ramStatus.ok && ramStatus.message) {
+    phosToast(ramStatus.message, { duration: 8000 });
+  }
+  _sbPlanShotsSubmitted = sbShotsValue() || 12;
   const btn = sbEl('sbPlanBtn');
   if (btn) { btn.dataset.busy = '1'; btn.disabled = true; btn.textContent = 'Planning…'; }
   const fd = new URLSearchParams();
@@ -643,6 +744,7 @@ async function sbPlan() {
   fd.set('must', (sbEl('sbMust') || {}).value || '');
   fd.set('locations', (sbEl('sbLocations') || {}).value || '');
   fd.set('wardrobe', (sbEl('sbWardrobe') || {}).value || '');
+  fd.set('light', (sbEl('sbLight') || {}).value || '');
   fd.set('engine', _sbEngineMode);
   if (_sbCastId) fd.set('character_id', _sbCastId);
   // The director's two fields travel whenever the row exists, so clearing
@@ -654,6 +756,7 @@ async function sbPlan() {
   }
   if (sbEl('sbAuto')) fd.set('auto', sbEl('sbAuto').checked ? '1' : '0');
   if (sbEl('sbAnchorStills')) fd.set('anchor_stills', sbEl('sbAnchorStills').checked ? '1' : '0');
+  if (sbEl('sbStillsFirst')) fd.set('stills_first', sbEl('sbStillsFirst').checked ? '1' : '0');
   if (sbEl('sbLongWindows')) fd.set('long_windows', sbEl('sbLongWindows').checked ? '1' : '0');
   if (SB.aspect) fd.set('aspect', SB.aspect);
   let r;
@@ -674,6 +777,16 @@ async function sbPlan() {
   sbShow('planning');
   sbSetPlanningStage('load');
   sbLoad(SB.id);
+}
+// FILM-44: this Soundtrack box is the "Director" — an LLM writes a
+// beat-synced shot list from a plain concept, and the track is a raw file
+// path. The Audio tab's Music Video pane is a different, more capable
+// entrance for the common case (cast a Singer + B-roll pictures against a
+// song, with a real drop-zone and a library) and a creator typing a
+// concept here would never find it. This is the one signpost between them.
+function sbGoToMusicVideo() {
+  if (typeof workflowSwitch === 'function') workflowSwitch('audio');
+  if (typeof audioModeSet === 'function') audioModeSet('drive');
 }
 // THE SHOTS CHIPS STAND DOWN WHEN A TRACK IS ON THE BRIEF — the grid decides
 // the count — and the line under the field says what will happen instead.
@@ -707,12 +820,32 @@ async function sbCancelPlan() {
   sbLoad(SB.id);
 }
 
+// FILM-56: "About a minute" was said for every board regardless of shot
+// count, while the server's own timeout is 900s (15 minutes) — a large
+// board that genuinely takes several minutes read as stuck against a
+// promise of one. Scales with the shot count actually submitted, and
+// folds in the low-RAM notice (see SB_BOOT.ram_status) so a Mac already
+// flagged as likely to run out keeps saying so through every stage, not
+// just in the one-off toast `sbPlan()` shows at submit time.
+function _sbPlanningTimeCopy() {
+  const n = _sbPlanShotsSubmitted || 12;
+  const base = n <= 4 ? 'About a minute'
+             : n <= 12 ? 'A few minutes for ' + n + ' shots'
+             : 'Several minutes for ' + n + ' shots';
+  const ramStatus = SB_BOOT.ram_status || {};
+  if (!ramStatus.ok) {
+    return base + '. This Mac is short on memory for the planner — it can '
+                 + 'fail instead of finishing. Nothing renders yet.';
+  }
+  return base + '. Nothing renders yet.';
+}
+
 function sbSetPlanningStage(stage) {
   const map = {
-    load:   ['Loading the planner', 'About a minute. Nothing renders yet.'],
+    load:   ['Loading the planner', _sbPlanningTimeCopy()],
     grid:   ['Reading the beat', 'Finding the downbeats the shots will cut on.'],
-    write:  ['Writing the plan', 'About a minute. Nothing renders yet.'],
-    check:  ['Checking the plan', 'About a minute. Nothing renders yet.'],
+    write:  ['Writing the plan', _sbPlanningTimeCopy()],
+    check:  ['Checking the plan', _sbPlanningTimeCopy()],
     repair: ['Fixing the plan', 'It came back slightly malformed. One retry.'],
     unload: ['Giving the memory back', 'The renderer gets it now.'],
   };
@@ -920,6 +1053,11 @@ async function sbLoad(id, quiet) {
   try {
     r = await (await fetch('/storyboard/get?id=' + encodeURIComponent(id))).json();
   } catch (e) { return; }
+  // FILM-02/FILM-19: another sbOpen — a caller elsewhere, the 2s poll, the
+  // gallery's "open this film" badge — may have moved SB.id on while this
+  // fetch was in flight. Adopting this reply now would silently repaint (and
+  // let a later save write) a DIFFERENT film than the one now on screen.
+  if (id !== SB.id) return;
   if (!r || !r.ok) {
     if (!quiet) phosToast('That storyboard is gone.', { kind: 'danger' });
     sbBackToList();
@@ -1087,42 +1225,59 @@ function sbRenderPlan(r) {
   const shots = b.shots || [];
   const title = sbEl('sbTitle');
   if (title && document.activeElement !== title) title.value = b.title || '';
-  // The three brief switches read back from the board, so reopening a film
-  // shows how it is being made — not whatever the last brief had ticked.
-  for (const [id, key] of [['sbAuto', 'auto'], ['sbAnchorStills', 'anchor_stills'], ['sbLongWindows', 'long_windows']]) {
+  // The brief switches read back from the board, so reopening a film shows
+  // how it is being made — not whatever the last brief had ticked.
+  for (const [id, key] of [['sbAuto', 'auto'], ['sbAnchorStills', 'anchor_stills'],
+                           ['sbStillsFirst', 'stills_first'], ['sbLongWindows', 'long_windows']]) {
     const el = sbEl(id);
     if (el && key in b) el.checked = !!b[key];
   }
-  if ('take_seconds' in b) {
-    if (b.take_seconds) { sbSetShots('take', false); sbSetTake(b.take_seconds); }
-    else sbSetShots(b.shots_target || _sbShots, false);
-  }
+  sbStillsFirstSync();
+  // 4.17: the brief's Length (shot count / One-take seconds) and Engine are
+  // the NEW-film form — the next "Plan" reads them. Opening a board used to
+  // copy that board's shot count into them, so planning a new film after
+  // browsing an old one silently inherited its length. The open board's own
+  // size is on its plan screen; Re-plan / Try again read the board itself
+  // (b.shots_target, b.engine_mode), never these controls.
   sbSyncBriefGates();
 
   // --- summary ---
-  // Per PASS, not per `status`: during delivery, `status === 'done'` still
-  // reads true from the draft that already landed.
-  const outKey = r.pass === 'final' ? 'final_output' : 'draft_output';
-  const done = shots.filter(s => s[outKey]).length;
+  // FILM-42: ONE model, both passes counted honestly, so this line can
+  // never again contradict the rail's own "N of M rendered" (which counts
+  // ANY clip, `final_output || draft_output`). The old version counted only
+  // the CURRENT pass's output key and then labelled the final branch
+  // "Finished" unconditionally — so a board whose delivery pass had not
+  // even started yet (0 delivered) read "Finished · 0 shots" right next to
+  // a rail that correctly said every draft had rendered.
+  const draftDone = shots.filter(s => s.draft_output).length;
+  const finalDone = shots.filter(s => s.final_output).length;
   const failed = shots.filter(s => s.status === 'failed').length;
   const rendering = !!r.rendering;
   let status;
   if (r.pass === 'final') {
-    // "Delivery rendering · 4 of 4" is a sentence about a thread that hasn't
-    // released its slot yet, not about the film. Once every shot has its
-    // delivery clip the film is finished, whatever the dispatcher is doing.
-    status = (rendering && done < shots.length)
-      ? `Delivery rendering · ${done} of ${shots.length}`
-      : `Finished · ${done} shot${done === 1 ? '' : 's'}`;
+    if (rendering && finalDone < shots.length) {
+      // "Delivery rendering · 4 of 4" is a sentence about a thread that
+      // hasn't released its slot yet, not about the film.
+      status = `Delivery rendering · ${finalDone} of ${shots.length}`;
+    } else if (shots.length && finalDone >= shots.length) {
+      status = `Finished · ${finalDone} shot${finalDone === 1 ? '' : 's'}`;
+    } else if (finalDone) {
+      status = `Delivery · ${finalDone} of ${shots.length}`;
+    } else {
+      // The drafts are what finished — that is WHY the pass moved to
+      // final — but delivery itself has not started. "Finished" would
+      // claim a pass that never ran.
+      status = 'Drafts done · ready for delivery';
+    }
   } else if (rendering) {
-    status = `Drafts rendering · ${done} of ${shots.length}`;
-  } else if (done && done + failed >= shots.length) {
-    status = failed ? `Drafts done · ${done} of ${shots.length}, ${failed} failed`
-                    : `Drafts done · ${done} of ${shots.length}`;
-  } else if (done) {
+    status = `Drafts rendering · ${draftDone} of ${shots.length}`;
+  } else if (draftDone && draftDone + failed >= shots.length) {
+    status = failed ? `Drafts done · ${draftDone} of ${shots.length}, ${failed} failed`
+                    : `Drafts done · ${draftDone} of ${shots.length}`;
+  } else if (draftDone) {
     // Partway through and NOT running — stopped, or a single shot retried.
     // "Drafts rendering" here would be a sentence that isn't true.
-    status = `Drafts · ${done} of ${shots.length}`;
+    status = `Drafts · ${draftDone} of ${shots.length}`;
   } else {
     status = 'Draft plan · not rendered';
   }
@@ -1199,6 +1354,21 @@ function sbRenderPlan(r) {
   errBox.hidden = !boardErrs.length;
   errBox.innerHTML = boardErrs.map(sbErrRow).join('');
 
+  // FILM-46: "Stills first" — how many are waiting for a look, in one place,
+  // with a bulk Approve so a 20-shot board isn't 20 individual clicks.
+  const stillsBanner = sbEl('sbStillsBanner');
+  if (stillsBanner) {
+    const waiting = b.stills_first
+      ? shots.filter(s => s.still && !s.still_approved && s.still_source !== 'user').length
+      : 0;
+    stillsBanner.hidden = !waiting;
+    if (waiting) {
+      stillsBanner.innerHTML =
+        `<span>${waiting} still${waiting === 1 ? '' : 's'} ready for approval.</span>` +
+        `<button type="button" class="ghost-btn" onclick="sbApproveAllStills()">Approve all</button>`;
+    }
+  }
+
   // --- shot cards ---
   // Rebuilding the list under a cursor is what makes editing impossible, so a
   // repaint that arrives mid-word repaints everything EXCEPT the cards. The
@@ -1212,8 +1382,15 @@ function sbRenderPlan(r) {
   // visibly. Cheap, too: the string is built either way, the compare is the
   // only new work.
   const box = sbEl('sbShots');
+  box.classList.toggle('sb-shots-grid', SB.shotView === 'grid');
+  const viewTog = sbEl('sbShotViewToggle');
+  // FILM-41: a handful of shots is already fully visible as a list; the
+  // grid earns its place on a board long enough to need finding a shot fast.
+  if (viewTog) viewTog.hidden = shots.length < 12;
   if (!sbTypingInShots() && !sbSelectOpen()) {
-    const html = shots.map(s => sbShotCard(s, r, errs)).join('');
+    const html = SB.shotView === 'grid'
+      ? shots.map(sbShotGridTile).join('')
+      : shots.map(s => sbShotCard(s, r, errs)).join('');
     if (html !== _sbShotsHtml || box.childElementCount !== shots.length) {
       box.innerHTML = html;
       _sbShotsHtml = html;
@@ -1295,6 +1472,48 @@ function sbAutoGrowPrompts(one) {
   });
 }
 
+// FILM-41: List/Grid toggle for the shot list itself (separate from the
+// Shot-list/Player stage toggle above — this decides how the SHOT LIST is
+// laid out, not what the stage pane shows).
+function sbSetShotView(mode) {
+  SB.shotView = mode;
+  try { sessionStorage.setItem('phos.sb.shotView', mode); } catch (e) {}
+  const tog = sbEl('sbShotViewToggle');
+  if (tog) tog.querySelectorAll('.smt-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.sbView === mode));
+  const box = sbEl('sbShots');
+  if (box) box.classList.toggle('sb-shots-grid', mode === 'grid');
+  _sbShotsHtml = '';   // force a repaint under the new layout
+  if (SB.payload) sbRenderPlan(SB.payload);
+}
+// Clicking a tile is the "detail" step: back to the full editable card,
+// scrolled to it — no second surface to keep in sync with the real one.
+function sbGridTileOpen(n) {
+  sbSetShotView('list');
+  requestAnimationFrame(() => sbScrollToShot(n));
+}
+function sbShotGridTile(s) {
+  const n = s.n;
+  const clip = s.final_output || s.draft_output;
+  const dur = Number(s.duration_s || 0);
+  const gradeDot = s.grade
+    ? `<span class="sb-grid-grade sb-grid-grade-${escapeHtml(s.grade)}">${{ keep: 'K', reroll: 'R', cut: 'C' }[s.grade] || ''}</span>`
+    : '';
+  const thumb = clip
+    ? `<video class="sb-grid-thumb" preload="metadata" muted playsinline src="/file?path=${encodeURIComponent(clip)}"></video>`
+    : `<div class="sb-grid-thumb sb-grid-thumb-empty" aria-hidden="true"></div>`;
+  return `<li class="sb-grid-tile" data-n="${n}" onclick="sbGridTileOpen(${n})" role="button" tabindex="0"
+      title="${escapeHtml((s.title || s.prompt || '').slice(0, 140))}">
+    ${thumb}
+    <div class="sb-grid-meta">
+      <span class="sb-grid-n">${String(n).padStart(2, '0')}</span>
+      <span class="sb-grid-dur">${dur ? dur.toFixed(1) + 's' : ''}</span>
+      <span class="sb-grid-status sb-grid-status-${escapeHtml(s.status || 'pending')}">${escapeHtml(s.status || 'pending')}</span>
+      ${gradeDot}
+    </div>
+  </li>`;
+}
+
 function sbErrRow(e) {
   const copy = SB_ERR_COPY[e.code];
   const html = !copy ? escapeHtml(e.message)
@@ -1312,6 +1531,14 @@ function sbShotCard(s, r, errs) {
   const est = (r.per_shot_est || {})[String(n)];
   const chars = r.characters || [];
   const locked = (s.status === 'rendering' || s.status === 'queued' || s.status === 'done');
+  // FILM-21: a singing (a2v) shot on a music-video board was rendered
+  // against ONE EXACT stretch of the song — its film_start/film_end and
+  // its audio linkage are facts about the track, not creative choices.
+  // Reorder, a duration change, the Text/Character toggle or a Rewrite can
+  // each knock it (and every later singing shot) off its own words, so all
+  // four are locked here rather than fixed after the fact.
+  const mv = s.music_video || null;
+  const singingLocked = s.mode === 'a2v' && mv && mv.kind === 'singing';
   // The chip says what will ACTUALLY render, not what the plan wrote. With no
   // H3 pack the server forces every shot to LTX at enqueue, so a pink Hailuo
   // chip on a machine that has no Hailuo would be the UI contradicting itself.
@@ -1378,22 +1605,53 @@ function sbShotCard(s, r, errs) {
     }
     durOpts += `<option value="${_cur}" selected>${escapeHtml(label)}</option>`;
   }
-  const passLabel = r.pass === 'final' ? 'Delivery' : 'Draft';
+  // FILM-42: this used to be ONE label for the whole board, read off
+  // `r.pass` (whichever pass is currently active) — so a shot that had
+  // already delivered was badged "Draft" the moment ANY other shot on the
+  // board still needed its delivery pass, and vice versa. Each shot is
+  // judged on its OWN clip now: the real pixel size ffprobe measured when
+  // the clip landed (`output_dims`), compared against the board's own
+  // Delivery canvas — never a guess from whichever pass queued it.
+  const finalPol = ((r.board || {}).policy || {}).final || {};
+  const finalMax = Math.max(Number(finalPol.width) || 0, Number(finalPol.height) || 0);
+  let passLabel;
+  if (Array.isArray(s.output_dims) && finalMax) {
+    const shotMax = Math.max(Number(s.output_dims[0]) || 0, Number(s.output_dims[1]) || 0);
+    passLabel = shotMax >= finalMax ? 'Delivery' : 'Draft';
+  } else {
+    // No measured size yet (an older clip from before this fix) — fall
+    // back to which file this card is actually showing.
+    passLabel = s.final_output ? 'Delivery' : 'Draft';
+  }
   const seedSet = (s.seed != null && s.seed !== -1);
 
   // ANCHOR STILL. The image the shot starts from, when the board anchors
   // shots; a failed still says so and the shot renders unanchored.
   const stillPending = !s.still && !s.still_error && s.still_job_id && s.still_job_id !== 'skipped';
+  // FILM-11: a user-uploaded still (a music-video cast photo) is never
+  // regenerated — "New still" on it would silently delete the user's own
+  // picture. The button becomes an honest "Re-render" that keeps the photo
+  // and just renders a fresh take (new seed) from it.
+  const userStill = s.still_source === 'user';
+  // FILM-46: "Stills first" holds the render at the still until the user
+  // approves it — this is the approve/decline UI for that pause. Never
+  // shown for a user photo: there is nothing generated to approve.
+  const awaitingApproval = !!((r.board || {}).stills_first) && !userStill
+    && !s.still_approved;
   const stillBlock = s.still ? `
-    <div class="sb-still" title="The still this shot starts from">
+    <div class="sb-still${awaitingApproval ? ' sb-still-awaiting' : ''}" title="${userStill ? 'The photo this shot starts from' : 'The still this shot starts from'}">
       <a href="/image?path=${encodeURIComponent(s.still)}" target="_blank" rel="noopener" title="Open the still">
         <img src="/image?w=480&path=${encodeURIComponent(s.still)}" alt="Anchor still for shot ${n}" loading="lazy"></a>
-      <span class="sb-still-tag">starts from this still</span>
-      <button type="button" class="sb-err-fix sb-still-redo" data-act="restill" title="Make a new still and render this shot from it">New still</button>
+      <span class="sb-still-tag">${awaitingApproval ? 'approve this still before it renders' : userStill ? 'starts from your photo' : 'starts from this still'}</span>
+      ${awaitingApproval ? `
+      <button type="button" class="sb-err-fix sb-still-approve" data-act="approve-still" title="Render the video from this still">Approve</button>` : ''}
+      <button type="button" class="sb-err-fix sb-still-redo" data-act="restill"
+              title="${userStill ? 'Render a new take from this photo (new seed) — your photo is kept' : 'Make a new still and render this shot from it'}">${userStill ? 'Re-render (new seed)' : 'New still'}</button>
     </div>` : stillPending ? `
     <div class="sb-still is-pending"><span class="sb-still-spin" aria-hidden="true"></span><span class="sb-still-tag">making the still…</span></div>`
-    : (s.still_error ? `<div class="sb-still sb-still-failed" title="${escapeHtml(s.still_error)}"><span class="sb-still-tag">no still — rendered unanchored</span>
-      <button type="button" class="sb-err-fix sb-still-redo" data-act="restill" title="Try the still again">Try again</button></div>` : '');
+    : (s.still_error ? `<div class="sb-still sb-still-failed" title="${escapeHtml(s.still_error)}"><span class="sb-still-tag">${awaitingApproval ? 'the still could not be made — held until you choose' : 'no still — rendered unanchored'}</span>
+      <button type="button" class="sb-err-fix sb-still-redo" data-act="restill" title="Try the still again">Try again</button>${awaitingApproval ? `
+      <button type="button" class="sb-err-fix sb-still-approve" data-act="approve-still" title="Render the video without a still to start from">Render without a still</button>` : ''}</div>` : '');
   const outBlock = stale ? `
     <div class="sb-shot-out car-card is-stale">
       <div class="car-thumb-wrap" onclick="selectOutput('${escapeHtml(stale)}')">
@@ -1414,7 +1672,8 @@ function sbShotCard(s, r, errs) {
         <span class="sub">${s.final_output ? 'delivery' : 'draft'}</span></div>
       <div class="sb-grade" role="group" aria-label="Grade shot ${n}">
         <button type="button" class="sb-grade-btn ${s.grade === 'keep' ? 'active' : ''}" data-act="grade" data-g="keep" aria-pressed="${s.grade === 'keep'}">KEEP</button>
-        <button type="button" class="sb-grade-btn ${s.grade === 'reroll' ? 'active' : ''}" data-act="grade" data-g="reroll" aria-pressed="${s.grade === 'reroll'}">RE-ROLL</button>
+        <button type="button" class="sb-grade-btn ${s.grade === 'reroll' ? 'active' : ''}" data-act="grade" data-g="reroll" aria-pressed="${s.grade === 'reroll'}"
+                ${singingLocked ? 'disabled title="Locked to the song — Rewrite would drop its audio and its place in the song."' : ''}>RE-ROLL</button>
         <button type="button" class="sb-grade-btn ${s.grade === 'cut' ? 'active' : ''}" data-act="grade" data-g="cut" aria-pressed="${s.grade === 'cut'}">CUT</button>
       </div>
       <textarea class="sb-note" rows="2" data-act="note" ${s.grade === 'reroll' ? '' : 'hidden'}
@@ -1444,39 +1703,49 @@ function sbShotCard(s, r, errs) {
     </div>` : '');
 
   const failBlock = (s.status === 'failed') ? (() => {
-    const fe = friendlyJobError(s.error || '');
+    const fe = friendlyJobError(s.error || '', s.engine);
     return `<div class="sb-shot-err"><div class="sb-err-row"><span class="sb-err-dot"></span>
       <span><b>Shot ${n} failed.</b> ${escapeHtml(fe.friendly)} — ${escapeHtml(fe.hint)}</span>
       <button type="button" class="sb-err-fix" data-act="retry">Retry this shot</button>
       <button type="button" class="sb-err-fix" data-act="cut">Cut it</button></div></div>`;
   })() : '';
 
+  const singingChip = singingLocked
+    ? `<span class="sb-chip sb-chip-singing" title="Singing shots are locked to the song — mode, length and order can't change here.">
+         Singing${mv.section ? ' · ' + escapeHtml(mv.section) : ''} · ${sbFmtClock(mv.film_start || 0)}
+       </span>` : '';
+
   return `<li class="sb-shot ${mine.length ? 'has-error' : ''} ${locked ? 'is-locked' : ''}"
-      data-n="${n}" draggable="${locked ? 'false' : 'true'}" tabindex="0">
+      data-n="${n}" draggable="${locked || singingLocked ? 'false' : 'true'}" tabindex="0">
     <div class="sb-shot-head">
       <span class="sb-shot-n">${String(n).padStart(2, '0')}</span>
+      ${singingLocked ? singingChip : `
       <div class="sb-seg" role="group" aria-label="Shot type">
         <button type="button" class="sb-seg-btn ${isChar ? '' : 'active'}" data-act="mode" data-mode="text" ${locked ? 'disabled' : ''}>Text</button>
         <button type="button" class="sb-seg-btn ${isChar ? 'active' : ''}" data-act="mode" data-mode="character"
                 ${locked || noCast ? 'disabled' : ''} ${noCast ? 'title="No trained characters on this Mac yet — train one in the Train tab."' : ''}>Character</button>
-      </div>
+      </div>`}
       <select class="sb-select sb-shot-char" data-act="char" aria-label="Who's in this shot" ${locked ? 'disabled' : ''} ${noCast ? 'hidden' : ''}>${opts}</select>
-      <select class="sb-select sb-shot-dur" data-act="dur" aria-label="Length" ${locked ? 'disabled' : ''}>${durOpts}</select>
+      <select class="sb-select sb-shot-dur" data-act="dur" aria-label="Length" ${locked || singingLocked ? 'disabled' : ''} ${singingLocked ? 'title="Locked to the song — its length is the words it sings."' : ''}>${durOpts}</select>
       ${sbEngineChip(engine)}
       ${isChar && /<d>\s*(?!<\/\s*d\s*>)\S/i.test(s.prompt || '')
         ? `<span class="sb-chip sb-chip-voice" title="This shot has spoken lines, so the character's voice loads.">voice</span>`
         : ''}
-      <span class="sb-chip sb-chip-pass" data-act="pass" title="Quality is set for the whole film — click to change it">${passLabel}</span>
+      <span class="sb-chip sb-chip-pass" data-act="pass" title="${Array.isArray(s.output_dims) ? `Rendered at ${s.output_dims[0]}×${s.output_dims[1]} — ` : ''}Quality is set for the whole film — click to change it">${passLabel}</span>
       <span class="sb-shot-est">${sbShotEst(est)}</span>
       <span class="sb-shot-spacer"></span>
       <span class="sb-seedwrap" hidden>
         <input type="number" class="sb-seed" data-act="seed" value="${seedSet ? s.seed : ''}"
                aria-label="Seed for shot ${n}" ${locked ? 'disabled' : ''}></span>
-      <button type="button" class="sb-icon" data-act="up" title="Move up" aria-label="Move shot ${n} up" ${n === 1 || locked ? 'disabled' : ''}>↑</button>
-      <button type="button" class="sb-icon" data-act="down" title="Move down" aria-label="Move shot ${n} down" ${n === shots.length || locked ? 'disabled' : ''}>↓</button>
+      <button type="button" class="sb-icon" data-act="up" title="${singingLocked ? "Locked to the song — reordering it would move its mouth off the words." : 'Move up'}" aria-label="Move shot ${n} up" ${n === 1 || locked || singingLocked ? 'disabled' : ''}>↑</button>
+      <button type="button" class="sb-icon" data-act="down" title="${singingLocked ? "Locked to the song — reordering it would move its mouth off the words." : 'Move down'}" aria-label="Move shot ${n} down" ${n === shots.length || locked || singingLocked ? 'disabled' : ''}>↓</button>
       <button type="button" class="sb-icon ${seedSet ? 'is-set' : ''}" data-act="seedtoggle"
               title="${seedSet ? `Seed ${s.seed} — same number, same roll of the dice. Fix it so the delivery render matches the draft you approved.` : 'Seed — same number, same roll of the dice. Fix it so the delivery render matches the draft you approved.'}"
               aria-label="Seed for shot ${n}">🎲</button>
+      ${s.status === 'done' ? `
+      <button type="button" class="sb-icon" data-act="newtake"
+              title="Edit &amp; re-render — unlocks the prompt and renders a new take with a fresh seed. The old clip is kept, not deleted. No planner call, so it works even while other shots are queued."
+              aria-label="New take of shot ${n}">↻</button>` : ''}
       <button type="button" class="sb-icon sb-icon-danger" data-act="del" title="${locked ? "This one's already rendering." : 'Delete this shot'}" aria-label="Delete shot ${n}" ${locked && s.status !== 'done' ? 'disabled' : ''}>✕</button>
       <span class="sb-grip" title="Drag to reorder" aria-hidden="true">⠿</span>
     </div>
@@ -1514,6 +1783,33 @@ function sbRenderTally(shots, r) {
   fin.textContent = keep ? `Finish ${keep} keeper${keep === 1 ? '' : 's'}` : 'Finish keepers';
   fin.disabled = !keep;
   fin.title = keep ? '' : 'Mark at least one shot KEEP first.';
+  // FILM-47: "Keep all ungraded" — only offered when there is something it
+  // would actually do (a rendered, un-skipped shot with no grade yet).
+  const keepAllBtn = sbEl('sbKeepAllBtn');
+  if (keepAllBtn) {
+    const ungradedWithClip = shots.filter(s => (s.draft_output || s.final_output)
+      && s.status !== 'skipped' && !s.grade).length;
+    keepAllBtn.hidden = !ungradedWithClip;
+    keepAllBtn.textContent = `Keep all ungraded (${ungradedWithClip})`;
+  }
+  // FILM-47: a finished export/timeline mixes whatever resolution each
+  // shot's own clip happens to be at — a shot delivered at the Delivery
+  // canvas next to one still sitting at Draft size, silently. Flag it
+  // before Finish rather than after the film is cut.
+  const mixWarn = sbEl('sbMixedResWarn');
+  if (mixWarn) {
+    const withClip = shots.filter(s => s.draft_output || s.final_output);
+    const sizes = new Set(withClip
+      .filter(s => Array.isArray(s.output_dims))
+      .map(s => s.output_dims.join('x')));
+    if (sizes.size > 1) {
+      mixWarn.hidden = false;
+      mixWarn.textContent = `This film mixes ${sizes.size} clip sizes (${[...sizes].join(', ')}) — `
+        + 'some shots are still at draft size. Finish keepers (or KEEP them) before rendering the film.';
+    } else {
+      mixWarn.hidden = true;
+    }
+  }
   const canExport = shots.some(s => s.final_output);
   sbEl('sbExportBtn').hidden = !canExport;
   sbEl('sbExportNote').hidden = !canExport;
@@ -1555,20 +1851,53 @@ function sbRenderRunBar(r) {
               : `${done} of ${shots.length} done`);
   let sub = '';
   if (active) sub = (tag.still ? 'making the still · ' : '') + `S${String(active.n).padStart(2, '0')} · ${snippet(active.prompt, 40)}`;
-  // The remaining time is a SERVER number. /status.eta_sec is the sum of
-  // per-job ETAs and is trustworthy when every queued job is this film's.
+  // FILM-49: "Time left" used to count only the CURRENT BATCH. The film
+  // dispatcher submits one bucket at a time (_sb_render_thread: "Submit
+  // the film ONE BUCKET AT A TIME"), so /status.eta_sec — the sum of
+  // per-job ETAs for what is queued RIGHT NOW — only ever covers that one
+  // bucket. `allMine` is true for nearly the whole render (nothing else
+  // typically shares the queue with a film), so the shallow bucket total
+  // was what actually displayed: "12m left" with hours still to go once
+  // the ~19-min singing shots in later buckets were counted.
+  //
+  // The number now combines BOTH sources: the server's own eta_sec for
+  // whatever is genuinely queued (accurate wall-clock — a job's OWN
+  // remaining_sec extrapolation lives inside it) plus the film's own
+  // per-shot estimate for every shot that has not been queued AT ALL yet,
+  // from the same cost model the summary cell prices the film with.
+  //
+  // 4.17 Codex EST-6: three separate sums, each only of THIS film's work —
+  // the shot rendering now (its own remaining_sec), this film's queued rows
+  // (each row's own eta_sec, which /status stamps per job), and the shots
+  // not queued at all yet. The old version dropped the current shot
+  // entirely and used the WHOLE queue's total only while every queued job
+  // was this film's — one unrelated job queued made the film's queued work
+  // vanish from its own estimate.
   const q = (LAST_STATUS && LAST_STATUS.queue) || [];
-  const allMine = q.length && q.every(j => { const t = _sbTagOf(j); return t && t.id === SB.id; });
-  if (allMine && LAST_STATUS.eta_sec) sub += ` · ${sbFmtWall(LAST_STATUS.eta_sec)} left`;
-  else {
-    // THE FILM'S OWN NUMBER when the queue's is not ours to read: the sum
-    // of the per-shot estimates for what this pass has not landed yet,
-    // from the same cost model the summary cell prices the film with.
-    const per = r.per_shot_est || {};
-    const left = shots.filter(s => !s[outKey] && s.status !== 'skipped')
-      .reduce((a, s) => a + (Number(per[String(s.n)]) || 0), 0);
-    if (left > 0) sub += ` · ${sbFmtWall(left)} left`;
+  const per = r.per_shot_est || {};
+  const shotEst = t => (t && !t.still) ? (Number(per[String(t.n)]) || 0) : 0;
+  const accounted = new Set();
+  let queuedPortion = 0;
+  q.forEach(j => {
+    const t = _sbTagOf(j);
+    if (!t || t.id !== SB.id) return;
+    if (!t.still) accounted.add(t.n);   // a still ahead of its shot is not the shot
+    const eta = Number(j.eta_sec);
+    queuedPortion += (Number.isFinite(eta) && eta >= 0) ? eta : shotEst(t);
+  });
+  const curTag = cur ? _sbTagOf(cur) : null;
+  let currentPortion = 0;
+  if (curTag && curTag.id === SB.id) {
+    if (!curTag.still) accounted.add(curTag.n);
+    const rem = Number(((cur || {}).progress || {}).remaining_sec);
+    currentPortion = (((cur || {}).progress || {}).remaining_sec != null && Number.isFinite(rem))
+      ? Math.max(0, rem) : shotEst(curTag);
   }
+  const notYetQueued = shots
+    .filter(s => !s[outKey] && s.status !== 'skipped' && !accounted.has(s.n))
+    .reduce((a, s) => a + (Number(per[String(s.n)]) || 0), 0);
+  const left = currentPortion + queuedPortion + notYetQueued;
+  if (left > 0) sub += ` · ${sbFmtWall(left)} left`;
   sbEl('sbRunSub').textContent = sub;
   sbEl('sbPauseBtn').textContent = paused ? 'Resume' : 'Pause';
   sbEl('sbRunDots').innerHTML = shots.map(s => {
@@ -1598,6 +1927,48 @@ function sbScrollToShot(n) {
   const el = document.querySelector(`.sb-shot[data-n="${n}"]`);
   if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
+// FILM-41: "Player" used to just reveal the shared stage pane, which still
+// held whatever the Video tab had last selected — a board with nothing
+// rendered showed an unrelated clip, and a rendered board showed one
+// arbitrary shot, never the film in order. This plays THIS board's own
+// shots, oldest to last, as one ordered playlist; each clip's `ended` event
+// advances to the next. The shared player element is rebuilt from scratch
+// by selectOutput() on every call, so the listener is re-attached each time
+// rather than assumed to survive.
+function sbPlaylistPaths() {
+  const shots = (((SB.payload || {}).board) || {}).shots || [];
+  return shots.filter(s => s.status !== 'skipped')
+    .slice().sort((a, b) => (a.n || 0) - (b.n || 0))
+    .map(s => s.final_output || s.draft_output)
+    .filter(Boolean);
+}
+function sbPlayBoard() {
+  const paths = sbPlaylistPaths();
+  if (!paths.length) {
+    if (typeof phosToast === 'function') phosToast('Nothing on this board has rendered yet.');
+    return;
+  }
+  SB.playlist = { paths, idx: 0, boardId: SB.id };
+  sbSetStage('player');
+  sbPlaylistPlay(0);
+}
+function sbPlaylistPlay(idx) {
+  const pl = SB.playlist;
+  if (!pl || idx >= pl.paths.length) { SB.playlist = null; return; }
+  pl.idx = idx;
+  if (typeof selectOutput === 'function') selectOutput(pl.paths[idx], { autoplay: true });
+  const v = document.querySelector('#playerWrap video');
+  if (v) {
+    v.addEventListener('ended', () => {
+      // The user may have clicked away to a different clip (or a different
+      // board) while this one played — only advance if this playlist is
+      // still the thing actually on screen.
+      if (SB.playlist !== pl || SB.id !== pl.boardId || activePath !== pl.paths[pl.idx]) return;
+      sbPlaylistPlay(pl.idx + 1);
+    }, { once: true });
+  }
+}
+
 function sbOpenShotClip(n) {
   const s = (((SB.payload || {}).board) || {}).shots.find(x => x.n === n);
   const clip = s && (s.final_output || s.draft_output);
@@ -1652,12 +2023,14 @@ async function sbFlushSave() {
   const board = ((SB.payload || {}).board);
   if (!board) return;
   SB.saveInFlight = true;
+  const bid = SB.id;
   try {
     const r = await (await fetch('/storyboard/save', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: SB.id, board: board }),
+      body: JSON.stringify({ id: bid, board: board }),
     })).json();
-    if (r && r.ok) {
+    // BOARD-2: a reply for a board that is no longer open never repaints.
+    if (r && r.ok && bid === SB.id) {
       SB.payload = r;
       if (sbAdoptLiveEdits(r)) SB.saveAgain = true;
       sbRenderPlan(r);
@@ -1746,6 +2119,8 @@ function sbShotAction(n, act, el, ev) {
     case 'note': s.note = el.value; sbGrade(n, s.grade, el.value); return;
     case 'retry': sbRenderPass(SB.payload.pass || 'draft', [n]); return;
     case 'restill': sbRestill(n); return;
+    case 'newtake': sbNewTake(n); return;
+    case 'approve-still': sbApproveStill(n); return;
     case 'cut': sbGrade(n, 'cut', s.note || ''); return;
     default: return;
   }
@@ -1787,13 +2162,21 @@ function sbTitleSave() {
 }
 
 async function sbGrade(n, grade, note) {
+  const bid = SB.id;
   const fd = new URLSearchParams();
-  fd.set('id', SB.id); fd.set('n', String(n));
+  fd.set('id', bid); fd.set('n', String(n));
+  // BOARD-2: the shot's identity rides along, so the server refuses a grade
+  // aimed at a shot number that now belongs to a different shot.
+  let shot = null;
+  try { shot = sbShotById(n); } catch (e) {}
+  if (shot && shot.uid) fd.set('uid', shot.uid);
   if (grade) fd.set('grade', grade);
   fd.set('note', note || '');
   try {
     const r = await (await fetch('/storyboard/grade', { method: 'POST', body: fd })).json();
+    if (bid !== SB.id) return;
     if (r && r.ok) { SB.payload = r; sbRenderPlan(r); }
+    else if (r && r.error) phosToast(r.error, { kind: 'warning' });
   } catch (e) {}
 }
 
@@ -2017,13 +2400,35 @@ async function sbFinish() {
   catch (e) {}
   const pol = (((SB.payload || {}).board) || {}).policy || {};
   const f = pol.final || {};
+  // FILM-47: "you get the take you approved — bigger" was never true — the
+  // same seed and prompt at a different pipeline/canvas gives a DIFFERENT
+  // clip on these engines, not the approved one scaled up. Said honestly.
   if (!confirm(
       `Finish ${keep.length} shot${keep.length === 1 ? '' : 's'}?\n\n` +
       `Delivery pass, ${f.width}×${f.height}, ${(f.quality || '').replace(/^./, c => c.toUpperCase())}. ` +
       `${sbFmtWall(est.total_secs).replace(/^about /, 'About ')} on this Mac.\n` +
-      "Each shot re-renders at its draft's seed, so you get the take you approved — bigger.\n" +
+      'Each shot renders a NEW take at delivery size — same prompt, same seed, ' +
+      'but not pixel-identical to the draft you approved.\n' +
       'The drafts stay in your gallery.')) return;
   sbRenderPass('final', keep);
+}
+
+// FILM-47: a 52-shot board needed 52 individual KEEP presses before Finish
+// could do anything — this is the one-click version for "everything I
+// haven't graded is fine, keep it". One request, one save server-side —
+// N separate grade calls would each load-mutate-save the whole board and
+// could race each other (the same class of bug as FILM-19/20).
+async function sbKeepAllUngraded() {
+  const bid = SB.id;
+  const fd = new URLSearchParams(); fd.set('id', bid);
+  let r;
+  try { r = await (await fetch('/storyboard/keep-all-ungraded', { method: 'POST', body: fd })).json(); }
+  catch (e) { r = { ok: false, error: String(e) }; }
+  // BOARD-2: board A's reply must not paint A's shots under board B's id —
+  // the next grade would then change B's shot with A's number.
+  if (bid !== SB.id) return;
+  if (!r.ok) { phosToast(r.error || 'Could not keep those shots.', { kind: 'danger', duration: 6000 }); return; }
+  if (r.kept) { SB.payload = r; sbRenderPlan(r); phosToast(`Kept ${r.kept} ungraded shot${r.kept === 1 ? '' : 's'}.`, { kind: 'success' }); }
 }
 
 async function sbRewrite() {
@@ -2067,9 +2472,18 @@ async function sbExport() {
   btn.dataset.busy = '1';
   btn.disabled = true;
   btn.textContent = 'Assembling…';
-  const fd = new URLSearchParams(); fd.set('id', SB.id);
+  // FILM-48: Export posted only `id` — with no edit.json yet (the Editor
+  // was never opened), the server had no song to lay under the film and
+  // silently concatenated each clip's OWN audio instead. A music-video
+  // board already has a dedicated route that knows where its song is
+  // (/music/video/film, same _sb_export underneath, music_mode=replace)
+  // — route there instead of guessing the song path here.
+  const isMusicVideo = !!sbMusicVideoBlock();
+  const url = isMusicVideo ? '/music/video/film' : '/storyboard/export';
+  const fd = new URLSearchParams();
+  fd.set(isMusicVideo ? 'board_id' : 'id', SB.id);
   let r;
-  try { r = await (await fetch('/storyboard/export', { method: 'POST', body: fd })).json(); }
+  try { r = await (await fetch(url, { method: 'POST', body: fd })).json(); }
   catch (e) { r = { ok: false, error: String(e) }; }
   finally { btn.dataset.busy = ''; btn.disabled = false; btn.textContent = prev; }
   if (!r.ok) { phosToast(r.error || 'Export failed.', { kind: 'danger' }); return; }
@@ -2127,9 +2541,47 @@ async function sbFilmLoad() {
   sbFilmPaint();
   sbRailPaint();
 }
+// A board planned in Music video carries the song it was planned against, and
+// that is the only thing that makes this button meaningful — so it is shown
+// off the board itself rather than off anything this screen remembers.
+function sbMusicVideoBlock() {
+  const board = ((SB.payload || {}).board) || {};
+  const mv = board.music_video;
+  return (mv && typeof mv === 'object' && mv.song) ? mv : null;
+}
+
+// Join the shots and lay the song under them, unbroken. The lip-sync survives
+// because each singing shot was rendered against its own `audio_start_time`
+// segment of this very file — the route's own docstring has the rest, and the
+// auto-editor is deliberately off there.
+async function sbFilmWithTheSong() {
+  const mv = sbMusicVideoBlock();
+  if (!mv) return;
+  const btn = sbEl('sbMusicFilmBtn');
+  if (btn && btn.dataset.busy === '1') return;
+  const prev = btn ? btn.textContent : '';
+  if (btn) { btn.dataset.busy = '1'; btn.disabled = true; btn.textContent = 'Assembling…'; }
+  const fd = new URLSearchParams(); fd.set('board_id', SB.id);
+  let r;
+  try { r = await (await fetch('/music/video/film', { method: 'POST', body: fd })).json(); }
+  catch (e) { r = { ok: false, error: String(e) }; }
+  finally { if (btn) { btn.dataset.busy = ''; btn.disabled = false; btn.textContent = prev; } }
+  if (!r.ok) { phosToast(r.error || 'The film could not be assembled.', { kind: 'danger' }); return; }
+  if (r.film_name) {
+    phosToast(`${r.film_name} — ${Math.round(r.film_duration || 0)} s with the song under it`,
+              { kind: 'success', duration: 8000 });
+    sbFilmOpen({ focus: r.film_name });
+  } else {
+    phosToast(`The clips and the shot list are in ${r.dir}, but the film could `
+              + `not be assembled: ${r.film_error || 'unknown reason'}`, { duration: 9000 });
+  }
+}
+
 function sbFilmPaint() {
   const body = sbEl('sbFilmBody');
   const status = sbEl('sbFilmStatus');
+  const songBtn = sbEl('sbMusicFilmBtn');
+  if (songBtn) songBtn.hidden = !sbMusicVideoBlock();
   if (!body) return;
   const film = sbFilmPick(SB.films, SB.filmOpen);
   if (!film) {
@@ -2143,9 +2595,14 @@ function sbFilmPaint() {
         <div class="sb-empty-icon"><svg width="56" height="56" viewBox="0 0 256 256" aria-hidden="true"><use href="#ph-film-slate"/></svg></div>
         <div class="sb-empty-title">No film yet.</div>
         <div class="sb-empty-sub">${clips
-          ? 'Arrange the ' + clips + ' clip' + (clips === 1 ? '' : 's') + ' you have on the timeline and render. The finished film lands in <code>' + escapeHtml(SB.filmShort || 'mlx_outputs/storyboards/') + '</code> and appears here.'
+          // FILM-42: this used to say "the N clips you have ON THE
+          // TIMELINE" — a claim about the Editor's arrangement this
+          // screen has no way to check (it only knows how many shots
+          // RENDERED). Said honestly: how many are ready to arrange, not
+          // how many already are.
+          ? clips + ' shot' + (clips === 1 ? ' has' : 's have') + ' rendered. Open the timeline, arrange them and render the film. The finished film lands in <code>' + escapeHtml(SB.filmShort || 'mlx_outputs/storyboards/') + '</code> and appears here.'
           : 'Render some shots first — a film is the shots, joined. Nothing to arrange yet.'}</div>
-        ${clips ? '<div class="sb-film-actions"><button type="button" class="primary" onclick="sbGo(\'arrange\')">Open the timeline</button></div>' : ''}
+        ${clips ? '<div class="sb-film-actions"><button type="button" class="primary" onclick="sbGo(\'edit\')">Open the timeline</button></div>' : ''}
       </div>`;
     return;
   }
@@ -2238,23 +2695,147 @@ function sbRowAction(b) {
   }
   return '';
 }
-function sbRenderBoardLists() {
-  const rows = SB.boards.map(b => `
+// FILM-43: filters the FULL board list (search box above it) client-side —
+// there are never more than a few dozen boards, and a round-trip for this
+// would just be latency with no benefit.
+let _sbBoardFilter = '';
+function sbFilterBoardList(q) {
+  _sbBoardFilter = String(q || '').trim().toLowerCase();
+  sbRenderBoardLists();
+}
+// 4.17: DELETE LIVES BEHIND ⋯. A bare × sat at the end of every board row —
+// in the rail too, where the rows are 230 px wide — one slip away from
+// deleting a plan. It is now a menu item (the shared .kebab-wrap/.kebab-pop
+// component the LoRA rows and the clip toolbar use), and the confirm is the
+// panel's own dialog, not the browser's.
+function sbBoardRowMenu(b, where) {
+  const kid = 'sbk-' + where + '-' + String(b.id).replace(/[^A-Za-z0-9_-]/g, '_');
+  const idAttr = escapeHtml(JSON.stringify(String(b.id)));
+  const titleAttr = escapeHtml(JSON.stringify(String(b.title || '')));
+  return `<div class="kebab-wrap sb-board-menu" onclick="event.stopPropagation()">
+      <button type="button" title="More" aria-haspopup="true" aria-label="More actions for this film"
+              onclick="kebabToggle('${kid}')">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <circle cx="3" cy="8" r="1.4" fill="currentColor"/><circle cx="8" cy="8" r="1.4" fill="currentColor"/><circle cx="13" cy="8" r="1.4" fill="currentColor"/>
+        </svg>
+      </button>
+      <div class="kebab-pop" id="${kid}" role="menu">
+        <button type="button" role="menuitem" class="danger"
+                onclick="kebabToggle('${kid}', false); sbDeleteBoard(${idAttr}, ${titleAttr})">Delete this storyboard…</button>
+      </div>
+    </div>`;
+}
+// The FULL board-list screen's row: thumbnail, date, rename, duplicate.
+function sbBoardRow(b) {
+  const thumb = b.thumb
+    ? `<video class="sb-board-thumb" preload="metadata" muted playsinline src="/file?path=${encodeURIComponent(b.thumb)}"></video>`
+    : `<span class="sb-board-thumb sb-board-thumb-empty" aria-hidden="true"></span>`;
+  const when = sbFmtAgo(b.updated_at || b.created_at);
+  return `
+    <li data-id="${escapeHtml(b.id)}" class="${b.running || b.planning ? 'is-live' : ''}"
+        onclick="sbOpen('${escapeHtml(b.id)}')">
+      ${thumb}
+      <span class="ttl" data-role="title">${escapeHtml(b.title || 'Untitled film')}</span>
+      <span class="params">${b.shots} shots · ${b.done} rendered${when ? ' · ' + escapeHtml(when) : ''}</span>
+      <span class="badge">${escapeHtml(sbBoardChip(b))}</span>
+      ${sbRowAction(b)}
+      <button title="Rename" onclick="event.stopPropagation();sbRenameBoardStart(this)"><svg class="ph" aria-hidden="true"><use href="#ph-pencil-simple"/></svg></button>
+      <button title="Duplicate this storyboard" onclick="event.stopPropagation();sbDuplicateBoard('${escapeHtml(b.id)}')"><svg class="ph" aria-hidden="true"><use href="#ph-copy"/></svg></button>
+      ${sbBoardRowMenu(b, 'full')}
+    </li>`;
+}
+// The rail's quick-switch copy — deliberately unchanged: ~230px has no room
+// for a thumbnail or three action buttons, and it is a jump list, not the
+// place search/rename/duplicate belong.
+function sbBoardRowMini(b) {
+  return `
     <li data-id="${escapeHtml(b.id)}" class="${b.running || b.planning ? 'is-live' : ''}"
         onclick="sbOpen('${escapeHtml(b.id)}')">
       <span class="ttl">${escapeHtml(b.title || 'Untitled film')}</span>
       <span class="params">${b.shots} shots · ${b.done} rendered</span>
       <span class="badge">${escapeHtml(sbBoardChip(b))}</span>
       ${sbRowAction(b)}
-      <button title="Delete this storyboard" onclick="event.stopPropagation();sbDeleteBoard('${escapeHtml(b.id)}','${escapeHtml((b.title || '').replace(/'/g, ''))}')"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>
-    </li>`).join('');
-  const full = sbEl('sbBoardList');
-  if (full) full.innerHTML = rows || '<li class="empty-state"><span></span><span>No storyboards yet</span><span></span><span></span></li>';
-  const mini = sbEl('sbBoardListMini');
-  if (mini) mini.innerHTML = rows;
+      ${sbBoardRowMenu(b, 'mini')}
+    </li>`;
 }
-async function sbDeleteBoard(id, title) {
-  if (!confirm(`Delete "${title || 'this storyboard'}"?\n\nDeletes the plan. The clips it already rendered stay in mlx_outputs/.`)) return;
+function sbRenderBoardLists() {
+  const boards = _sbBoardFilter
+    ? SB.boards.filter(b => (b.title || 'Untitled film').toLowerCase().includes(_sbBoardFilter))
+    : SB.boards;
+  const full = sbEl('sbBoardList');
+  if (full) {
+    full.innerHTML = boards.map(sbBoardRow).join('') || (_sbBoardFilter
+      ? '<li class="empty-state"><span></span><span>No film matches that search</span><span></span><span></span></li>'
+      : '<li class="empty-state"><span></span><span>No storyboards yet</span><span></span><span></span></li>');
+  }
+  const mini = sbEl('sbBoardListMini');
+  // The rail's mini list never filters — it's a quick-switch, not a search
+  // result — so it always shows every board regardless of the box above.
+  if (mini) mini.innerHTML = SB.boards.map(sbBoardRowMini).join('');
+}
+// Turns a row's title into an inline text input; Enter/blur saves through
+// the ordinary board-save route (title is one of the fields it already
+// accepts), Escape cancels. No native prompt() — the panel's own idiom.
+function sbRenameBoardStart(btn) {
+  const li = btn.closest('li');
+  if (!li) return;
+  const id = li.dataset.id;
+  const ttl = li.querySelector('[data-role="title"]');
+  if (!ttl || ttl.querySelector('input')) return;
+  const current = ttl.textContent;
+  const input = document.createElement('input');
+  input.type = 'text'; input.value = current; input.className = 'sb-board-rename';
+  input.addEventListener('click', (e) => e.stopPropagation());
+  const commit = () => {
+    const next = input.value.trim();
+    ttl.textContent = next || current;
+    if (next && next !== current) sbRenameBoard(id, next);
+  };
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+    else if (e.key === 'Escape') { ttl.textContent = current; input.remove(); }
+  });
+  input.addEventListener('blur', commit, { once: true });
+  ttl.textContent = '';
+  ttl.appendChild(input);
+  input.focus(); input.select();
+}
+async function sbRenameBoard(id, title) {
+  let r;
+  try {
+    r = await (await fetch('/storyboard/save', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, board: { id, title } }),
+    })).json();
+  } catch (e) { r = { ok: false, error: String(e) }; }
+  if (!r.ok) { phosToast(r.error || 'Could not rename that film.', { kind: 'danger' }); return; }
+  if (SB.id === id && SB.payload) { SB.payload.board.title = title; sbRenderPlan(SB.payload); }
+  sbRefreshBoards();
+}
+async function sbDuplicateBoard(id) {
+  const fd = new URLSearchParams(); fd.set('id', id);
+  let r;
+  try { r = await (await fetch('/storyboard/duplicate', { method: 'POST', body: fd })).json(); }
+  catch (e) { r = { ok: false, error: String(e) }; }
+  if (!r.ok) { phosToast(r.error || 'Could not duplicate that film.', { kind: 'danger' }); return; }
+  phosToast(`Duplicated as "${r.title}".`, { kind: 'success' });
+  await sbRefreshBoards();
+}
+function sbDeleteBoard(id, title) {
+  const body = 'Deletes the plan. The clips it already rendered stay in your outputs.';
+  const go = () => { sbDeleteBoardNow(id); };
+  if (typeof _phModalShow === 'function' && _phModalShow({
+        tone: 'danger', kicker: 'Delete storyboard',
+        title: `Delete "${title || 'this storyboard'}"?`, body,
+        primaryLabel: 'Delete', onPrimary: go,
+        secondaryLabel: 'Keep it' })) {
+    return;
+  }
+  // The panel's dialog is busy with something else (one at a time) — the
+  // browser's confirm is the fallback, never "no confirm at all".
+  if (confirm(`Delete "${title || 'this storyboard'}"?\n\n${body}`)) go();
+}
+async function sbDeleteBoardNow(id) {
   const fd = new URLSearchParams(); fd.set('id', id);
   const r = await (await fetch('/storyboard/delete', { method: 'POST', body: fd })).json();
   if (!r.ok) { phosToast(r.error || 'Could not delete.', { kind: 'danger' }); return; }
@@ -2264,17 +2845,40 @@ async function sbDeleteBoard(id, title) {
 }
 
 // ---- shared state: pull a normal generation INTO a film ---------------------
+// FILM-26: the select used to open already showing its FIRST real film
+// selected — so a user who wanted exactly that film clicked it, nothing
+// fired (`onchange` never fires when the value does not change), and the
+// button looked broken. A leading placeholder option means every real
+// choice is a CHANGE, so onchange always fires; `showPicker()` also opens
+// the native list immediately instead of leaving a revealed-but-closed
+// 20px control the user has to find and click a second time.
 async function sbAddActiveToBoard(chosen) {
   if (!activePath) return;
   const sel = sbEl('sbAddSelect');
   if (!chosen && SB.boards.length > 1 && sel && sel.style.display === 'none') {
-    sel.innerHTML = SB.boards.map(b =>
-      `<option value="${escapeHtml(b.id)}">${escapeHtml(b.title || 'Untitled film')}</option>`).join('')
-      + '<option value="new">— new storyboard —</option>';
+    // Last-used first: the film you were just cutting is the one you most
+    // likely mean to add this clip to.
+    let last = '';
+    try { last = localStorage.getItem('phos_sb_open') || ''; } catch (e) {}
+    const boards = last ? SB.boards.slice().sort(
+      (a, b) => (b.id === last) - (a.id === last)) : SB.boards;
+    sel.innerHTML = '<option value="" disabled selected>Add to which film?</option>'
+      + boards.map(b =>
+        `<option value="${escapeHtml(b.id)}">${escapeHtml(b.title || 'Untitled film')}</option>`).join('')
+      + '<option value="new">— new film —</option>';
     sel.style.display = '';
+    if (typeof sel.showPicker === 'function') { try { sel.showPicker(); } catch (e) {} }
+    else { try { sel.focus(); } catch (e) {} }
     return;
   }
-  const id = chosen || (SB.boards.length === 1 ? SB.boards[0].id : (SB.boards[0] || {}).id) || 'new';
+  if (!chosen && SB.boards.length <= 1) {
+    // Nothing to choose between — the old fallback silently picked
+    // SB.boards[0] even when `chosen` was empty and boards.length was 0,
+    // which sent id="" straight to add-shot as if a real film existed.
+    chosen = (SB.boards[0] || {}).id || 'new';
+  }
+  if (!chosen) return;                 // the placeholder option, or a stray call
+  const id = chosen;
   if (sel) sel.style.display = 'none';
   const fd = new URLSearchParams();
   fd.set('id', id); fd.set('path', activePath);
@@ -2453,6 +3057,9 @@ document.addEventListener('keydown', (ev) => {
   const li = document.activeElement && document.activeElement.closest
            && document.activeElement.closest('.sb-shot');
   if (!li || /^(INPUT|TEXTAREA|SELECT)$/.test((ev.target.tagName || ''))) return;
+  // Bare letters only: ⌘C on a focused card is a copy and ⌘R a reload, and
+  // both used to grade the shot as well.
+  if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
   const g = { k: 'keep', r: 'reroll', c: 'cut' }[ev.key.toLowerCase()];
   if (!g) return;
   const n = Number(li.dataset.n);
@@ -2508,8 +3115,9 @@ document.addEventListener('dragend', () => {
 // the global scope; everything NOT listed here is private to this module.
 Object.assign(globalThis, {
   sbSetTake,
-  sbToggleSwitchHelp, sbSyncBriefGates, sbRestill,
-  sbTrackInput,
+  sbToggleSwitchHelp, sbSyncBriefGates, sbRestill, sbNewTake, sbStillsFirstSync,
+  sbApproveAllStills, sbKeepAllUngraded,
+  sbTrackInput, sbGoToMusicVideo,
   sbEl, sbFmtClock, sbFmtBytes, sbFmtAgo,
   sbFilmKind, sbFilmPick, sbRenderFinalQualities, sbInit,
   sbTeardown, sbConceptInput, sbMustInput, sbLocInput,
@@ -2518,14 +3126,16 @@ Object.assign(globalThis, {
   sbReplan, sbTryAgain, sbShowRaw, sbOpen,
   sbOpenAt, sbBackToList, sbRailModel, sbRailPaint,
   sbGo, sbLoad, sbShow, sbSyncStage,
-  sbSetStage, sbRenderPlan, sbRenderRemaining, sbAddShot,
+  sbSetStage, sbPlayBoard, sbSetShotView, sbGridTileOpen, sbRenderPlan, sbRenderRemaining, sbAddShot,
   sbTitleSave, sbRenderDrafts, sbFinish, sbRewrite,
   sbStopShot, sbStopFilm, sbExport, sbFilmOpen,
   sbSetRenderMode, sbSetAspect, sbEnhanceConcept, sbClearQueueToPlan, sbRenderImages, sbConvertShotToVideo, sbConvertAllToVideo,
+  sbMusicVideoBlock, sbFilmWithTheSong,
   sbFilmPaint, sbBoardChip, sbRowAction, sbAddActiveToBoard,
   sbOpenFromClip, sbPollHook,
   // inline-handler targets: generated markup resolves these through the
   // global scope (the v4.9.0 regression, PR #69)
   sbDeleteBoard, sbFilmReveal, sbFilmSelect, sbFixError,
   sbOpenShotClip, sbPickCast, sbScrollToShot,
+  sbFilterBoardList, sbRenameBoardStart, sbDuplicateBoard,
 });

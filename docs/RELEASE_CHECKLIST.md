@@ -8,6 +8,17 @@ have shipped broken (gated model needing a token, mflux not bundled, the missing
 upscaler "mosaic", the scary pip dependency block) were invisible on a warm dev
 box and only showed up from zero.
 
+> **Before any release, read the `phosphene-release` skill**
+> (`~/.claude/skills/phosphene-release/SKILL.md`). This file owns the **gates**;
+> that one owns the **environment** — what Pinokio injects into every app it
+> launches, where `uv`/python/ffmpeg/git come from when Pinokio starts the app
+> versus when a human does, and the "launch it the way Pinokio launches it" gate.
+> It exists because v4.14.0 shipped music broken for nearly every user: Pinokio's
+> kernel exports `PYTORCH_ENABLE_MPS_FALLBACK=1` and YuE2 refuses to construct
+> with it set, while our hand-started panel never had it. **From zero is not
+> enough on its own** — a clean room started by hand has the same wrong
+> environment this dev box does.
+
 Run these BEFORE promoting `dev`/`beta` → public `main`. All must pass.
 
 ## 0. The mechanical gates, in one command
@@ -17,17 +28,48 @@ bash scripts/release_gates.sh          # everything (~2 min)
 bash scripts/release_gates.sh --fast   # skips the two slowest
 ```
 
+- **The gates need pytest in the repo venv** — users never do, so no install
+  pins it: `ltx-2-mlx/env/bin/python -m pip install pytest`. Without it the
+  pytest-style suites are a loud SKIP, never a pass.
+- **The gates need a real install, not a bare clone.** `ltx-2-mlx/` (the
+  vendored engine and its venv) is gitignored and created by `install.js`, and
+  the registry gate reads the weights under `mlx_models/`. Run them inside an
+  installed Phosphene (or a worktree whose `ltx-2-mlx` and `mlx_models` point
+  at one); a fresh `git clone` cannot run them.
+
 It runs every check on this page that a command can run — `py_compile`, the
 three `node` gates, `assert_registry`, `assert_schedules`, `check_output_codec`
-(§3a), the whole root `test_*.py` sweep, and `scripts/test_*.py` **through
-pytest** (three of those suites are pytest-style; `python -m unittest` collects
-zero tests from them and prints a green "Ran 0 tests / OK" that asserts
-nothing). It prints a PASS/FAIL/SKIP table and exits non-zero on any failure.
+(§3a), the whole root `test_*.py` sweep, and `scripts/test_*.py` — every
+pytest-style file (module-level `def test_*`) **through pytest**, because
+`python -m unittest` collects zero tests from those and prints a green "Ran 0
+tests / OK" that asserts nothing. Each suite runs in its own empty state/
+outputs/uploads sandbox. It prints a PASS/FAIL/SKIP table, lists every test
+skipped inside a passing suite, and exits non-zero on any failure.
 **A SKIP is not a PASS** — it means the gate could not run.
+
+**Key every public step on the runner's exit code, explicitly.** On 2026-09-08 a
+release chain written as `set -e; …; [ "$G" = "0" ]; git push …` ran straight
+through a red gate (one UI test) and 4.12.2 went out with a failing test in its
+tree. `set -e` is not a gate. Write `if [ "$G" != "0" ]; then exit 1; fi` right
+after the gate line, or chain every public step with `&&` from that test onward.
 
 This does NOT replace the sections below. From-zero, the Ideogram eyeball, the
 smoke renders, the weight mirror and the update-path gate all need a human and
 a real machine.
+
+## Music — from-zero install and listening gate
+
+- [ ] On a fresh Pinokio install with empty music weights and no cached HF
+  files, use **Install the music engine (YuE2, ~11 GB)**. Verify the isolated
+  Python 3.12 venv, pinned checkout, frozen sync, resumable staged downloads,
+  full SHA-256 check and clean generator tree. Open Audio → Compose, make a
+  real song, play its WAV, inspect the sidecar and credit, and use **Drive
+  video** without an automatic submission. Test Stop, Repair with weights
+  kept, and Update's offline check. Record memory and timing at Draft/Final;
+  the ETA table stays unmeasured until receipts exist. The owner's listening
+  verdict and explicit ship instruction are required. YuE2: the owner ordered
+  the ship on 2026-09-17 (v4.14.0); the real 10.5 GB download on a clean Mac is
+  still unrun.
 
 ## 1. Ideogram — from-zero render gate (the one that keeps biting us)
 
@@ -138,6 +180,37 @@ Exit 0 on both. For a DiT pack, finish with a real loader round-trip on the
 reassembled transformer (`verify_load_ltx_dit` in `scripts/quantize_ltx.py`) —
 sha256 proves the bytes arrived, only the loader proves they are a model.
 
+## 3c. Fleet timings — rebuild before every release
+
+Owner ruling (2026-09-29): every time estimate in the panel should be built
+from what the fleet's own installs actually measured, not just the
+chip-factor cost model. `data/fleet_timings.json` (committed) is a
+snapshot, not live — it goes stale the moment new render_completed events
+land, so it is rebuilt as part of cutting a release, not on some separate
+schedule:
+
+```
+python3 scripts/fleet_timings_build.py
+```
+
+Needs a PostHog personal API key in Settings -> analytics_query_key on the
+Mac running it (the maintainer's own dev panel already has one — see
+`~/pinokio/api/phosphene-dev.git/state/panel_settings.json`, read-only, the
+key is never printed or committed). Queries the last 75 days of
+`render_completed` events, excludes the maintainer's own install by
+`distinct_id`, and writes three levels of real p25/p50/p75 wall-clock data
+(cell / chip family / model-wide) to `data/fleet_timings.json`. Users'
+own panels never query PostHog themselves — they only read the committed
+table, the same way every other bundled data file ships.
+
+Diff the rebuilt file before committing — a release that ran during an
+outage, or against a key that lost access, should not silently ship a
+near-empty table. `test_fleet_timings.py`'s
+`test_the_real_shipped_table_loads_without_raising` is a structural
+sanity check only (schema + the three level names); it cannot catch a
+table that is technically valid but thin, because real data changes every
+rebuild and a value assertion there would fail on the next honest run.
+
 ## 4. Version + compile
 
 ```
@@ -214,15 +287,46 @@ The promote is: build the tree you want to publish, remove what must not go
 public, commit that tree onto `origin/main` with `commit-tree`, **verify the
 result before it is pushed**, then push exactly one commit.
 
+**`scripts/public_exclude.txt` is the single source of truth for "must never
+ship".** It exists because `docs/STATE.md` — the internal dev/agent handoff
+doc — shipped on public `main` since the very first commit that added it:
+beta and public were tree-identical, so nothing had ever actually curated
+this step. `scripts/public_leak_check.py <tree-ish>` reads that same file
+(so the removal list in step 1 and the verification in step 3 cannot drift
+apart) and additionally scans the whole tree's *content* against a private
+pattern list kept OUTSIDE the public tree (`scripts/public_leak_patterns.txt`
+— also on the exclude list, and separately hard-checked by the script: it
+would defeat the point to ship the very strings it exists to catch). The
+checker refuses to run its content check at all if that list is missing —
+fails closed, never a silent PASS — so a public checkout of the script can
+still verify paths but cannot claim to have done the content check. Both
+mechanisms are wired into the recipe below — run the leak check before every
+push, not just when you remember to.
+
 ```
 git fetch origin
 
 # 1. stage dev's tree, then remove what public main does not carry
 git read-tree --empty
 git read-tree <DEV-SHA>
-git rm --cached -q <scratch paths>        # currently: the dev-only scratch
-                                          # test files not on main — diff first,
-                                          # never guess this list
+# scripts/public_exclude.txt is the ONE list of what must never ship
+# (docs/STATE.md, the leak-check's own pattern list, plus anything else
+# added there) — it is also what public_leak_check.py verifies in step 3,
+# so the two can't drift apart. A while-read loop, not a command
+# substitution splatted into `git rm --cached`: under zsh, unquoted
+# command substitution does NOT word-split on the newline between paths
+# (bash does), so `git rm --cached -q $(cat ...)` silently hands the
+# WHOLE multi-line list to git as one bad pathspec and removes nothing —
+# bitten once already building v4.17.2's snapshot, caught only because
+# the leak-check then reported the paths still present.
+while IFS= read -r p; do
+    [ -z "$p" ] && continue
+    case "$p" in \#*) continue ;; esac
+    git rm --cached -q -- "$p"
+done < scripts/public_exclude.txt
+# If a release needs a ONE-OFF removal on top of that (a dev-only scratch
+# test file not meant to become permanently excluded), `git rm --cached -q`
+# it separately here — diff first, never guess that list.
 TREE=$(git write-tree)
 
 # 2. one snapshot commit, parented on public main
@@ -230,6 +334,9 @@ COMMIT=$(git commit-tree "$TREE" -p origin/main \
     -m "release(vX.Y.Z): <the release headline>")
 
 # 3. LEAK-VERIFY before pushing — this is the step that cannot be skipped
+python3 scripts/public_leak_check.py "$COMMIT"   # exit 0 = no excluded path,
+                                          # no banned private pattern, anywhere
+                                          # in the tree — MUST pass before continuing
 git diff --stat origin/main "$COMMIT"     # read EVERY path; expect only this
                                           # release's changes
 diff <(git ls-tree -r --name-only "$COMMIT" | sort) \
@@ -247,6 +354,31 @@ Reminders that bit before: the git index is shared, so `read-tree`/`rm --cached`
 leaves it staging the promote tree — reset it when you are done. And any weight
 pack published for this release must be tagged on the **public main commit you
 just pushed** (§3b), which means the packs go up *after* step 4, not before.
+
+## 6. Announce on Pinokio — part of every release
+
+A release is not done until its Pinokio post is live and the post's URL is in
+the release report. Owner, 2026-08-05 and again 2026-09-13: "This should be
+part of the protocol for releases."
+
+- **Check the login BEFORE promoting.** Open the app page on pinokio.co in the
+  owner's Chrome. A **Log in** link in the header means the session dropped:
+  tell the owner at once, so he signs in while the gates run. Never type
+  credentials on his behalf.
+- **Enter through the app page's Post button** (owner-only, top right).
+  Navigating straight to `/posts/new` bounces and can drop the session.
+- **Size the post to the release.** x.y.Z: a short text post (headline title,
+  4–6 bullets in user language, credit the reporters, link the release).
+  x.Y.0: media-rich, with a hero image or clip made from real Phosphene output,
+  screenshots of the new surface, and the fuller story.
+- **Paste ASCII only** (straight quotes, `-` instead of dashes). Non-ASCII
+  mojibakes through the clipboard paste.
+- **Media goes in through the composer's own file input**, so it lands on
+  Pinokio's CDN before publishing.
+- **Publish → Review → pick the feed cover → Publish.** Write the post URL into
+  the release's `docs/STATE.md` entry.
+- **Missed a release?** The next post covers every unannounced version, one
+  section each.
 
 ---
 

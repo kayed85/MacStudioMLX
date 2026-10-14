@@ -175,6 +175,43 @@ def test_take_runner_chains_parts_and_joins(tmp_path, monkeypatch):
     assert [f for f, flag in hidden if flag] == side["take"]["parts"]
 
 
+def test_take_runner_records_each_parts_seed(tmp_path, monkeypatch):
+    # VA-28: a random parent seed (-1) drew a fresh random seed per part with
+    # nothing recorded anywhere, so Load Params on a random-seed take could
+    # not reproduce it. Each part's REAL seed_used (as run_job_inner/
+    # run_h3_job_inner already stamp on the child's own params) now lands in
+    # take.parts_meta.
+    out_dir = tmp_path / "out"; out_dir.mkdir()
+    monkeypatch.setattr(p, "OUTPUT", out_dir)
+    monkeypatch.setattr(p, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(p, "set_hidden", lambda *a, **k: None)
+    seen = []
+
+    def fake_h3(child):
+        seen.append(child)
+        out = out_dir / f"{child['id']}.mp4"
+        _tiny_clip(out, "red" if len(seen) == 1 else "blue")
+        (out_dir / f"{child['id']}.mp4.json").write_text(json.dumps({"width": 64, "height": 64, "seed": 5}))
+        child["output_path"] = str(out)
+        # The real code path stamps this on the SAME params dict the take
+        # runner holds a reference to (mlx_ltx_panel.py:29052 and siblings).
+        child["params"]["seed_used"] = 1000 + len(seen)
+    monkeypatch.setattr(p, "run_h3_job_inner", fake_h3)
+    monkeypatch.setattr(p, "take_drift", lambda *a, **k: {"ok": True, "delta": 0.0, "drifted": False})
+    j = p.make_job({"mode": "t2v", "engine": "h3", "prompt": "a hen skates", "take_seconds": "30",
+                    "beats": json.dumps(["b1", "b2", "b3", "b4", "b5", "b6"]), "seed": "-1",
+                    "preset_label": "ride"})
+    p.run_take_job_inner(j)
+    final = Path(j["output_path"])
+    side = json.loads(final.with_suffix(final.suffix + ".json").read_text())
+    parts_meta = side["take"]["parts_meta"]
+    assert [m["seed_used"] for m in parts_meta] == [1001, 1002]
+    # Load Params (oneshot.js) restores the FIRST part's seed as the take's
+    # own Seed field when the parent seed was random (-1).
+    assert side["params"]["seed"] == "-1"
+    assert side["params"]["take"]["parts_meta"][0]["seed_used"] == 1001
+
+
 def test_take_runner_stops_between_parts(tmp_path, monkeypatch):
     out_dir = tmp_path / "out"; out_dir.mkdir()
     monkeypatch.setattr(p, "OUTPUT", out_dir)
@@ -186,7 +223,7 @@ def test_take_runner_stops_between_parts(tmp_path, monkeypatch):
         job["cancel_requested"] = True                # Stop pressed during part 1
     monkeypatch.setattr(p, "run_h3_job_inner", fake_h3)
     job = p.make_job({"mode": "t2v", "engine": "h3", "prompt": "x", "take_seconds": "30"})
-    with pytest.raises(RuntimeError, match="stopped"):
+    with pytest.raises(RuntimeError, match="(?i)stopped"):
         p.run_take_job_inner(job)
 
 

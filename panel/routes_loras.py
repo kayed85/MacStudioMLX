@@ -570,11 +570,47 @@ def post_civitai_download(h, path, qs, ctype) -> None:
         meta = P.json.loads(meta_raw) if meta_raw else {}
     except P.json.JSONDecodeError:
         meta = {}
+    # 4.18.0: an optional browser-chosen token names this download so the
+    # card can show its progress and cancel it (/civitai/download/state,
+    # /civitai/download/cancel). Without one it runs exactly as before.
+    token = P.civitai_dl_token(form.get("token", [""])[0] if isinstance(form.get("token"), list)
+                               else form.get("token", ""))
+    P.civitai_dl_begin(token, meta.get("name") if isinstance(meta, dict) else "")
     try:
-        result = P._civitai_download(url, meta)
+        result = P._civitai_download(url, meta, token=token)
         h._json({"ok": True, **result})
+    except P.CivitaiDownloadCancelled as exc:
+        h._json({"ok": False, "cancelled": True, "error": str(exc)})
     except Exception as exc:
         h._json({"ok": False, "error": str(exc)}, 400)
+    finally:
+        P.civitai_dl_end(token)
+
+
+@get("/civitai/download/state")
+def get_civitai_download_state(h, parsed) -> None:
+    token = P.civitai_dl_token((P.parse_qs(parsed.query).get("token") or [""])[0])
+    st = P.civitai_dl_state(token) if token else None
+    if not st:
+        h._json({"ok": False, "state": "unknown"}, 404)
+        return
+    st.pop("cancel", None)
+    h._json({"ok": True, **st})
+
+
+@post("/civitai/download/cancel")
+def post_civitai_download_cancel(h, path, qs, ctype) -> None:
+    _rb = h._read_form_body()
+    if _rb is None:
+        return
+    body, form = _rb
+    raw = form.get("token", [""])
+    token = P.civitai_dl_token(raw[0] if isinstance(raw, list) else raw)
+    if not token or not P.civitai_dl_cancel(token):
+        h._json({"ok": False, "error": "That download is not running."}, 404)
+        return
+    P.push("[civitai] cancel requested")
+    h._json({"ok": True})
 
 
 # H3 LoRA import. This is deliberately a separate endpoint from

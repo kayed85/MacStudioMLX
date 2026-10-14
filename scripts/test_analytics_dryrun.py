@@ -329,8 +329,8 @@ class TestNoLeakage(AnalyticsTestCase):
     PROMPT = ("a weathered lighthouse keeper bizarrotrn turns toward camera, "
               "storm light raking his face")
     NEG = "blurry, extra fingers, watermark"
-    IMG = "/Users/salo/Desktop/private-photos/keeper-reference.png"
-    OUT = "/Users/salo/pinokio/drive/mlx_outputs/20260805_lighthouse_final.mp4"
+    IMG = "/Users/jane/Desktop/holiday-pics/keeper-reference.png"
+    OUT = "/Users/jane/pinokio/drive/mlx_outputs/20260805_lighthouse_final.mp4"
 
     def setUp(self):
         super().setUp()
@@ -353,7 +353,7 @@ class TestNoLeakage(AnalyticsTestCase):
         """No fragment of the user's content in ANY transmitted byte."""
         blob = self.spy.raw() + json.dumps(self.log_lines())
         for needle in (self.PROMPT, self.NEG, self.IMG, self.OUT,
-                       "lighthouse", "keeper-reference", "private-photos",
+                       "lighthouse", "keeper-reference", "holiday-pics",
                        "bizarrotrn", "/Users/", "Desktop", "mlx_outputs",
                        ".mp4", ".png"):
             self.assertNotIn(needle, blob,
@@ -407,7 +407,7 @@ class TestNoLeakage(AnalyticsTestCase):
         """Defense in depth: a future `**params` spread must not leak."""
         dirty = {
             "prompt": self.PROMPT, "image": self.IMG, "output_path": self.OUT,
-            "filename": "secret.mp4", "username": "salo", "lora_paths": [self.IMG],
+            "filename": "secret.mp4", "username": "jane", "lora_paths": [self.IMG],
             "engine": "ltx", "frames": 121,
         }
         clean = P._analytics_clean_props(dirty)
@@ -425,14 +425,14 @@ class TestNoLeakage(AnalyticsTestCase):
         self.assertLessEqual(len(long), P.ANALYTICS_STR_MAX)
 
     def test_scrub_strips_home_and_tilde_paths(self):
-        for raw in ("could not open /Users/salo/AI/notes.txt",
+        for raw in ("could not open /Users/jane/AI/notes.txt",
                     "missing ~/pinokio/api/phosphene.git/models/x.safetensors",
                     "bad /private/var/folders/t3/zz/T/render.mp4",
                     "nested /a/b/c/d/e.bin"):
             out = P._analytics_scrub_text(raw)
             self.assertIn("<path>", out, raw)
             self.assertNotIn("/Users/", out)
-            self.assertNotIn("salo", out)
+            self.assertNotIn("jane", out)
 
     def test_short_secrets_do_not_blank_ordinary_words(self):
         """A 3-char 'prompt' must not turn every error into <redacted>."""
@@ -549,6 +549,42 @@ class TestEventSchemas(AnalyticsTestCase):
         self.assertNotIn("error_fingerprint", p)
         self.assertEqual(p["audio_mode"], "h3_native")
 
+    def test_image_ref_paths_with_spaces_never_reach_the_signature(self):
+        """Codex UI-02: the image job's `refs` array was not in the secret
+        list and the path regex stops at whitespace, so a failed image job
+        sent "<path> Client Portrait.png"."""
+        from unittest import mock
+        self.configure(analytics_first_render_reported=True)
+        ref = "/Volumes/Photos/Private Client Portrait.png"
+        uni = "/Volumes/写真/秘密 の 顧客.png"
+        cases = [
+            (f"ref image not found: {ref}", {"refs": [ref]}),
+            (f"ref image not found: {uni}", {"refs": [{"path": uni}]}),
+            ("ref image not found: Private Client Portrait.png", {"refs": [ref]}),
+        ]
+        for err, extra in cases:
+            self.spy.bodies.clear()
+            P._analytics_render_event({
+                "status": "failed", "error": err, "elapsed_sec": 5.0,
+                "params": dict({"mode": "image", "engine": "mflux",
+                                "prompt": "x"}, **extra)})
+            drain()
+            sig = self.props_of("render_failed")["error_signature"]
+            for frag in ("Private", "Client", "Portrait", "秘密", "顧客", "写真"):
+                self.assertNotIn(frag, sig, (err, sig))
+        # an install root with a space in it
+        root = Path("/Users/someone/My Apps/phosphene.git")
+        with mock.patch.object(P, "ROOT", root), mock.patch.object(P, "UPLOADS", root / "panel_uploads"):
+            self.spy.bodies.clear()
+            P._analytics_render_event({
+                "status": "failed", "elapsed_sec": 5.0,
+                "error": f"ref image not found: {root}/panel_uploads/1700_face.png",
+                "params": {"mode": "image", "engine": "mflux", "prompt": "x"}})
+            drain()
+            sig = self.props_of("render_failed")["error_signature"]
+            self.assertNotIn("Apps", sig, sig)
+            self.assertNotIn("someone", sig, sig)
+
     def test_unknown_error_ships_class_other_plus_fingerprint(self):
         self.configure(analytics_first_render_reported=True)
         P._analytics_render_event({
@@ -620,7 +656,15 @@ class TestEventSchemas(AnalyticsTestCase):
             "ffmpeg exited 1": "export_failed",
             "prompt required": "bad_params",
             "phase timed out after 300s": "timeout",
-            "cancel requested, landing as failed": "cancelled_race",
+            # A cancel race in the words the panel actually raises. This
+            # fixture used to read "cancel requested, landing as failed" and
+            # passed against a bare "cancel" needle — which also claimed every
+            # unrelated message with the word in it (see the negative below).
+            "H3 render stopped early at the next forward boundary":
+                "cancelled_race",
+            "cancelled by /stop (rc=-9)": "cancelled_race",
+            "stopped before the join": "cancelled_race",
+            "torch autograd cancellation hook raised": "other",
             "some brand new exploding thing": "other",
             # REFUSALS WIN OVER EVERYTHING. Each of these used to land as
             # `other` — the first one was the single largest render_failed
@@ -691,7 +735,10 @@ class TestEventSchemas(AnalyticsTestCase):
                           # v4.9: the stale-vendored-engine gate (a 2.5 render
                           # on an engine predating the Gemma 4 tower is
                           # refused with the two-Update-clicks remedy).
-                          "stale_engine"])
+                          "stale_engine",
+                          # 4.17.x: Lip-sync "Listen to the voice only" on an
+                          # install without vocal separation (install prompt).
+                          "vocal_separator"])
         self.assertEqual(len(set(P._ANALYTICS_REFUSAL_SLUGS)),
                          len(P._ANALYTICS_REFUSAL_SLUGS))
         # `refused` is a real member of the closed error taxonomy, and its
@@ -958,7 +1005,11 @@ class TestReceiverDirectives(AnalyticsTestCase):
     def fire_every_event(self) -> dict[str, dict]:
         """One of each event the panel can emit → {event: properties}."""
         packs = dict(P._analytics_pack_state())
-        self.configure(analytics_last_packs=dict(packs, h3=not packs["h3"]))
+        # install_step is once-per-step-per-install BY DESIGN, and that memory
+        # lives in settings — which outlives a single test inside one process.
+        # A fresh install is the state this fixture is describing.
+        self.configure(analytics_last_packs=dict(packs, h3=not packs["h3"]),
+                       analytics_install_steps={})
         P._analytics_boot()      # app_installed + app_boot + pack_state_change
         P._analytics_render_event({
             "status": "done", "elapsed_sec": 120.0,
@@ -980,6 +1031,15 @@ class TestReceiverDirectives(AnalyticsTestCase):
         P._analytics_capture("queue_paused_breaker", {"n_failed": 3, "queued": 2,
                                                        "error_class": "model_missing",
                                                        "version": "4.9.7"})
+        # v4.16.0 funnel events. install_step is once-per-step-per-install by
+        # design, and _analytics_boot() above already spent `first_boot`,
+        # `engine_env` and `weights_check` on this fixture install — so the
+        # step fired here is the one the worker owns.
+        P._analytics_install_step("first_queue", "started")
+        P._analytics_update_outcome("restart_pending", "failed", "4.15.0")
+        # v4.17.4: one separator install outcome, the closed words only.
+        P._analytics_separator_install("failed", "update", "pip_failed",
+                                       ready=False, weights=False)
         # A refusal: the panel declining on purpose. Fired here for the same
         # reason as the rest — its payload has to carry the receiver
         # directives too, and it is the newest way to get an event out.
@@ -1006,56 +1066,59 @@ class TestReceiverDirectives(AnalyticsTestCase):
                 {k: props.get(k) for k in P._ANALYTICS_RECEIVER_DIRECTIVES},
                 dict(P._ANALYTICS_RECEIVER_DIRECTIVES),
                 f"{event} reached the wire without the directives intact")
-            self.assertIs(props["$geoip_disable"], True,
-                          f"{event} would be geolocated by the receiver")
             self.assertIs(props["$process_person_profile"], False,
                           f"{event} would build a person profile")
 
-    def test_no_location_property_is_sent_or_invited(self):
-        """We add no location field, and $geoip_disable is the only $geoip_*
-        key that may appear — everything else in that namespace is something
-        the receiver would have derived."""
+    def test_the_panel_still_sends_no_location_field_of_its_own(self):
+        """The receiver derives country and city from the connecting address
+        (deliberate, 2026-09-19). The PANEL still names no place: it reads no
+        locale, no timezone, no coordinates off this Mac, and it puts nothing
+        in the $geoip_* namespace. That distinction is the whole Location
+        section of docs/ANALYTICS.md — a derived country is a fact about a
+        connection, a sent one would be a fact this program went looking for."""
         for event, props in self.fire_every_event().items():
-            geo = sorted(k for k in props
-                         if k.startswith("$geoip_") and k != "$geoip_disable")
+            geo = sorted(k for k in props if k.startswith("$geoip_"))
             self.assertEqual(geo, [], f"{event} carried location data: {geo}")
         raw = self.spy.raw().lower()
         for word in ("country", "city", "latitude", "longitude", "timezone",
                      "time_zone", "subdivision", "locale", "continent"):
             self.assertNotIn(word, raw, f"a payload mentions {word!r}")
 
-    def test_the_ip_placeholder_is_truthy_and_not_a_spoof_trigger(self):
-        """Both ways of writing this so that it does nothing.
+    def test_no_ip_property_is_sent_so_the_receiver_can_resolve_one(self):
+        """The reversal that is easiest to make by accident.
 
-        PostHog's ingest fills properties.$ip from the socket only when the
-        event did not bring one — `if (!properties['$ip'] && event.ip)`. Any
-        falsy value (None, "", 0) is therefore not suppression, it is the
-        default with extra steps, and the real address lands on the event
-        anyway. Separately, the GeoIP transformation rewrites 127.0.0.1 and
-        192.168.* to a real address in Sweden as a local-dev convenience, so
-        a loopback placeholder would manufacture a location the day the
-        disable flag got dropped. Hence: truthy, and neither of those."""
-        ip = P.ANALYTICS_IP_PLACEHOLDER
-        self.assertIsInstance(ip, str)
-        self.assertTrue(ip, "a falsy $ip is silently replaced by the real one")
-        self.assertNotEqual(ip, "127.0.0.1")
-        self.assertFalse(ip.startswith("192.168."))
-        P._analytics_capture("app_boot", {"version": "3.7.0"})
-        drain()
-        self.assertEqual(self.spy.bodies[0]["properties"]["$ip"], ip,
-                         "the placeholder never reached the wire")
+        From 2026-08-12 every event carried `$ip: "0.0.0.0"` to keep the
+        connecting address off the stored event. PostHog's GeoIP step reads
+        `properties.$ip`, so that placeholder did not just hide the address —
+        it emptied the country and city columns, which is what the fleet view
+        needs. Sending ANY `$ip` brings that back: 0.0.0.0 resolves to nothing,
+        127.0.0.1 and 192.168.* are rewritten to a real address in Sweden as a
+        local-dev convenience and would invent a location outright. So: no $ip
+        at all, and the address is discarded after enrichment by the project's
+        own *Discard client IP data* setting."""
+        self.assertNotIn("$ip", P._ANALYTICS_RECEIVER_DIRECTIVES)
+        self.assertNotIn("$geoip_disable", P._ANALYTICS_RECEIVER_DIRECTIVES)
+        for event, props in self.fire_every_event().items():
+            self.assertNotIn("$ip", props,
+                             f"{event} sent an $ip, so it will have no country")
 
-    def test_a_call_site_cannot_override_a_directive(self):
-        """The directives are spread last for this reason. A props dict is
-        built from job params in places this module does not own."""
-        P._analytics_capture("app_boot", {"$geoip_disable": False,
-                                          "$ip": "203.0.113.7",
+    def test_a_call_site_cannot_reach_the_receiver_namespace(self):
+        """The directives are spread last for this reason, and a props dict is
+        built from job params in places this module does not own. While the
+        directives occupied $ip and $geoip_disable, spreading last was enough;
+        now that they don't, _analytics_clean_props drops the whole $ namespace
+        instead — a stray "$ip" would spoof the address the GeoIP step reads
+        and a stray "$geoip_city_name" would invent a location."""
+        P._analytics_capture("app_boot", {"$ip": "203.0.113.7",
+                                          "$geoip_disable": True,
+                                          "$geoip_city_name": "Atlantis",
                                           "$process_person_profile": True})
         drain()
         props = self.spy.bodies[0]["properties"]
-        self.assertIs(props["$geoip_disable"], True)
         self.assertIs(props["$process_person_profile"], False)
-        self.assertEqual(props["$ip"], P.ANALYTICS_IP_PLACEHOLDER)
+        self.assertNotIn("$ip", props)
+        self.assertNotIn("$geoip_disable", props)
+        self.assertNotIn("$geoip_city_name", props)
 
     def test_the_local_mirror_records_only_our_own_properties(self):
         """The directives are transport, not data: state/usage-log.jsonl is
@@ -1093,7 +1156,7 @@ class TestUsageReport(AnalyticsTestCase):
         ])
         r = P._usage_local_report()
         self.assertEqual(r["source"], "local")
-        self.assertEqual(r["tiles"]["renders_7d"], 3)
+        self.assertEqual(r["tiles"]["renders_in_range"], 3)
         self.assertAlmostEqual(r["tiles"]["h3_share_pct"], 33.3, places=1)
         self.assertAlmostEqual(r["tiles"]["error_rate_pct"], 33.3, places=1)
         self.assertEqual(r["top_errors"], [{"signature": "OOM during decode", "count": 1}])
@@ -1104,7 +1167,7 @@ class TestUsageReport(AnalyticsTestCase):
     def test_refusals_are_outside_every_render_number(self):
         """The whole point, expressed as arithmetic. Two completed, one
         failed, three refused: the error rate is 1-in-3, not 1-in-6, and
-        `renders_7d` is 3, not 6. Getting this wrong is what made the
+        `renders_in_range` is 3, not 6. Getting this wrong is what made the
         published failure rate wrong in the first place."""
         now = time.time()
         self.seed([
@@ -1122,12 +1185,12 @@ class TestUsageReport(AnalyticsTestCase):
              "props": {"engine": "h3", "refusal": "h3_ram"}},
         ])
         r = P._usage_local_report()
-        self.assertEqual(r["tiles"]["renders_7d"], 3)
+        self.assertEqual(r["tiles"]["renders_in_range"], 3)
         self.assertAlmostEqual(r["tiles"]["error_rate_pct"], 33.3, places=1)
         # Not in the engine mix either — no engine ran.
         self.assertAlmostEqual(r["tiles"]["h3_share_pct"], 33.3, places=1)
         # Counted, loudly, in their own place.
-        self.assertEqual(r["tiles"]["refusals_7d"], 3)
+        self.assertEqual(r["tiles"]["refusals_in_range"], 3)
         self.assertEqual(r["top_refusals"], [
             {"refusal": "ingredients_generation", "count": 2},
             {"refusal": "h3_ram", "count": 1}])
@@ -1140,12 +1203,12 @@ class TestUsageReport(AnalyticsTestCase):
         self.seed([{"event": "render_completed", "ts": old, "at": "x",
                     "props": {"engine": "ltx"}}])
         r = P._usage_local_report()
-        self.assertEqual(r["tiles"]["renders_7d"], 0)
+        self.assertEqual(r["tiles"]["renders_in_range"], 0)
 
     def test_empty_log_is_a_valid_report(self):
         r = P._usage_local_report()
         self.assertTrue(r["ok"])
-        self.assertEqual(r["tiles"]["renders_7d"], 0)
+        self.assertEqual(r["tiles"]["renders_in_range"], 0)
         self.assertIsNone(r["tiles"]["h3_share_pct"])
         self.assertEqual(r["top_errors"], [])
 

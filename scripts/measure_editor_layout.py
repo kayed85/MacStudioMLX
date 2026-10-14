@@ -425,8 +425,13 @@ def start_panel(work: Path, log: Path, verbose: bool) -> tuple[subprocess.Popen,
         "LTX_OUTPUT_DIR": str(work / "outputs"),
         "LTX_UPLOADS_DIR": str(work / "uploads"),
         # Nothing here should phone home or open a window.
+        # PHOSPHENE_NO_TELEMETRY is read by nothing; the panel's real switches
+        # are the two below, and without them a hand-run gate booted a panel
+        # that reported an app_boot to the fleet under a fresh install id.
         "LTX_NO_BROWSER": "1",
         "PHOSPHENE_NO_TELEMETRY": "1",
+        "PHOSPHENE_ANALYTICS_DISABLED": "1",
+        "PHOSPHENE_DISABLE_VERSION_CHECK": "1",
     })
     fh = log.open("wb")
     proc = subprocess.Popen(
@@ -697,6 +702,51 @@ JS_MEASURE = r"""
   out.still_visible = on(still);
   out.stage_layers_both_visible = on(video) && on(still);
 
+  // THE TWO MONITORS (round 2). The Source monitor is on screen by default
+  // and both pictures must be 16:9 — the first cut of this layout let the
+  // Program column's bar squeeze the Source picture to 499x315. The View
+  // group must hold its five buttons on the header's one row (header_rows).
+  const box = (e) => { if (!e || e.offsetParent === null) return null;
+    const r = e.getBoundingClientRect(); return { w: num(r.width), h: num(r.height) }; };
+  const srcMon = el('sbeSrcMon');
+  out.source_shown = !!(srcMon && !srcMon.hidden && srcMon.offsetParent !== null);
+  // FILM-37: EMPTY IS NOT A PICTURE. The Source monitor now collapses to a
+  // narrow rail (class is-empty) while nothing is loaded, rather than
+  // holding the full 16:9 box open on every boot — so "on screen by
+  // default" no longer means "16:9 by default"; it means "16:9 once
+  // something is actually loaded into it, collapsed otherwise." Both are
+  // asserted below, on this flag.
+  out.source_empty = !!(srcMon && srcMon.classList.contains('is-empty'));
+  out.program_box = box(el('sbeStage'));
+  out.source_box = box(el('sbeSrcStage'));
+  out.source_mon_box = box(srcMon);
+  out.view_buttons = document.querySelectorAll('#sbeView .sbe-vbtn').length;
+
+  // FILM-37: THE INSPECTOR, OPENED, MEASURED, PUT BACK. Below 1600px it is a
+  // fixed drawer that costs the row no width at all (the whole point — at
+  // 1366-1440px the shared-flex rail measured about 210px and clipped the
+  // "2x" speed control inside it); at and above 1600px it is an ordinary
+  // column again. Opened explicitly rather than trusting whatever
+  // `phos_sbe_inspect` a fresh profile happens to default to — a gate that
+  // sometimes measures a hidden rail is a gate that sometimes measures
+  // nothing.
+  try {
+    if (typeof sbeInspectSet === 'function') sbeInspectSet(true);
+  } catch (e) { out.errors.push('sbeInspectSet threw: ' + e); }
+  await settle();
+  const rail = el('sbeRail');
+  // NOT box()'s own offsetParent guard: a `position: fixed` element (the
+  // drawer, below 1600px) reports offsetParent === null in every engine —
+  // that is fixed positioning working as specified, not the rail being
+  // hidden, and box() would silently read it as absent.
+  out.rail_shown = !!(rail && !rail.hidden
+                     && getComputedStyle(rail).display !== 'none');
+  out.rail_position = rail ? getComputedStyle(rail).position : null;
+  out.rail_box = (rail && out.rail_shown)
+    ? (() => { const r = rail.getBoundingClientRect();
+               return { w: num(r.width), h: num(r.height) }; })()
+    : null;
+
   // Put it back, so the next width does not start from a forced state.
   try {
     if (window.SBE) SBE.dirty = false;
@@ -719,6 +769,11 @@ JS_HANDLES = r"""
   const out = { blocks: {}, errors: [] };
 
   if (typeof sbeTlSet !== 'function') { out.errors.push('sbeTlSet missing'); return out; }
+  // THE HANDLES THIS GATE MEASURES LIVE ON THE SOUND LANES, which are thin
+  // strips in picture mode (the default) — a grip inside an 18px strip is not
+  // the control this gate is about. Sound mode, through the app's own writer,
+  // is how a user gets them at full height.
+  if (typeof sbeSoundModeSet === 'function') sbeSoundModeSet(true, { quiet: true });
   sbeTlSet(%(tl)s);
   if (typeof sbePaint === 'function') sbePaint();
   await settle();
@@ -911,6 +966,53 @@ def check(width: int, m: dict) -> list[str]:
                    f"(scrollHeight {m.get('timeline_scroll_height')} vs "
                    f"clientHeight {m.get('timeline_client_height')}, "
                    f"floor {m.get('timeline_floor_h')})")
+
+    if not m.get("stacked"):
+        if m.get("source_shown") is not True:
+            bad.append(f"{w}: the Source monitor is not on screen by default")
+        pb = m.get("program_box") or {}
+        if not pb.get("h"):
+            bad.append(f"{w}: program_box not measured")
+        elif abs(pb["w"] / pb["h"] - 16 / 9) > 0.02:
+            bad.append(f"{w}: program_box {pb['w']}x{pb['h']} is not 16:9")
+        # FILM-37: the Source monitor is 16:9 once something is loaded into
+        # it, and a narrow ~64px rail while it is empty — which is the
+        # default boot state this script measures, so the collapsed width
+        # is checked here rather than the aspect ratio a picture nobody
+        # loaded was never going to have.
+        sb = m.get("source_box") or {}
+        smb = m.get("source_mon_box") or {}
+        if m.get("source_empty"):
+            if not smb.get("w"):
+                bad.append(f"{w}: source_mon_box not measured")
+            elif abs(smb["w"] - 64) > 2:
+                bad.append(f"{w}: source_mon_box width {smb['w']} != 64 "
+                           f"while empty (collapsed rail)")
+        else:
+            if not sb.get("h"):
+                bad.append(f"{w}: source_box not measured")
+            elif abs(sb["w"] / sb["h"] - 16 / 9) > 0.02:
+                bad.append(f"{w}: source_box {sb['w']}x{sb['h']} is not 16:9")
+    if m.get("view_buttons") != 5:
+        bad.append(f"{w}: the View group has {m.get('view_buttons')} buttons, not 5")
+
+    # FILM-37: below 1600px the Inspector is a fixed drawer that costs the
+    # row no width (checked here); at and above it, an ordinary column.
+    if m.get("rail_shown") is not True:
+        bad.append(f"{w}: the Inspector did not open for measurement")
+    else:
+        rb = m.get("rail_box") or {}
+        pos = m.get("rail_position")
+        if width < 1600:
+            if pos != "fixed":
+                bad.append(f"{w}: the Inspector is {pos!r}, not a fixed "
+                           f"drawer, below 1600px")
+            if not rb.get("w") or rb["w"] < 300:
+                bad.append(f"{w}: the Inspector drawer is {rb.get('w')}px "
+                           f"wide, under the 300px floor")
+        elif pos == "fixed":
+            bad.append(f"{w}: the Inspector is still a fixed drawer at "
+                       f"{w}px, where there is room for an ordinary column")
 
     both = m.get("stage_layers_both_visible")
     if both is not False:

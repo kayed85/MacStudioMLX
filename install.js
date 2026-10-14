@@ -332,125 +332,24 @@ module.exports = {
     // measurement: moving mlx to 0.32.x while mflux stays at 0.18.0 makes the
     // step-7 mflux resolve walk mlx back DOWN to 0.31.2 — the broken one — on
     // every fresh install and every Update, silently.
+    //
+    // 4.17.4: THE COMMANDS LIVE IN scripts/pinokio/ltx_engine_env.sh NOW, in
+    // the same order with the same pins (mlx trio + transformers cap, the
+    // dependency pass, the --reinstall --no-deps pass that turns the
+    // workspace's editable links into real copies, mlx-vlm, the runtime
+    // extras - every reason above still applies, line for line). Moved for
+    // the fleet's `venv_broken` ("the engine venv has a Python but no
+    // packages", 18 installs in 30 days, nearly all at first boot): the script
+    // retries a dropped connection up to 3 times, VERIFIES the result the way
+    // the panel judges it (scripts/pinokio/engine_env_check.py: real package
+    // directories, and an import), and ends with "FATAL error:" when it cannot
+    // - so Install stops here, loudly, instead of downloading 37 GB into a
+    // venv that cannot render. And it is ONE step the panel's own "Repair
+    // engine" button can re-run alone, with no downloads and no venv rebuild.
     {
       method: "shell.run",
       params: {
-        path: "ltx-2-mlx",
-        message: [
-          // v2.0.3: log Python identity before each pip step. KTDS hit a
-          // silent missing-package install and we had nothing in the log
-          // to diagnose it. These echoes leave a paper trail of which
-          // interpreter is being targeted by --python env/bin/python.
-          "echo '=== install diagnostics: pip install ==='",
-          "env/bin/python --version || echo 'venv python NOT executable'",
-          "env/bin/python -c 'import sys; print(\"sys.executable:\", sys.executable); print(\"sys.path[0]:\", sys.path[0] if sys.path else None)'",
-          "echo '=== /diagnostics ==='",
-          // Force the mlx pin BEFORE installing ltx-* packages so their deps
-          // resolve to the pinned version instead of pulling latest 0.31.x.
-          //
-          // SHIP-BLOCKER (2026-07-10, GitHub #40/#38/#37/#33): also pin
-          // transformers <5.13.0. mlx-lm 0.31.1 declares `transformers>=5.0.0`
-          // with NO upper bound, so any fresh install after transformers 5.13.0
-          // dropped (~Jul 9) pulls 5.13.0 — which breaks mlx_lm.tokenizer_utils.
-          // EVERY generation then crashes with "'str' object has no attribute
-          // '__module__'": the Gemma text-encoder load silently no-ops ("done in
-          // 0.0s") → downstream "Model not loaded. Call load() first." Known-good:
-          // 5.7.0 (our validated build) and 5.12.x. Cap it on the SAME resolve as
-          // mlx-lm so the constraint sticks. Diagnosed by @saved-j + @xandreau.
-          //
-          // The Update path enforces this too — scripts/post_update.sh step 2b,
-          // a `require` (fatal) step. That sentence used to live here as "uv
-          // downgrades an already-installed 5.13.0 on the next Update" and was
-          // simply false for a month: nothing in the update path constrained
-          // transformers at all, so an existing 5.13.0 survived every Update and
-          // the install stayed unable to generate anything. A promise about
-          // another file now names the step that keeps it.
-          "uv pip install --python env/bin/python 'mlx==0.31.1' 'mlx-lm==0.31.1' 'mlx-metal==0.31.1' 'transformers>=5.0.0,<5.13.0'",
-          // Y3 — Train Character ships in 3.0. Without ltx-trainer-mlx in
-          // the venv, the trainer subprocess fails at `import yaml` because
-          // pyyaml is a transitive dep of ltx-trainer (declared in its
-          // pyproject). Codex pre-ship review 2026-05-18 caught this.
-          //
-          // `--build-constraints ../pip-build-constraints.txt` pins the wheel
-          // BUILD backend (hatchling<1.32). Upstream's three pyprojects all
-          // declare `readme = "../../README.md"` — a path outside the package
-          // dir — which hatchling 1.32.0 turned into a hard error
-          // ("Readme path must be within the project directory" →
-          // metadata-generation-failed). uv resolves the build backend fresh
-          // from PyPI into an isolated env, so from the day 1.32.0 shipped
-          // this step failed for every NEW install on every pinned tag. See
-          // pip-build-constraints.txt; update.js runs the same uv command
-          // (it used to spell it `PIP_CONSTRAINT=`, which modern pip ignores
-          // by design — one lane now, one failure mode).
-          "uv pip install --python env/bin/python --build-constraints ../pip-build-constraints.txt ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx ./packages/ltx-trainer",
-          // v4.0 — THE SECOND PASS IS THE POINT, and it closes a trap that has
-          // shipped since the workspace landed. `ltx-2-mlx` is a uv WORKSPACE:
-          // the line above (with deps, without --reinstall) links its members
-          // EDITABLE. site-packages gets `_editable_impl_ltx_core_mlx.pth`
-          // instead of a copy, so `import ltx_core_mlx` resolves to
-          // `packages/ltx-core-mlx/src/...` — the GIT-TRACKED source. The codec
-          // patch further down then finds no ltx_core_mlx directory in
-          // site-packages and patches the tracked file, which is why a
-          // PERFECTLY SUCCESSFUL install ended with
-          //     M packages/ltx-core-mlx/src/.../video_vae.py
-          // every single time — and why the v3.8.0 pin move hit "your local
-          // changes would be overwritten by checkout" for the whole fleet.
-          //
-          // v3.8.1 made the pin move survive that (reset --hard first) and
-          // v3.8.1's own notes filed this as the follow-up: cure the cause, so
-          // a FRESH install no longer starts dirty. `--reinstall --no-deps`
-          // replaces the .pth links with real copies and re-resolves nothing;
-          // it is the exact command update.js has run for many releases, so
-          // the end state is one every install already converges to on its
-          // first Update. One lane, one runtime shape.
-          "uv pip install --python env/bin/python --reinstall --no-deps --build-constraints ../pip-build-constraints.txt ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx ./packages/ltx-trainer",
-          // Auto-caption (Gemma 3 12B via mlx-vlm) needs the mlx-vlm
-          // package. Pinned to 0.4.4 — caption_with_gemma.py's import
-          // surface (load, generate, prompt_utils.apply_chat_template)
-          // is stable at that version. --no-deps so we don't drag in
-          // mlx-vlm's heavy default deps (PIL>=10, av, etc. that fight
-          // mflux/transformers pins). The runtime imports it lazily so
-          // a partial install doesn't break the rest of the panel.
-          "uv pip install --python env/bin/python --no-deps 'mlx-vlm==0.4.4'",
-          // hf_transfer is HuggingFace's Rust-based downloader — 5-10× faster
-          // than the default Python downloader for big repos like Q8 (~25 GB).
-          // The panel sets HF_HUB_ENABLE_HF_TRANSFER=1 in download envs; if the
-          // package is missing the hf CLI falls back gracefully with a warning.
-          // litellm: agent's chat client (multi-provider router for OpenAI /
-          // Anthropic / Ollama / mlx-lm.server). Pinned to >=1.83.14 — the
-          // March 2026 PyPI supply-chain incident affected earlier 1.x
-          // releases (stole SSH keys via a poisoned post-install script).
-          // See agent/engine.py for routing details. Falls back to stdlib
-          // urllib if missing — safe to omit but the loop is less robust.
-          //
-          // smolagents: Phase 2 of the agent-layer refactor. Powers
-          // the optional CodeAgent runtime in agent/runtime_smol.py,
-          // selectable per-request via PHOSPHENE_RUNTIME=smol. smolagents
-          // pulls transformers as a transitive dep — the huggingface-hub
-          // floor is bumped to >=1.5.0 to satisfy transformers' pin.
-          // smolagents itself ships with a pessimistic <1.0 hub pin that
-          // is empirically benign in practice.
-          //
-          // The hub pin range we settle on (>=1.5.0,<2.0) satisfies:
-          //   - mflux>=0.17.5            wants >=1.1.6,<2.0
-          //   - transformers (5.7.0+)    wants >=1.5.0,<2.0
-          //   - smolagents 1.24.0        warns about <1.0 but works
-          //   - hf download CLI          needs v1+ for the new command name
-          // 2026-05-31 review fix (E3): pin `certifi` explicitly. start.js
-          // points SSL_CERT_FILE at certifi's cacert.pem (the v3.0.4 fix for
-          // the CivitAI CERTIFICATE_VERIFY_FAILED on uv-Python). certifi was
-          // only ever a transitive dep — if a future dep change drops it, the
-          // SSL_CERT_FILE path vanishes and ALL panel stdlib HTTPS breaks.
-          // Naming it here keeps the cert bundle guaranteed-present.
-          "uv pip install --python env/bin/python certifi pillow numpy 'huggingface-hub>=1.5.0,<2.0' 'hf_transfer>=0.1.6' 'litellm>=1.83.14' 'smolagents>=1.24.0' 'pywebpush>=2.0'",
-          // v2.0.3: post-install confirmation that the local packages
-          // actually landed in site-packages. The Y1.034+ patch script's
-          // i2v target tolerates a missing ltx_pipelines_mlx — without
-          // this echo we'd discover the gap only at panel start time.
-          "echo '=== post-pip site-packages check ==='",
-          "ls env/lib/python3.11/site-packages/ | grep -E '^(ltx|mlx)' || echo 'WARN: no ltx_*/mlx packages in site-packages'",
-          "echo '=== /site-packages check ==='"
-        ]
+        message: "bash scripts/pinokio/ltx_engine_env.sh"
       }
     },
 
@@ -590,6 +489,20 @@ module.exports = {
       method: "shell.run",
       params: {
         message: "bash scripts/pinokio/mflux_pack.sh"
+      }
+    },
+
+    // ---- Vocal separation for Lip-sync (~15 MB + 80 MB weights) -----------
+    // "Listen to the voice only" is ON by default in the Lip-sync form, and
+    // until 4.17 nothing installed what it needs, so every render asked for
+    // the voice and got the full mix. demucs goes into the engine venv with
+    // torch pinned to the copy the image pack above just installed; the
+    // htdemucs weights land in mlx_models/demucs. BEST-EFFORT: a hiccup must
+    // not fail the video install — the Lip-sync form offers the same step.
+    {
+      method: "shell.run",
+      params: {
+        message: "bash scripts/pinokio/a2v_stems_deps.sh ./ltx-2-mlx || echo 'WARN: vocal separation did not install - video works; the Lip-sync form offers Install.'"
       }
     },
 

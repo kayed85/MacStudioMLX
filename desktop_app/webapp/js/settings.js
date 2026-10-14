@@ -28,6 +28,27 @@ function updateModelsCard(s) {
   card.classList.remove('state-missing', 'state-warn', 'state-downloading', 'dismissible');
   progress.style.display = 'none';
 
+  // ----- A Pinokio-side H3 build/install is running RIGHT NOW --------------
+  // H3-19: install/build only ever runs as a Pinokio script — there is no
+  // real in-panel trigger for the ~75 GB clone+venv+download (unlike the
+  // small Fast/Turbo adapter installs, which DO run in-process). But the
+  // worker already reads scripts/pinokio/h3_build_q8.sh's lock file to HOLD
+  // the render queue while that script runs (_external_build_hold,
+  // mlx_ltx_panel.py) — it just never told the UI why. Surface it as its
+  // own precedence-topping state: not an in-panel installer, but an
+  // in-panel PROGRESS SIGNAL, so a user who started the build from the
+  // Pinokio sidebar doesn't have to keep that tab open to know it's working.
+  const extBuild = s.h3 && s.h3.external_build;
+  if (extBuild && extBuild.active) {
+    card.style.display = '';
+    card.classList.add('state-downloading');
+    icon.textContent = '↓';
+    title.textContent = `Building ${extBuild.what || 'an H3 engine'} in Pinokio`;
+    sub.textContent = 'Running in the Pinokio sidebar — Generate resumes here automatically when it finishes. No need to keep that tab open.';
+    actions.innerHTML = '';
+    return;
+  }
+
   // ----- Active download takes precedence over everything ------------------
   if (dl) {
     card.style.display = '';
@@ -52,16 +73,30 @@ function updateModelsCard(s) {
     card.classList.add('state-missing');
     icon.innerHTML = '<svg class="ph" aria-hidden="true"><use href="#ph-warning-fill"/></svg>';
     title.textContent = 'Base models needed before you can render';
-    const missing = (s.base_missing || []).length;
+    const missingList = s.base_missing || [];
+    const missing = missingList.length;
     // REGISTRY-DRIVEN, for the ACTIVE generation. `base_missing` is already
     // version-scoped, so offering `q4` here downloaded 2.3's base to fix a
     // broken 2.5 install: 20 GB spent, still broken.
     const P = ((BOOT.ltx || {}).packs) || {};
     const pBase = P.base, pEnc = P.encoder;
-    sub.innerHTML = `${escapeHtml(pBase ? pBase.name : 'The base model')} (~${escapeHtml(pBase ? pBase.size : '?')})`
-      + ` and ${escapeHtml(pEnc ? pEnc.name : 'its text encoder')} (~${escapeHtml(pEnc ? pEnc.size : '?')})`
-      + ` are required. Click below — downloads resume if interrupted.${
-      missing ? ` <span style="color:var(--muted)">(${missing} files left)</span>` : ''
+    // SYS-11: this used to say "X AND Y are required" unconditionally,
+    // even when only one pack (say, just the base transformer) was
+    // actually missing a file and the other (Gemma) was fully present —
+    // a half-installed 16 GB install saw "LTX-2.5 base and Gemma 4 are
+    // required" with Gemma 4 sitting right there on disk. Name only the
+    // pack(s) whose local_dir actually shows up in base_missing.
+    const packNeeded = (p) => !p || !p.local_dir
+      || missingList.some(f => String(f).includes(p.local_dir));
+    const needBase = packNeeded(pBase), needEnc = packNeeded(pEnc);
+    const parts = [];
+    if (needBase) parts.push(`${escapeHtml(pBase ? pBase.name : 'The base model')} (~${escapeHtml(pBase ? pBase.size : '?')})`);
+    if (needEnc) parts.push(`${escapeHtml(pEnc ? pEnc.name : 'its text encoder')} (~${escapeHtml(pEnc ? pEnc.size : '?')})`);
+    sub.innerHTML = (parts.join(' and ') || 'A required model')
+      + ` ${parts.length > 1 ? 'are' : 'is'} required. Click below — downloads resume if interrupted.${
+      // VC-10: was always "(N files left)" — grammatically wrong for the
+      // single-file case the review actually hit ("1 files left").
+      missing ? ` <span style="color:var(--muted)">(${missing} file${missing === 1 ? '' : 's'} left)</span>` : ''
     }`;
     // A mirrored pack does not need `hf` at all — the same per-row question the
     // Models modal already asks, answered from the same registry field.
@@ -82,9 +117,9 @@ function updateModelsCard(s) {
   // Y1.036 — Extend joins FFLF and High in needing Q8. The Extend pipeline
   // loads `transformer-dev.safetensors` for CFG-guided denoise; Q4 doesn't
   // ship it after the Y1.024 download trim, so surface the same CTA here.
-  const needsQ8 = (currentMode === 'keyframe')
-                || (currentMode === 'extend')
-                || _qualityUsesHq(document.getElementById('quality').value);
+  const _onH3 = document.body.dataset.engine === 'h3';
+  const needsQ8 = (!_onH3 && (currentMode === 'keyframe' || currentMode === 'extend'))
+                || (!_onH3 && _qualityUsesHq(document.getElementById('quality').value));
   if (needsQ8 && !q8Ok && tier.allows_q8 !== false) {
     if (dismissed) { card.style.display = 'none'; return; }
     card.style.display = '';
@@ -145,13 +180,38 @@ function updateModelsCard(s) {
   // existed this Mac was `capable: false` and got no card, no switcher
   // segment, and — if it ever reached a render — a refusal claiming it needed
   // 64 GB. The server owns the sentence; this only places it.
+  //
+  // Two different Macs share this band. `missing_q8_dit` holds all ~75 GB and
+  // lacks only the local build: a warning, it installed H3 and cannot use it.
+  // Anything else never installed H3 at all — an offer, not a fault, and "its
+  // low-RAM engine isn't built yet" misread as "your Mac is not enough" beside
+  // a size note that said 64 GB (X, 2026-09-24).
   if (h3s.needs_q8_dit) {
+    // H3-20: this branch never added 'dismissible' (the × only renders on
+    // that class — panel.css `.models-inline.dismissible .models-inline-
+    // dismiss`), so the banner was permanent on every 36-59 GB Mac. It also
+    // never checked `dismissed`, so a user who did dismiss it (nothing else
+    // sets the flag differently) would have kept seeing it anyway. And the
+    // body repeated the title almost verbatim: the title said "Hailuo H3
+    // runs on this Mac..." and h3s.ram_note (the FULL server sentence, built
+    // for the install-card modal) starts with "Hailuo H3 runs on this Mac —
+    // on its reduced-RAM lane..." — two sentences that opened the same way,
+    // wrapping to ~270px at 1440x900 and pushing Generate under the Now
+    // card. One short line here; the full explanation lives one click away
+    // in the install card, which already reads h3s.ram_note itself.
+    if (dismissed) { card.style.display = 'none'; return; }
+    const built = (h3s.reason === 'missing_q8_dit');
     card.style.display = '';
-    card.classList.add('state-warn');
-    icon.innerHTML = '<svg class="ph" aria-hidden="true"><use href="#ph-warning-fill"/></svg>';
-    title.textContent = 'Hailuo H3 runs on this Mac — its low-RAM engine isn’t built yet';
-    sub.textContent = h3s.ram_note || '';
-    actions.innerHTML = `<button onclick="openH3InstallCard()">How to enable H3</button>`;
+    card.classList.add('dismissible');
+    if (built) card.classList.add('state-warn');
+    icon.innerHTML = built
+      ? '<svg class="ph" aria-hidden="true"><use href="#ph-warning-fill"/></svg>'
+      : '<svg class="ph" aria-hidden="true"><use href="#ph-download-simple"/></svg>';
+    title.textContent = 'Hailuo H3 can run on this Mac';
+    sub.textContent = built
+      ? 'Its compact engine just needs building — no download.'
+      : 'Needs its compact (Q8) engine, built during install.';
+    actions.innerHTML = `<button onclick="openH3InstallCard()">Set up H3 →</button>`;
     return;
   }
   if (h3s.capable && !h3s.available && h3s.repairable) {
@@ -196,13 +256,19 @@ function updateModelsCard(s) {
   card.style.display = '';
   card.classList.add('dismissible');
   icon.innerHTML = '<svg class="ph" aria-hidden="true"><use href="#ph-check-bold"/></svg>';
+  // SYS-17: "Models ready · 3/12" read as "25% ready" -- the denominator
+  // counts every optional add-on, most of which nobody needs. Also
+  // dropped the inline "Manage models ->" link here: the card's own
+  // static "Manage all models ->" footer link (index.html) said the
+  // identical thing right below, so both showed together every time
+  // this state rendered.
   const ready = s.repos_ready ?? 0;
   const total = s.repos_total ?? 0;
-  title.textContent = `Models ready · ${ready}/${total}`;
-  const partialNote = (q8Ok && baseOk) ? '' : ` · ${total - ready} optional missing`;
-  sub.innerHTML =
-    `All installed weights detected${partialNote}. ` +
-    `<a style="color:var(--accent-bright,#7e98ff); cursor:pointer; text-decoration:underline" onclick="openModelsModal()">Manage models →</a>`;
+  const addons = Math.max(0, total - ready);
+  title.textContent = addons > 0
+    ? `Ready to render ✓ · ${addons} add-on${addons === 1 ? '' : 's'} available`
+    : 'Ready to render ✓';
+  sub.textContent = 'All the weights this Mac renders with are installed.';
   actions.innerHTML = '';
 }
 
@@ -238,8 +304,10 @@ function applyTierGates(tier) {
   // Mode pills
   document.querySelectorAll('#modeGroup .pill-btn').forEach(b => {
     const m = b.dataset.mode;
-    const allowed = (m === 'keyframe') ? tier.allows_keyframe
-                  : (m === 'extend')   ? tier.allows_extend
+    // Hailuo H3 serves Keyframes and Extend on its own engine and lane.
+    const _h3 = document.body.dataset.engine === 'h3';
+    const allowed = (m === 'keyframe') ? (_h3 || tier.allows_keyframe)
+                  : (m === 'extend')   ? (_h3 || tier.allows_extend)
                   : true;
     b.classList.toggle('disabled', !allowed);
     if (!allowed) {
@@ -281,6 +349,9 @@ document.addEventListener('click', (e) => {
 
 // ====== Tier modal ======
 function openTierModal() {
+  // SYS-19: the health popover's Tier row opened this modal UNDERNEATH the
+  // still-open popover. Close it first.
+  if (typeof closeHealthPop === 'function') closeHealthPop();
   const modal = document.getElementById('tierModal');
   modal.style.display = 'flex';
   // Defensive: show "loading" state immediately so the modal never appears
@@ -436,11 +507,14 @@ ${tail}
 \`\`\`
 `;
   // Crash-report checkbox only when there's something to bundle.
+  // SYS-12: default OFF, per report (was pre-ticked). Zipping a crash log
+  // into a public GitHub issue should be something the reporter chooses
+  // each time, not a box that was already checked when they opened this.
   if ((c.crashCount || 0) > 0) {
     crashRow.style.display = 'flex';
     crashLabel.textContent =
       `Include latest crash reports (zips up to 5 of ${c.crashCount} .ips files)`;
-    document.getElementById('bugCrashCheck').checked = true;
+    document.getElementById('bugCrashCheck').checked = false;
   } else {
     crashRow.style.display = 'none';
   }
@@ -458,6 +532,21 @@ ${tail}
 }
 function closeBugModal() {
   document.getElementById('bugModal').style.display = 'none';
+}
+// SYS-40: for anyone without a GitHub account (or more comfortable
+// reporting somewhere else in their own language) — copies the exact
+// title + description GitHub would have received, already scrubbed
+// server-side the same way (see get_panel_bug_context).
+async function copyBugDiagnostics() {
+  const statusEl = document.getElementById('bugStatus');
+  const title = document.getElementById('bugTitle').value.trim() || '[bug] (untitled)';
+  const body = document.getElementById('bugBody').value;
+  try {
+    await navigator.clipboard.writeText(title + '\n\n' + body);
+    if (statusEl) statusEl.textContent = 'Copied — paste it anywhere (a forum post, a DM, a translated message).';
+  } catch (e) {
+    if (statusEl) statusEl.textContent = 'Could not copy — select the text above manually.';
+  }
 }
 async function submitBugReport() {
   const submitBtn = document.getElementById('bugSubmitBtn');
@@ -664,6 +753,21 @@ async function openSettingsModal() {
   if (lpSelect) {
     lpSelect.value = (cur.live_preview === 'off') ? 'off' : 'on';
   }
+  // SYS-28: the select can read "On" while the 22 MB decoder isn't on disk —
+  // BOOT.ltx.preview_state names that case (`reason === 'missing_decoder'`)
+  // the same way the Now card's preview area already does (preview.js).
+  const lpNote = document.getElementById('settingsLivePreviewNote');
+  if (lpNote) {
+    const ps = ((BOOT.ltx || {}).preview_state) || {};
+    if (ps.reason === 'missing_decoder') {
+      lpNote.hidden = false;
+      lpNote.innerHTML = 'Live preview: needs a 22 MB add-on — ' +
+        '<a href="#" onclick="closeSettingsModal();openModelsModal();return false;">Get it</a>';
+    } else {
+      lpNote.hidden = true;
+      lpNote.textContent = '';
+    }
+  }
   // H3 model. Hidden entirely when H3 is not installed — an install that
   // cannot render H3 has no use for a control that only changes how it does.
   const ditRow = document.getElementById('settingsH3DitRow');
@@ -675,6 +779,20 @@ async function openSettingsModal() {
     if (ditHint) ditHint.hidden = !haveH3;
     const v = String(cur.h3_dit || 'auto').toLowerCase();
     ditSelect.value = ['auto', 'bf16', 'q8'].includes(v) ? v : 'auto';
+    // Below the full engine's memory floor "Full" is not a real choice: the
+    // master alone loads ~39 GiB and the render dies of Metal memory. The
+    // server renders Compact there anyway; the menu says why instead of
+    // offering it.
+    const fullOpt = ditSelect.querySelector('option[value="bf16"]');
+    if (fullOpt) {
+      const h3s = (LAST_STATUS && LAST_STATUS.h3) || {};
+      const fits = h3s.bf16_fits !== false;
+      fullOpt.disabled = !fits;
+      fullOpt.textContent = fits
+        ? 'Full (bf16) — 42 GiB peak'
+        : 'Full (bf16) — needs ' + Math.round(h3s.min_ram_gb || 60) + ' GB of memory, not this Mac';
+      if (h3s.bf16_fits === false && ditSelect.value === 'bf16') ditSelect.value = 'auto';
+    }
   }
 
   // Token rows. We never receive the actual key from the server (the
@@ -1336,7 +1454,7 @@ Object.assign(globalThis, {
   appearanceGet, applyAppearance, setAppearance,
   renderNotifyState, toggleNotify, askNotifyPermission,
   updateModelsCard, dismissModelsCard, applyTierGates, openTierModal,
-  closeTierModal, openBugModal, closeBugModal, submitBugReport,
+  closeTierModal, openBugModal, closeBugModal, submitBugReport, copyBugDiagnostics,
   openSettingsModal, toggleAnalytics, saveAnalyticsKey, clearAnalyticsKey,
   toggleSpicyMode, onTokenInput, toggleTokenVisibility, testToken,
   clearToken, closeSettingsModal, applySettings, _applyHdrPillAvailability,

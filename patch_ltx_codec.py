@@ -34,7 +34,7 @@ The helper already calls the new API defensively (`hasattr` guard on
 Re-implementing them against the pinned tag would only re-introduce divergence — the
 whole point of the catch-up was to let pinned-upstream own this behaviour.
 
-What REMAINS is the one preference upstream doesn't share:
+What REMAINS is two preferences upstream doesn't share:
 
 1. Output codec. Upstream emits `yuv420p crf 18` — 4:2:0 chroma subsampling
    produces visible JPEG-style block artifacts on faces / skin. We patch to
@@ -43,8 +43,23 @@ What REMAINS is the one preference upstream doesn't share:
    without downloading the whole clip). Override via `LTX_OUTPUT_PIX_FMT` /
    `LTX_OUTPUT_CRF`.
 
-If a future pin restructures `decode_and_stream`'s ffmpeg line, this fails
-LOUD (exit non-zero) rather than silently shipping a 4:2:0 install.
+2. Gemma truncation direction (VC-14, 2026-09-29). `GemmaEncoder.tokenize()`
+   left-pads to `max_length` and, on an over-length prompt, kept the LAST
+   `max_length` tokens ("truncate from the left"). That reads as a sane
+   default of left-padding for the common case (nothing to trim), but on the
+   watchdog fallback path (`GEMMA_FALLBACK_MAX_LENGTH = 256`, armed on chips
+   whose Metal watchdog kills the full 1024-token encode — typically the
+   low-end Macs) it silently drops the BEGINNING of any prompt over 256
+   tokens, i.e. the subject. We patch to keep the first `max_length` tokens
+   instead — the model still sees a coherent, if shortened, prompt starting
+   from its subject rather than a random tail. Optional: a future pin may
+   restructure this method, and losing the fix only degrades long-prompt
+   quality on the fallback path, so a drift here logs a note and lets
+   install continue rather than blocking it (unlike the codec patch above).
+
+If a future pin restructures `decode_and_stream`'s ffmpeg line, the codec
+patch fails LOUD (exit non-zero) rather than silently shipping a 4:2:0
+install.
 
 Safe to re-run — checks for its marker before touching anything.
 """
@@ -148,6 +163,25 @@ PATCH_CODEC_NEW = (
     '        _crf = _os.environ.get("LTX_OUTPUT_CRF", "0")\n'
     '        cmd.extend(["-c:v", "libx264", "-pix_fmt", _pix, "-crf", _crf,\n'
     '                    "-movflags", "+faststart", output_path])'
+)
+
+
+# ---- Patch: keep the SUBJECT, not the tail, when a prompt is truncated ------
+# VC-14. `tokenize()` left-pads to max_length; on the fallback path
+# (256 tokens, armed by the Metal-watchdog encode-length guard) an
+# over-length prompt kept its LAST 256 tokens, dropping the subject the
+# user actually wrote first. Keep the first max_length tokens instead.
+PATCH_GEMMA_TRUNCATE_OLD = (
+    '        if len(tokens) > max_length:\n'
+    '            tokens = tokens[-max_length:]  # Keep last tokens (left-pad = truncate from left)'
+)
+PATCH_GEMMA_TRUNCATE_NEW = (
+    '        if len(tokens) > max_length:\n'
+    '            # PATCHED (LTX23MLX, VC-14): keep the FIRST max_length tokens — the\n'
+    '            # subject of the prompt is almost always near the start, and on the\n'
+    '            # watchdog fallback path (256 tokens) the old "keep last" behaviour\n'
+    '            # silently dropped it on any prompt over ~256 tokens.\n'
+    '            tokens = tokens[:max_length]  # Keep first tokens (keeps the subject)'
 )
 
 
@@ -255,7 +289,7 @@ def _shout(*lines: str) -> None:
 
 
 def main() -> int:
-    print("Applying LTX23MLX codec patch (ltx-2-mlx v0.14.19+ltx25.6 — only the codec edit remains):")
+    print("Applying LTX23MLX patches (ltx-2-mlx v0.14.19+ltx25.7 — codec + Gemma truncation):")
 
     # `upgrade_marker="+faststart"` lets us upgrade installs where the
     # earlier version of this patch was applied (LTX_OUTPUT_PIX_FMT marker
@@ -309,6 +343,24 @@ def main() -> int:
         print(f"Done — codec patch applied and verified in {verify}")
     else:
         print(f"Codec patch already applied and verified in {verify}")
+
+    # Gemma truncation direction (VC-14) — optional: a drift here only
+    # degrades long-prompt quality on the fallback path, never breaks a
+    # render, so it logs a note and lets install/update continue rather
+    # than failing loud like the codec patch above.
+    gemma_target = _find("ltx_core_mlx/text_encoders/gemma/encoders/base_encoder.py")
+    gemma_outcome = apply_patch(
+        gemma_target, PATCH_GEMMA_TRUNCATE_OLD, PATCH_GEMMA_TRUNCATE_NEW,
+        marker="VC-14", label="gemma-truncate (keep subject, not tail)",
+    )
+    if gemma_outcome in (OUTCOME_DRIFT, OUTCOME_MISSING):
+        print(
+            f"  [gemma-truncate] note: could not apply ({gemma_outcome}) — "
+            f"the fallback encode path will keep truncating from the tail "
+            f"until this is re-checked against the installed ltx-2-mlx pin.",
+            file=sys.stderr,
+        )
+
     return 0
 
 

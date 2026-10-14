@@ -75,6 +75,13 @@ ltx-2-mlx/
 # nested inside a vendored tree.
 /minimax-h3-mlx
 /minimax-h3-mlx/
+# Read-only sparse clones of other LTX-2 trainers (Lightricks' official
+# ltx-trainer, ostris ai-toolkit), kept next to the code so the #62 trainer
+# comparison in the PR #89 investigation log (tanis2000/Phosphene, branch
+# issue-62, docs/ISSUE_62_VALERIOSAN_2026-09-30.md) can be re-checked line
+# by line. Separate git repos with their own licences; never ours to commit.
+/reference_trainers
+/reference_trainers/
 .venv
 .venv/
 
@@ -151,3 +158,15 @@ notes/
 desktop_app/node_modules/
 desktop_app/dist/
 node_modules/
+
+# YuE2 engine checkout; weights live in the shared mlx_models tree.
+yue2-mlx/
+mlx_models/yue2-cover/
+state_studio/
+# 2026-09-20: `yue2-mlx/` and `node_modules/` ignore a DIRECTORY, not a symlink of the
+# same name. An agent worktree carried symlinks to the real trees, `git add -A`
+# committed them, and the merge replaced the real engine checkout + venv with a
+# self-referential link. Same trap as ltx-2-mlx above — ignore both spellings.
+yue2-mlx
+node_modules
+

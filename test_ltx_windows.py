@@ -109,10 +109,17 @@ import mlx_ltx_panel as panel                                         # noqa: E4
 
 class ThePanel(unittest.TestCase):
     def test_make_job_carries_the_windows_fields(self):
-        job = panel.make_job({"mode": "t2v", "prompt": "a man walks",
-                              "frames": "481", "temporal_mode": "windows",
-                              "window_prompts": '["", "he sits", ""]',
-                              "window_invariants": "one man, grey room"})
+        # The hardware generation profile is held off (issue #90): on a 48 GB
+        # Mac it auto-enables Long Clip Boost past its frame threshold, so a
+        # 481-frame job came back temporal_mode=fps12_interp24 by design and
+        # this assertion failed by which Mac ran it. What is under test is
+        # make_job carrying the windows fields; the profile has its own suite
+        # (test_generation_profile_override).
+        with _mock.patch.object(panel, "_apply_generation_profile_to_job"):
+            job = panel.make_job({"mode": "t2v", "prompt": "a man walks",
+                                  "frames": "481", "temporal_mode": "windows",
+                                  "window_prompts": '["", "he sits", ""]',
+                                  "window_invariants": "one man, grey room"})
         p = job["params"]
         self.assertEqual(p["long_mode"], "windows")
         self.assertEqual(p["temporal_mode"], "native")

@@ -70,11 +70,12 @@ function engineServesMode(e, mode) {
 // offering a choice that changes nothing.
 function _currentSurface() {
   const wf = (document.body.dataset.workflow || 'manual').toLowerCase();
+  if (wf === 'audio' && musicComposeActive()) return 'music';
   // 'storyboard' MUST be in this map. Without it the `|| 'video'` fallback
   // leaves the engine switcher visible in a tab that has no engine choice to
   // offer — the film decides per shot, not a global toggle.
   return ({ manual: 'video', studio: 'image', audio: 'audio', train: 'train',
-            storyboard: 'storyboard' })[wf] || 'video';
+            storyboard: 'storyboard', oneshot: 'oneshot' })[wf] || 'video';
 }
 function engineOnSurface(e) {
   return (e.surfaces || ['video']).indexOf(_currentSurface()) !== -1;
@@ -97,6 +98,7 @@ function engineRenderable(e) {
 // download already has with the High pill). A new engine adds a key here the
 // day it has a status function; nothing else in this file changes.
 window._ENGINE_PROBES = {
+  music: (BOOT.music || { capable: false, available: false, estimates: {} }),
   h3: (BOOT.h3 || { capable: false, available: false, tiers: [] }),
 };
 // H3 keeps its own binding because the H3 tier / Turbo / export code below is
@@ -178,27 +180,19 @@ function h3CurrentCell() {
   let savedUp = null;
   try { savedUp = localStorage.getItem('phos_h3_upscale'); } catch (e) {}
   const allowed = H3.upscale_modes || ['off', 'fit_720p', 'fit_1080p'];
-  if (savedUp && allowed.indexOf(savedUp) !== -1) up.value = savedUp;
+  // The after-the-draft Upscale & Face Fix is an extra job, so a reload
+  // starts with it OFF even if an older panel saved it as the preference.
+  if (savedUp && savedUp !== 'ltx_x2' && allowed.indexOf(savedUp) !== -1) up.value = savedUp;
   // And again for the sampler-depth pills, same reason.
   const st = document.getElementById('h3_steps');
   if (!st) return;
   let savedSt = null;
   try { savedSt = localStorage.getItem('phos_h3_steps'); } catch (e) {}
-  if (savedSt && ['auto', '12', '16', '20'].indexOf(savedSt) !== -1) st.value = savedSt;
-  // And Turbo — but only restore an ON state when this install can actually
-  // serve it. A user who downloaded the adapter, deleted it and reloaded must
-  // come back on Standard, not on a mode that would fail at queue time.
+  if (savedSt) st.value = h3NormalizeSteps(savedSt);
+  // Turbo is folded into the Speed switch (Fast | Best): the form never posts
+  // it. renderH3Turbo() writes #h3_tristep from the saved speed.
   const tb = document.getElementById('h3_turbo');
-  if (!tb) return;
-  let savedTb = null;
-  try { savedTb = localStorage.getItem('phos_h3_turbo'); } catch (e) {}
-  // Turbo is the DEFAULT when the adapter is installed (owner's call): it is
-  // ~half the wall clock and graded better at the mouth than the full-step
-  // path, so the fast one should be the one you land on and Standard the one
-  // you reach for. An explicit "0" is still honoured — only the ABSENCE of a
-  // preference defaults on. Never defaults on when the adapter isn't there.
-  const turboOk = !!(H3.turbo && H3.turbo.available);
-  tb.value = (turboOk && savedTb !== '0') ? '1' : '0';
+  if (tb) tb.value = '0';
 })();
 
 // What the export pass will DO to the selected tier's canvas, in one line under
@@ -230,16 +224,42 @@ function _h3SyncExportNote() {
 // Export canvas for an H3 render. Separate from the LTX `upscale` control
 // (which is data-ltx-only and folds away on H3) so one pill never means two
 // things. Server-side make_job re-validates — a stale tab must never win.
+// "ltx_x2" is the stored value of the OPTIONAL after-the-draft Upscale & Face
+// Fix (a checkbox under the pills): the draft ships as rendered and the fix is
+// queued behind it. It is never saved as the preference; the size the user had
+// is, so unticking the box returns to it.
 function setH3Upscale(mode) {
   const allowed = H3.upscale_modes || ['off', 'fit_720p', 'fit_1080p'];
   const v = allowed.indexOf(mode) !== -1 ? mode : (H3.default_upscale || 'fit_720p');
   const inp = document.getElementById('h3_upscale');
   if (inp) inp.value = v;
+  const fix = v === 'ltx_x2';
+  const shown = fix ? 'off' : v;
+  const grp = document.getElementById('h3UpscaleGroup');
+  if (grp) grp.classList.toggle('is-overridden', fix);
   document.querySelectorAll('#h3UpscaleGroup [data-h3-upscale]').forEach(b =>
-    b.classList.toggle('active', b.dataset.h3Upscale === v));
-  try { localStorage.setItem('phos_h3_upscale', v); } catch (e) {}
+    b.classList.toggle('active', b.dataset.h3Upscale === shown));
+  const box = document.getElementById('h3FaceFixAfter');
+  if (box) box.checked = fix;
+  const box2 = document.getElementById('h3FaceFixFooter');
+  if (box2) box2.checked = fix;
+  _h3SyncFaceFixEta();
+  const row = document.getElementById('h3FaceFixAfterRow');
+  if (row) row.hidden = allowed.indexOf('ltx_x2') === -1;
+  if (!fix) { try { localStorage.setItem('phos_h3_upscale', v); } catch (e) {} }
   _h3SyncExportNote();
   if (typeof updateDerived === 'function') { try { updateDerived(); } catch (e) {} }
+  // The export target is what the "After the render" summary SAYS, and that
+  // section is closed by default — so the line has to be rewritten here or it
+  // keeps advertising 720p for a render that ships 1080p. (It was stale in the
+  // old Customize summary for the same reason, where it mattered less.)
+  if (typeof updateCustomizeSummary === 'function') { try { updateCustomizeSummary(); } catch (e) {} }
+}
+function setH3FaceFixAfter(on) {
+  if (on) { setH3Upscale('ltx_x2'); return; }
+  let size = null;
+  try { size = localStorage.getItem('phos_h3_upscale'); } catch (e) {}
+  setH3Upscale(size && size !== 'ltx_x2' ? size : (H3.default_upscale || 'fit_720p'));
 }
 document.querySelectorAll('#h3UpscaleGroup [data-h3-upscale]').forEach(b => {
   b.onclick = () => setH3Upscale(b.dataset.h3Upscale);
@@ -257,6 +277,8 @@ function setH3Orientation(v) {
   try { localStorage.setItem('phos_h3_orientation', val); } catch (e) {}
   _h3SyncOrientationSubs();
   if (typeof updateDerived === 'function') { try { updateDerived(); } catch (e) {} }
+  // Orientation is part of the shape the closed Shot setup summary prints.
+  if (typeof updateCustomizeSummary === 'function') { try { updateCustomizeSummary(); } catch (e) {} }
 }
 // Say the ACTUAL canvases the current cell would produce, both ways round.
 function _h3SyncOrientationSubs() {
@@ -282,13 +304,32 @@ document.querySelectorAll('#h3OrientationGroup [data-h3-orientation]').forEach(b
 // Sampler depth for an H3 render. 'auto' = the tier's tuned count (stamped in
 // H3_TIERS); a number overrides it for every window of the job. Server-side
 // make_job clamps to 4-30 and re-validates — a stale tab must never win.
+// Any count the server accepts (4-30) is kept: a replayed render pinned at 21
+// or 7 must replay at 21 or 7, not silently at the target's Auto. No pill lights
+// for such a count and the row hint names it instead.
+function h3NormalizeSteps(v) {
+  const t = String(v == null ? '' : v).trim().toLowerCase();
+  if (/^\d+$/.test(t)) {
+    const n = parseInt(t, 10);
+    if (n >= 4 && n <= 30) return String(n);
+  }
+  return 'auto';
+}
 function setH3Steps(v) {
-  const allowed = ['auto', '12', '16', '20'];
-  v = allowed.indexOf(String(v)) !== -1 ? String(v) : 'auto';
+  v = h3NormalizeSteps(v);
   const inp = document.getElementById('h3_steps');
   if (inp) inp.value = v;
-  document.querySelectorAll('#h3StepsGroup [data-h3-steps]').forEach(b =>
-    b.classList.toggle('active', b.dataset.h3Steps === v));
+  let lit = false;
+  document.querySelectorAll('#h3StepsGroup [data-h3-steps]').forEach(b => {
+    const on = b.dataset.h3Steps === v;
+    lit = lit || on;
+    b.classList.toggle('active', on);
+  });
+  const hint = document.querySelector('#h3StepsRow .cz-label-hint');
+  if (hint) {
+    hint.textContent = lit ? "Auto = this shape's tuned count"
+      : ('Pinned at ' + v + ' (from a saved render) · pick a pill to change');
+  }
   // Mirror the resolved count into the shared hidden `steps` so the queue
   // card and the estimate line read the truth (make_job re-stamps anyway).
   const tier = h3CurrentCell();
@@ -307,49 +348,78 @@ document.querySelectorAll('#h3StepsGroup [data-h3-steps]').forEach(b => {
   b.onclick = () => setH3Steps(b.dataset.h3Steps);
 });
 
-// ---- Turbo: the 4-step distillation LoRA ------------------------------------
-// A speed MODE, not a tier: same model, same geometry, fewer denoise passes.
-// Three states, and the UI has to say which one it is in:
-//   runner has no --lora  → the whole row is hidden (an old pack never learns
-//                           Turbo exists, exactly like chained tiers)
-//   supported, not installed  → dashed pill; click explains/fetches the asset
-//   available             → a normal pill, and picking it pins steps at 4
+// ---- Speed: ⚡ Fast | ✦ Best ------------------------------------------------
+// ONE switch above the Quality cards (owner, 2026-09-17: "finally fast
+// generations", and no messy UI):
+//   ⚡ Fast — TaoMate's 3-step adapter on its own sigma ladder (3 forwards).
+//            Draft, Standard and High, T2V and I2V. Needs the 180 MB adapter
+//            and a runner with --sigma-subset; until then the Fast half says
+//            what one click does (install / update the runner).
+//   ✦ Best — the shape's own sampler, as before (Draft/Standard 8 forwards,
+//            High 15, Native as tuned), and the Steps override.
+// Default Fast once installed; remembered per browser (phos_h3_speed).
+// Native and the dense 10 s single pass have not been validated on 3 steps,
+// so they always render Best and say so under the switch.
+//
+// TURBO IS FOLDED IN. The old Standard | Turbo row is gone: Fast is the faster
+// AND the owner-preferred recipe, and two speed controls — or two adapters on
+// one render — is the confusion this switch exists to remove. The UI posts
+// h3_turbo=0 always; the server still honours h3_turbo from the API (and
+// never stacks it with Fast). A Turbo clip's Load Params / Finish maps to Fast.
 function h3TurboState() {
   return (H3 && H3.turbo) || { available: false, supported: false, downloaded: false };
 }
+function h3TriStepState() {
+  return (H3 && H3.tristep) || { available: false, supported: false, downloaded: false };
+}
+function h3SpeedPref() {
+  let v = null;
+  try { v = localStorage.getItem('phos_h3_speed'); } catch (e) {}
+  return v === 'best' ? 'best' : 'fast';
+}
+function _h3SetSpeedPref(v) {
+  try { localStorage.setItem('phos_h3_speed', v === 'best' ? 'best' : 'fast'); } catch (e) {}
+}
+function _h3IsI2V() {
+  return ((document.getElementById('mode') || {}).value || 't2v') === 'i2v';
+}
+// Would THIS cell render Fast, as things stand?
+function h3TriStepOn(cell) {
+  cell = cell || h3CurrentCell();
+  // Fast HD is the Fast pass by definition (the server forces it too).
+  if (cell && cell.fast_hd) return !!(cell.tristep_min != null && h3TriStepState().available);
+  return !!(cell && cell.tristep_min != null
+            && h3TriStepState().available && h3SpeedPref() === 'fast');
+}
+function _h3TriStepMin(cell) {
+  if (!cell || cell.tristep_min == null) return null;
+  return (_h3IsI2V() && cell.tristep_min_i2v != null) ? cell.tristep_min_i2v : cell.tristep_min;
+}
+function _h3TriStepEta(cell) {
+  if (!cell || cell.tristep_min == null) return '';
+  if (_h3IsI2V()) return cell.tristep_eta_i2v || cell.tristep_eta;
+  // Owner ruling (2026-09-29): real fleet range for Fast, where enough of
+  // it exists (fleet_range_fast, priced separately from Best — H3's speed
+  // split is a real difference in wall time, unlike LTX's mode axis).
+  return cell.fleet_range_fast ? cell.fleet_range_fast.eta_range : cell.tristep_eta;
+}
 
-// The per-tier estimate comes from the server's tier table (turbo_eta), built
-// from that tier's own GEOMETRY — Turbo runs 3 forwards whatever the tier bakes
-// and the fixed per-window cost doesn't shrink, so there is no single ratio
-// that could be right for every tier (it is 0.45 on an 8-forward one and 0.59
-// on a 6-forward one). The retired adapter has end-to-end measurements in the
-// changelog, but LightX2V v1.0 does not yet; its active cells remain derived
-// rather than inheriting a measurement from different weights.
-// The pill's SECOND line, in the same grammar every other .pill-btn in
-// Customize uses (name on top, one spec line under it): the cost of turning it
-// on, or the cost of getting it at all.
-// Both Speed segments print an ABSOLUTE wall clock, in the same shape, so the
-// two are directly comparable. Two mistakes were baked into the old copy and
-// the owner hit both: the Standard segment described the sampler ("the tier's
-// own sampler") while Turbo quoted a number, so there was nothing to compare
-// against; and the number was rendered as "~4 min", whose tilde reads as a
-// MINUS at this size — he read "-4 min at this tier" as four minutes being
-// ADDED. No tildes here, and never a delta: just "8 min" vs "4 min".
+// "~9 min" → "9 min": a tilde at this size reads as a minus (the owner read
+// "-4 min" once). Estimates on the switch are plain.
 function _h3EtaPlain(s) {
-  // "~17-19 min" -> "17-19 min", "~4 min" -> "4 min", "~27 min · batch" kept.
   return String(s || '').replace(/[~≈]/g, '').trim();
 }
-// Minutes for a cell under the CURRENT sampler state. The server pre-computes
-// the two states that matter (the cell's own steps, and Turbo's 3 forwards) and
-// ships the two model outputs — per_forward_sec and fixed_sec — so a PINNED
-// Steps override can be priced in the browser through the same arithmetic
-// rather than through a second, drifting cost model.
+// Minutes for a cell under the CURRENT speed (or the one opts names). The
+// server ships every number (Best eta, Fast eta per mode, per-forward and
+// fixed seconds for a pinned Steps count); nothing here models anything.
 function h3CellEtaMin(cell, opts) {
   if (!cell) return 0;
+  // Fast HD is priced whole: the Fast H3 pass plus its Upscale & Face Fix.
+  if (cell.fast_hd) return (_h3TriStepMin(cell) || cell.tristep_min || 0) + (cell.facefix_min || 0);
   opts = opts || {};
-  const turbo = (opts.turbo != null) ? opts.turbo
-    : ((document.getElementById('h3_turbo') || {}).value === '1');
-  if (turbo) return cell.turbo_min;
+  const fast = (opts.fast != null) ? opts.fast : h3TriStepOn(cell);
+  if (fast && cell.tristep_min != null) return _h3TriStepMin(cell);
+  if (opts.turbo) return cell.turbo_min;
   const ov = (opts.steps != null) ? String(opts.steps)
     : ((document.getElementById('h3_steps') || {}).value || 'auto');
   if (ov !== 'auto' && /^\d+$/.test(ov)) {
@@ -359,178 +429,350 @@ function h3CellEtaMin(cell, opts) {
   }
   return cell.eta_min;
 }
-function h3FmtEtaMin(m) {
-  return '~' + Math.max(1, Math.round(m)) + ' min' + (m >= 25 ? ' · batch' : '');
-}
-// The eta STRING for a cell in the current state. Prefers the server's own
-// string whenever the state is one the server priced (default steps, or Turbo),
-// because that is where a MEASURED wall clock lives — "~8-9 min" on the one
-// Turbo run that has actually been rendered end to end is not a number this
-// function should be regenerating.
-function h3CellEta(cell, opts) {
+// The provenance line for a cell's tooltip, matching whichever speed is
+// actually showing — mirrors ltxCellEtaBasis's contract.
+function h3CellEtaBasis(cell, opts) {
   if (!cell) return '';
   opts = opts || {};
-  const turbo = (opts.turbo != null) ? opts.turbo
-    : ((document.getElementById('h3_turbo') || {}).value === '1');
-  if (turbo) return cell.turbo_eta;
-  const ov = (document.getElementById('h3_steps') || {}).value || 'auto';
-  if (ov === 'auto' || !/^\d+$/.test(ov)) return cell.eta;
-  return h3FmtEtaMin(h3CellEtaMin(cell, { turbo: false }));
+  const fast = (opts.fast != null) ? opts.fast : h3TriStepOn(cell);
+  const fr = fast ? cell.fleet_range_fast : cell.fleet_range;
+  return fr ? fr.basis : 'estimated — few renders on this Mac class yet';
 }
+function h3FmtEtaMin(m) {
+  // H3-37: "· batch" on a 25+ min chip was unexplained, and reads as the
+  // unrelated Batch feature (queueing several renders) rather than what it
+  // meant here — this single render is long enough to start and walk away
+  // from. Say that plainly instead of a one-word label with two meanings.
+  return '~' + Math.max(1, Math.round(m)) + ' min' + (m >= 25 ? ' · long, start and walk away' : '');
+}
+// The eta STRING for a cell under the current speed; the server's own string
+// wherever it priced that state (that is where a MEASURED wall clock lives).
+function h3CellEta(cell, opts) {
+  if (!cell) return '';
+  if (cell.fast_hd) return h3FmtEtaMin(h3CellEtaMin(cell));
+  opts = opts || {};
+  const fast = (opts.fast != null) ? opts.fast : h3TriStepOn(cell);
+  if (fast && cell.tristep_min != null) return _h3TriStepEta(cell);
+  if (opts.turbo) return cell.turbo_eta;
+  const ov = (document.getElementById('h3_steps') || {}).value || 'auto';
+  if (ov === 'auto' || !/^\d+$/.test(ov)) {
+    // Owner ruling (2026-09-29): Best's own real fleet range, same idea as
+    // Fast's above — never for i2v, which the server prices separately and
+    // this fleet cell (mode "t2v") does not cover.
+    if (!_h3IsI2V() && cell.fleet_range) return cell.fleet_range.eta_range;
+    return cell.eta;
+  }
+  return h3FmtEtaMin(h3CellEtaMin(cell, { fast: false }));
+}
+// Second line of each half of the switch.
 function h3SpeedSub(which) {
   const cell = h3CurrentCell();
-  if (which === 'standard') {
-    const eta = cell ? _h3EtaPlain(h3CellEta(cell, { turbo: false })) : '';
-    return eta || 'this shape as tuned';
+  if (which === 'best') {
+    return _h3EtaPlain(h3CellEta(cell, { fast: false })) || 'full steps';
   }
-  const t = h3TurboState();
-  if (!t.downloaded && !t.install_available) return 'adapter asset pending';
-  if (!t.downloaded) return (t.download_gb || 2.0) + ' GB download';
-  const eta = cell && cell.turbo_eta ? _h3EtaPlain(cell.turbo_eta) : '';
-  return eta || '4-step adapter';
-}
-function h3TurboPillSub() {
-  return h3SpeedSub('turbo');
-}
-// Kept for anything (and anyone) still reading the one-line form.
-function h3TurboPillLabel() {
-  return 'Turbo · ' + h3TurboPillSub();
-}
-
-function renderH3Turbo() {
-  const row = document.getElementById('h3TurboRow');
-  const pill = document.getElementById('h3TurboPill');
-  const sub = document.getElementById('h3TurboPillSub');
-  const t = h3TurboState();
-  if (row) row.hidden = !t.supported;
-  if (!pill) return;
-  if (sub) sub.textContent = h3SpeedSub('turbo');
-  const stdSub = document.getElementById('h3StdPillSub');
-  if (stdSub) stdSub.textContent = h3SpeedSub('standard');
-  pill.classList.toggle('needs-download', !t.downloaded);
-  // Two different kinds of number, and the tooltip must not blur them: the ONE
-  // shape that has actually been rendered with the adapter end to end says so,
-  // everything else says out loud that its figure is derived from geometry.
-  const tier = h3CurrentCell();
-  const basis = (tier && tier.turbo_measured)
-    ? ' Measured end to end at this exact canvas and length — not derived.'
-    : ' Estimated for this shape: Turbo runs ' + ((tier && tier.turbo_forwards) || 3)
-      + ' forwards instead of ' + ((tier && tier.forwards) || 8)
-      + ', over the same fixed load/decode time. Not measured at this canvas.';
-  const fallbackNote = (t.downloaded && t.fallback && t.adapter_version)
-    ? ' Running the ' + t.adapter_version + ' fallback adapter — the v1.0 '
-      + 'download replaces it.'
-    : '';
-  pill.title = t.downloaded
-    ? (t.note || '') + basis + fallbackNote
-    : (t.install_available
-      ? 'Downloads the LightX2V v1.0 runner-layout adapter (~'
-        + (t.download_gb || 2.0) + ' GB) into the H3 pack.'
-      : (t.install_note || 'The runner-layout adapter release asset is pending.'));
-  // The pack could have gone away (or arrived) since boot without a reload.
-  if (!t.available && (document.getElementById('h3_turbo') || {}).value === '1') {
-    setH3Turbo(false);
+  const tri = h3TriStepState();
+  if (!tri.supported) return 'update H3 runner';
+  if (!tri.downloaded) {
+    if (tri.installing) {
+      const d = tri.download || {};
+      return 'installing ' + (d.mb || 0) + ' / ' + (d.total_mb || 173) + ' MB';
+    }
+    return 'Install (180 MB)';
   }
+  if (!cell || cell.tristep_min == null) return 'Best only here';
+  return _h3EtaPlain(_h3TriStepEta(cell)) || '3 steps';
 }
+// Kept for callers of the pre-switch API.
+function h3TurboPillSub() { return h3SpeedSub('fast'); }
 
-// Steps and Turbo are the same axis, so only one of them can be in charge.
-// Turbo is, and the pills go visibly dead rather than silently ignored — the
-// server drops the override too (make_job), this just stops it looking live.
-function _h3SyncStepsEnabled() {
-  const on = (document.getElementById('h3_turbo') || {}).value === '1';
-  const row = document.getElementById('h3StepsRow');
+// The sampler depth Best runs is per CELL (High 16 sigma points, Draft/
+// Standard/Native 9, dense 10 s 16), so the tooltips read it from the cell.
+function _h3SyncSamplerTitles() {
+  const cell = h3CurrentCell();
+  const pts = (cell && cell.steps) || 9;
+  const fwd = Math.max(1, pts - 1);
+  const best = document.querySelector('#h3SpeedGroup [data-h3-speed="best"]');
+  if (best) best.title = "Best: this shape's full sampler — " + fwd + ' steps per window. '
+    + 'The slower, most careful render.';
+  const auto = document.querySelector('#h3StepsGroup [data-h3-steps="auto"]');
+  if (auto) auto.title = "This shape's tuned count — " + pts + ' sigma points ('
+    + fwd + ' forwards per window) at this canvas.';
+  if (!cell || !cell.eta_min) return;
   document.querySelectorAll('#h3StepsGroup [data-h3-steps]').forEach(b => {
-    b.disabled = on;
-    b.classList.toggle('disabled', on);
+    const n = b.dataset.h3Steps;
+    if (!/^\d+$/.test(n)) return;
+    const k = h3CellEtaMin(cell, { fast: false, steps: n }) / cell.eta_min;
+    const rel = Math.abs(k - 1) < 0.05 ? 'the same time as Auto at this shape'
+      : '~' + k.toFixed(1) + '× Auto\'s render time at this shape';
+    b.title = n + ' sigma points (' + (parseInt(n, 10) - 1) + ' forwards) — ' + rel
+      + (n === '20' ? '. The official reference recipe.' : '.');
   });
-  if (row) {
-    row.style.opacity = on ? '.5' : '';
-    row.title = on ? 'Turbo pins the sampler at 4 steps.' : '';
-  }
 }
 
-function setH3Turbo(on) {
+// Paint the switch for the current cell and apply it. Called from every place
+// that moves the shape, the steps, the mode or the install state.
+function renderH3Turbo() {
+  const row = document.getElementById('h3SpeedRow');
   const t = h3TurboState();
-  const v = (on && t.available) ? '1' : '0';
-  const inp = document.getElementById('h3_turbo');
-  if (inp) inp.value = v;
-  document.querySelectorAll('#h3TurboGroup [data-h3-turbo]').forEach(b =>
-    b.classList.toggle('active', b.dataset.h3Turbo === v));
-  const note = document.getElementById('h3TurboNote');
-  if (note) {
-    note.hidden = (v !== '1');
-    note.textContent = t.note || '';
+  const tri = h3TriStepState();
+  // An old pack with no --lora at all can do neither; the switch hides, as
+  // Turbo's row always did.
+  if (row) row.hidden = !(t.supported || tri.supported);
+  const cell = h3CurrentCell();
+  const fastBtn = document.querySelector('#h3SpeedGroup [data-h3-speed="fast"]');
+  const bestSub = document.getElementById('h3SpeedBestSub');
+  const fastSub = document.getElementById('h3SpeedFastSub');
+  if (fastSub) fastSub.textContent = h3SpeedSub('fast');
+  if (bestSub) bestSub.textContent = h3SpeedSub('best');
+  if (fastBtn) {
+    fastBtn.classList.toggle('needs-download', !tri.available);
+    // H3-13: distinct from needs-download (the adapter isn't installed) —
+    // this cell has no Fast path at all (Native, the single-pass 10s), same
+    // dashed/dimmed treatment so the chip itself says "not really available
+    // here" instead of only a sub-label most people skim past.
+    const cellOnlyBest = tri.available && cell && cell.tristep_min == null;
+    fastBtn.classList.toggle('cell-only-best', cellOnlyBest);
+    fastBtn.title = !tri.supported
+      ? 'Fast needs a newer H3 runner — run "Update Hailuo H3 runner" in the Pinokio sidebar (weights stay).'
+      : !tri.downloaded
+        ? '3 steps — about 4× faster, great for drafts and most shots. One click installs the '
+          + '180 MB adapter (' + (tri.license || 'MiniMax H3 Community License') + ').'
+        : cellOnlyBest
+          ? (cell.label || 'This shape') + ' has no Fast pass yet — it always renders on Best.'
+          : '3 steps — about 4× faster, great for drafts and most shots.';
   }
-  if (v === '1') {
-    // ORDER IS LOAD-BEARING, and it was wrong until Steps became a primary
-    // control and the lie got visible: setH3Steps('auto') re-derives the
-    // shared hidden `steps` from the TIER (9), so running it after the pin
-    // overwrote the 4 and the derived line read "Steps 9" on a Turbo render.
-    // Release the pill override first, THEN pin. make_job stamps
-    // H3_TURBO_STEPS server-side either way — this only ever affected what the
-    // form told the user it was about to do, which is the whole reason Speed
-    // and Steps were moved out where the user can see them.
-    if (typeof setH3Steps === 'function') { try { setH3Steps('auto'); } catch (e) {} }
+  _h3SyncSamplerTitles();
+  _h3ApplySpeed();
+  _h3SyncFaceFixEta();
+}
+
+// ONE writer for what this render does: both hidden inputs, the lit half, the
+// Steps row, the note. Guarded: setH3Steps re-enters through renderH3Turbo.
+let _h3SpeedBusy = false;
+function _h3ApplySpeed() {
+  if (_h3SpeedBusy) return;
+  _h3SpeedBusy = true;
+  try {
+    const cell = h3CurrentCell();
+    const tri = h3TriStepState();
+    const pref = h3SpeedPref();
+    const fastOn = h3TriStepOn(cell);
+    const triIn = document.getElementById('h3_tristep');
+    if (triIn) triIn.value = fastOn ? '1' : '0';
+    const tbIn = document.getElementById('h3_turbo');
+    if (tbIn) tbIn.value = '0';
+    // H3-13: the lit half used to be the PREFERENCE alone (pref === 'fast' &&
+    // tri.available), so Native and the single-pass 10s — cells with no Fast
+    // path at all (cell.tristep_min == null) — kept the Fast pill pink while
+    // the render that actually queued ran Best, 8-25x slower. fastOn already
+    // folds in per-cell availability (h3TriStepOn), so light whichever half
+    // is really about to render; the note below still explains why.
+    const lit = fastOn ? 'fast' : 'best';
+    document.querySelectorAll('#h3SpeedGroup [data-h3-speed]').forEach(b =>
+      b.classList.toggle('active', b.dataset.h3Speed === lit));
+    const note = document.getElementById('h3SpeedNote');
+    if (note) {
+      // Independent of `lit`: this is "you prefer Fast, but this shape can
+      // only run Best", which is exactly the case where the pill and the
+      // note used to disagree.
+      const bestOnly = pref === 'fast' && cell && cell.tristep_min == null;
+      note.textContent = bestOnly
+        ? cell.label + ' renders on Best — Fast is not validated at this shape yet.'
+        : '';
+      note.hidden = !bestOnly;
+    }
+    const stIn = document.getElementById('h3_steps');
     const s = document.getElementById('steps');
-    if (s) s.value = t.steps || 4;
+    if (fastOn) {
+      // Release a pinned Steps pill FIRST (it re-derives `steps` from the
+      // cell), THEN pin Fast's own count.
+      if (stIn && stIn.value !== 'auto' && typeof setH3Steps === 'function') {
+        try { setH3Steps('auto'); } catch (e) {}
+      }
+      // H3-25: this used to mirror the adapter's own SIGMA-POINT count
+      // (tri.steps, falling back to the literal 4) into the shared #steps
+      // field that the derived line reads — but the Speed row says
+      // "Fast = 3 steps", counting FORWARDS, not sigma points. Same render,
+      // two different numbers on screen. cell.tristep_forwards is what
+      // actually runs (windows * H3_TRISTEP_FORWARDS, server-side); a
+      // sigma-point count minus one is the fallback only when a cell
+      // hasn't loaded yet.
+      if (s) s.value = (cell && cell.tristep_forwards != null)
+        ? cell.tristep_forwards : (tri.steps ? tri.steps - 1 : 3);
+    } else if (s && cell) {
+      const ov = (stIn || {}).value || 'auto';
+      s.value = (ov !== 'auto' && /^\d+$/.test(ov)) ? parseInt(ov, 10) : cell.steps;
+    }
+    // Steps is a Best control: it only shows while Best is what renders.
+    const stepsRow = document.getElementById('h3StepsRow');
+    if (stepsRow) stepsRow.hidden = fastOn;
+    if (typeof renderH3LoraSlot === 'function') { try { renderH3LoraSlot(); } catch (e) {} }
+  } finally {
+    _h3SpeedBusy = false;
   }
-  _h3SyncStepsEnabled();
-  // Turbo is one half of the single-adapter-slot conflict, so the Adapter row
-  // appears / disappears with it.
-  if (typeof renderH3LoraSlot === 'function') { try { renderH3LoraSlot(); } catch (e) {} }
-  try { localStorage.setItem('phos_h3_turbo', v); } catch (e) {}
-  // Turbo roughly halves every cell, so the chips have to re-price — a strip
-  // still advertising the 9-step wall clock while Turbo is lit is the same lie
-  // the Speed pill's absolute times were added to kill.
+}
+function _h3SpeedRepriced() {
   if (typeof renderH3Axes === 'function') { try { renderH3Axes(); } catch (e) {} }
+  if (typeof renderH3Turbo === 'function') { try { renderH3Turbo(); } catch (e) {} }
   if (typeof updateDerived === 'function') { try { updateDerived(); } catch (e) {} }
   if (typeof updateCustomizeSummary === 'function') { try { updateCustomizeSummary(); } catch (e) {} }
 }
 
-// One click, two behaviours, because the pill has two jobs: select Turbo when
-// it is ready, or fetch it when it isn't. Never both — a click that starts a
-// download must not also arm a render that has nothing to render with.
-async function h3TurboClick() {
-  const t = h3TurboState();
-  if (t.available) { setH3Turbo(true); return; }
-  if (!t.supported) {
-    if (typeof phosToast === 'function') {
-      phosToast('This Hailuo H3 pack predates Turbo. Re-run "Install Hailuo H3" '
-                + 'in the Pinokio sidebar to update the clone — your weights stay.',
-                { kind: 'danger' });
-    }
-    return;
-  }
-  if (!t.install_available) {
-    if (typeof phosToast === 'function') {
-      phosToast(t.install_note || 'The H3 Turbo runner-layout adapter release asset is pending.',
-                { kind: 'danger' });
-    }
-    return;
-  }
-  const gb = t.download_gb || 2.0;
-  if (!confirm('Download the H3 Turbo adapter?\n\n'
-             + '~' + gb + ' GB, into the H3 pack’s models folder.\n'
-             + 'The LightX2V source adapter is Apache-2.0.\n\n'
-             + 'Progress streams to the log at the bottom of the page.')) return;
-  try {
-    const r = await fetch('/h3/turbo/install', { method: 'POST' });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
-    if (typeof phosToast === 'function') {
-      phosToast('Turbo download started — watch the log. The pill turns on by '
-                + 'itself when the adapter lands.', { kind: 'ok' });
-    }
-  } catch (e) {
-    if (typeof phosToast === 'function') {
-      phosToast('Turbo download: ' + (e.message || 'failed'), { kind: 'danger' });
-    }
-  }
+// Set the speed ('fast' | 'best'). Remembered per browser.
+function setH3Speed(v) {
+  _h3SetSpeedPref(v === 'best' ? 'best' : 'fast');
+  _h3ApplySpeed();
+  _h3SpeedRepriced();
+}
+// Pre-switch API: Turbo on meant "the fast one".
+function setH3Turbo(on) { if (on) setH3Speed('fast'); else _h3ApplySpeed(); }
+function setH3TriStep(on) { setH3Speed(on ? 'fast' : 'best'); }
+// What a saved clip was made with, as this switch's value.
+function h3SpeedOfParams(p) {
+  p = p || {};
+  return (p.h3_tristep || p.h3_turbo) ? 'fast' : 'best';
+}
+// H3-04: "Fast" / "Best", for any place that shows a submitted or running
+// H3 job's params — the Now card, a queue row, the info modal. One
+// function so all three read the same label from the same field.
+function h3JobSpeedLabel(p) {
+  if (!p || p.engine !== 'h3') return '';
+  return h3SpeedOfParams(p) === 'fast' ? 'Fast' : 'Best';
+}
+// "Hailuo H3 · Standard 10s" — the shape a submitted H3 job asked for,
+// looked up from its own h3_tier (never re-derived from the CURRENT form
+// state, which may have moved on to a different shot by the time this job
+// is showing in the queue or the Now card).
+function h3JobShapeLabel(p) {
+  if (!p || p.engine !== 'h3') return '';
+  const cell = h3TierByKey(p.h3_tier || '');
+  const shape = cell ? `${cell.quality_label} ${cell.length_label}` : (p.h3_tier || '');
+  return ['Hailuo H3', shape].filter(Boolean).join(' · ');
 }
 
-document.querySelectorAll('#h3TurboGroup [data-h3-turbo]').forEach(b => {
-  b.onclick = () => (b.dataset.h3Turbo === '1') ? h3TurboClick() : setH3Turbo(false);
+// The Fast half: select it when ready; otherwise the one click that makes it
+// ready (install the adapter, or say which update is needed).
+async function h3SpeedClick(which) {
+  if (which !== 'fast') { setH3Speed('best'); return; }
+  const tri = h3TriStepState();
+  if (tri.available) { setH3Speed('fast'); return; }
+  const toast = (m, kind) => { if (typeof phosToast === 'function') phosToast(m, { kind }); };
+  if (!tri.supported) {
+    toast('Fast needs a newer Hailuo H3 runner. Run "Update Hailuo H3 runner" in the Pinokio '
+          + 'sidebar — your weights stay.', 'danger');
+    return;
+  }
+  if (tri.installing) { toast('The Fast adapter is already installing — watch the log.', 'ok'); return; }
+  // H3-27: a native confirm() blocks the tab and reads as a browser dialog,
+  // not the panel's own UI (the same rule Stop's confirmation follows).
+  // Replace it with the panel's existing "toast + action link" confirm
+  // pattern (used for the engine-offer nudge, install prompts elsewhere) —
+  // one informative toast, one explicit click to proceed, nothing blocking.
+  // Also: when Fast can't install right now (or before the user commits),
+  // mention Turbo if it's ALREADY installed — a real quicker-than-Best
+  // option this click used to leave unmentioned entirely.
+  const turbo = h3TurboState();
+  const turboHint = (turbo && turbo.available)
+    ? ' Turbo (already installed) is a quicker option too — pick it from this same switch after Best.'
+    : '';
+  const el = phosToast(
+    'Install Fast — 180 MB adapter from ' + (tri.repo || 'Kijai/MiniMax-H3_comfy')
+    + ' (a conversion of ' + (tri.source_repo || 'TaoLiveAIGC/TaoMate-H3') + '). License: '
+    + (tri.license || 'MiniMax H3 Community License') + ', same terms as H3 itself.' + turboHint,
+    { icon: 'ph-download-simple', duration: 12000 });
+  if (!el) return;
+  const a = document.createElement('a');
+  a.href = '#';
+  a.className = 'phos-toast-action';
+  a.textContent = 'Install Fast';
+  a.onclick = async (ev) => {
+    ev.preventDefault();
+    el.remove();
+    try {
+      const r = await fetch('/h3/tristep/install', { method: 'POST' });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+      _h3SetSpeedPref('fast');
+      toast(j.already_installed ? 'Fast is already installed.'
+        : 'Installing Fast (180 MB) — watch the log. It switches on by itself when it lands.', 'ok');
+    } catch (e) {
+      toast('Fast install: ' + (e.message || 'failed'), 'danger');
+    }
+  };
+  el.appendChild(a);
+}
+document.querySelectorAll('#h3SpeedGroup [data-h3-speed]').forEach(b => {
+  b.onclick = () => h3SpeedClick(b.dataset.h3Speed);
 });
+
+// The Upscale & Face Fix pair, priced from the cell's own numbers: the
+// checkbox beside Generate and the estimate line in the footer.
+function h3FaceFixOn() {
+  const cell = (typeof h3CurrentCell === 'function') ? h3CurrentCell() : null;
+  if (cell && cell.fast_hd) return true;   // Fast HD always finishes with it
+  return ((document.getElementById('h3_upscale') || {}).value) === 'ltx_x2';
+}
+function _h3SyncFaceFixEta() {
+  const cell = h3CurrentCell();
+  const allowed = (H3.upscale_modes || []).indexOf('ltx_x2') !== -1;
+  const row = document.getElementById('h3FaceFixFooterRow');
+  // Fast HD always finishes with it, so the toggle has nothing to decide.
+  if (row) row.hidden = !allowed || !!(cell && cell.fast_hd);
+  const eta = document.getElementById('h3FaceFixFooterEta');
+  if (eta) {
+    eta.textContent = (cell && cell.facefix_min != null)
+      ? '+' + (Math.round(cell.facefix_min * 2) / 2) + ' min · 2× · face and sound kept'
+      : '2× · face and sound kept';
+  }
+  const legacy = document.getElementById('h3FaceFixEta');
+  if (legacy) {
+    legacy.textContent = 'optional · 2× · face and sound kept'
+      + ((cell && cell.facefix_min != null)
+        ? ' · +' + (Math.round(cell.facefix_min * 2) / 2) + ' min' : " · about the render's time again");
+  }
+}
+// The footer line: "Draft · Fast ≈ 3 min" / "High · Best + Face Fix ≈ 44 min".
+function h3EstimateLine() {
+  const cell = h3CurrentCell();
+  if (!cell) return '';
+  // 4.19: Extend and Add sound are priced by the 5 s window they run in, not
+  // by the Length strip (which they do not use).
+  const _mode = (typeof currentMode !== 'undefined') ? currentMode : '';
+  if (_mode === 'extend' || _mode === 'v2a') {
+    const win = h3CellFor(cell.quality, '5s') || cell;
+    const per = h3CellEtaMin(win);
+    const fmt = (m) => h3FmtEtaMin(m).replace(/^~/, '').replace(/ · batch$/, '');
+    if (_mode === 'extend') {
+      const sec = Math.max(0.5, Math.min(15, parseFloat((document.getElementById('extend_seconds') || {}).value) || 5));
+      const windows = 1 + Math.max(0, Math.ceil((sec * 24 + 1 - 124) / 123));
+      return 'Extend +' + sec.toFixed(1) + ' s · ' + win.quality_label + ' · ' + windows
+        + ' window' + (windows > 1 ? 's' : '') + ' ≈ ' + fmt(per * windows);
+    }
+    // Add sound never upscales (the picture is the user's), so a Fast HD pick
+    // costs only its H3 pass here.
+    const v2aPer = win.fast_hd ? (_h3TriStepMin(win) || win.tristep_min || per) : per;
+    return 'Add sound · picture kept · ≈ ' + fmt(v2aPer) + ' per 5 s of clip';
+  }
+  const fast = h3TriStepOn(cell);
+  let m = h3CellEtaMin(cell);
+  if (cell.fast_hd) {
+    // Already includes its Upscale & Face Fix (h3CellEtaMin prices it whole).
+    return 'Fast HD · ' + cell.width + '×' + cell.height + ' → ' + cell.final_width + '×'
+      + cell.final_height + ' ≈ ' + h3FmtEtaMin(m).replace(/^~/, '').replace(/ · batch$/, '');
+  }
+  let txt = cell.quality_label + ' · ' + (fast ? 'Fast' : 'Best');
+  if (h3FaceFixOn()) {
+    txt += ' + Face Fix';
+    if (cell.facefix_min == null) return txt;
+    m += cell.facefix_min;
+  }
+  // H3-24: this used to round to the nearest HALF minute below 10 min
+  // (Math.round(m * 2) / 2, e.g. "6.5") while the chip and the Shot setup
+  // summary round the SAME cell to the nearest whole minute (h3FmtEtaMin /
+  // the server's own _fmt_eta) — one cell, three different numbers on
+  // screen at once. One formatter now, everywhere.
+  return txt + ' ≈ ' + h3FmtEtaMin(m).replace(/^~/, '').replace(/ · batch$/, '');
+}
 
 // Adapter-slot pills. Bound at parse time like the Turbo / Steps groups —
 // the row itself is hidden until Turbo and a LoRA actually collide.
@@ -548,7 +790,8 @@ document.querySelectorAll('#h3LoraSlotGroup [data-h3-lora-slot]').forEach(b => {
 // gate exists to prevent. (Old name kept: it is what the rest of this file
 // calls.)
 function _engineRowVisible() {
-  return ENGINES.filter(e => engineRenderable(e) && e.state !== 'announced').length > 1;
+  const count = ENGINES.filter(e => engineRenderable(e) && e.state !== 'announced').length;
+  return count > 1 || (_currentSurface() === 'music' && count === 1);
 }
 
 // ---- The header switcher ----------------------------------------------------
@@ -608,12 +851,22 @@ function _engineMenuEl() {
   return m;
 }
 
-function closeEngineMenu() {
+// H3-17: the menu is portaled to <body> (it has to be — the header is
+// overflow:hidden and would slice it) which is exactly what breaks Tab
+// order: a portaled element sits at the END of the DOM regardless of where
+// its trigger lives, so Tab from the trigger jumped clear over it to
+// whatever else the header holds (the health chip). closeEngineMenu() used
+// to only hide the menu, never give focus back anywhere, so a keyboard user
+// who opened it with Enter/Space had no idea where focus went next.
+function closeEngineMenu(opts) {
   window._engineMenuOpen = false;
   const m = document.getElementById('engineMenu');
   if (m) m.hidden = true;
   const t = document.querySelector('#engineSwitch .eng-trigger');
-  if (t) t.setAttribute('aria-expanded', 'false');
+  if (t) {
+    t.setAttribute('aria-expanded', 'false');
+    if (!opts || opts.returnFocus !== false) t.focus();
+  }
 }
 
 function toggleEngineMenu() {
@@ -628,17 +881,41 @@ function toggleEngineMenu() {
   m.hidden = false;
   window._engineMenuOpen = true;
   trig.setAttribute('aria-expanded', 'true');
+  // Move focus INTO the menu (the active engine's row, or the first row) —
+  // a keyboard user who just opened this had no other way to reach it,
+  // since Tab from the trigger skips clear over the portaled menu.
+  const opts = Array.from(m.querySelectorAll('.eng-opt'));
+  const target = opts.find(o => o.classList.contains('active')) || opts[0];
+  if (target) target.focus();
 }
 
 document.addEventListener('click', (ev) => {
   if (!window._engineMenuOpen) return;
   if (ev.target.closest('#engineMenu') || ev.target.closest('#engineSwitch')) return;
-  closeEngineMenu();
+  closeEngineMenu({ returnFocus: false });
 }, true);
 document.addEventListener('keydown', (ev) => {
-  if (ev.key === 'Escape' && window._engineMenuOpen) closeEngineMenu();
+  if (!window._engineMenuOpen) return;
+  if (ev.key === 'Escape') { closeEngineMenu(); return; }
+  // Arrow Up/Down move focus between rows; Home/End jump to the ends. Enter
+  // and Space already work — they're plain <button> elements, so the
+  // browser fires their onclick natively when focused.
+  if (ev.key !== 'ArrowDown' && ev.key !== 'ArrowUp'
+      && ev.key !== 'Home' && ev.key !== 'End') return;
+  const m = document.getElementById('engineMenu');
+  if (!m) return;
+  const opts = Array.from(m.querySelectorAll('.eng-opt'));
+  if (!opts.length) return;
+  ev.preventDefault();
+  const cur = opts.indexOf(document.activeElement);
+  let next;
+  if (ev.key === 'Home') next = 0;
+  else if (ev.key === 'End') next = opts.length - 1;
+  else if (ev.key === 'ArrowDown') next = cur < 0 ? 0 : (cur + 1) % opts.length;
+  else next = cur < 0 ? opts.length - 1 : (cur - 1 + opts.length) % opts.length;
+  opts[next].focus();
 });
-window.addEventListener('resize', closeEngineMenu);
+window.addEventListener('resize', () => closeEngineMenu({ returnFocus: false }));
 
 function renderEngineSwitch() {
   const box = document.getElementById('engineSwitch');
@@ -649,7 +926,8 @@ function renderEngineSwitch() {
   if (div) div.hidden = !show;
   if (!show) { box.innerHTML = ''; closeEngineMenu(); return; }
 
-  const active = currentEngine();
+  const active = _currentSurface() === 'music' ? 'music' : currentEngine();
+  const surfaceMode = _currentSurface() === 'music' ? 'music' : currentMode;
   const list = ENGINES.filter(engineRenderable);
 
   // ---- The trigger: the active engine, and nothing else ----
@@ -658,7 +936,7 @@ function renderEngineSwitch() {
     box.innerHTML = `<button type="button" class="eng-trigger" aria-haspopup="listbox"
         aria-expanded="false"
         style="--eng-accent:${escapeHtml(act.accent)};--eng-dim:${escapeHtml(act.accent_dim)};--eng-soft:${escapeHtml(act.accent_soft)}"
-        title="${escapeHtml(_engineTooltip(act, engineStatus(act), engineServesMode(act, currentMode)))}">
+        title="${escapeHtml(_engineTooltip(act, engineStatus(act), engineServesMode(act, surfaceMode)))}">
       <span class="eng-mark"><svg class="ph" aria-hidden="true"><use href="#${escapeHtml(act.mark)}"/></svg></span>
       <span class="eng-seg-name">${escapeHtml(act.label)}</span>${
       act.generation ? `<span class="eng-seg-gen">${escapeHtml(act.generation)}</span>` : ''}
@@ -673,13 +951,20 @@ function renderEngineSwitch() {
   menu.innerHTML = list.map(e => {
     const st = engineStatus(e);
     const offer = !e.builtin && !st.announced && st.capable && !st.available;
-    const modeOk = engineServesMode(e, currentMode);
+    const modeOk = engineServesMode(e, surfaceMode);
     // Four badges, four different sentences. An OFFER (download / repair) is
     // worth the engine's own colour; a constraint is not.
     let badge = '', badgeClass = '';
     if (st.announced) { badge = 'soon'; }
     else if (offer) {
-      badge = st.repairable ? 'repair' : (e.install_size || '').replace(/^~/, '');
+      // H3-05: "repairable" also covers the missing_q8_dit case (weights on
+      // disk, only the local compact build is missing) — Pinokio's sidebar
+      // shows ONLY a Build entry there, no Repair entry (pinokio.js), so a
+      // "repair" badge sent the user looking for a button that doesn't
+      // exist. venv/runner actually broken is the real repair case.
+      badge = (st.repairable && st.reason === 'missing_q8_dit') ? 'build'
+        : st.repairable ? 'repair'
+        : (e.install_size || '').replace(/^~/, '');
       badgeClass = ' offer';
     } else if (st.available && !modeOk) { badge = (e.serves_label || '').toLowerCase().replace(' and ', ' · '); }
     // Inert = real but unreachable RIGHT NOW. Distinct from needs-install,
@@ -731,12 +1016,20 @@ function _engineTooltip(e, st, modeOk) {
   if (!e.builtin && !st.capable) {
     // The floor is the LOWEST lane's, served by the panel. This read
     // `st.min_ram_gb || 64` — the bf16 number, or a literal 64 that no floor
-    // in this codebase has ever been — on a machine whose real bar is 46.
-    return name + ' — needs ' + (st.ram_floor_gb || st.min_ram_gb || 46)
+    // in this codebase has ever been — then `|| 46`, a number no floor in
+    // this codebase has ever been either (H3-28). The real bar is
+    // H3_MIN_RAM_GB_Q8 = 36 (mlx_ltx_panel.py); both server fields should
+    // always be present, so this is a last-resort fallback only.
+    return name + ' — needs ' + (st.ram_floor_gb || st.min_ram_gb || 36)
                 + ' GB unified memory';
   }
   if (!e.builtin && !st.available) {
-    return st.repairable
+    // H3-05: "repairable" also covers missing_q8_dit (every weight present,
+    // only the local compact build is missing) — a genuinely different fix
+    // than "repair", with its own Pinokio menu entry (Build, not Repair).
+    return (st.repairable && st.reason === 'missing_q8_dit')
+      ? name + ' — needs its compact engine built; your weights are already on disk. Click for the one-click fix.'
+      : st.repairable
       ? name + ' — needs repair; your weights are still on disk. Click for the one-click fix.'
       : name + ' — available to install (' + (e.install_size || '')
         + '). Click to see what it does.';
@@ -810,7 +1103,17 @@ const TIER_ENGINES = {
     // what the quality chip prints. It is the current cell's frames, never a
     // fixed number — a chip that said "73f" while rendering 121 would be the
     // same class of lie as the engine label this release is fixing.
-    qualitySpec: (item, cell) => `${item.canvas} · ${cell ? cell.frames : '—'}f`,
+    // VC-28: show the size that actually lands in Outputs, not just the
+    // render canvas — Balanced's default fit_720p export means a 1024×576
+    // render delivers a 1280×720 file, the same gap VC-19 closed for the
+    // info modal. item.delivered_canvas comes from the server
+    // (ltx_tiers_payload -> compute_upscale_plan); equals item.canvas
+    // whenever nothing is exported, so this is a no-op everywhere else.
+    qualitySpec: (item, cell) => {
+      const canvas = (item.delivered_canvas && item.delivered_canvas !== item.canvas)
+        ? `${item.canvas} → ${item.delivered_canvas}` : item.canvas;
+      return `${canvas} · ${cell ? cell.frames : '—'}f`;
+    },
     lengthSpec: (item, cell) => (cell ? `${cell.frames}f` : `${item.frames}f`),
     eta: (cell) => ltxCellEta(cell),
     // A cell whose weights are not on disk is an INSTALL OFFER, not a choice.
@@ -860,8 +1163,15 @@ function _tierChipHtml(engine, kind, item, cell, active) {
   const foot = !ok ? 'unavailable'
              : needsInstall ? E.installLabel(cell)
              : E.eta(cell);
+  // Owner ruling (2026-09-29): the tooltip says WHERE the time on the chip
+  // comes from — "based on 523 renders on Macs like yours" vs "estimated —
+  // few renders on this Mac class yet" — right where a user is already
+  // looking to decide whether to trust it.
+  const basisFn = kind === 'quality' && !needsInstall
+    ? (engine === 'h3' ? h3CellEtaBasis : ltxCellEtaBasis) : null;
+  const basis = (ok && basisFn) ? basisFn(cell) : '';
   const title = ok
-    ? ((cell && cell.blurb) || item.blurb || '')
+    ? ([(cell && cell.blurb) || item.blurb || '', basis].filter(Boolean).join(' — '))
     : (cell && cell.unavailable_reason) || 'Not available on this install.';
   const attr = (kind === 'quality') ? (E.qAttr || `${engine}-quality`)
                                     : (E.lAttr || `${engine}-length`);
@@ -890,13 +1200,28 @@ function renderTierAxes(engine) {
   const curQ = E.currentQuality();
   const curL = E.currentLength();
 
-  qStrip.style.gridTemplateColumns = `repeat(${Math.max(1, qualities.length)}, 1fr)`;
+  // Both strips used to be fixed column counts, which squeezed and then
+  // CLIPPED: LTX ships five canvases (Quick · Balanced · Standard · High ·
+  // High 720p) whose specs wrapped to three lines in the pane's usual width,
+  // and H3's four ran off the right edge as soon as the window was dragged in.
+  // Auto-fit tracks answer to the strip's own width. The 90 px floor is
+  // measured, not guessed: the pane's content box is ~386 px, where four
+  // tracks + gaps fit and five do not — so H3's four canvases stay one row
+  // across (unchanged) and LTX's five wrap 4 + 1 instead of squeezing five
+  // into a row. Squeeze the pane and it gives ground a column at a time
+  // instead of clipping. An unfilled track collapses, so a 2-cell strip still
+  // stretches its two cells across the row.
+  qStrip.style.gridTemplateColumns = 'repeat(auto-fit, minmax(90px, 1fr))';
   qStrip.innerHTML = qualities.map(q =>
     _tierChipHtml(engine, 'quality', q, E.cellFor(q.key, curL), q.key === curQ)).join('');
   // Past four lengths (the lab dense pass turns a fifth on) the chips would
-  // squeeze; wrap to three per row and let the strip grow a line instead.
-  lStrip.style.gridTemplateColumns =
-    `repeat(${lengths.length > 4 ? 3 : Math.max(1, lengths.length)}, 1fr)`;
+  // squeeze; wrap to three per row and let the strip grow a line instead. The
+  // wider floor is what makes it three rather than four at the pane's usual
+  // width — same result the hard-coded 3 gave, and it keeps giving ground as
+  // the pane narrows instead of clipping.
+  lStrip.style.gridTemplateColumns = lengths.length > 4
+    ? 'repeat(auto-fit, minmax(118px, 1fr))'
+    : 'repeat(auto-fit, minmax(90px, 1fr))';
   lStrip.innerHTML = lengths.map(l =>
     _tierChipHtml(engine, 'length', l, E.cellFor(curQ, l.key), l.key === curL)).join('');
 
@@ -947,7 +1272,19 @@ function renderTierAxes(engine) {
   }
 }
 // The shipped name, kept so every H3 call site is unchanged.
-function renderH3Axes() { return renderTierAxes('h3'); }
+// H3-12: the Landscape/Portrait sub-labels ("Landscape 640x384") were only
+// ever refreshed from setH3Orientation itself — every OTHER thing that
+// changes the resolved cell's canvas (setH3Quality, setH3Length, setH3Tier,
+// Load Params, a Fallback redirect) left them stale, showing a size that
+// belonged to the PREVIOUS quality/length pick. renderH3Axes() is the one
+// function every one of those already calls to repaint the strips, so
+// syncing the subs here — instead of chasing each call site individually —
+// fixes the whole class at once.
+function renderH3Axes() {
+  const result = renderTierAxes('h3');
+  if (typeof _h3SyncOrientationSubs === 'function') { try { _h3SyncOrientationSubs(); } catch (e) {} }
+  return result;
+}
 
 // ---- LTX's side of the shared axis machinery --------------------------------
 // The mirror of h3CellFor / h3CurrentQuality / h3CellEta, and nothing more. The
@@ -1010,13 +1347,33 @@ function ltxCellEta(cell) {
   // Chips must not advertise the tuned wall clock while the Fast draft
   // schedule is armed — the same lie the H3 Turbo repaint exists to kill.
   // fast_eta exists only on cells that can run the preset (server-stamped),
-  // so HQ cells keep their own number untouched.
+  // so HQ cells keep their own number untouched. Fast draft has no fleet
+  // range of its own yet, so this branch keeps the point estimate.
   if (cell.fast_eta && typeof schedPresetActive === 'function'
       && schedPresetActive()) {
     return cell.fast_eta + ' · fast draft';
   }
-  const tail = (cell.pack === 'q8' && cell.pipeline === 'hq') ? ' · Q8 HQ' : '';
-  return (cell.eta || '') + tail;
+  // VC-23: "Q8 HQ" names the internal quantization + pipeline, not
+  // anything a user asked for — "High detail" says what it delivers.
+  const tail = (cell.pack === 'q8' && cell.pipeline === 'hq') ? ' · High detail' : '';
+  // Owner ruling (2026-09-29): show the fleet's own p25-p75 RANGE ("~12-18
+  // min") wherever real fleet data exists, instead of a single point
+  // number — cell.fleet_range is server-computed (fleet_calibrated_range,
+  // mlx_ltx_panel.py) from real installs' own wall clocks, this Mac's
+  // chip/RAM class first, falling back through chip-family and fleet-wide
+  // levels. Without fleet data, VC-28's modelled band (cell.eta_range:
+  // +/-10% on a measured cell, skewed upward on a modelled one) still reads
+  // more honestly than a single point; the bare point estimate is last.
+  const fr = cell.fleet_range;
+  return (fr ? fr.eta_range : (cell.eta_range || cell.eta || '')) + tail;
+}
+// The provenance line for a cell's tooltip — "based on 523 renders on Macs
+// like yours" / "estimated -- few renders on this Mac class yet". Kept
+// separate from ltxCellEta so a caller that only wants the number (the
+// Batch total, a queue-row label) doesn't have to strip a sentence back off.
+function ltxCellEtaBasis(cell) {
+  if (!cell) return '';
+  return cell.fleet_range ? cell.fleet_range.basis : 'estimated — few renders on this Mac class yet';
 }
 // Are this cell's weights on disk? A RUNTIME question — the tier table is built
 // at import time and cannot know. `offered` answers "can this Mac's RAM serve
@@ -1209,6 +1566,15 @@ function _h3ApplyShape(qualityKey, lengthKey, opts) {
     noteEl.textContent = n;
     noteEl.hidden = !n;
   }
+  // H3-14: the same blurb the chip's own title= tooltip carries, surfaced as
+  // a visible line so it isn't hover-only (unreachable on trackpad-averse
+  // and touch use, and easy for a stale sentence to hide in for months).
+  const blurbEl = document.getElementById('h3TierBlurb');
+  if (blurbEl) {
+    const b = cell.blurb || '';
+    blurbEl.textContent = b;
+    blurbEl.hidden = !b;
+  }
   // The export line is per (canvas × target): switching quality changes whether
   // this canvas exports clean or padded, so it has to be re-read here too.
   _h3SyncExportNote();
@@ -1400,6 +1766,160 @@ function setH3Tier(key) {
   _h3ApplyShape(tier.quality, tier.length, { fallback: true });
 }
 
+// ---- H3-07: the Video-tab prompt helper -------------------------------------
+// H3 speaks only what sits inside a <d>[Language] …</d> tag, written into the
+// three-field form (integrated_multimodal_description / overall_soundscape /
+// non_diegetic_music) — docs/H3_ENGINE.md "Dialogue on H3". None of that was
+// discoverable from the Video tab: a line written as prose quotes left H3's
+// voice switched off with no error. These three functions are the whole
+// control; the format itself is unchanged — this only helps someone write it.
+
+const H3_PROMPT_FIELD_MARKER = 'integrated_multimodal_description:';
+
+// Structure: wrap whatever is already typed as the first field's content
+// (so nothing is thrown away) and append the other two, empty and labelled.
+// A prompt that already looks structured is left alone — this is an insert,
+// not a reformat.
+function h3InsertPromptStructure() {
+  const ta = document.getElementById('prompt');
+  if (!ta) return;
+  const cur = ta.value || '';
+  if (cur.includes(H3_PROMPT_FIELD_MARKER)) {
+    if (typeof phosToast === 'function') {
+      phosToast('Already structured — the three fields are there.', { kind: 'ok' });
+    }
+    ta.focus();
+    return;
+  }
+  const body = cur.trim()
+    ? cur.trim()
+    : '[Shot 1] Who is on screen, two or three anchors (build, clothes), '
+      + 'where they are and the light. What happens, described plainly.';
+  ta.value = `${H3_PROMPT_FIELD_MARKER} ${body}\n\n`
+    + `overall_soundscape: ambience and sound effects in the scene.\n\n`
+    + `non_diegetic_music: N/A`;
+  ta.dispatchEvent(new Event('input', { bubbles: true }));
+  ta.focus();
+}
+
+// + Line: insert one dialogue line at the cursor (or the end) — the tag, a
+// speaker id, and the mouth-stop clause the model needs in the SAME
+// sentence or it keeps the mouth moving on nothing (docs/H3_ENGINE.md).
+// Selects the placeholder words inside the tag so typing replaces them.
+function h3InsertDialogueLine() {
+  const ta = document.getElementById('prompt');
+  if (!ta) return;
+  const lang = (document.getElementById('h3DialogueLang') || {}).value || 'English';
+  const start = (typeof ta.selectionStart === 'number') ? ta.selectionStart : ta.value.length;
+  const end = (typeof ta.selectionEnd === 'number') ? ta.selectionEnd : start;
+  const before = ta.value.slice(0, start);
+  const after = ta.value.slice(end);
+  const needsLeadingSpace = before && !/[\s\n]$/.test(before);
+  const speaker = 'NAME (S1) says: ';
+  const line = `${needsLeadingSpace ? ' ' : ''}${speaker}<d>[${lang}] line here</d> `
+    + `Exactly as the line ends, NAME's mouth settles closed.`;
+  ta.value = before + line + after;
+  // Select "line here" so typing the actual words is one keystroke away.
+  // Numeric, always: `before && …` is '' at position 0, and '' + 1 + … used to
+  // concatenate into a string offset that selected nothing (Codex H3-9).
+  const selStart = before.length + (needsLeadingSpace ? 1 : 0) + speaker.length
+    + `<d>[${lang}] `.length;
+  const selEnd = selStart + 'line here'.length;
+  ta.focus();
+  try { ta.setSelectionRange(selStart, selEnd); } catch (e) {}
+  ta.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+// Every <d>[Lang] …</d> tag's word count against this shape's budget
+// (H3.speech_words_per_sec — the SAME number storyboard's own validator
+// uses, so the two can't disagree), and a warning when prose quotes appear
+// with no tag at all — the exact silent-failure this control exists for.
+function h3SyncPromptHelper() {
+  const ta = document.getElementById('prompt');
+  const countEl = document.getElementById('h3DialogueWordCount');
+  const warnEl = document.getElementById('h3QuoteWarning');
+  if (!ta) return;
+  const text = ta.value || '';
+  const tagRe = /<d>\s*(?:\[[^\]]*\]\s*)?([^<]*)<\/d>/gi;
+  let m, words = 0, tagCount = 0;
+  while ((m = tagRe.exec(text))) {
+    tagCount++;
+    words += (m[1].trim().match(/\S+/g) || []).length;
+  }
+  if (countEl) {
+    if (tagCount) {
+      const cell = (typeof h3CurrentCell === 'function') ? h3CurrentCell() : null;
+      const windows = Math.max(1, (cell && cell.chain_windows) || 1);
+      const perWindowSec = (cell && cell.seconds) ? (cell.seconds / windows) : 5;
+      const rate = (H3 && H3.speech_words_per_sec) || 2.4;
+      // ONE window's speaking time, however many tags share it: splitting the
+      // same words into more tags used to raise the allowance (Codex H3-8).
+      // The main prompt's dialogue is window 1's; later windows have boxes.
+      const budget = Math.max(1, Math.round(perWindowSec * rate));
+      countEl.hidden = false;
+      countEl.textContent = `${words}/${budget} dialogue words`;
+      countEl.classList.toggle('over-budget', words > budget);
+    } else {
+      countEl.hidden = true;
+    }
+  }
+  if (warnEl) {
+    // A "-marked quote whose position falls outside every <d>…</d> span.
+    const tagSpans = [];
+    tagRe.lastIndex = 0;
+    while ((m = tagRe.exec(text))) tagSpans.push([m.index, m.index + m[0].length]);
+    const quoteRe = /["“”]/g;
+    let hasStrayQuote = false;
+    let q;
+    while ((q = quoteRe.exec(text))) {
+      if (!tagSpans.some(([s, e]) => q.index >= s && q.index < e)) { hasStrayQuote = true; break; }
+    }
+    warnEl.hidden = !hasStrayQuote;
+  }
+}
+document.getElementById('prompt') && document.getElementById('prompt')
+  .addEventListener('input', () => {
+    if (document.body.dataset.engine === 'h3') { try { h3SyncPromptHelper(); } catch (e) {} }
+  });
+
+
+// ---- 4.19: H3 media modes ----------------------------------------------------
+// Keyframes, Extend, Lip-sync and Add sound each need a runner flag an older
+// H3 pack does not have. /status.h3 carries one boolean per capability, probed
+// on the INSTALLED runner; the server (make_job + the worker) makes the same
+// decision from the same probes — this copy only lets the UI say so first.
+globalThis.H3_MODE_CAP = { keyframe: 'keyframes', extend: 'extend', a2v: 'audio_drive', v2a: 'video_to_audio' };
+globalThis.H3_MODE_LABEL = { keyframe: 'Keyframes', extend: 'Extend', a2v: 'Lip-sync', v2a: 'Add sound' };
+
+function h3CanServe(mode) {
+  const st = (window._ENGINE_PROBES && window._ENGINE_PROBES.h3) || {};
+  if (!st.available) return false;
+  const cap = H3_MODE_CAP[mode];
+  return cap ? !!st[cap] : true;
+}
+
+function h3ClipIsH3(o) {
+  return !!(o && o.engine === 'h3');
+}
+
+// The Extend panel's length control speaks per engine: LTX adds 8-frame
+// latents up to 10 s; H3 adds 5 s windows and lands on the exact seconds,
+// up to 15 s (three windows, each carrying the last 17 frames and their sound).
+function syncH3MediaModeUi() {
+  const onH3 = document.body.dataset.engine === 'h3';
+  const sec = document.getElementById('extend_seconds');
+  if (sec) {
+    sec.max = onH3 ? '15' : '10';
+    if (!onH3 && parseFloat(sec.value) > 10) sec.value = '10';
+  }
+  const hint = document.getElementById('extendDurationHint');
+  if (hint && onH3 && sec) {
+    const s = Math.max(0.5, Math.min(15, parseFloat(sec.value) || 5));
+    const windows = 1 + Math.max(0, Math.ceil((s * 24 + 1 - 124) / 123));
+    hint.textContent = `Adds ${s.toFixed(1)} s · ${windows} H3 window${windows > 1 ? 's' : ''}`;
+  }
+}
+
 
 // ---- published to the page --------------------------------------------------
 // Inline handlers in the markup and the other files resolve these through
@@ -1407,10 +1927,23 @@ function setH3Tier(key) {
 Object.assign(globalThis, {
   engineById, defaultEngine, engineStatus, engineServesMode,
   h3ResolveTierKey, h3TierByKey, h3CellFor, h3CurrentCell,
-  setH3Upscale, setH3Orientation, setH3Steps, h3TurboPillSub,
+  setH3Upscale, setH3FaceFixAfter, setH3Orientation, setH3Steps, h3TurboPillSub,
   renderH3Turbo, setH3Turbo, syncModeStripToEngine, renderEngineSwitch,
+  setH3Speed, h3SpeedOfParams, h3EstimateLine, setH3TriStep, h3TriStepOn, h3TriStepState,
+  h3JobSpeedLabel, h3JobShapeLabel, ltxCellEtaBasis, h3CellEtaBasis,
+  // Published for the Shot setup summary (characters.js): a closed section has
+  // to price the shape it is hiding, and it must do it with the SAME numbers
+  // the chips print — never a second cost model in a second module.
+  h3CellEta,
+  // ...and the two the Batch section needs to price N jobs: the MINUTES behind
+  // that string, and whether a Face Fix rides along. Private, they threw on
+  // first call and the catch swallowed it, so an H3 batch showed no total at
+  // all (lint_webapp: no-undef, queue.js:4579).
+  h3CellEtaMin, h3FaceFixOn,
   renderTierAxes, renderH3Axes, ltxCellFor, ltxCurrentQuality,
   ltxCurrentLength, ltxCurrentCell, ltxCellEta, ltxCellNeedsInstall,
   ltxCellInstallLabel, _ltxApplyShape, setH3Quality, _h3ApplyShape,
   renderH3WindowPrompts, toggleH3WindowHelp, setH3ChainPrompts, setH3Tier,
+  h3InsertPromptStructure, h3InsertDialogueLine, h3SyncPromptHelper,
+  h3CanServe, h3ClipIsH3, syncH3MediaModeUi, h3FmtEtaMin,
 });

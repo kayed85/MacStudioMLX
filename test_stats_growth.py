@@ -46,15 +46,20 @@ class LocalGrowth(unittest.TestCase):
 
 class FleetQueriesAndPage(unittest.TestCase):
     def test_fleet_queries_have_no_window_on_the_totals(self):
-        q = p._USAGE_FLEET_QUERIES
-        for name in ("total_renders", "total_installs", "installs_by_day", "renders_by_day", "active_by_week"):
-            self.assertIn(name, q)
-        self.assertNotIn("INTERVAL", q["total_renders"])
-        self.assertNotIn("INTERVAL", q["total_installs"])
-        self.assertNotIn("INTERVAL", q["installs_by_day"])
-        self.assertIn("render_completed", q["total_renders"])
-        # the running week is excluded, or the caption reads as a collapse
-        self.assertIn("toStartOfWeek(timestamp) < toStartOfWeek(now())", q["active_by_week"])
+        # stats-v2: the static dict became a function of range_key — the
+        # "totals" queries stay windowless (no INTERVAL) regardless of
+        # which range is selected, by design (see _fleet_queries' docstring).
+        for range_key in ("7d", "30d", "90d", "all"):
+            q = p._fleet_queries(range_key)
+            for name in ("total_renders", "total_installs", "installs_by_day",
+                         "renders_by_day", "active_by_week"):
+                self.assertIn(name, q)
+            self.assertNotIn("INTERVAL", q["total_renders"])
+            self.assertNotIn("INTERVAL", q["total_installs"])
+            self.assertNotIn("INTERVAL", q["installs_by_day"])
+            self.assertIn("render_completed", q["total_renders"])
+            # the running week is excluded, or the caption reads as a collapse
+            self.assertIn("toStartOfWeek(timestamp) < toStartOfWeek(now())", q["active_by_week"])
 
     def test_page_has_the_tiles_and_the_chart(self):
         html = p.STATS_HTML_FILE.read_text(encoding="utf-8")

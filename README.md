@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <strong>Generative video, image, and character training on your Mac.</strong><br>
+  <strong>Generative video, music, image, and character training on your Mac.</strong><br>
   MLX. No PyTorch, no CUDA, no cloud, no API key.<br>
   <a href="https://github.com/kayed85/MacStudioMLX">github.com/kayed85/MacStudioMLX</a>
 </p>
@@ -27,7 +27,7 @@
 
 ### 📥 [Click Here to Download MacStudio MLX for Mac (.dmg)](https://github.com/kayed85/MacStudioMLX/releases/latest)
 
-> **Current release: v4.12.2.** Upstream release sync: The talking one shot (J-cut speech handoff, lip-sync speaker gate, two-speaker staging), no-beats one-shot prefill, Q8 H3 compact build validation, Krea 2 Turbo photorealistic model for 16 GB Macs, vertical aspect ratio fixes, and prompt enhancer aspect preservation. Full notes on the [releases page](https://github.com/kayed85/MacStudioMLX/releases).
+> **Current release: v4.19.1.** Upstream release sync: Hailuo H3 fast mode, keyframes, extend, lip-sync, progressive layer offloading for 16 GB Apple Silicon, Music Studio & YuE2 audio engine, trained characters repair, and enhanced timeline editor. Full notes on the [releases page](https://github.com/kayed85/MacStudioMLX/releases).
 
 ---
 
@@ -42,6 +42,7 @@
 ## ✨ What's New in This Release?
 
 * **📱 Native macOS App & DMG Installer:** No command line or external browser runners required. Double-click the `.dmg` file to install `MacStudioMLX.app` directly into `/Applications`.
+* **⚡ Progressive Layer Offloading (16 GB M1/M2/M3 Support):** Ultra-low RAM block streaming runs heavy video models, Q8 Dev transformers, and multi-stage pipelines in ~1-3 GB peak unified memory without crashes.
 * **🎛️ Interactive Model Hub (Manager):** Lightweight 120 MB installer. Select and download only the AI models you want (`LTX-Video 2.5 4-bit`, `Gemma 3 4-bit`, `FLUX.2 Edit`, `Krea 2 Turbo`, `IC-LoRAs`) directly into your local Mac application data directory.
 * **💻 Tailored for MacBook Pro M1 Pro (16GB RAM+):** Pre-tuned low-memory precision profiles, half-memory H3 engine, Krea 2 Turbo, and TeaCache acceleration for high-speed local generation on M1 Pro chips.
 * **🎨 Custom macOS Futuristic Icon:** High-resolution 3D Apple squircle app icon.
@@ -59,6 +60,29 @@ A 7-second character clip with synced audio renders in roughly 6 minutes on an M
 
 The interface adapts to the machine it runs on. Under 48 GB of unified memory, the panel exposes only what fits in that envelope (text-to-video, image-to-video, and the Image tab). At 48 GB and above, character mode, first/last-frame keyframing, clip extension, and the Q8 HQ pipelines become available. Tier detection runs once at boot and the unsupported surfaces are hidden rather than greyed out.
 
+## Engines
+
+LTX, Hailuo H3 and YuE2 are peers with their own jobs and install sizes:
+
+| Engine | Surface | Weights | Unified memory |
+|---|---|---|---|
+| **LTX-Video 2.5** | Video, including Audio → Video | ~27.5 GB base; Q8 adds ~37 GB | Adapts to the Mac; advanced modes need more memory |
+| **Hailuo H3** | Video with dialogue and sound | ~75 GB; Q8 DiT adds ~22 GB | 36 GB+ with the Q8 DiT; 60 GB+ for full bf16 |
+| **YuE2** | Audio → Compose: vocals and arrangement from lyrics and a style | ~11 GB | 24 GB or more |
+
+YuE2 installs from inside the panel: open **Audio → Compose** and click **Install music engine (YuE2, ~11 GB)** (the Pinokio sidebar entry **Install the music engine** does the same).
+Compose offers section-tagged lyrics, a prose style, an Instrumental pill,
+three score modes, Draft/Final quality and a maximum length. Songs appear as
+48 kHz stereo WAVs in the gallery; **Drive video** loads a song into the video
+workflow without submitting it. Until the music pack is installed, Audio
+keeps its existing layout. [Music engine guide](docs/MUSIC_ENGINE.md).
+
+YuE2 weights use [CC BY-NC 4.0 plus individual-creator permission](LICENSES/YuE2-MODEL_LICENSE.txt):
+creators may monetize their songs; companies need a license for the weights.
+Code is Apache-2.0. Generated with YuE2 by Multimodal Art Projection · MLX port
+by vanch007. On an M4 Max a 3-minute song renders in about 3 minutes (Final)
+and a 2-minute Draft in about 1 minute, peaking at 11 GB of memory.
+
 ## Features
 
 ### Video
@@ -72,9 +96,9 @@ Text-to-video, image-to-video, and audio-to-video, all delivered as MP4 with joi
 | | [**LTX-Video 2.5**](https://github.com/Lightricks/LTX-Video) | [**Hailuo H3**](https://github.com/MiniMax-AI) (MiniMax-H3 FL2VA) |
 |---|---|---|
 | **How you get it** | The base install (27.5 GB) | One click in the Pinokio sidebar (75 GB) |
-| **Modes** | Text, image, keyframes, extend, audio-to-video, character | Text and image |
-| **Character LoRAs** | Yes — trained in-panel, face + voice | Not yet |
-| **Memory** | Every tier in the table above; the surface adapts | 64 GB class, or 48 GB with the Q8 DiT pack on disk |
+| **Modes** | Text, image, keyframes, extend, audio-to-video, character | Text, image, keyframes (end frame, first + last, timed), extend, lip-sync to your audio, add sound to a silent clip |
+| **Character LoRAs** | Yes — trained in-panel, face + voice | Imported H3 LoRAs (no in-panel training yet) |
+| **Memory** | Every tier in the table above; the surface adapts | 36 GB+ on the compact Q8 engine (the install builds it); 60 GB+ also runs the full bf16 engine |
 | **Best at** | Breadth: every workflow the panel offers, plus your own trained faces | Dialogue: joint video + spoken lines + sound, from one prompt |
 | **Weights licence** | [LTX-2.x Community License](LICENSES/LTX-2.x-Community-License.md) (Lightricks) | MiniMax Community License — territory restrictions apply |
 
@@ -117,11 +141,13 @@ The Train tab also exposes **Style** training (experimental in v3.0) — same en
 ### Audio-to-Video
 <img width="876" height="557" alt="image" src="https://github.com/user-attachments/assets/e64b2a23-e3e2-4132-8ceb-838b0c089136" />
 
-New workflow tab in 3.0. WAV or MP3 in, MP4 out — the audio drives motion in the generated video, and an optional reference image anchors frame zero. The pipeline runs in two stages: low-resolution with classifier-free guidance, then full-resolution with the distilled LoRA fused on top. The original input audio is muxed onto the final clip so the result is a single self-contained MP4. Requires Q8 + ≥64 GB unified memory.
+New workflow tab in 3.0 — Phosphene's lip-sync: a picture (optional) and a stretch of audio become one clip whose mouth follows the track. WAV or MP3 in, MP4 out — the audio drives motion in the generated video, and an optional reference image anchors frame zero. On Q8 (≥64 GB unified memory) it runs the two-stage pipeline: low-resolution with classifier-free guidance, then full-resolution with the distilled LoRA fused on top. Below that it falls back to a faster Q4 distilled lane — smaller Macs still get Audio-to-Video, just not the Q8 pipeline. The original input audio is muxed onto the final clip so the result is a single self-contained MP4.
 
 ### LoRAs
 
 Drop `.safetensors` into `mlx_models/loras/` for immediate use, or browse and install LTX LoRAs from CivitAI inside the panel (per-row rename, download, companion-aware delete). Character bundles live alongside style LoRAs and are filtered out of the regular picker so they don't show up twice.
+
+A CivitAI download shows its progress on the Install button and can be cancelled; nothing half-downloaded is kept. **Enhance** reads the active LoRAs' guides (or their creators' notes) as reference and keeps their trigger words - if the rewrite drops one, it is put back at the front.
 
 **MiniMax H3 LoRAs use a separate library.** Switch the Video engine to
 **Hailuo H3** and the LoRAs panel gains an **Import H3 LoRA** button: pick a
@@ -202,30 +228,38 @@ cd phosphene
 git clone https://github.com/dgrauet/ltx-2-mlx.git ltx-2-mlx
 cd ltx-2-mlx
 git remote add fork https://github.com/mrbizarro/ltx-2-mlx.git
-git fetch fork +refs/tags/v0.14.19+ltx25.6:refs/tags/v0.14.19+ltx25.6
-git checkout v0.14.19+ltx25.6
+git fetch fork +refs/tags/v0.14.19+ltx25.7:refs/tags/v0.14.19+ltx25.7
+git checkout v0.14.19+ltx25.7
 cd ..
 
 # 2. Create the Python 3.11 venv inside ltx-2-mlx (uv-managed).
+#    Every install below uses the `uv` on your PATH — `--seed` puts pip,
+#    setuptools and wheel into the venv, not uv, so there is no env/bin/uv.
 cd ltx-2-mlx
 uv venv --python 3.11 --seed env
 
 # 3. Install the MLX pipeline + trainer packages. Pin mlx to 0.31.1 —
-#    0.31.2 attenuates the LTX vocoder by 22 dB.
-./env/bin/uv pip install --python env/bin/python \
-  'mlx==0.31.1' 'mlx-lm==0.31.1' 'mlx-metal==0.31.1'
+#    0.31.2 attenuates the LTX vocoder by 22 dB — and cap transformers below
+#    5.13.0, which breaks every generation. Both on the same resolve.
+uv pip install --python env/bin/python \
+  'mlx==0.31.1' 'mlx-lm==0.31.1' 'mlx-metal==0.31.1' 'transformers>=5.0.0,<5.13.0'
 # --build-constraints pins hatchling below 1.32, which rejects upstream's
 # `readme = "../../README.md"` and fails metadata generation. See
-# pip-build-constraints.txt.
-./env/bin/uv pip install --python env/bin/python \
+# pip-build-constraints.txt. The first pass resolves the packages'
+# dependencies (mlx-arsenal among them); the second replaces the editable
+# workspace links it leaves with real copies, which the codec patch needs.
+uv pip install --python env/bin/python \
   --build-constraints ../pip-build-constraints.txt \
   ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx ./packages/ltx-trainer
-./env/bin/uv pip install --python env/bin/python \
+uv pip install --python env/bin/python --reinstall --no-deps \
+  --build-constraints ../pip-build-constraints.txt \
+  ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx ./packages/ltx-trainer
+uv pip install --python env/bin/python \
   pyyaml pydantic tqdm rich
 # mlx-vlm powers Gemma 3 auto-caption. --no-deps so it doesn't drag mlx-lm past 0.31.1.
-./env/bin/uv pip install --python env/bin/python --no-deps 'mlx-vlm==0.4.4'
+uv pip install --python env/bin/python --no-deps 'mlx-vlm==0.4.4'
 # Agent + downloader + hub pin range.
-./env/bin/pip install pillow numpy 'huggingface-hub>=1.5.0,<2.0' \
+uv pip install --python env/bin/python pillow numpy 'huggingface-hub>=1.5.0,<2.0' \
   'hf_transfer>=0.1.6' 'litellm>=1.83.14' 'smolagents>=1.24.0'
 cd ..
 
@@ -244,8 +278,9 @@ cd ..
 ./ltx-2-mlx/env/bin/python3.11 scripts/fetch_pack_release.py --repo-key q8_25
 
 # 6. (Optional) Image tab — install mflux + apply the FBCache patch.
-./ltx-2-mlx/env/bin/pip install 'mflux==0.18.0'
-./ltx-2-mlx/env/bin/pip install --force-reinstall --no-deps 'mflux==0.18.0'
+uv pip install --python ltx-2-mlx/env/bin/python 'mflux==0.18.0'
+uv pip install --python ltx-2-mlx/env/bin/python --reinstall --no-deps 'mflux==0.18.0'
+uv pip install --python ltx-2-mlx/env/bin/python 'mlx-teacache==0.4.1'
 ./ltx-2-mlx/env/bin/python3.11 patch_mflux_fbcache.py
 
 # 7. (Optional) HiDream — separate one-time clone for the photoreal engine.
@@ -257,7 +292,7 @@ cd ..
 ./ltx-2-mlx/env/bin/python3.11 mlx_ltx_panel.py
 ```
 
-About the version pins: `mlx 0.31.2` attenuates the LTX vocoder by 22 dB. Stay on 0.31.1. `ltx-2-mlx` is pinned to the fork **tag** `v0.14.19+ltx25.6` (`mrbizarro/ltx-2-mlx`, commit `0b74258`) — v0.14.19 plus the LTX-2.5 port, because upstream has no 2.5 branch. A tag, not a bare SHA: a force-push upstream would strand every install with an un-fetchable pin and a dead Update button. The installed packages report `0.14.19+ltx25.6` and `_LTX_EXPECTED_VERSION` must match that string exactly, or every render logs a VERSION SKEW warning. `scripts/pinokio/ltx_checkout.sh` holds the pin and `node scripts/check_ltx_pin.js` enforces the agreement. `mflux 0.18.0` is the version `patch_mflux_fbcache.py` is line-targeted against, and it is pinned TOGETHER with mlx — mflux declares its own mlx range, so installing it with deps after pinning mlx can silently move mlx (`node scripts/check_post_update.js` fails if either moves alone). `hatchling<1.32` (in `pip-build-constraints.txt`) is a *build-time* pin: 1.32 rejects the `readme = "../../README.md"` that all three upstream packages declare, which fails the wheel build on every tag.
+About the version pins: `mlx 0.31.2` attenuates the LTX vocoder by 22 dB. Stay on 0.31.1. `ltx-2-mlx` is pinned to the fork **tag** `v0.14.19+ltx25.7` (`mrbizarro/ltx-2-mlx`, commit `bf419b6`) — v0.14.19 plus the LTX-2.5 port, because upstream has no 2.5 branch. A tag, not a bare SHA: a force-push upstream would strand every install with an un-fetchable pin and a dead Update button. The installed packages report `0.14.19+ltx25.7` and `_LTX_EXPECTED_VERSION` must match that string exactly, or every render logs a VERSION SKEW warning. `scripts/pinokio/ltx_checkout.sh` holds the pin and `node scripts/check_ltx_pin.js` enforces the agreement. `mflux 0.18.0` is the version `patch_mflux_fbcache.py` is line-targeted against, and it is pinned TOGETHER with mlx — mflux declares its own mlx range, so installing it with deps after pinning mlx can silently move mlx (`node scripts/check_post_update.js` fails if either moves alone). `hatchling<1.32` (in `pip-build-constraints.txt`) is a *build-time* pin: 1.32 rejects the `readme = "../../README.md"` that all three upstream packages declare, which fails the wheel build on every tag.
 
 ## Interface
 

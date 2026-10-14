@@ -149,6 +149,47 @@ for (const [label, re] of mustRequire) {
   }
 }
 
+// --- 2d. THE VENDORED PACKAGES' DEPENDENCIES ARE RESOLVED, NOT ASSUMED -------
+// The reinstall is --no-deps, which is right for moving the runtime and wrong
+// as the ONLY install: on a venv step 0 just rebuilt, nothing installed what
+// the packages declare, `mlx-arsenal` above all (core and pipelines import
+// `mlx_arsenal.diffusion`; nothing else depends on it). Every Update then
+// repeated the same dependency-free install and the import-gate "repair" did
+// too — an install that Update could never fix (Codex INST-03, 2026-09-24).
+// Reproduced 2026-09-24 in a fresh uv venv: the old sequence ends in
+// `No module named 'mlx_arsenal'`; with the dependency pass it imports.
+{
+  const vendoredLines = code.filter((l) => /\.\/packages\/ltx-core-mlx/.test(l.t))
+  const depPass = vendoredLines.find((l) => /uv pip install/.test(l.t) && !/--no-deps/.test(l.t))
+  if (!depPass) {
+    failures.push("no dependency-resolving install of the vendored packages — the --no-deps reinstall alone leaves a rebuilt venv without mlx-arsenal (INST-03).")
+  } else {
+    if (depPass.n > reinstall) failures.push(`the vendored dependency pass (line ${depPass.n}) runs AFTER the --no-deps reinstall (line ${reinstall}) — it would re-link the packages editable and leave them that way.`)
+    if (!/^require\s/.test(depPass.t.trim())) failures.push(`the vendored dependency pass (line ${depPass.n}) is not wrapped in \`require\`.`)
+    if (!/mlx==0\.31\.1/.test(depPass.t) || !/transformers>=5\.0\.0,<5\.13\.0/.test(depPass.t)) failures.push(`the vendored dependency pass (line ${depPass.n}) does not carry the mlx pin and the transformers cap on the same resolve — the solver could move either.`)
+    else console.log(`  ok    vendored dependencies resolved (line ${depPass.n}) before the --no-deps reinstall, pins on the same resolve`)
+  }
+  const gate = code.find((l) => /import ltx_core_mlx, ltx_pipelines_mlx, mlx/.test(l.t))
+  if (gate && !/mlx_arsenal/.test(gate.t)) failures.push("the import gate does not import mlx_arsenal — the package roots import without it, so the gate passes an engine that cannot render.")
+  const repair = code.filter((l) => gate && l.n < gate.n && l.n > reinstall && /uv pip install --python env\/bin\/python/.test(l.t))
+  if (gate && !repair.some((l) => !/--reinstall|--no-deps/.test(l.t))) failures.push("the import-gate repair only reinstalls --no-deps — it cannot install a missing dependency, so it fails the same way every time.")
+}
+
+// --- 2e. THE INSTALL'S ENGINE STEP RESOLVES THE SAME WAY (4.19.0) ----------
+// scripts/pinokio/ltx_engine_env.sh (install.js and the panel's Repair engine)
+// installed the vendored packages WITHOUT the pins on that resolve. The newest
+// mlx-arsenal requires mlx>=0.32.1, so the solver moved mlx to 0.32.3 and the
+// mflux pack then walked it to 0.31.2: every fresh install since 2026-08-24
+// ran mlx 0.31.2 while every Update (2d above) put 0.31.1 back.
+{
+  const eng = fs.readFileSync(path.resolve(__dirname, "pinokio", "ltx_engine_env.sh"), "utf8")
+  const cmds = eng.replace(/\\\n/g, " ").split("\n").filter((l) => !/^\s*#/.test(l))
+  const dep = cmds.find((l) => /uv pip install/.test(l) && /\.\/packages\/ltx-core-mlx/.test(l) && !/--no-deps/.test(l))
+  if (!dep) failures.push("scripts/pinokio/ltx_engine_env.sh has no dependency-resolving install of the vendored packages.")
+  else if (!/mlx==0\.31\.1/.test(dep) || !/mlx-metal==0\.31\.1/.test(dep) || !/transformers>=5\.0\.0,<5\.13\.0/.test(dep)) failures.push("scripts/pinokio/ltx_engine_env.sh resolves the vendored packages without the mlx pin and the transformers cap on the same command - mlx-arsenal moves mlx (fresh installs land on 0.31.2).")
+  else console.log("  ok    the install's engine step resolves the vendored packages with the pins on the same command")
+}
+
 // --- 3. THE mlx PIN AND THE mflux PIN ARE ONE DECISION -----------------------
 // Step 2 pins mlx. Step 7 installs mflux WITH deps (the resolving call, there
 // so a fresh install gets mflux's transitive set). mflux declares its OWN mlx
@@ -187,6 +228,9 @@ for (const [label, re] of mustRequire) {
 const PIN_PAIR = { mlx: "0.31.1", mflux: "0.18.0" }
 const pinSites = [
   ["scripts/post_update.sh", "mlx"], ["install.js", "mlx"],
+  // 4.17.4: install.js's engine step now lives here (one implementation the
+  // panel's "Repair engine" re-runs too), so the mlx pin is asserted here.
+  ["scripts/pinokio/ltx_engine_env.sh", "mlx"],
   ["scripts/post_update.sh", "mflux"], ["install.js", "mflux"],
   ["scripts/pinokio/mflux_pack.sh", "mflux"], ["install_qwen.js", "mflux"],
 ]

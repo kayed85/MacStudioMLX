@@ -219,6 +219,11 @@
       font-size: 11px; font-weight: 600; text-transform: uppercase;
       letter-spacing: 0.10em; color: var(--muted);
       margin: 0;
+      /* Flex children default to a min-width equal to their content's
+         intrinsic (unwrapped) width, which is what let a long .h2-sub
+         string push past the viewport edge on narrow screens instead of
+         wrapping — this is the fix, not a width on the child. */
+      min-width: 0;
     }
     h2 .h2-sub {
       margin-left: 8px;
@@ -237,7 +242,7 @@
        Period chips (and any other chip groups).
        ============================================================ */
     .chips {
-      display: inline-flex; gap: 2px;
+      display: inline-flex; flex-wrap: wrap; gap: 2px;
       background: var(--bg-2);
       border: 1px solid var(--border);
       border-radius: var(--r-pill);
@@ -257,6 +262,30 @@
     .chip[aria-pressed="true"] {
       background: var(--accent-dim);
       color: var(--accent-bright);
+    }
+
+    /* ============================================================
+       Global range bar — ONE control (7d/30d/90d/all) that every
+       panel on the page reads. Sits right under the header so it
+       reads as governing everything below it.
+       ============================================================ */
+    .range-bar {
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+      margin: 0 0 18px; padding: 10px 14px;
+      background: var(--bg-2); border: 1px solid var(--border);
+      border-radius: var(--r-md);
+    }
+    .range-bar-label {
+      font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.08em;
+      color: var(--muted); font-weight: 600;
+    }
+    .range-bar .chip { font-size: 12px; padding: 5px 14px; }
+    .range-bar-hint {
+      font-size: 11.5px; color: var(--faint); margin-left: auto;
+    }
+    @media (max-width: 600px) {
+      .range-bar { padding: 8px 10px; gap: 8px; }
+      .range-bar-hint { margin-left: 0; flex-basis: 100%; }
     }
 
     /* ============================================================
@@ -298,6 +327,15 @@
       -webkit-text-fill-color: transparent;
               color: transparent;
     }
+    /* A hero that cannot be answered must not look like a zero, and must not
+       wear the brand gradient as if it were a result: muted, plain, and its
+       caption carries the remedy rather than a unit. */
+    .kpi.is-hero.is-unknown .value {
+      background: none;
+      -webkit-text-fill-color: initial;
+      color: var(--muted, #8b93a7);
+    }
+    .kpi.is-unknown .delta { color: var(--warn, #d29922); }
     .kpi .deltas {
       display: flex; gap: 10px; flex-wrap: wrap;
       margin-top: 8px;
@@ -477,12 +515,24 @@
     .two-col {
       display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
     }
+    /* The actual grid items are the two plain <div> wrappers (each holds
+       an <h3> + .table-wrap) — min-width:0 on .table-wrap alone didn't
+       reach them, so a wide table still forced the GRID ITEM wide, which
+       forced the page into horizontal scroll on a phone. */
+    .two-col > div { min-width: 0; }
     @media (max-width: 760px) { .two-col { grid-template-columns: 1fr; } }
     .table-wrap {
       background: var(--bg-2);
       border: 1px solid var(--border);
       border-radius: var(--r-md);
-      overflow: hidden;
+      overflow-x: auto; overflow-y: hidden;
+      /* Grid items default to a min-width equal to their content's
+         intrinsic width — the same trap as flex children (see h2 above).
+         A table with several columns refused to shrink below that width
+         and pushed the whole PAGE into horizontal scroll on a phone.
+         overflow-x:auto is the fallback for content that still doesn't
+         fit even at min-width:0. */
+      min-width: 0;
     }
     table {
       width: 100%; border-collapse: collapse; font-size: 12.5px;
@@ -660,11 +710,13 @@
       background: color-mix(in srgb, var(--lc, var(--border)) 12%, transparent);
       white-space: nowrap;
     }
-    .board-more {
+    .board-more, .list-more {
       margin-top: 8px;
-      color: var(--faint); font-size: 10.5px; font-style: italic;
+      color: var(--faint); font-size: 10.5px;
       font-family: var(--ph-font-mono);
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
     }
+    .list-toggle { font-size: 11.5px; }
     .board-empty {
       display: flex; align-items: center; gap: 8px;
       padding: 18px 14px;
@@ -723,8 +775,14 @@
     .dist-col { min-width: 0; }
     .dist-col > h3 { display: flex; align-items: center; gap: 8px; }
     .dist-list {
-      list-style: none; margin: 8px 0 0; padding: 0;
+      list-style: none; margin: 8px 0 0; padding: 0 4px 0 0;
       display: flex; flex-direction: column; gap: 6px;
+      /* Capped + scrollable — "Failures by version" and friends can carry
+         up to 12 rows (one closed error/version/chip taxonomy each), and
+         without a cap the tallest column stretched the whole dist-grid
+         row, leaving huge empty space under every shorter column next
+         to it. */
+      max-height: 300px; overflow-y: auto;
     }
     .dist-row {
       position: relative; overflow: hidden;
@@ -735,6 +793,14 @@
       border: 1px solid var(--border);
       border-radius: var(--r-sm);
       font-size: 12px;
+      /* .dist-list (the flex column these rows sit in) got a max-height +
+         scroll further down. A flex item with overflow:hidden loses its
+         normal min-height:auto protection (CSS Flexbox spec, 4.5) — so
+         without this, the flex algorithm shrank each row to fit the
+         constrained container instead of letting the container scroll,
+         and a two-line stacked row (mobile .is-err) got clipped to about
+         one line, silently hiding whichever half didn't fit. */
+      flex-shrink: 0;
     }
     /* Proportional fill behind each row — same "bar in a table cell"
        idea the Traffic sources tables use, so the eye reads them alike. */
@@ -748,15 +814,114 @@
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
       color: var(--text);
     }
+    .dist-row.is-err {
+      /* The base 1fr/auto split starves the name column whenever the
+         value is a long sentence ("failed · 6.1% of 1,109 · 65
+         installs") — "auto" claims whatever it wants first, so a short
+         name like "4.12.2" got squeezed into a sliver and word-break
+         wrapped it one character per line. Give the name a guaranteed
+         max-content column instead and let the (already-wrappable)
+         value take the rest. */
+      grid-template-columns: minmax(60px, max-content) 1fr;
+    }
     .dist-row.is-err .name {
       font-family: var(--ph-font-mono); font-size: 11px; color: var(--muted);
       white-space: normal; word-break: break-word;
+      /* The base .dist-row .name rule sets overflow:hidden for its
+         single-line ellipsis truncation — irrelevant once wrapping is
+         turned back on above, and left in place it collapsed this
+         element to 0 height in the flex-column mobile layout below. */
+      overflow: visible; text-overflow: clip;
     }
     .dist-row.is-err .fill { background: rgba(248, 81, 73, 0.14); }
     .dist-row .n small.sub { font-size: 11px; font-weight: 400; color: var(--faint); margin-left: 4px; }
     .dist-row .n {
       font-family: var(--ph-font-mono); font-variant-numeric: tabular-nums;
       font-weight: 700; color: var(--muted); font-size: 11px;
+    }
+
+    /* Small "?" tooltip marker — plain-words explanation of a metric,
+       on hover/focus. Not a link, not a button; just a title attr host. */
+    .info-dot {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 14px; height: 14px; border-radius: 50%;
+      background: var(--bg-3, rgba(140,160,220,0.10));
+      border: 1px solid var(--border);
+      color: var(--faint); font-size: 10px; font-weight: 600;
+      cursor: help; user-select: none;
+    }
+    .info-dot:hover { color: var(--accent-bright); border-color: var(--accent-dim); }
+
+    /* ============================================================
+       Errors — collapsible card. Collapsed by default; the header
+       alone carries total count + trend so there's signal without
+       opening it.
+       ============================================================ */
+    .errors-card {
+      margin-top: 16px;
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: var(--r-md);
+      overflow: hidden;
+    }
+    .errors-header {
+      width: 100%; display: flex; align-items: center; gap: 10px;
+      background: transparent; border: 0; cursor: pointer;
+      padding: 13px 16px; text-align: left; color: var(--text);
+      font: inherit;
+    }
+    .errors-header:hover { background: rgba(140, 160, 220, 0.04); }
+    .errors-header .chev {
+      color: var(--faint); font-size: 11px;
+      transition: transform var(--t-fast);
+    }
+    .errors-header[aria-expanded="true"] .chev { transform: rotate(90deg); }
+    .errors-title { font-size: 14px; font-weight: 650; }
+    .errors-trend {
+      font-family: var(--ph-font-mono); font-size: 11.5px; font-weight: 600;
+    }
+    .errors-trend.up   { color: var(--danger); }
+    .errors-trend.down { color: var(--success); }
+    .errors-trend.flat { color: var(--faint); }
+    .errors-header-hint {
+      margin-left: auto; font-size: 11px; color: var(--faint);
+    }
+    .errors-body { padding: 4px 16px 16px; }
+    .errors-empty { padding: 10px 2px; color: var(--faint); font-size: 12.5px; }
+    .errors-groups {
+      display: flex; flex-direction: column; gap: 8px; margin-top: 6px;
+    }
+    .error-group {
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: var(--r-sm); padding: 10px 12px;
+    }
+    .error-group-head {
+      display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+    }
+    .error-group-class {
+      font-family: var(--ph-font-mono); font-size: 12.5px; font-weight: 700;
+      color: var(--text);
+    }
+    .error-group-stat {
+      font-size: 11px; color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+    .error-group-stat strong { color: var(--text); font-weight: 700; }
+    .error-group-meta {
+      margin-left: auto; font-size: 10.5px; color: var(--faint);
+      font-family: var(--ph-font-mono);
+    }
+    .error-group-msg {
+      margin-top: 6px; font-family: var(--ph-font-mono); font-size: 11.5px;
+      color: var(--muted); cursor: pointer;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .error-group-msg:hover { color: var(--text); }
+    .error-group-msg.is-expanded {
+      white-space: normal; word-break: break-word;
+    }
+    .errors-showall {
+      margin-top: 10px; width: 100%;
     }
 
     /* ============================================================
@@ -850,6 +1015,16 @@
       .kpi .value { font-size: 22px; }
       .kpi.is-hero .value { font-size: 28px; }
       .row-bar { width: 60px; }
+      /* "Failures by version" / any other is-err row carries a long
+         descriptive value ("failed · 6.1% of 1,109 · 65 installs") that
+         has nowhere to shrink to next to a name in a 1fr/auto grid at
+         this width — the two columns fought for space and the name
+         wrapped into an unreadably narrow sliver. Stack instead — flex
+         column rather than fighting the grid's implicit row sizing. */
+      .dist-row.is-err {
+        display: flex; flex-direction: column; align-items: stretch; gap: 3px;
+      }
+      .dist-row.is-err .n { text-align: left; }
     }
   </style>
 </head>
@@ -894,13 +1069,127 @@
       <div class="hero-underline" aria-hidden="true"></div>
     </header>
 
+    <!-- ============================================================
+         GLOBAL RANGE — the one time-window control for the whole
+         dashboard. Replaces the separate "Over time" (7/30/90/365/all)
+         and "Clones date range" (30/90/365/all) chip groups — every
+         chart and the Usage section now read this single value.
+         Persisted per-browser (localStorage, wrapped in try/catch —
+         private browsing can throw), default 30 days.
+         ============================================================ -->
+    <div class="range-bar" role="group" aria-label="Dashboard time range">
+      <span class="range-bar-label">Range</span>
+      <div class="chips" id="global-range-chips">
+        <button class="chip" type="button" data-range="7"   aria-pressed="false">7 days</button>
+        <button class="chip" type="button" data-range="30"  aria-pressed="true">30 days</button>
+        <button class="chip" type="button" data-range="90"  aria-pressed="false">90 days (3 months)</button>
+        <button class="chip" type="button" data-range="all" aria-pressed="false">All time</button>
+      </div>
+      <span class="range-bar-hint" id="range-bar-hint"></span>
+    </div>
+
     <!-- Mount point for error state. Hidden unless fetch fails. -->
     <div id="error-mount" hidden></div>
 
     <!-- ============================================================
          RIGHT NOW — KPI strip with sparklines + health pulse.
          ============================================================ -->
-    <section class="card" id="sec-now">
+    <!-- ============================================================
+         USAGE — anonymous panel telemetry. Independent of /stats/data:
+         it reads /stats/usage, which always answers (local aggregates
+         from state/usage-log.jsonl) and upgrades to fleet-wide numbers
+         when a PostHog personal API key is configured in Settings.
+         Hidden only if the endpoint itself is missing — i.e. on a panel
+         older than this feature.
+         ============================================================ -->
+    <section class="card" id="sec-usage" hidden>
+      <div class="section-head">
+        <h2>Usage <span class="h2-sub">anonymous panel telemetry · renders, errors, hardware</span></h2>
+        <button class="icon-btn" id="usage-refresh" type="button"
+                title="Re-query PostHog now (bypasses the 6h cache)">
+          <span class="ico">↻</span> refresh
+        </button>
+      </div>
+      <div class="usage-note" id="usage-note">
+        <span class="src" id="usage-src">local</span>
+        <span id="usage-note-text">loading…</span>
+      </div>
+      <div class="kpi-grid" id="usage-tiles" aria-label="Usage headline stats"></div>
+      <!-- Growth: installs over time (cumulative, all-time) against renders
+           per day (30d). One chart, two axes, so "is it growing" is one
+           glance; weekly active installs ride the caption. -->
+      <div class="usage-growth" id="usage-growth" hidden>
+        <h3>Growth <span class="h2-sub" id="usage-growth-sub">installs, all time · renders per day, 30d</span></h3>
+        <div class="chart-wrap" style="height:260px">
+          <canvas id="chart-usage-growth" aria-label="Installs over time and renders per day"></canvas>
+        </div>
+      </div>
+      <!-- Pack-flip alert. A pack going true→false across boots is the
+           "my H3 vanished" bug class; red when it has happened at all. -->
+      <div class="usage-alert is-clear" id="usage-packflip">
+        <span class="n">0</span>
+        <span>optional-pack regressions in the selected range.</span>
+      </div>
+      <div class="dist-grid">
+        <div class="dist-col">
+          <!-- Refusals, kept next to errors and never inside them: these are
+               renders the panel declined on purpose, so they are not part of
+               the error rate. A tall bar here is a UI bug (we offered a
+               control that can never work), not an engine bug. -->
+          <h3>Refused <span class="count-pill" id="usage-refusals-count">0</span>
+            <span class="info-dot" title="Renders the panel declined before starting — not a crash, not counted in the error rate. A big number here means the UI is offering something this machine can't actually do.">?</span></h3>
+          <ul class="dist-list" id="usage-refusals"></ul>
+        </div>
+        <div class="dist-col">
+          <h3>Failures by version <span class="info-dot" title="Failed renders as a share of that version's total renders, in the selected range. A version failing MORE than the one before it is the signal to look for.">?</span></h3>
+          <ul class="dist-list" id="usage-failures-by-version"></ul>
+        </div>
+        <div class="dist-col">
+          <h3>Versions <span class="info-dot" title="Which release each install is running, by distinct installs seen in the selected range.">?</span></h3>
+          <ul class="dist-list" id="usage-versions"></ul>
+        </div>
+        <div class="dist-col">
+          <h3>Chip <span class="info-dot" title="Apple Silicon family (M1–M5, Pro/Max/Ultra) across installs seen in the selected range.">?</span></h3>
+          <ul class="dist-list" id="usage-chips"></ul>
+        </div>
+        <div class="dist-col">
+          <h3>Memory <span class="info-dot" title="Unified RAM tier across installs seen in the selected range — the single biggest driver of which engines/quality tiers an install can run.">?</span></h3>
+          <ul class="dist-list" id="usage-ram"></ul>
+        </div>
+      </div>
+
+      <!-- ==========================================================
+           ERRORS — collapsible, collapsed by default (owner: "the
+           error section is really not well designed... it should be
+           collapsible, it's too big"). Header alone carries the total
+           count + a trend arrow vs. the prior equal-length period, so
+           there's signal without expanding. Expanded: grouped by the
+           closed error_class taxonomy (not raw free-text messages),
+           sorted by distinct installs affected, top 5 with "show all".
+           ========================================================== -->
+      <section class="errors-card" id="errors-card">
+        <button class="errors-header" id="errors-toggle" type="button"
+                aria-expanded="false" aria-controls="errors-body">
+          <span class="chev" aria-hidden="true">▸</span>
+          <span class="errors-title">Errors</span>
+          <span class="count-pill" id="errors-total-count">0</span>
+          <span class="errors-trend" id="errors-trend"></span>
+          <span class="errors-header-hint">click to expand</span>
+        </button>
+        <div class="errors-body" id="errors-body" hidden>
+          <div class="errors-empty" id="errors-empty" hidden>no render failures in this range.</div>
+          <div class="errors-groups" id="errors-groups"></div>
+          <button class="btn ghost errors-showall" id="errors-showall" type="button" hidden>
+            show all error classes
+          </button>
+        </div>
+      </section>
+    </section>
+
+    <!-- ============================================================
+         FUNNEL — Views → Clones → Stars → Forks.
+         ============================================================ -->
+        <section class="card" id="sec-now">
       <div class="section-head">
         <h2>Right now <span class="h2-sub">snapshot from latest fetch</span></h2>
       </div>
@@ -944,78 +1233,7 @@
       </div>
     </section>
 
-    <!-- ============================================================
-         USAGE — anonymous panel telemetry. Independent of /stats/data:
-         it reads /stats/usage, which always answers (local aggregates
-         from state/usage-log.jsonl) and upgrades to fleet-wide numbers
-         when a PostHog personal API key is configured in Settings.
-         Hidden only if the endpoint itself is missing — i.e. on a panel
-         older than this feature.
-         ============================================================ -->
-    <section class="card" id="sec-usage" hidden>
-      <div class="section-head">
-        <h2>Usage <span class="h2-sub">anonymous panel telemetry · renders, errors, hardware</span></h2>
-        <button class="icon-btn" id="usage-refresh" type="button"
-                title="Re-query PostHog now (bypasses the 6h cache)">
-          <span class="ico">↻</span> refresh
-        </button>
-      </div>
-      <div class="usage-note" id="usage-note">
-        <span class="src" id="usage-src">local</span>
-        <span id="usage-note-text">loading…</span>
-      </div>
-      <div class="kpi-grid" id="usage-tiles" aria-label="Usage headline stats"></div>
-      <!-- Growth: installs over time (cumulative, all-time) against renders
-           per day (30d). One chart, two axes, so "is it growing" is one
-           glance; weekly active installs ride the caption. -->
-      <div class="usage-growth" id="usage-growth" hidden>
-        <h3>Growth <span class="h2-sub" id="usage-growth-sub">installs, all time · renders per day, 30d</span></h3>
-        <div class="chart-wrap" style="height:260px">
-          <canvas id="chart-usage-growth" aria-label="Installs over time and renders per day"></canvas>
-        </div>
-      </div>
-      <!-- Pack-flip alert. A pack going true→false across boots is the
-           "my H3 vanished" bug class; red when it has happened at all. -->
-      <div class="usage-alert is-clear" id="usage-packflip">
-        <span class="n">0</span>
-        <span>optional-pack regressions in the last 7 days.</span>
-      </div>
-      <div class="dist-grid">
-        <div class="dist-col">
-          <h3>Top errors <span class="count-pill" id="usage-errors-count">0</span></h3>
-          <ul class="dist-list" id="usage-errors"></ul>
-        </div>
-        <div class="dist-col">
-          <!-- Refusals, kept next to errors and never inside them: these are
-               renders the panel declined on purpose, so they are not part of
-               the error rate. A tall bar here is a UI bug (we offered a
-               control that can never work), not an engine bug. -->
-          <h3>Refused <span class="count-pill" id="usage-refusals-count">0</span></h3>
-          <ul class="dist-list" id="usage-refusals"></ul>
-        </div>
-        <div class="dist-col">
-          <h3>Failures by version <span class="hint">last 7 days · failed renders, share of that version's renders, installs that hit one</span></h3>
-          <ul class="dist-list" id="usage-failures-by-version"></ul>
-        </div>
-        <div class="dist-col">
-          <h3>Versions</h3>
-          <ul class="dist-list" id="usage-versions"></ul>
-        </div>
-        <div class="dist-col">
-          <h3>Chip</h3>
-          <ul class="dist-list" id="usage-chips"></ul>
-        </div>
-        <div class="dist-col">
-          <h3>Memory</h3>
-          <ul class="dist-list" id="usage-ram"></ul>
-        </div>
-      </div>
-    </section>
-
-    <!-- ============================================================
-         FUNNEL — Views → Clones → Stars → Forks.
-         ============================================================ -->
-    <section class="card" id="sec-funnel">
+<section class="card" id="sec-funnel">
       <div class="section-head">
         <h2>Discovery funnel <span class="h2-sub">how the repo converts pageviews to commitment</span></h2>
       </div>
@@ -1047,14 +1265,8 @@
          ============================================================ -->
     <section class="card" id="sec-clones-history">
       <div class="section-head">
-        <h2>Clones <span class="h2-sub">accumulated history — grows as the panel keeps fetching</span></h2>
-        <div class="chips" role="group" aria-label="Clones date range">
-          <button class="chip clones-chip-period" type="button" data-clones-period="30"  aria-pressed="false">30d</button>
-          <button class="chip clones-chip-period" type="button" data-clones-period="90"  aria-pressed="false">90d</button>
-          <button class="chip clones-chip-period" type="button" data-clones-period="365" aria-pressed="false">1y</button>
-          <button class="chip clones-chip-period" type="button" data-clones-period="all" aria-pressed="true">all</button>
-        </div>
-        <div class="chips" role="group" aria-label="Clones bucketing" style="margin-left:8px">
+        <h2>Clones <span class="h2-sub">accumulated history — follows the range above</span></h2>
+        <div class="chips" role="group" aria-label="Clones bucketing">
           <button class="chip clones-chip-bucket" type="button" data-clones-bucket="daily" aria-pressed="false">daily</button>
           <button class="chip clones-chip-bucket" type="button" data-clones-bucket="weekly" aria-pressed="true">weekly</button>
           <button class="chip clones-chip-bucket" type="button" data-clones-bucket="monthly" aria-pressed="false">monthly</button>
@@ -1167,6 +1379,14 @@
         border-radius: 3px;
         font-size: 11px;
       }
+      /* Fixed 4 equal columns had no floor — each needs ~90px minimum
+         before the numbers/labels themselves start clipping, so at
+         phone width the strip pushed the whole PAGE into horizontal
+         scroll (found via a headless 390px-viewport pass). 2 columns
+         keeps every value readable down to ~340px content width. */
+      @media (max-width: 480px) {
+        .clones-kpi-strip { grid-template-columns: repeat(2, 1fr); }
+      }
     </style>
 
     <!-- ============================================================
@@ -1174,14 +1394,7 @@
          ============================================================ -->
     <section class="card" id="sec-over-time">
       <div class="section-head">
-        <h2>Over time <span class="h2-sub">history from the local archive</span></h2>
-        <div class="chips" role="group" aria-label="Date range">
-          <button class="chip" type="button" data-period="7"   aria-pressed="false">7d</button>
-          <button class="chip" type="button" data-period="30"  aria-pressed="true">30d</button>
-          <button class="chip" type="button" data-period="90"  aria-pressed="false">90d</button>
-          <button class="chip" type="button" data-period="365" aria-pressed="false">1y</button>
-          <button class="chip" type="button" data-period="all" aria-pressed="false">all</button>
-        </div>
+        <h2>Over time <span class="h2-sub">history from the local archive — follows the range above</span></h2>
       </div>
 
       <div class="chart-row">
@@ -1292,7 +1505,7 @@
          ============================================================ -->
     <section class="card" id="sec-releases" hidden>
       <div class="section-head">
-        <h2>Releases <span class="h2-sub">download volume per tag</span></h2>
+        <h2>Releases <span class="h2-sub" id="releases-note">download volume per tag</span></h2>
       </div>
       <div class="table-wrap">
         <table id="releases-table">
@@ -1305,6 +1518,7 @@
           <tbody></tbody>
         </table>
       </div>
+      <div class="list-more" id="releases-more" hidden></div>
     </section>
 
     <footer>
@@ -1329,7 +1543,18 @@
   //  new install with one row of data.
   // =====================================================================
 
-  const LS_PERIOD = 'phosphene.stats.period';
+  // Safe localStorage — private browsing (and some locked-down browser
+  // profiles) throw on getItem/setItem rather than just failing quietly,
+  // which used to be able to take the chip-init code down with it. Every
+  // read/write in this file goes through these two now.
+  function lsGet(key) {
+    try { return localStorage.getItem(key); } catch (_) { return null; }
+  }
+  function lsSet(key, value) {
+    try { localStorage.setItem(key, value); } catch (_) { /* ignore */ }
+  }
+
+  const LS_RANGE = 'phosphene.stats.range';
   const REPO_URL  = 'https://github.com/mrbizarro/phosphene';
   const JSONL_URL = '/stats/data';
   // Refresh endpoint is "coming soon" on the panel side — POST best-effort
@@ -1359,15 +1584,19 @@
   };
 
   let allRows = [];
-  let currentPeriod = '30';
-  // Independent state for the dedicated clones-history chart — does NOT
-  // share with currentPeriod so flipping the clones range doesn't
-  // re-render every other chart in the "Over time" section.
-  const clonesAllTime = { period: 'all', bucket: 'weekly' };
-  const LS_CLONES_PERIOD = 'phosphene-stats-clones-period';
+  // Global range: '7' | '30' | '90' | 'all' — client-side day-count form
+  // (matches sliceByPeriod/sliceTimelineByPeriod). Drives every chart AND
+  // the server fetch (?range=7d/30d/90d/all). ONE control now, replacing
+  // the old independent currentPeriod + clonesAllTime.period pair.
+  let globalRange = '30';
+  const clonesAllTime = { bucket: 'weekly' };
   const LS_CLONES_BUCKET = 'phosphene-stats-clones-bucket';
   const charts = {};       // id -> Chart instance
   const sparkCharts = {};  // id -> mini Chart
+
+  /** '7'/'30'/'90'/'all' (client slicing form) -> '7d'/'30d'/'90d'/'all'
+   * (the server's ?range= form). */
+  function serverRange(r) { return r === 'all' ? 'all' : `${r}d`; }
 
   // ===================================================================
   //  Helpers
@@ -1434,14 +1663,19 @@
     });
   }
 
-  /** Two-part delta string (yday + week-over-week). */
-  function deltaHtml(today, yesterday, weekAgo) {
+  /** Delta string: d/d + w/w, plus "vs N days ago" when the selected
+   * range is longer than a week (7d and 'all' are covered by w/w and by
+   * having no meaningful prior period, respectively — see renderKpiStrip). */
+  function deltaHtml(today, yesterday, weekAgo, rangeAgo, rangeLabel) {
     const out = [];
     if (today != null && yesterday != null) {
       out.push(deltaPart(today - yesterday, 'd/d'));
     }
     if (today != null && weekAgo != null && weekAgo !== yesterday) {
       out.push(deltaPart(today - weekAgo, 'w/w'));
+    }
+    if (today != null && rangeAgo != null && rangeLabel) {
+      out.push(deltaPart(today - rangeAgo, `${rangeLabel} ago`));
     }
     if (!out.length) return '';
     return `<div class="deltas">${out.join('')}</div>`;
@@ -1588,6 +1822,15 @@
     const wkIdx = rows.length - 8;
     const week = wkIdx >= 0 ? rows[wkIdx] : null;
 
+    // "vs N days ago" — only for ranges longer than a week (7d duplicates
+    // w/w; 'all' has no meaningful prior point to compare a single day
+    // to), and only when the archive actually reaches back that far.
+    const rangeDays = (globalRange !== 'all' && globalRange !== '7')
+      ? parseInt(globalRange, 10) : null;
+    const rangeIdx = rangeDays ? rows.length - 1 - rangeDays : -1;
+    const rangeRow = rangeIdx >= 0 ? rows[rangeIdx] : null;
+    const rangeLabel = rangeRow && rangeDays ? `${rangeDays}d` : null;
+
     // 30-day sparkline series (best-effort — uses raw rows).
     const sparkRows = rows.slice(-30);
     const sparkOf = pick => sparkRows.map(pick);
@@ -1601,34 +1844,48 @@
     const cards = [
       {
         key: 'stars', label: 'Stars',
+        title: 'Total GitHub stars on the repo right now.',
         value: last.stars, yday: prev.stars, wk: week?.stars,
+        rangeAgo: rangeRow?.stars,
         spark: sparkOf(r => r.stars), color: C.accent,
       },
       {
         key: 'forks', label: 'Forks',
+        title: 'Copies of the repo other GitHub accounts have made.',
         value: last.forks, yday: prev.forks, wk: week?.forks,
+        rangeAgo: rangeRow?.forks,
         spark: sparkOf(r => r.forks), color: C.purple,
       },
       {
         key: 'clones', label: 'Clones · today', hero: true,
+        title: 'git clones of the repo today (GitHub Traffic API). The '
+          + 'closest signal we have to "how many people installed today" '
+          + '— it also counts CI, re-clones after a failed install, etc.',
         value: last.clones?.count,
         yday: prev.clones?.count, wk: week?.clones?.count,
+        rangeAgo: rangeRow?.clones?.count,
         spark: clonesS.map(p => p.count), color: C.pink,
         sparkGradient: true,
       },
       {
         key: 'views', label: 'Views · today',
+        title: 'Page views on the repo today (GitHub Traffic API).',
         value: last.views?.count,
         yday: prev.views?.count, wk: week?.views?.count,
+        rangeAgo: rangeRow?.views?.count,
         spark: viewsS.map(p => p.count), color: C.amber,
       },
       {
         key: 'work', label: 'Open issues + PRs',
+        title: 'Everything currently open on the repo — bug reports, '
+          + 'feature requests, and pull requests waiting on review.',
         value: (last.open_issues ?? 0) + (last.open_prs ?? 0),
         yday: (prev.open_issues ?? 0) + (prev.open_prs ?? 0),
         wk:   (week?.open_issues ?? null) != null
               ? (week.open_issues + (week.open_prs ?? 0))
               : null,
+        rangeAgo: (rangeRow?.open_issues ?? null) != null
+              ? (rangeRow.open_issues + (rangeRow.open_prs ?? 0)) : null,
         sub: `${last.open_issues ?? 0} issues · ${last.open_prs ?? 0} prs`,
         spark: sparkOf(r => (r.open_issues ?? 0) + (r.open_prs ?? 0)),
         color: C.red,
@@ -1656,9 +1913,10 @@
         : '';
       const subHtml = c.sub
         ? `<div class="deltas"><span class="delta" style="color:var(--muted)">${escapeHtml(c.sub)}</span></div>`
-        : deltaHtml(c.value, c.yday, c.wk);
+        : deltaHtml(c.value, c.yday, c.wk, c.rangeAgo, rangeLabel);
+      const titleAttr = c.title ? ` title="${escapeAttr(c.title)}"` : '';
       return `
-        <div class="kpi${hero}${sparkOk ? ' has-spark' : ''}" data-key="${c.key}" tabindex="0">
+        <div class="kpi${hero}${sparkOk ? ' has-spark' : ''}" data-key="${c.key}" tabindex="0"${titleAttr}>
           <div class="label">${escapeHtml(c.label)}</div>
           ${valHtml}
           ${subHtml}
@@ -2043,8 +2301,9 @@
   }
 
   // ===================================================================
-  //  CHART — Clones · all-time history (dedicated line chart).
-  //  Independent state (clonesAllTime.period / .bucket). Bucketing keeps
+  //  CHART — Clones · history (dedicated line chart).
+  //  Period comes from the global range control; only bucketing
+  //  (clonesAllTime.bucket) is this chart's own state. Bucketing keeps
   //  long ranges readable (weekly default; monthly for multi-year).
   // ===================================================================
 
@@ -2096,7 +2355,7 @@
       return;
     }
     let dailySeries = clonesSeriesAllTime(rows);
-    dailySeries = sliceTimelineByPeriod(dailySeries, clonesAllTime.period);
+    dailySeries = sliceTimelineByPeriod(dailySeries, globalRange);
     if (!dailySeries.length) {
       chartEmpty(id, 'no clones data in this range');
       return;
@@ -2507,8 +2766,10 @@
     $('#attn-issues-count').textContent = fmt(issuesTotal);
     $('#attn-prs-count').textContent    = fmt(prsTotal);
 
-    // Cap what we actually paint per column so a big backlog stays glanceable.
-    const SHOWN = 12;
+    // 8 visible by default; the rest are rendered but hidden behind an
+    // in-page "show all" (same pattern as Errors and Releases) — a long
+    // backlog used to push every section below it off the screen.
+    const SHOWN = 8;
 
     const paint = (list, listSel, moreSel, total, noun) => {
       const body = $(listSel);
@@ -2521,15 +2782,21 @@
         if (more) more.hidden = true;
         return;
       }
-      body.innerHTML = list.slice(0, SHOWN).map(openItemRow).join('');
-      const hiddenCount = Math.max(0, total - Math.min(list.length, SHOWN));
+      body.innerHTML = list.map((it, i) =>
+        openItemRow(it).replace(/^\s*<li/, i >= SHOWN ? '<li hidden' : '<li')).join('');
+      const unfetched = Math.max(0, total - list.length);
       const capped = !!last.open_items_truncated;
-      if (more && (hiddenCount > 0 || capped)) {
+      const ghNote = (unfetched > 0 || capped)
+        ? ` <a href="${REPO_URL}/issues" target="_blank" rel="noopener">${unfetched > 0 ? `+${fmt(unfetched)} more` : 'more'} on GitHub ↗</a>` : '';
+      if (!more) return;
+      if (list.length > SHOWN) {
         more.hidden = false;
-        more.textContent = capped
-          ? `+ more (list capped at fetch time) — see all on GitHub ↗`
-          : `+ ${hiddenCount} more ${noun} — see all on GitHub ↗`;
-      } else if (more) {
+        more.innerHTML = `<button class="btn ghost list-toggle" type="button">show all ${fmt(list.length)} ${noun}</button>${ghNote}`;
+        wireListToggle(more.querySelector('.list-toggle'), body, 'li', SHOWN, list.length, noun);
+      } else if (ghNote) {
+        more.hidden = false;
+        more.innerHTML = ghNote.trim();
+      } else {
         more.hidden = true;
       }
     };
@@ -2573,12 +2840,25 @@
     }).join('');
   }
 
+  const RANGE_TEXT = { '7': '7d', '30': '30d', '90': '90d', 'all': 'all time' };
+
+  /** "+12%" / "−4%" pill, or '' when there's nothing to compare to
+   * (matches _pct_delta on the server: None means no baseline, not 0). */
+  function pctDeltaHtml(pct) {
+    if (pct == null || !Number.isFinite(pct)) return '';
+    if (pct === 0) return ` <span class="trend flat">±0%</span>`;
+    const cls = pct > 0 ? 'up' : 'down';
+    const sign = pct > 0 ? '+' : '';
+    return ` <span class="trend ${cls}">${sign}${pct}%</span>`;
+  }
+
   function renderUsage(u) {
     const sec = $('#sec-usage');
     if (!sec) return;
     sec.hidden = false;
 
     const isFleet = u.source === 'fleet';
+    const rangeTxt = RANGE_TEXT[globalRange] || globalRange;
     const note = $('#usage-note');
     const srcEl = $('#usage-src');
     const noteText = $('#usage-note-text');
@@ -2601,35 +2881,69 @@
     // Headline tiles. Null values render as "—" rather than 0 so
     // "we have no data" never masquerades as "the number is zero".
     const t = u.tiles || {};
+    const d = u.deltas || {};
     // "All time" is since the first install that ever pinged — the fleet
     // has a first day and the tile says which, so the number is not read
     // as "since the app existed".
     const firstDay = (((u.growth || {}).installs_by_day || [])[0] || {}).date;
     const since = firstDay ? 'since ' + firstDay : 'all time';
+    // THE FLEET IS THE HEADLINE (owner, 2026-09-18: "when I ask you for total
+    // renders, I mean total renders from the fleet too… one of the first
+    // windows I want to see is total renders for all the fleet"). One tile
+    // used to be called "Total renders" and mean the fleet's total or THIS
+    // MAC's depending on whether a query key happened to be configured — a
+    // number whose meaning moved under the same label. Now the hero is always
+    // the fleet, it reads "—" with a remedy when the fleet cannot be reached,
+    // and this machine's own total is its own tile that never pretends to be
+    // anything else.
+    const m = u.machine || {};
+    const blocked = String(u.fleet_blocked || '');
+    const fleetSub = blocked === 'no_key'
+      ? 'add a PostHog read key in Settings'
+      : (blocked ? 'PostHog query failed — check the key in Settings'
+                 : 'completed · all installs · ' + since);
     const tiles = [
-      { label: 'Total renders', value: fmt(t.total_renders),
-        sub: isFleet ? 'completed · all installs · ' + since : 'completed · this machine · ' + since, hero: true },
+      { label: 'Total renders · fleet', value: isFleet ? fmt(t.total_renders) : '—',
+        sub: fleetSub, hero: true, warn: !isFleet,
+        title: 'Every render ever completed across every install that has ever reported in, all time — the fleet total, not this machine.' },
+      { label: 'Total renders · this Mac',
+        value: fmt(isFleet ? m.total_renders : t.total_renders),
+        sub: 'completed' + (m.first_day || (!isFleet && firstDay)
+             ? ' · since ' + (m.first_day || firstDay) : ''),
+        title: 'Renders completed on THIS Mac only, all time.' },
       { label: isFleet ? 'Total installs' : 'Installs',
-        value: fmt(t.total_installs), sub: isFleet ? 'ever booted · ' + since : 'this machine' },
-      { label: isFleet ? 'Weekly active installs' : 'Active this week',
-        value: fmt(t.weekly_active_installs),
-        sub: isFleet ? 'unique installs · 7d' : 'this machine · 7d' },
-      { label: 'Renders', value: fmt(t.renders_7d), sub: 'completed + failed · 14d' },
-      { label: 'H3 share', value: fmtPct(t.h3_share_pct), sub: 'of renders · 14d' },
-      { label: 'Error rate', value: fmtPct(t.error_rate_pct), sub: 'failed renders · 14d' },
-      { label: 'Refused', value: fmt(t.refusals_7d), sub: 'declined on purpose · 7d' },
+        value: isFleet ? fmt(t.total_installs) : '—',
+        sub: isFleet ? 'ever booted · ' + since : fleetSub,
+        title: 'Distinct machines that have ever booted the panel with analytics on, all time.' },
+      { label: isFleet ? 'Active installs' : 'Active this range',
+        value: fmt(t.active_in_range) + pctDeltaHtml(d.active_in_range_pct),
+        sub: (isFleet ? 'unique installs' : 'this machine') + ' · ' + rangeTxt,
+        title: `Distinct installs that booted the panel in the selected range (${rangeTxt}), vs the same-length period before it.` },
+      { label: 'Renders', value: fmt(t.renders_in_range) + pctDeltaHtml(d.renders_in_range_pct),
+        sub: 'completed + failed · ' + rangeTxt + ' · ' + (isFleet ? 'all installs' : 'this machine'),
+        title: `Renders (successful and failed) in the selected range, vs the same-length period before it.` },
+      { label: 'H3 share', value: fmtPct(t.h3_share_pct), sub: 'of renders · ' + rangeTxt,
+        title: `Share of renders in the selected range (${rangeTxt}) that used the H3 engine rather than LTX.` },
+      { label: 'Error rate', value: fmtPct(t.error_rate_pct)
+          // Inverted vs the usual up=green/down=red: for an error rate, a
+          // RISE is the bad direction and a FALL is the good one.
+          + (d.error_rate_pp != null ? ` <span class="trend ${d.error_rate_pp > 0 ? 'down' : (d.error_rate_pp < 0 ? 'up' : 'flat')}">${d.error_rate_pp > 0 ? '+' : ''}${d.error_rate_pp}pp</span>` : ''),
+        sub: 'failed renders · ' + rangeTxt,
+        title: `Share of renders that failed in the selected range. The pp badge is the change in percentage points vs the prior period.` },
+      { label: 'Refused', value: fmt(t.refusals_in_range), sub: 'declined on purpose · ' + rangeTxt,
+        title: 'Renders the panel declined before starting (missing model, bad params, etc.) — never counted as a failure.' },
     ];
     const grid = $('#usage-tiles');
     if (grid) {
       grid.innerHTML = tiles.map(k => `
-        <div class="kpi${k.hero ? ' is-hero' : ''}">
+        <div class="kpi${k.hero ? ' is-hero' : ''}${k.warn ? ' is-unknown' : ''}"${k.title ? ` title="${escapeAttr(k.title)}"` : ''}>
           <div class="label">${escapeHtml(k.label)}</div>
           <div class="value">${k.value}</div>
           <div class="delta">${escapeHtml(k.sub)}</div>
         </div>`).join('');
     }
 
-    renderUsageGrowth(u.growth || {}, isFleet);
+    renderUsageGrowth(u.growth || {}, isFleet, rangeTxt);
 
     // Pack-flip alert — the H3-vanished detector. Any true→false
     // transition on any pack counts; h3 is called out by name because
@@ -2644,19 +2958,13 @@
       const total = lost + others;
       alert.classList.toggle('is-clear', total === 0);
       alert.innerHTML = total === 0
-        ? `<span class="n">0</span><span>optional-pack regressions in the last 7 days.</span>`
-        : `<span class="n">${fmt(total)}</span><span>optional-pack regression${total === 1 ? '' : 's'} in the last 7 days`
+        ? `<span class="n">0</span><span>optional-pack regressions in ${escapeHtml(rangeTxt)}.</span>`
+        : `<span class="n">${fmt(total)}</span><span>optional-pack regression${total === 1 ? '' : 's'} in ${escapeHtml(rangeTxt)}`
           + (lost ? ` — <strong>H3 went from installed to missing ${fmt(lost)}×</strong>` : '')
           + `. A pack that disappears between boots is a broken install, not a user choice.</span>`;
     }
 
-    const errs = Array.isArray(u.top_errors) ? u.top_errors : [];
-    const errCount = $('#usage-errors-count');
-    if (errCount) errCount.textContent = fmt(errs.reduce((a, r) => a + (Number(r.count) || 0), 0));
-    // Ranked by installs, not events: one install retrying a broken model dir
-    // 400 times a week is one problem, not the fleet's biggest.
-    paintDist('#usage-errors', errs, 'signature', { err: true,
-      sub: r => (r.people === null || r.people === undefined) ? '' : `· ${fmt(r.people)} install${Number(r.people) === 1 ? '' : 's'}` });
+    renderErrorGroups(u, rangeTxt);
     const fbv = Array.isArray(u.failures_by_version) ? u.failures_by_version : [];
     paintDist('#usage-failures-by-version', fbv, 'version', { err: true,
       sub: r => `failed · ${r.pct}% of ${fmt((Number(r.failed) || 0) + (Number(r.ok) || 0))} · ${fmt(r.people)} install${Number(r.people) === 1 ? '' : 's'}` });
@@ -2669,10 +2977,135 @@
     paintDist('#usage-ram', u.ram, 'ram_gb');
   }
 
+  // ===================================================================
+  //  ERRORS — collapsible, grouped by the closed error_class taxonomy.
+  //  Collapsed by default; header carries total + trend so the owner
+  //  gets signal without opening it. Top 5 groups (sorted by installs
+  //  affected, server-side) with a "show all" for the rest.
+  // ===================================================================
+
+  const ERROR_CLASS_LABELS = {
+    refused: 'Refused', oom_jetsam: 'OOM (jetsam)', metal_watchdog: 'Metal watchdog',
+    metal_oom: 'Metal OOM', native_crash: 'Native crash',
+    helper_start_timeout: 'Helper start timeout', helper_exit: 'Helper exited',
+    model_missing: 'Model missing', model_corrupt: 'Model corrupt',
+    download_failed: 'Download failed', venv_broken: 'Venv broken',
+    bad_params: 'Bad parameters', input_missing: 'Input missing',
+    file_missing: 'File missing', disk_full: 'Disk full',
+    export_failed: 'Export failed', timeout: 'Timeout',
+    cancelled_race: 'Cancelled (race)', other: 'Other / unclassified',
+  };
+  function prettyErrorClass(cls) {
+    return ERROR_CLASS_LABELS[cls] || String(cls || 'other').replace(/_/g, ' ');
+  }
+
+  const ERRORS_SHOWN_DEFAULT = 5;
+  let errorGroupsFull = [];
+
+  function errorGroupRowHtml(g) {
+    const installsTxt = `${fmt(g.installs)} install${Number(g.installs) === 1 ? '' : 's'}`;
+    const firstAgo = g.first_seen ? dayAgo(g.first_seen) : '—';
+    const lastAgo = g.last_seen ? dayAgo(g.last_seen) : '—';
+    return `
+      <div class="error-group">
+        <div class="error-group-head">
+          <span class="error-group-class">${escapeHtml(prettyErrorClass(g.error_class))}</span>
+          <span class="error-group-stat"><strong>${fmt(g.count)}</strong> event${Number(g.count) === 1 ? '' : 's'}</span>
+          <span class="error-group-stat"><strong>${installsTxt}</strong> affected</span>
+          <span class="error-group-meta" title="first seen ${escapeAttr(g.first_seen || '—')} (UTC)&#10;last seen ${escapeAttr(g.last_seen || '—')} (UTC)">
+            first ${escapeHtml(firstAgo)} · last ${escapeHtml(lastAgo)}
+          </span>
+        </div>
+        <div class="error-group-msg" tabindex="0" role="button"
+             aria-label="click to show the full message">${escapeHtml(g.top_message || 'unknown error')}</div>
+      </div>`;
+  }
+
+  function renderErrorGroups(u, rangeTxt) {
+    const groups = Array.isArray(u.error_groups) ? u.error_groups.slice() : [];
+    errorGroupsFull = groups;
+    const total = groups.reduce((a, g) => a + (Number(g.count) || 0), 0);
+    const countEl = $('#errors-total-count');
+    if (countEl) countEl.textContent = fmt(total);
+
+    const trendEl = $('#errors-trend');
+    if (trendEl) {
+      const pct = (u.deltas || {}).errors_count_pct;
+      if (pct == null || !Number.isFinite(pct)) {
+        trendEl.textContent = '';
+        trendEl.className = 'errors-trend';
+      } else if (pct === 0) {
+        trendEl.textContent = '±0% vs prior ' + rangeTxt;
+        trendEl.className = 'errors-trend flat';
+      } else {
+        trendEl.textContent = (pct > 0 ? '+' : '') + pct + '% vs prior ' + rangeTxt;
+        trendEl.className = 'errors-trend ' + (pct > 0 ? 'up' : 'down');
+      }
+    }
+
+    const empty = $('#errors-empty');
+    const body = $('#errors-groups');
+    const showAll = $('#errors-showall');
+    if (!body) return;
+    if (!groups.length) {
+      if (empty) empty.hidden = false;
+      body.innerHTML = '';
+      if (showAll) showAll.hidden = true;
+      return;
+    }
+    if (empty) empty.hidden = true;
+    body.innerHTML = groups.slice(0, ERRORS_SHOWN_DEFAULT).map(errorGroupRowHtml).join('');
+    if (showAll) {
+      const rest = groups.length - ERRORS_SHOWN_DEFAULT;
+      if (rest > 0) {
+        showAll.hidden = false;
+        showAll.textContent = `show ${rest} more error class${rest === 1 ? '' : 'es'}`;
+        showAll.dataset.expanded = '0';
+      } else {
+        showAll.hidden = true;
+      }
+    }
+  }
+
+  function initErrorsToggle() {
+    const toggle = $('#errors-toggle');
+    const body = $('#errors-body');
+    if (toggle && body) {
+      toggle.addEventListener('click', () => {
+        const open = toggle.getAttribute('aria-expanded') === 'true';
+        toggle.setAttribute('aria-expanded', String(!open));
+        body.hidden = open;
+      });
+    }
+    const showAll = $('#errors-showall');
+    if (showAll) {
+      showAll.addEventListener('click', () => {
+        const body2 = $('#errors-groups');
+        if (!body2) return;
+        body2.innerHTML = errorGroupsFull.map(errorGroupRowHtml).join('');
+        showAll.hidden = true;
+      });
+    }
+    // Expand-on-click for a truncated message — event delegation so it
+    // keeps working after re-renders replace the row markup.
+    const groupsEl = $('#errors-groups');
+    if (groupsEl) {
+      groupsEl.addEventListener('click', (e) => {
+        const msg = e.target.closest('.error-group-msg');
+        if (msg) msg.classList.toggle('is-expanded');
+      });
+      groupsEl.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        const msg = e.target.closest('.error-group-msg');
+        if (msg) { e.preventDefault(); msg.classList.toggle('is-expanded'); }
+      });
+    }
+  }
+
   // Growth chart: cumulative installs (line, left axis) against renders per
   // day (bars, right axis). Installs are all-time so the line is the shape of
   // the whole project; renders are 30 days so the bars stay readable.
-  function renderUsageGrowth(g, isFleet) {
+  function renderUsageGrowth(g, isFleet, rangeTxt) {
     const box = $('#usage-growth');
     const id = 'chart-usage-growth';
     const el = document.getElementById(id);
@@ -2696,7 +3129,8 @@
       const first = weeks[0], now = weeks[weeks.length - 1];
       const wau = (first && now && weeks.length > 1)
         ? ` · weekly active ${fmt(first.installs)} → ${fmt(now.installs)} over ${weeks.length} weeks` : '';
-      sub.textContent = (isFleet ? 'installs, all time · renders per day, 30d' : 'this machine · renders per day, 30d') + wau;
+      const rt = rangeTxt || '30d';
+      sub.textContent = (isFleet ? `installs, all time · renders per day, ${rt}` : `this machine · renders per day, ${rt}`) + wau;
     }
     charts[id] = new Chart(el.getContext('2d'), {
       type: 'bar',
@@ -2724,11 +3158,21 @@
     });
   }
 
+  // 4.17.3 review: a range change while an older request is still in
+  // flight let the OLDER response land last and paint 30-day totals under
+  // 7-day labels. Each loader stamps its request; a superseded answer is
+  // dropped.
+  let _usageGen = 0;
+  let _rowsGen = 0;
   async function loadUsage(force) {
+    const gen = ++_usageGen;
     try {
-      const r = await fetch(USAGE_URL + (force ? '?force=1' : ''), { cache: 'no-store' });
+      const qs = new URLSearchParams({ range: serverRange(globalRange) });
+      if (force) qs.set('force', '1');
+      const r = await fetch(USAGE_URL + '?' + qs.toString(), { cache: 'no-store' });
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const u = await r.json();
+      if (gen !== _usageGen) return;          // a newer range was asked for
       if (u && u.ok === false && !u.tiles) throw new Error(u.error || 'usage unavailable');
       renderUsage(u || {});
     } catch (e) {
@@ -2794,6 +3238,20 @@
     }
   }
 
+  /** "show all N" / "show fewer" for a list whose overflow rows carry the
+   * `hidden` attribute. `keepVisible(el, i)` decides which rows stay
+   * visible when collapsed (default: the first `shown`). */
+  function wireListToggle(btn, container, rowSel, shown, total, noun, keepVisible) {
+    if (!btn) return;
+    const keep = keepVisible || ((el, i) => i < shown);
+    let open = false;
+    btn.addEventListener('click', () => {
+      open = !open;
+      container.querySelectorAll(rowSel).forEach((el, i) => { el.hidden = open ? false : !keep(el, i); });
+      btn.textContent = open ? 'show fewer' : `show all ${fmt(total)} ${noun}`;
+    });
+  }
+
   // ===================================================================
   //  RELEASES — only renders when release_timeline is present.
   // ===================================================================
@@ -2812,13 +3270,32 @@
       ? r.pack_downloads : (r.total_downloads || 0);
     const max = Math.max(1, ...tl.map(shown));
     const body = $('#releases-table tbody');
-    body.innerHTML = tl.map(r => {
+    // Newest first. Collapsed view = the 8 most recent tags plus any older
+    // tag whose downloads are notable (>= 10% of the biggest) — ~100 rows
+    // of mostly-zero tags used to make up half the page.
+    const RECENT = 8;
+    const sorted = tl.slice().sort((a, b) => (b.published_at || '') < (a.published_at || '') ? -1 : 1);
+    const notable = r => shown(r) > 0 && shown(r) >= max * 0.10;
+    const keep = sorted.map((r, i) => i < RECENT || notable(r));
+    const keptCount = keep.filter(Boolean).length;
+    const note = $('#releases-note');
+    if (note) note.textContent = keptCount < sorted.length
+      ? `${RECENT} most recent + ${keptCount - Math.min(RECENT, sorted.length)} older with notable downloads · ${fmt(sorted.length)} tags total`
+      : `${fmt(sorted.length)} tags`;
+    const toggleWrap = $('#releases-more');
+    if (toggleWrap) {
+      toggleWrap.hidden = keptCount >= sorted.length;
+      toggleWrap.innerHTML = `<button class="btn ghost list-toggle" type="button">show all ${fmt(sorted.length)} releases</button>`;
+      wireListToggle(toggleWrap.querySelector('.list-toggle'), body, 'tr', RECENT, sorted.length, 'releases',
+        (el) => el.dataset.keep === '1');
+    }
+    body.innerHTML = sorted.map((r, idx) => {
       const isPack = String(r.tag || '').startsWith('weights-') && r.pack_downloads != null;
       const w = Math.max(2, (shown(r) / max) * 100);
       const when = r.published_at ? new Date(r.published_at) : null;
       const whenStr = (when && Number.isFinite(when.getTime()))
         ? when.toISOString().slice(0, 10) : '—';
-      return `<tr>
+      return `<tr data-keep="${keep[idx] ? 1 : 0}"${keep[idx] ? '' : ' hidden'}>
         <td><code>${escapeHtml(r.tag || '—')}</code></td>
         <td class="mono" style="color:var(--muted)">${escapeHtml(whenStr)}</td>
         <td class="num" title="${escapeAttr(isPack
@@ -2856,48 +3333,48 @@
   }
 
   // ===================================================================
-  //  PERIOD CHIPS
+  //  GLOBAL RANGE — one control drives every chart + the Usage section.
+  //  A range change re-fetches from the server (the archive is trimmed
+  //  server-side per range, and the Usage tiles/errors are recomputed
+  //  over the new window) rather than just re-slicing what's already in
+  //  memory, so switching to "All time" after loading "30 days" actually
+  //  gets the rest of the archive.
   // ===================================================================
 
-  function initChips() {
-    const saved = localStorage.getItem(LS_PERIOD);
-    if (saved && ['7','30','90','365','all'].includes(saved)) currentPeriod = saved;
-    // ONLY chips with data-period — exclude the clones-specific chips
-    // (they have data-clones-period / data-clones-bucket instead).
-    $$('.chip[data-period]').forEach(b => {
-      b.setAttribute('aria-pressed', String(b.dataset.period === currentPeriod));
+  const RANGE_HINTS = {
+    '7':   'last 7 days',
+    '30':  'last 30 days',
+    '90':  'last 90 days (3 months)',
+    'all': 'all time — no delta comparisons (no prior period to compare to)',
+  };
+
+  function initGlobalRange() {
+    const saved = lsGet(LS_RANGE);
+    if (saved && ['7', '30', '90', 'all'].includes(saved)) globalRange = saved;
+    const hint = $('#range-bar-hint');
+    if (hint) hint.textContent = RANGE_HINTS[globalRange] || '';
+    $$('#global-range-chips .chip[data-range]').forEach(b => {
+      b.setAttribute('aria-pressed', String(b.dataset.range === globalRange));
       b.addEventListener('click', () => {
-        currentPeriod = b.dataset.period;
-        localStorage.setItem(LS_PERIOD, currentPeriod);
-        $$('.chip[data-period]').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
-        renderAllCharts(allRows, currentPeriod);
+        if (b.dataset.range === globalRange) return;
+        globalRange = b.dataset.range;
+        lsSet(LS_RANGE, globalRange);
+        $$('#global-range-chips .chip[data-range]').forEach(x =>
+          x.setAttribute('aria-pressed', String(x === b)));
+        if (hint) hint.textContent = RANGE_HINTS[globalRange] || '';
+        loadAll();
       });
     });
   }
 
   function initClonesChart() {
-    const sp = localStorage.getItem(LS_CLONES_PERIOD);
-    const sb = localStorage.getItem(LS_CLONES_BUCKET);
-    if (sp && ['30','90','365','all'].includes(sp)) clonesAllTime.period = sp;
-    if (sb && ['daily','weekly','monthly'].includes(sb)) clonesAllTime.bucket = sb;
-    // Period chips
-    $$('.clones-chip-period').forEach(b => {
-      b.setAttribute('aria-pressed', String(b.dataset.clonesPeriod === clonesAllTime.period));
-      b.addEventListener('click', () => {
-        clonesAllTime.period = b.dataset.clonesPeriod;
-        localStorage.setItem(LS_CLONES_PERIOD, clonesAllTime.period);
-        $$('.clones-chip-period').forEach(x =>
-          x.setAttribute('aria-pressed', String(x.dataset.clonesPeriod === clonesAllTime.period))
-        );
-        renderClonesHistoryChart(allRows);
-      });
-    });
-    // Bucket chips
+    const sb = lsGet(LS_CLONES_BUCKET);
+    if (sb && ['daily', 'weekly', 'monthly'].includes(sb)) clonesAllTime.bucket = sb;
     $$('.clones-chip-bucket').forEach(b => {
       b.setAttribute('aria-pressed', String(b.dataset.clonesBucket === clonesAllTime.bucket));
       b.addEventListener('click', () => {
         clonesAllTime.bucket = b.dataset.clonesBucket;
-        localStorage.setItem(LS_CLONES_BUCKET, clonesAllTime.bucket);
+        lsSet(LS_CLONES_BUCKET, clonesAllTime.bucket);
         $$('.clones-chip-bucket').forEach(x =>
           x.setAttribute('aria-pressed', String(x.dataset.clonesBucket === clonesAllTime.bucket))
         );
@@ -2993,7 +3470,7 @@
     const draw = () => {
       if (drawn) return;
       drawn = true;
-      renderAllCharts(allRows, currentPeriod);
+      renderAllCharts(allRows, globalRange);
     };
     if (!('IntersectionObserver' in window)) { draw(); return; }
     const io = new IntersectionObserver(entries => {
@@ -3009,8 +3486,9 @@
   // ===================================================================
 
   async function loadRows() {
-    const r = await fetch(JSONL_URL, { cache: 'no-store' });
-    if (!r.ok) throw new Error('HTTP ' + r.status + ' on ' + JSONL_URL);
+    const url = JSONL_URL + '?range=' + encodeURIComponent(serverRange(globalRange));
+    const r = await fetch(url, { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status + ' on ' + url);
     const text = await r.text();
     const rows = text.split(/\n+/).filter(Boolean).map(l => {
       try { return JSON.parse(l); }
@@ -3025,8 +3503,11 @@
   // ===================================================================
 
   async function main() {
+    const gen = ++_rowsGen;
     try {
-      allRows = await loadRows();
+      const rows = await loadRows();
+      if (gen !== _rowsGen) return;           // a newer range was asked for
+      allRows = rows;
       renderMeta(allRows);
       if (!allRows.length) {
         $('#kpi-grid').setAttribute('aria-busy', 'false');
@@ -3051,18 +3532,25 @@
     }
   }
 
+  // Runs both data sources for the CURRENT globalRange. Called at boot and
+  // every time the range chip changes — the archive and the usage
+  // telemetry are independent sources (either can be empty or broken
+  // without taking the other down), so they're kicked off together but
+  // not awaited on each other.
+  function loadAll() {
+    main();
+    loadUsage(false);
+  }
+
   // ===================================================================
   //  BOOT
   // ===================================================================
-  initChips();
+  initGlobalRange();
   initClonesChart();
   initRefresh();
   initUsageRefresh();
-  main();
-  // Own fetch, not awaited by main() — the GitHub archive and the usage
-  // telemetry are independent sources and either can be empty or broken
-  // without taking the other down with it.
-  loadUsage(false);
+  initErrorsToggle();
+  loadAll();
   </script>
 </body>
 </html>

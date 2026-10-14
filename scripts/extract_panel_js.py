@@ -35,6 +35,82 @@ class ExtractError(RuntimeError):
     pass
 
 
+# Characters after which a `/` most likely OPENS a regex literal rather than
+# meaning division. Not exhaustive JS grammar — just enough for this file's
+# own coding style (a regex almost always follows `(`, `,`, `=`, `||`, `&&`,
+# or sits at the start of a line/statement).
+_REGEX_PRECEDERS = set("([{,;:=&|!?+-~^%<>*")
+_REGEX_KEYWORDS = {"return", "typeof", "instanceof", "in", "of", "new",
+                    "delete", "void", "throw", "case", "yield", "else", "do"}
+
+
+def _looks_like_regex_start(s: str, j: int) -> bool:
+    """Heuristic: does the `/` at s[j] open a regex literal?
+
+    Found the hard way (VC-08): `friendlyJobError`'s first branch tests
+    `/music engine isn't installed|.../i.test(raw)` — a regex literal
+    containing an apostrophe ("isn't"). The brace-matching loop below only
+    ever tracked `"`, `'` and `` ` `` as string delimiters; it had no idea
+    a `/.../ ` regex literal exists, so it read that apostrophe as the
+    START of a fake single-quoted string, which then swallowed the next
+    real `'` (an unrelated string's OPENING quote) as its own close —
+    desynchronising every string/brace boundary for the rest of the
+    function. The corruption is silent: depth still reaches exactly 0
+    eventually, just at the wrong `}`, so a change miles away that shifts
+    the alignment can suddenly truncate an unrelated function with no
+    error at the call site that owns the regex — the way editing the
+    UNRELATED sigkill branch below it broke this function's extraction.
+    """
+    k = j - 1
+    while k >= 0 and s[k] in " \t\r\n":
+        k -= 1
+    if k < 0:
+        return True  # start of the scanned region — nothing before it
+    prev = s[k]
+    if prev in _REGEX_PRECEDERS:
+        return True
+    if prev.isalnum() or prev in "_$":
+        word_start = k
+        while word_start >= 0 and (s[word_start].isalnum() or s[word_start] in "_$"):
+            word_start -= 1
+        return s[word_start + 1:k + 1] in _REGEX_KEYWORDS
+    return False
+
+
+def _skip_regex_literal(s: str, j: int) -> int:
+    """`s[j] == '/'` opens a regex literal — return the index of its LAST
+    character (the trailing flag letters, if any), so the caller's `j += 1`
+    lands just past it. Handles `\\`-escapes and `[...]` character classes,
+    where an unescaped `/` does not terminate the literal."""
+    k = j + 1
+    in_class = False
+    while k < len(s):
+        ch = s[k]
+        if ch == "\\":
+            k += 2
+            continue
+        if in_class:
+            if ch == "]":
+                in_class = False
+        elif ch == "[":
+            in_class = True
+        elif ch == "/":
+            break
+        elif ch == "\n":
+            # Not actually a regex (they can't span lines) — bail out and
+            # let the caller treat the `/` as an ordinary character; safer
+            # than consuming the rest of the file looking for a `/` that
+            # was never a regex terminator to begin with.
+            return j
+        k += 1
+    else:
+        return j
+    k += 1
+    while k < len(s) and s[k].isalpha():
+        k += 1
+    return k - 1
+
+
 def panel_source() -> str:
     # Everything the panel serves, in the order the pieces sat in the
     # pre-extraction single file: Python, then the CSS, then the page
@@ -61,6 +137,52 @@ def panel_source() -> str:
     return "\n".join(parts)
 
 
+def _balanced_brace_end(s: str, i: int) -> int:
+    """Index of the `}` that closes the `{` at `s[i]`, tracking strings,
+    `//`/`/* */` comments and `/regex/` literals so none of their contents
+    are mistaken for real braces (or, for a regex containing a quote
+    character, mistaken for a string that swallows real braces further on
+    — see `_looks_like_regex_start`'s docstring). Shared by
+    `extract_function` and `extract_object`, which used to carry two
+    copies of this loop that both lacked regex awareness."""
+    depth, j, in_s, esc, in_c, in_lc = 0, i, "", False, False, False
+    while j < len(s):
+        ch = s[j]
+        nxt = s[j + 1] if j + 1 < len(s) else ""
+        if in_lc:
+            if ch == "\n":
+                in_lc = False
+        elif in_c:
+            if ch == "*" and nxt == "/":
+                in_c = False
+                j += 1
+        elif in_s:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == in_s:
+                in_s = ""
+        elif ch in "\"'`":
+            in_s = ch
+        elif ch == "/" and nxt == "/":
+            in_lc = True
+            j += 1
+        elif ch == "/" and nxt == "*":
+            in_c = True
+            j += 1
+        elif ch == "/" and nxt not in ("/", "*") and _looks_like_regex_start(s, j):
+            j = _skip_regex_literal(s, j)
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return j
+        j += 1
+    raise ExtractError("unbalanced braces from offset %d" % i)
+
+
 def extract_function(name: str, src: str | None = None) -> str:
     """The full text of `function <name>(...) { ... }`, braces balanced."""
     s = src if src is not None else panel_source()
@@ -82,40 +204,11 @@ def extract_function(name: str, src: str | None = None) -> str:
     m = hits[0]
     start = m.start()
     i = s.index("{", m.end() - 1)
-    depth, j, in_s, esc, in_c, in_lc = 0, i, "", False, False, False
-    while j < len(s):
-        ch = s[j]
-        nxt = s[j + 1] if j + 1 < len(s) else ""
-        if in_lc:
-            if ch == "\n":
-                in_lc = False
-        elif in_c:
-            if ch == "*" and nxt == "/":
-                in_c = False
-                j += 1
-        elif in_s:
-            if esc:
-                esc = False
-            elif ch == "\\":
-                esc = True
-            elif ch == in_s:
-                in_s = ""
-        elif ch in "\"'`":
-            in_s = ch
-        elif ch == "/" and nxt == "/":
-            in_lc = True
-            j += 1
-        elif ch == "/" and nxt == "*":
-            in_c = True
-            j += 1
-        elif ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return s[start:j + 1]
-        j += 1
-    raise ExtractError("unbalanced braces while extracting %s()" % name)
+    try:
+        end = _balanced_brace_end(s, i)
+    except ExtractError:
+        raise ExtractError("unbalanced braces while extracting %s()" % name) from None
+    return s[start:end + 1]
 
 
 def extract_object(name: str, src: str | None = None) -> str:
@@ -125,40 +218,11 @@ def extract_object(name: str, src: str | None = None) -> str:
     if not m:
         raise ExtractError("window.%s not found" % name)
     i = s.index("{", m.end() - 1)
-    depth, j, in_s, esc, in_c, in_lc = 0, i, "", False, False, False
-    while j < len(s):
-        ch = s[j]
-        nxt = s[j + 1] if j + 1 < len(s) else ""
-        if in_lc:
-            if ch == "\n":
-                in_lc = False
-        elif in_c:
-            if ch == "*" and nxt == "/":
-                in_c = False
-                j += 1
-        elif in_s:
-            if esc:
-                esc = False
-            elif ch == "\\":
-                esc = True
-            elif ch == in_s:
-                in_s = ""
-        elif ch in "\"'`":
-            in_s = ch
-        elif ch == "/" and nxt == "/":
-            in_lc = True
-            j += 1
-        elif ch == "/" and nxt == "*":
-            in_c = True
-            j += 1
-        elif ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return s[i:j + 1]
-        j += 1
-    raise ExtractError("unbalanced braces while extracting window.%s" % name)
+    try:
+        end = _balanced_brace_end(s, i)
+    except ExtractError:
+        raise ExtractError("unbalanced braces while extracting window.%s" % name) from None
+    return s[i:end + 1]
 
 
 def extract_element(element_id: str, src: str | None = None) -> str:

@@ -12,6 +12,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -64,8 +65,11 @@ class TestLtxGeometryGrid(unittest.TestCase):
     def test_h3_geometry_still_comes_from_the_tier_cell(self):
         # The H3 lane stamps the (quality × length) cell's own geometry over
         # the form; the LTX grid must not touch it (H3 frames ride 17n+5).
-        p = job_for({"engine": "h3", "width": "1000", "height": "500",
-                     "frames": "100"})["params"]
+        # As an H3-capable Mac (issue #90): below the RAM floor make_job falls
+        # back to LTX by design, which put the LTX grid's 960x448 here.
+        with mock.patch.dict(os.environ, {"LTX_H3_FORCE_CAPABLE": "1"}):
+            p = job_for({"engine": "h3", "width": "1000", "height": "500",
+                         "frames": "100"})["params"]
         tier = P.H3_TIERS[p["h3_tier"]]
         self.assertEqual((p["width"], p["height"], p["frames"]),
                          (tier["width"], tier["height"], tier["frames"]))
@@ -80,7 +84,7 @@ class ControlsHideWithTheirParents(unittest.TestCase):
     and Studio."""
 
     SURFACES = ("train", "audio", "storyboard", "editor", "characters",
-                "studio")
+                "studio", "oneshot")
 
     @classmethod
     def setUpClass(cls):

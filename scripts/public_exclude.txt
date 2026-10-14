@@ -1,0 +1,35 @@
+# Paths that must NEVER be present in a public-main snapshot commit.
+#
+# One repo-relative path per line, exactly as `git ls-tree -r --name-only`
+# prints it. Blank lines and lines starting with # are ignored. No globs —
+# list every path explicitly, so an accidental typo fails closed (an
+# unmatched exclude line is silently a no-op, which is why a new promote
+# should always diff `origin/main` and eyeball what actually changed, not
+# just trust this file ran).
+#
+# scripts/public_leak_check.py reads this file and fails if any listed path
+# exists in the tree-ish it is given. The promote recipe in
+# docs/RELEASE_CHECKLIST.md ("Promoting — a curated SNAPSHOT") step 1 uses
+# this same file as the `git rm --cached` list, so the two never drift apart
+# — one list, read by both the removal step and the verification step.
+#
+# docs/STATE.md — the internal dev/agent handoff doc (thousands of lines,
+# rewritten every session). It has been shipping on public `main` since the
+# very first commit that added it (4121cdd, "docs: add docs/STATE.md") —
+# beta/main and origin/main were tree-identical at the time this list was
+# created (2026-09-29), which is *why* nothing had ever stripped it before.
+# It carries internal-only material with no business in a public repo.
+# Agents read it from the private beta checkout; it must never reach a
+# public-main snapshot going forward. (Already-shipped copies remain in
+# public git history — see the scrub_4172 report for why that is a
+# separate, harder problem this list does not solve.)
+docs/STATE.md
+#
+# scripts/public_leak_patterns.txt — the private pattern list
+# scripts/public_leak_check.py's content check reads. Kept out of the
+# public tree on purpose: the patterns exist to detect specific private
+# strings, so shipping the list publicly would just republish the same
+# strings it is meant to catch. The checker refuses to run its content
+# check when this file is missing (fails closed) rather than silently
+# skipping it.
+scripts/public_leak_patterns.txt

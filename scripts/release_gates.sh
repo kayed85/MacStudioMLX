@@ -51,6 +51,42 @@ fi
 
 LOGDIR="$(mktemp -d "${TMPDIR:-/tmp}/phosphene-gates.XXXXXX")"
 
+# HERMETIC, like conftest.py does for pytest (4.17.5): the unittest sweep does
+# not load conftest, and a full run used to leave an 810 MB Hugging Face
+# download in the system temp dir every time. Every gate gets its own TMPDIR
+# under LOGDIR (removed below, the logs kept) and an offline Hugging Face hub.
+GATE_TMP="$LOGDIR/tmp"
+mkdir -p "$GATE_TMP"
+export TMPDIR="$GATE_TMP/"
+export HF_HUB_OFFLINE=1
+export HF_HUB_DISABLE_TELEMETRY=1
+trap 'rm -rf "$GATE_TMP"' EXIT
+
+# ...AND THE TEST SWEEPS NEVER SEE THE INSTALL'S OWN state/, mlx_outputs/ OR
+# panel_uploads/ (issue #90). conftest.py sandboxes those three for pytest,
+# but the root sweep runs through `python -m unittest`, which never loads
+# conftest — and most root suites import the panel without setting
+# LTX_STATE_DIR themselves. So every gate run read the OPERATOR's
+# panel_settings.json and eta_calibration.json (a gate result that depended
+# on whose Mac ran it) and wrote storyboards, outputs, usage-log lines and
+# analytics install steps INTO the install it ran in. Each suite now gets a
+# fresh, empty tree of its own, set unconditionally: a caller's LTX_STATE_DIR
+# is just as likely to be somebody's real state. check_output_codec is NOT
+# sandboxed — its whole job is to read the real mlx_outputs/.
+# sandbox_env <name>: point the three dirs at a fresh tree for one unittest
+# gate. pytest_env: clear them, so conftest.py builds its own sandbox (it
+# keeps a caller's value, and test_state_sandbox asserts it is conftest's).
+sandbox_env() {
+    local box="$GATE_TMP/sandbox/$(echo "$1" | tr -c 'A-Za-z0-9_.-' '_')"
+    mkdir -p "$box/state" "$box/mlx_outputs" "$box/panel_uploads"
+    export LTX_STATE_DIR="$box/state"
+    export LTX_OUTPUT_DIR="$box/mlx_outputs"
+    export LTX_UPLOADS_DIR="$box/panel_uploads"
+}
+pytest_env() {
+    unset LTX_STATE_DIR LTX_OUTPUT_DIR LTX_UPLOADS_DIR
+}
+
 # Parallel arrays: gate name, result, log path.
 NAMES=()
 RESULTS=()
@@ -59,6 +95,7 @@ LOGS=()
 PASS_N=0
 FAIL_N=0
 SKIP_N=0
+INNER_SKIPS=()
 
 # run_gate <name> <command...>
 #   Records PASS on exit 0, FAIL otherwise. Output goes to a per-gate log,
@@ -68,8 +105,24 @@ run_gate() {
     local log="$LOGDIR/$(echo "$name" | tr -c 'A-Za-z0-9_.-' '_').log"
     printf '  %-46s ' "$name"
     if "$@" >"$log" 2>&1; then
-        printf 'PASS\n'
-        NAMES+=("$name"); RESULTS+=("PASS"); LOGS+=("$log")
+        # A suite can pass while some of its tests SKIPPED (a pack this Mac
+        # does not have, an opt-in live test). That is not a pass for what
+        # those tests cover, so the count goes on the row and the reasons
+        # (unittest -v "skipped '...'", pytest -rs "SKIPPED [n] ...", the
+        # registry gate's "SKIP  ...") go in the summary, instead of hiding
+        # inside a green line.
+        local nskip
+        nskip=$(grep -Eo 'skipped=[0-9]+|[0-9]+ skipped' "$log" | tail -1 | grep -Eo '[0-9]+')
+        if [ -n "$nskip" ] && [ "$nskip" != "0" ]; then
+            printf 'PASS  (%s test(s) skipped)\n' "$nskip"
+            NAMES+=("$name"); RESULTS+=("PASS ($nskip test(s) skipped)"); LOGS+=("$log")
+            while IFS= read -r why; do
+                INNER_SKIPS+=("$name: $why")
+            done < <(grep -Eo "skipped ['\"].*['\"]\$|^SKIPPED \[[0-9]+\] .*|^SKIP  .*" "$log" | sort -u)
+        else
+            printf 'PASS\n'
+            NAMES+=("$name"); RESULTS+=("PASS"); LOGS+=("$log")
+        fi
         PASS_N=$((PASS_N + 1))
     else
         printf 'FAIL\n'
@@ -169,8 +222,18 @@ fi
 
 # ---------------------------------------------------------------------------
 echo
-echo "== root test sweep (unittest) =="
+echo "== root test sweep (unittest; pytest-style files through pytest) =="
 # ---------------------------------------------------------------------------
+# A root file with a module-level `def test_*` is pytest-style (wholly, or
+# mixed with TestCase classes). `python -m unittest` collects ZERO tests from
+# those functions and prints "Ran 0 tests / OK" — the same false green the
+# scripts/ sweep below guards against. Until issue #90 only test_music_engine
+# was routed through pytest; 17 other root suites (366 tests) were reported
+# PASS while not one of their assertions ran, and test_storyboard_planner
+# silently dropped its module-level test. Every such file now goes through
+# pytest, and without pytest it is a loud SKIP, never a pass.
+HAVE_PYTEST=0
+"$VENV_PY" -c "import pytest" >/dev/null 2>&1 && HAVE_PYTEST=1
 for t in test_*.py; do
     [ -e "$t" ] || continue
     mod="${t%.py}"
@@ -178,7 +241,17 @@ for t in test_*.py; do
         mark_skip "$mod" "--fast"
         continue
     fi
-    run_gate "$mod" "$VENV_PY" -m unittest "$mod"
+    if grep -Eq '^(async )?def test_' "$t"; then
+        if [ "$HAVE_PYTEST" = "1" ]; then
+            pytest_env
+            run_gate "$mod" "$VENV_PY" -m pytest -q -rs -p no:cacheprovider "$t"
+        else
+            mark_skip "$mod" "pytest-style suite and pytest is not installed"
+        fi
+        continue
+    fi
+    sandbox_env "$mod"
+    run_gate "$mod" "$VENV_PY" -m unittest -v "$mod"
 done
 
 # ---------------------------------------------------------------------------
@@ -195,7 +268,8 @@ echo "== scripts/ test sweep (pytest) =="
 PYTEST_ONLY="scripts/test_convert_ltx_mlx.py scripts/test_ltx_pack_diff.py scripts/test_pack_release.py"
 
 if "$VENV_PY" -c "import pytest" >/dev/null 2>&1; then
-    run_gate "pytest scripts/" "$VENV_PY" -m pytest -q scripts/
+    pytest_env
+    run_gate "pytest scripts/" "$VENV_PY" -m pytest -q -rs -p no:cacheprovider scripts/
 else
     echo
     echo "  ############################################################"
@@ -224,6 +298,13 @@ while [ "$i" -lt "${#NAMES[@]}" ]; do
     printf ' %-46s %s\n' "${NAMES[$i]}" "${RESULTS[$i]}"
     i=$((i + 1))
 done
+if [ "${#INNER_SKIPS[@]}" -gt 0 ]; then
+    echo "------------------------------------------------------------"
+    echo " Tests SKIPPED inside passing suites (not verified on this Mac):"
+    for s in "${INNER_SKIPS[@]}"; do
+        printf '   %s\n' "$s"
+    done
+fi
 echo "------------------------------------------------------------"
 printf ' PASS %d   FAIL %d   SKIP %d\n' "$PASS_N" "$FAIL_N" "$SKIP_N"
 echo " logs: $LOGDIR"

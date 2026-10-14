@@ -85,8 +85,16 @@ class TestH3LoraImportHTTP(unittest.TestCase):
         self.dir = Path(self.tmp.name)
         self.old_dir = P._safe_h3_loras_dir
         P._safe_h3_loras_dir = lambda: self.dir
+        # As an install with no H3 DiT on disk (issue #90). With the weights
+        # installed, every import is also checked against the REAL DiT's
+        # module names, so these fixtures passed or failed by what was in
+        # mlx_models/hailuo-h3 (an unreadable DiT refused them all). The
+        # module check has its own cases, which pin the target set.
+        self.old_targets = P._h3_lora_target_modules
+        P._h3_lora_target_modules = lambda: None
 
     def tearDown(self):
+        P._h3_lora_target_modules = self.old_targets
         P._safe_h3_loras_dir = self.old_dir
         self.tmp.cleanup()
 

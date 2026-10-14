@@ -112,6 +112,102 @@ def post_storyboard_edit_upload(h, path, qs, ctype) -> None:
                200 if out.get("ok") else int(out.get("status") or 400))
 
 
+# ====== the Editor's audio tracks — where a sound comes from ========
+# The Sound source of the media pool: the film's own `audio/` folder and
+# every sound file at the top of the outputs. A read; it makes nothing.
+@get("/storyboard/edit/sounds")
+def get_storyboard_edit_sounds(h, parsed) -> None:
+    bid = (P.parse_qs(parsed.query).get("id") or [""])[0].strip()
+    try:
+        board = P.storyboard.load_storyboard(P.STATE_DIR, bid)
+    except Exception as exc:                                # noqa: BLE001
+        h._json({"ok": False, "error": str(exc)}, 404)
+        return
+    h._json({"ok": True, "sounds": P._sbe_list_sounds(board),
+             "dir": str(P._sbe_sound_dir(board))})
+
+
+# One file → a sound an audio track can hold: probed for its length, and
+# brought into the film's `audio/` folder when it lives anywhere the preview
+# cannot play it from. The strip itself is placed by the client, which owns
+# the arrangement, and saved like every other edit.
+@post("/storyboard/edit/add-sound")
+def post_storyboard_edit_add_sound(h, path, qs, ctype) -> None:
+    _rb = h._read_form_body()
+    if _rb is None:
+        return
+    _body, form = _rb
+
+    def f(name: str) -> str:
+        v = form.get(name) or [""]
+        return str(v[0] if isinstance(v, list) else v).strip()
+
+    try:
+        board = P.storyboard.load_storyboard(P.STATE_DIR, f("id"))
+    except Exception as exc:                                # noqa: BLE001
+        h._json({"ok": False, "error": str(exc)}, 404)
+        return
+    try:
+        out = P._sbe_add_sound(board, f("path"))
+    except Exception as exc:                                # noqa: BLE001
+        out = {"ok": False, "status": 500, "error": f"could not add that sound: {exc}"}
+    h._json({k: v for k, v in out.items() if k != "status"},
+            200 if out.get("ok") else int(out.get("status") or 400))
+
+
+# ====== Room tone — a generated bed under the whole film ============
+# The picker's rows and the numbers the Room tone card needs. Read-only.
+@get("/storyboard/edit/room-tone")
+def get_storyboard_edit_room_tone(h, parsed) -> None:
+    import room_tone as rt                                  # noqa: PLC0415
+    h._json({"ok": True, "variants": rt.variants(),
+             "default_variant": rt.DEFAULT_VARIANT,
+             "default_level": rt.DEFAULT_LEVEL,
+             "level_min": rt.LEVEL_MIN, "level_max": rt.LEVEL_MAX,
+             "ref_lufs": rt.REF_LUFS,
+             "auto": bool(P.get_settings().get("room_tone_auto", True))})
+
+
+# Make (or reuse) one bed. The client sends the timeline it is showing —
+# `clips` as JSON `[{path, start, end}]` and `film_len` — because a room tone
+# "from this film" must be made from the cut on screen, saved or not. The
+# track itself is placed by the client, like every other sound.
+@post("/storyboard/edit/room-tone")
+def post_storyboard_edit_room_tone(h, path, qs, ctype) -> None:
+    import json as _json                                    # noqa: PLC0415
+    _rb = h._read_form_body()
+    if _rb is None:
+        return
+    _body, form = _rb
+
+    def f(name: str) -> str:
+        v = form.get(name) or [""]
+        return str(v[0] if isinstance(v, list) else v).strip()
+
+    try:
+        board = P.storyboard.load_storyboard(P.STATE_DIR, f("id"))
+    except Exception as exc:                                # noqa: BLE001
+        h._json({"ok": False, "error": str(exc)}, 404)
+        return
+    try:
+        clips = _json.loads(f("clips") or "[]")
+        if not isinstance(clips, list):
+            raise ValueError("clips must be a list")
+        seed = int(f("seed") or 1)
+        film_len = float(f("film_len") or 0.0)
+    except (ValueError, TypeError) as exc:
+        h._json({"ok": False, "error": f"bad room tone request: {exc}"}, 400)
+        return
+    try:
+        out = P._sbe_room_tone(board, variant=f("variant") or "film", seed=seed,
+                               film_len=film_len, clips=clips)
+    except Exception as exc:                                # noqa: BLE001
+        out = {"ok": False, "status": 500,
+               "error": f"could not make the room tone: {exc}"}
+    h._json({k: v for k, v in out.items() if k != "status"},
+            200 if out.get("ok") else int(out.get("status") or 400))
+
+
 # ====== Storyboard — plan a film, then shoot it ====================
 # Sits with the /queue/* cluster on purpose: every one of these routes
 # ends up going through the SAME make_job -> STATE["queue"] contract

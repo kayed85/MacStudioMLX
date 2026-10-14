@@ -51,6 +51,7 @@ def get_styles(h, parsed) -> None:
 # /characters/download-sample/status until status == done|error.
 @post("/characters/download-sample")
 def post_characters_download_sample(h, path, qs, ctype) -> None:
+    P._analytics_feature("sample_character")
     if P._sample_character_present():
         h._json({"ok": True, "status": "done", "already": True,
                     "character_id": P.SAMPLE_CHARACTER["trigger"]})
@@ -222,8 +223,9 @@ def post_character_sheet_generate(h, path, qs, ctype) -> None:
     try:
         result = P.generate_character_sheet(
             cid_raw,
-            engine_override=(payload.get("engine_override")
-                             or "hidream_inline"),
+            # An absent engine lets generate_character_sheet pick the one
+            # this Mac has (HiDream only where its lab checkout exists).
+            engine_override=(payload.get("engine_override") or ""),
             views=payload.get("views"),
             wardrobe=str(payload.get("wardrobe") or ""),
             seed=payload.get("seed", -1),
@@ -374,9 +376,17 @@ def post_character_generate(h, path, qs, ctype) -> None:
     # Optional image / audio paths for i2v and i2v+clean-audio modes.
     # Frontend uploads files via /upload, gets back a path, and
     # passes it here. Mode auto-switches:
-    #   image + audio  → i2v_clean_audio (character lip-syncs to audio)
+    #   image + audio  → i2v_clean_audio (audio MUXED onto the render —
+    #                    not lip-sync; the mouth does not follow this file,
+    #                    see VA-20/webapp/docs/audio.md)
     #   image only     → i2v             (character animates from still)
-    #   audio only     → t2v + audio     (audio drives generation; rare)
+    #   audio only     → REFUSED (VA-37) — t2v never reads the audio field,
+    #                    so this used to queue a silent-audio render with
+    #                    no indication anything was dropped. For real
+    #                    lip-sync (audio-conditioned generation, the mouth
+    #                    actually follows the track) use the Video tab's
+    #                    Lip-sync mode (a2v), which takes a character's face
+    #                    LoRA as an ordinary LoRA pick.
     #   neither        → t2v             (default)
     image_path = (form.get("image", [""])[0] or "").strip()
     audio_path = (form.get("audio", [""])[0] or "").strip()
@@ -384,6 +394,13 @@ def post_character_generate(h, path, qs, ctype) -> None:
         h._json({"error": f"image not found: {image_path}"}, 400); return
     if audio_path and not P.Path(audio_path).exists():
         h._json({"error": f"audio not found: {audio_path}"}, 400); return
+    if audio_path and not image_path:
+        h._json({"error": "audio needs an image to make a mux (image + "
+                           "audio); without one the audio would be silently "
+                           "dropped. For a character that talks or sings to "
+                           "your audio, use Lip-sync on the Video tab "
+                           "instead — that's audio-conditioned generation, "
+                           "not a mux."}, 400); return
     if image_path and audio_path:
         mode = "i2v_clean_audio"
     elif image_path:

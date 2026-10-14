@@ -740,7 +740,7 @@ Every form field below maps to `params.<field>` on the resulting job.
 | `width` | int | `1280` | Clamped to `>= 32`. T2V only — image flows derive from aspect+quality. |
 | `height` | int | `704` | Same as width. |
 | `frames` | int | `121` | Number of video frames. The 8k+1 rule (latents are groups of 8). |
-| `steps` | int | `8` | Denoising steps. T2V/I2V Q4 distilled requires `>= 8` (schedule is locked). |
+| `steps` | int | `8` | Denoising steps. The T2V/I2V distilled lane always runs exactly `8` (fixed 9-point table): `clamp_distilled_steps()` rewrites any other value to 8 with a note (4.17.4 — it used to refuse). H3 reads its own counts from this field. |
 | `seed` | int-as-str | `"-1"` | `"-1"` → random. Stored as string so the form roundtrip is lossless. |
 | `image` | path | `REFERENCE` | Only used when `mode != "t2v"`. |
 | `audio` | path | `AUDIO_DEFAULT` | Only used when `mode == "i2v_clean_audio"` (mux external audio). |

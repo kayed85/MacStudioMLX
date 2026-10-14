@@ -3,7 +3,7 @@
 MiniMax-H3 (FL2VA) takes one prompt and returns **picture, dialogue and sound
 generated together**. It is a **peer of LTX, not an add-on to it** — but it is
 too big to ship in the base install, so it arrives as **its own one-click
-install**: ~75 GB of weights, a 46 GB+ Mac, and a licence with territory
+install**: ~75 GB of weights, a 36 GB+ Mac, and a licence with territory
 restrictions. LTX remains the default engine and is completely untouched by
 any of this; whichever engines you have installed sit side by side in the
 switcher.
@@ -20,9 +20,9 @@ it can.
 | Band | Lane | State |
 |---|---|---|
 | **≥ 60 GB** (`H3_MIN_RAM_GB`) | bf16 master DiT | Renders. 64 GB Macs report ~63.x after firmware reservations, which is why the floor is 60. |
-| **≥ 46 GB** (`H3_MIN_RAM_GB_Q8`), Q8 DiT pack on disk | quantised Q8 DiT | Renders. |
-| **≥ 46 GB, Q8 DiT pack absent** | — | **Not a hardware verdict.** `scripts/pinokio/h3_build_q8.sh` builds that pack locally in ~5 min / ~22 GB with **no extra download**, and "Install Hailuo H3" runs it automatically below 60 GB. The switcher shows H3 as an offer, the inline card names the step, and `h3_status()` carries `needs_q8_dit: true` with the sentence in `ram_note`. |
-| **< 46 GB** | — | Genuinely out of reach. The refusal states 46, not 64. |
+| **≥ 36 GB** (`H3_MIN_RAM_GB_Q8`), Q8 DiT pack on disk | quantised Q8 DiT | Renders. |
+| **≥ 36 GB, Q8 DiT pack absent** | — | **Not a hardware verdict.** `scripts/pinokio/h3_build_q8.sh` builds that pack locally in ~5 min / ~22 GB with **no extra download**, and "Install Hailuo H3" runs it automatically below 60 GB. The switcher shows H3 as an offer, the inline card names the step, and `h3_status()` carries `needs_q8_dit: true` with the sentence in `ram_note`. The sentence depends on whether the ~75 GB is already on disk: never installed → the sidebar's **Install Hailuo H3** (a real download, the Q8 build is its last step); weights present → **Build Hailuo H3 compact engine** (minutes, no download). Both entries are in the Pinokio sidebar while the panel runs, too (4.15.3; before that they appeared only with the panel stopped). |
+| **< 36 GB** | — | Genuinely out of reach. The refusal states 36, not 64. |
 
 `h3_ram_verdict()` is the single place those bands are decided. The render
 refusal, the `make_job` fallback line, the switcher tooltip, the engine-row
@@ -35,6 +35,34 @@ at 1024×576 / 124f (27.3 GiB Q8, 42.8 GiB bf16). On the staged loader at
 (bf16)** — peaks scale with frame count. A 3 s Q8 clip needs far less than a
 10 s one, so a length-aware gate could open short H3 renders to smaller Macs.
 That gate does **not** exist; the floors are deliberately one number per lane.
+
+**Field data — 48 GB really runs it.** A user report (X, 2026-09-24, v4.15.3,
+M5 Pro 48 GB, the compact Q8 engine, Image mode, 3 s clips). Peak is the
+system memory the user read while rendering, not an MLX-internal number:
+
+| Tier | Clip | Peak memory | Wall |
+|---|---|---|---|
+| Draft (640×384) | 3 s | 37 GB | 2 m 32 s |
+| Standard (768×448) | 3 s | 36 GB | 3 m 53 s |
+| High (1024×576) | 3 s | 39 GB | 13 m 27 s |
+
+Consistent with the Q8 lane's 25.63 GiB run peak plus macOS and the panel, and
+with the 36 GB floor leaving headroom on a 48 GB Mac.
+
+**Time estimates on 36-59 GB (v4.16.2).** Every H3 receipt was measured on a
+64 GB M4 Max, and until 4.16.2 the estimate only scaled it by chip. A Pinokio
+user on an M4 Pro 48 GB was told ~17 min for a 15 s Draft and waited 40+. The
+fleet (60 days to 2026-09-26, 6,587 H3 renders, wall bucket over the model's
+own estimate, one median per install) puts the reduced-RAM lane at **1.32x**
+the >=60 GB lane on chained 10/15 s lengths (29 vs 117 installs) and **1.07x**
+on single windows (43 vs 170). `_h3_ram_factor()` carries those two numbers
+(`H3_LOWRAM_FACTOR_CHAIN` / `_SINGLE`) into every H3 estimate below 60 GB, and
+chained cells there show a note: about a third longer than 64 GB, quit other
+apps, swapping can take far longer. The mechanism is not measured
+(`render_completed` has no pressure field); memory pressure inside a budget
+that leaves the Mac max(6, RAM/8) GB is the likely one. Separately, Fast is a
+one-click 180 MB adapter: until it is installed, a "Draft" render runs the
+full 8-forward sampler, about twice the Fast time.
 
 ---
 
@@ -92,7 +120,7 @@ duplicating 75 GB.
 | `LTX_H3_MODELS` | `<install>/mlx_models/hailuo-h3` | the three weight components |
 | `LTX_H3_PYTHON` | `<H3_ROOT>/.venv/bin/python3.11` → `python` | interpreter override (a checkout without its own venv) |
 | `LTX_H3_FORCE_CAPABLE` | unset | test-only: stop the UI hiding the pill on a small Mac. Does **not** make it render. |
-| `LTX_H3_DENSE_10S` | unset | re-adds the pre-chaining dense 10 s tier (36 min) for A/B work |
+| `LTX_H3_DENSE_10S` | **dead — not read anywhere in the code (H3-15)** | the dense 10 s tier ("10s single pass") ships `"offered": True` unconditionally; this var does nothing. Kept documented so a future re-gate has somewhere to land, not because it currently works. |
 | `LTX_H3_WIDE_DRAFT` | unset | adds an experimental **512×288 16:9 draft** (~2 min). Off because 0.15 MP is below anything this campaign has measured — see Tiers. |
 
 **Set them in `ENVIRONMENT`, not in your shell.** An `export` in a terminal reaches
@@ -131,14 +159,36 @@ shape; the campaign checkout uses the first.
 `H3_TIERS` in `mlx_ltx_panel.py` is the single source of truth — the UI renders
 its chips from `/status.h3.tiers`, so a tier change is one Python edit.
 
-| Tier | Geometry | Aspect | Windows | Sigma points | Wall time |
-|---|---|---|---|---|---|
-| Draft · 3s | 640×384 · 73f | 5:3 | 1 | 9 (8 forwards) | ~3 min |
-| HQ · 3s | 768×448 · 73f | 12:7 | 1 | 9 (8 forwards) | ~4-5 min |
-| HQ · 5s | 768×448 · 124f | 12:7 | 1 | 9 (8 forwards) | ~8 min |
-| **Wide · 5s** | **1024×576 · 124f** | **16:9** | 1 | 9 (8 forwards) | **~17-19 min** |
-| Long · 10s | 768×448 · 243f | 12:7 | **2 × 124f chained** | 9 (8 forwards) | ~17 min |
-| Long · 15s | 768×448 · 362f | 12:7 | **3 × 124f chained** | 9 (8 forwards) | ~27 min · batch |
+The table below uses the CURRENT names — two independent axes, Quality
+(canvas) × Length (duration) — the same ones `/status.h3.tiers` and the UI's
+chips use. H3-31: this table used to be written entirely in the RETIRED
+fixed-tier vocabulary (HQ / Wide / Long), which the UI dropped for the
+two-axis picker; `H3_TIER_ALIASES` (mlx_ltx_panel.py) still resolves those old
+composite keys for a sidecar written before the split — **HQ → Standard**,
+**Wide → High**, **Long → the chained lengths (10s/15s) at any quality** — but
+they are not choices in the UI, and this table should not have kept reading
+as if they were.
+
+| Quality | Length | Geometry | Aspect | Windows | Sigma points | Wall time |
+|---|---|---|---|---|---|---|
+| Draft | 3s | 640×384 · 73f | 5:3 | 1 | 9 (8 forwards) | ~3 min |
+| Standard | 3s | 768×448 · 73f | 12:7 | 1 | 9 (8 forwards) | ~4-5 min |
+| Standard | 5s | 768×448 · 124f | 12:7 | 1 | 9 (8 forwards) | ~8 min |
+| **High** | **5s** | **1024×576 · 124f** | **16:9** | 1 | **16 (15 forwards)** since 2026-09-16 | **~34 min** (was ~19 at 8 forwards) |
+| Standard | 10s | 768×448 · 243f | 12:7 | **2 × 124f chained** | 9 (8 forwards) | ~17 min |
+| Standard | 15s | 768×448 · 362f | 12:7 | **3 × 124f chained** | 9 (8 forwards) | ~27 min · batch |
+
+Legacy composite key → current two-axis key, for reading an old sidecar:
+
+| Legacy key | Current key |
+|---|---|
+| `hq_3s` | `standard_3s` |
+| `hq_5s` | `standard_5s` |
+| `wide_5s` | `high_5s` |
+| `long_10s` | `standard_10s` |
+| `long_15s` | `standard_15s` |
+| `long_10s_dense` | `standard_10s_dense` |
+| `wide_draft_3s` | `preview_3s` |
 
 ### Aspect — why one tier is 16:9 and the rest are not (2026-08-06)
 
@@ -174,7 +224,17 @@ Each tier's `aspect` is derived from its own width/height (`_h3_aspect`) and
 appended to the `spec` string the chip prints, so the advertised ratio can never
 drift from the geometry that renders.
 
-**Why 9 points everywhere now.** `--steps` is sigma *points*; the runner does
+**High runs 16 points (2026-09-16).** Every High cell (1024×576, any length)
+now runs 16 sigma points = 15 forwards per window. A matched gym A/B (same seed,
+still and prompt) at 15 forwards was clearly better than at 8, where the face was
+blurry; 1024×576/124f is ~22.9k packed rows, well past the ~13k envelope below.
+Knobs: `H3_HIGH_STEPS` and `H3_NATIVE_STEPS` in `mlx_ltx_panel.py` (Native stays
+at 9 until its own 15-forward test is judged). A cell runs
+`max(length steps, canvas steps)`. `H3_MEASURED_ETA` entries carry the forwards
+they were measured at, so the old 18.8 min High receipt no longer prints as
+"measured" for a 15-forward cell.
+
+**Why 9 points everywhere else.** `--steps` is sigma *points*; the runner does
 `points - 1` forwards. A matched-cost A/B showed 8 forwards is visually free at
 or below ~13k packed rows (640×384/73f ≈ 5.6k, 768×448/124f ≈ 13.7k). A *dense*
 768×448/243f pass is ~25k rows, where 8 forwards **ghosts** (two astronauts on
@@ -209,6 +269,62 @@ It still needs the runner-layout repack. `install_h3.js` deliberately contains
 no raw-file fetch: it records the exact release-asset publication TODO and must
 gain a digest-checked fetch only after the repacked asset and its output digest
 exist.
+
+### Speed: ⚡ Fast | ✦ Best — TaoMate's 3-step adapter (2026-09-17)
+
+ONE switch above the Quality cards. **Fast** renders with TaoLiveAIGC's
+TaoMate-H3 3-step adapter on its own sigma ladder; **Best** is each shape's own
+sampler, unchanged (Draft/Standard 8 forwards, High 15, Native as tuned) and the
+only place the Steps override shows. Fast is the default once its adapter is
+installed; the choice is remembered per browser (`phos_h3_speed`). The cards'
+estimates follow the switch and the mode (T2V/I2V). Fast runs on **Draft,
+Standard and High** (5 s windows, chained too); **Native** and the dense 10 s
+single pass are not validated on 3 steps and always render Best — the switch
+says so under itself when one of them is picked.
+
+| Cell (5 s, M4 Max, char + style LoRA) | Best | Fast |
+|---|---:|---:|
+| Draft 640×384 | 6.9 min (8 fwd, full decode) | **3.0 min** I2V (panel, cold cache: 3.4) |
+| Standard 768×448 | ~9 min (8 fwd) | **4.8** I2V · **4.9** T2V |
+| High 1024×576 | 35.1 min (15 fwd) | **9.0** I2V · **8.4** T2V |
+
+- **Recipe.** TaoMate distils H3 onto points `(0, 16, 33, 49)` of the shifted
+  50-point sigma grid (video σ `[1, .96117, .85333, 0]`, audio σ
+  `[1, .86087, .59259, 0]`) — **3 forwards**. Runner spelling:
+  `--steps 4 --sigma-subset 50:0,16,33,49 --lora <adapter>:1.0` (`--steps 4`
+  alone would re-space a 4-point grid the adapter never saw). Needs a runner
+  with `--sigma-subset` (minimax-h3-mlx `codex/h3-engine-v2` from `ccf532b`)
+  and stacking `--lora`; on an older runner the Fast half says "update H3
+  runner". Stacks with character/style LoRAs (adapter first; 416 wrapped,
+  0 unaccounted on the validation render). Full VAE decode, never TAE.
+- **Install.** Not installed → the Fast half reads **Install (180 MB)**; one
+  click (confirm names the license) runs `POST /h3/tristep/install`: Kijai's
+  rank-resized conversion
+  `turbo-lora/minimax_h3_taomate_3step_lora_avg_rank_19_bf16.safetensors`
+  (alpha == rank, ~87 % of the full delta) from `Kijai/MiniMax-H3_comfy` @
+  `098f8c4…`, resumable (HTTP Range on the `.partial`), exact size + sha256
+  `de9663d9…` before the rename. Never re-hosted. License: MiniMax H3
+  Community License (same as H3). A full-rank runner-layout copy
+  `taomate_h3_3step_ourlayout.safetensors` in the same folder wins. The
+  official release is T2AV only; I2V is unofficial (owner-approved look).
+- **Turbo is folded in.** The old Standard | Turbo row is gone: Fast replaces
+  it (faster, and the owner's pick), and two speed controls or two adapters on
+  one render is what the switch removes. The form posts `h3_turbo=0`; the
+  server still honours `h3_turbo` from the API (Storyboard, One Shot, curl)
+  wherever Fast does not run, and drops it when Fast does. A Turbo clip's Load
+  Params / Finish maps to Fast.
+- **Job field** `h3_tristep`: `1` Fast, `0` Best, absent = default (Fast where
+  offered and installed, unless a Steps pin asks for a depth). make_job and
+  `run_h3_job_inner` both refuse it off Draft/Standard/High and never stack it
+  with Turbo.
+- **Upscale & Face Fix** sits beside Generate (same state as the checkbox under
+  Upscale); the footer line prices the pair from the cell, e.g.
+  `Draft · Fast + Face Fix ≈ 5.5 min`. Face Fix receipts: 640×384 → 2.5 min,
+  1024×576 → ~9 min; 768×448 ~4 min is interpolated.
+- **Provenance.** Sidecar `params.h3_tristep`, and `h3.tristep` = file,
+  version, repo, revision, sha256, source repo, license, steps, forwards,
+  sigma subset, decode; plus `h3.schedule` (the sigmas the runner ran) and
+  `h3.lora_accounting`. The ⓘ modal prints a Speed row.
 
 ### Chained windows (v3.4.1)
 
@@ -248,16 +364,106 @@ and `make_job` falls back to `H3_TIER_FINISH_DEFAULT` (`hq_5s`) rather than
 failing a queued job — named explicitly, because the old "last single-pass row
 in the table" scan started meaning the ~19 min `wide_5s` the day a tier was
 appended, and a fallback nobody asked for has to be the cheap one.
-`LTX_H3_DENSE_10S=1` restores the old dense 10 s tier for A/B work.
+The dense 10 s tier ("10s single pass") ships visible by default, always —
+`LTX_H3_DENSE_10S` is not read anywhere and restores nothing; see the
+constants table above.
+
+### Media modes (4.19): Keyframes, Extend, Lip-sync, Add sound, carried context
+
+All of these ride on the packed sequence the reference already defines —
+video conditioning rows held at the keyframe noise level (0.999), audio
+conditioning rows held clean, and per-row timesteps — and on runner flags the
+panel probes on the INSTALLED runner (`/status.h3.keyframes`, `.continuation`,
+`.extend`, `.audio_drive`, `.video_to_audio`). An older pack falls back to LTX
+with a sentence (Add sound, which has no LTX lane, is refused with the update
+sentence). The panel-side map is `h3_media_plan()` in `mlx_ltx_panel.py`.
+
+| Capability | Runner flags | What the model sees |
+|---|---|---|
+| Carried context (chained 10 s / 15 s, Extend, Add sound) | `--chain-context-frames 17`, `--seam-colour-frames 24` | the previous window's last 17 frames as history rows placed just BEFORE the target on the rotary clock (one VAE clip, 5 latents), plus their sound as clean audio rows from the same instant; the hand-over frame stays the "first" anchor. Each window's grade is eased onto the carried frame over 24 frames. |
+| Start & end frame / Keyframes | `--first-frame`, `--last-frame`, `--keyframe PATH@FRAME` | MiniMax's FL2VA / L2VA tasks; a timed still is a `frame:<i>` anchor at `origin + i·5/3` (the same clock every target frame lives on). Each still also goes to the vision tower as `<Picture n>`, and the official alignment sentence is prepended when the prompt has none. On a chain each still is routed to the window that owns its frame. The start frame is optional on H3. |
+| Extend | `--extend-from SRC --extend-frames N` | the source is window 0; new 5 s windows continue from its last 17 frames and their sound. Output = source (on the H3 canvas) + N frames. Sources up to 60 s (the decoded source is held through the render). |
+| Lip-sync | `--audio-drive TRACK [--audio-mux ORIGINAL]` | the track is written into the TARGET audio rows and held clean (t = 1) for every step; only the picture is denoised. The delivered audio is the user's file, never the VAE round trip. "Voice only" conditions on the demucs vocal stem and delivers the mix. |
+| Add sound | `--video-to-audio SRC` | the clip is written into the TARGET video rows and held clean; only the audio is denoised. The delivery is the source's own video stream (`-c:v copy`) with the new track — no export re-encode, no Face Fix. |
+| Fast HD (quality) | the Draft canvas + Fast, then `mode=upscale` (start = source, 1 refine step — the "face kept" recipe) | H3 at 640×384 on the 3-step pass, LTX's x2 Upscale & Face Fix to 1280×768, queued together. |
+
+#### Measured (M4 Max 64 GB, Q8 DiT, 2026-10-07)
+
+Seam = the first frame of a new window. "Jump" = the change across the seam over the
+median frame-to-frame change around it (1.0 = invisible). Sound step = RMS 0.25 s after
+minus 0.25 s before.
+
+| Chain | Sound step at seams | Colour jump (eased) | Motion jump (eased) | Time |
+|---|---|---|---|---|
+| High 10 s, one still per window | +5.7 dB | 0.85 | 1.30 | 1008 s |
+| High 10 s, carried context | −0.9 dB | 1.81 | 1.14 | 1131 s |
+| Standard 15 s ×2 seeds, one still | avg 3.4 dB (worst 7.6) | avg 1.02 | avg 0.93 | 769 s |
+| Standard 15 s ×2 seeds, carried | avg 1.3 dB (worst 2.4) | avg 1.20 | avg 1.08 | 862 s |
+
+Without the easing the colour jump is 10–40× on either path — the grade step is a
+per-window decode artefact and the easing is what removes it. What carried context buys
+is the sound: the level and timbre continue across the seam (spectral similarity at the
+second seam 0.85/0.89 → 0.89/0.91, random-pair baseline 0.94). Transcripts were complete
+and identical on every chain.
+
+Other modes, High (1024×576) unless noted:
+
+- Keyframes, first + last, 5 s: normalised cross-correlation 1.000 at frame 0 and frame
+  123; ArcFace median 0.956 against the reference stills; 545 s.
+- Extend, 5 s source + 5 s: seam motion 1.60, colour 1.35, sound −0.8 dB, voice
+  similarity 0.997; the dialogue continues; ArcFace 0.927; 606 s.
+- Lip-sync, 10 s spoken voice on a still: mouth/audio correlation 0.35 without the
+  character LoRA, 0.47 with it (native H3 dialogue renders: −0.24…0.38); ArcFace 0.82 /
+  0.83; ~1110–1170 s. A song on its full mix scores −0.08 (the mouth stops after ~2 s) —
+  songs need Voice only (the vocal stem).
+- Add sound, Draft canvas, a talking clip with its audio removed: the line comes back
+  word for word on the lips (correlation 0.71, peak −7.9 dB); video stream byte-identical
+  to the source; 187 s for 5 s.
+
+#### Fast HD
+
+Same Bizarro prompt, still and seed, 5 s (124 frames):
+
+| Recipe | Output | Time | ArcFace median (min) |
+|---|---|---|---|
+| Fast HD: 640×384 Fast + x2 Face Fix, 1 step | 1280×768 | 181 + 158 = 339 s | 0.891 (0.841) |
+| 640×384 Fast + x2 Face Fix, 3 steps | 1280×768 | 181 + 357 = 538 s | 0.850 (0.818) |
+| High Fast (1024×576) | 1024×576 | 535 s | 0.914 (0.839) |
+| High Best (1024×576, 15 forwards) | 1024×576 | 2253 s | 0.922 (0.902) |
+| Native Best (1344×768, 8 forwards) | 1344×768 | 2888 s | 0.926 (0.886) |
+
+The 3-step finish redraws the face and costs as much as High Fast, so Fast HD uses the
+1-step "face kept" recipe. bf16 DiT on High Fast: 512 s, ArcFace 0.911, peak 42.6 GiB
+(Q8: 25.1 GiB) — not adopted. Skipping the 5 smallest-gate DiT blocks (`--skip-blocks
+auto:5`): 489 s, ArcFace 0.892 (min 0.814), visible expression change at the same seed —
+not adopted; the flag stays in the runner for research only.
+
 
 ### Export pass — the same post-process LTX renders get
 
-Most tiers write 768×448 (12:7), which is neither 720p nor 1080p. The panel runs
-the identical ffmpeg recipe an LTX render gets: lanczos fit inside the canvas +
-pad the remainder + `libx264` with the user's codec settings (`yuv420p crf 18`
-by default) + `+faststart`, audio copied through untouched. Bars on 12:7 content
-are correct — no crop, no distortion — and they land at the **sides**
-(pillarbox: 23 px at 720p, 34 px at 1080p), because 12:7 is *taller* than 16:9.
+Draft writes 640×384 (5:3) and Standard 768×448 (12:7), neither of them 720p
+nor 1080p. The panel runs the identical ffmpeg recipe an LTX render gets:
+lanczos scale + `libx264` with the user's codec settings (`yuv420p crf 18` by
+default) + `+faststart`, audio copied through untouched.
+
+**Since 4.16.1 a near-16:9 canvas FILLS the frame instead of getting bars.**
+Until then a non-matching source was fitted inside the canvas and padded:
+Draft → 720p had **40 px of black on each side**, Standard 23 px (luma-scanned
+on real exports). A 48 GB user on X asked whether that was a bug (2026-09-24),
+and for a file whose job is to be 720p it was. Now a source within
+`EXPORT_FILL_MAX_TRIM` (8%) of the target aspect is scaled to **cover** the
+canvas and centre-cropped: 5:3 → 720p trims 24 px top and bottom, 12:7 13 px,
+Native 7:4 → 1080p 8 px. The same rule applies to LTX exports (1280×704 → 720p
+trims 14 px left and right instead of 8 px bars) and to the Sharp (PiperSR)
+path, which carries its own copy of the constant. A source further off —
+square, 4:3 — still pads: cutting a third of the picture is worse than bars.
+The plan reports `fill: True` plus `trim_w`/`trim_h`.
+
+The picture was never the problem: an Image-mode reference is already
+cover-cropped onto the tier canvas before conditioning (`_h3_fit_first_frame`,
+centre crop — no face detection ships with the base install), so the bars came
+only from this export pass. The High tier (1024×576) is exact 16:9 and gets
+neither a crop nor a pad.
 
 **A source that already matches the target aspect takes a pure-scale path**
 (2026-08-06). `compute_upscale_plan` compares `w·target_h == h·target_w`; on a match
@@ -265,12 +471,12 @@ it emits `scale=W:H:flags=lanczos` with **no pad filter at all** and reports
 `pad: False` on the plan (plus `fit_w`/`fit_h`, the content size inside the
 canvas, so a sidecar reader can tell bars from picture). `wide_5s` → 720p is a
 pure 1.25× and → 1080p a pure 1.875×. Everything that does not match keeps the
-fit-and-pad filtergraph byte-for-byte.
+fill-or-pad rule above.
 
 The panel says which one you are about to get: `_h3_export_notes()` generates one
 sentence per export mode **from `compute_upscale_plan` itself** — "720p: pure
-1.25× scale to 1280×720 — no bars, no padding." vs "720p: 12:7 fits to 1234×720
-inside 1280×720 — 23 px bars left and right." — ships it on each tier as
+1.25× scale to 1280×720 — no bars, no padding." vs "720p: 12:7 fills 1280×720 —
+13 px trimmed top and bottom, no bars." — ships it on each tier as
 `export_note`, and `_h3SyncExportNote()` prints it under the Export row. The copy
 can never disagree with the ffmpeg command because it is generated from it.
 
@@ -284,6 +490,68 @@ can never disagree with the ffmpeg command because it is generated from it.
 - Sidecar gains `upscale` (target, method, source, codec) and `output_codec`,
   and `h3.chain_windows` / `h3.window_frames` / `h3.delivered_frames` /
   `h3.seams`.
+
+---
+
+## Dialogue on H3 — the recipe (measured 2026-09-08)
+
+H3 speaks only what is written inside its dialogue tag. A line written as
+prose quotes — `She says: "You said Tuesday."` — leaves the voice switched
+off and the model guessing: a 10 s draft written that way transcribed (whisper
+large-v3-turbo) as *"You know, for when? Please, Jack, you're telling him…"*.
+The same engine, same canvas, with the line in the tag, transcribed the line
+word for word — at 640×384 draft and at 768×448 standard alike, so a draft is
+enough to judge whether a line comes out.
+
+One 5-second window, in the three-field form the Storyboard planner writes
+(`docs/PROMPTING.md` has the laws; this is the shape):
+
+```text
+integrated_multimodal_description: [Shot 1] Live-action, vintage 1990s
+multi-camera sitcom, a medium shot of GEORGE, <two or three anchors: build,
+glasses, jacket>, <where he is, the light>. The camera holds a static shot,
+the frame never moves - no pan, no push-in, no reframing. <What he does
+first, in silence.> Then George, with a nasal, agitated New York voice (S1),
+says: <d>[English] I thought it was ashwagandha!</d> Exactly as his voice
+stops, his jaw ceases speaking motion and his mouth settles closed, and a
+studio audience laughs. No text appears at any point.
+
+overall_soundscape: The room tone of a television studio, then a burst of
+studio-audience laughter right after the line.
+
+non_diegetic_music: N/A
+```
+
+The rules that were paid for:
+
+- **The words go in `<d>[English] …</d>` and nowhere else.** Speaker, voice
+  and delivery stay outside the tag; the speaker keeps one ID (`(S1)`) across
+  every shot. The panel and the runner pass the tag through untouched.
+- **At most about eight words per five seconds.** Speech runs ~2.4 words a
+  second and the mouth needs a second to settle (`storyboard.SPEECH_WORDS_PER_SEC`
+  is the same budget the board validator enforces). A twelve-word line spills
+  past the window.
+- **Stop the mouth in the same sentence** — "his jaw ceases speaking motion
+  and his mouth settles closed" — or the model keeps it moving on nothing.
+- **Voiceover has a fixed phrase.** `George (S1) says in an off-screen
+  voiceover: <d>[English] …</d> while his lips remain completely closed.`
+  Without the closing clause the on-screen mouth lip-syncs the narration.
+- **One face in frame while a line plays.** Every mouth in frame moves to
+  whatever voice plays. The other character's hands may enter the frame; the
+  reverse angle is its own shot.
+- **A laugh track is a soundscape event**, not dialogue: "then a burst of
+  studio-audience laughter right after the line" gave a clean line at
+  0.5–2.5 s and laughter at 3–4.5 s at the same loudness; the identical prompt
+  without it is silent after the line.
+- **Music is instrumentation.** "A funky slap bass riff with a bright synth
+  pop, fast tempo, two bars, that ends before he speaks" plays as a sting under
+  the first second; "upbeat sitcom music" is a mood word and does nothing
+  predictable.
+
+A chained 10 s or 15 s clip carries one line per window through the
+per-window prompts (`h3_chain_prompts`); a board shot carries one line per
+5 s shot. The Saint Feld chapter (twelve 5 s draft shots, every line
+transcribed back word for word on the first take) is the reference render.
 
 ---
 
@@ -326,21 +594,24 @@ existing wrapper rather than nesting one — nesting hid the quantized base's
 `scales` from `plan()` and skipped every module (`tests/test_lora_stack.py`
 in the engine tree pins this).
 
-**Key layouts.** Three exist in the wild and only two work:
+**Key layouts.** Four exist in the wild; three load, one is refused:
 
 | Layout | Keys | What happens |
 |---|---|---|
 | bare | `blocks.N.attn.qkv_proj.lora_A/B.weight` | loads as-is |
 | ComfyUI repack | the same, namespaced under `diffusion_model.` | **converted in place** at install time — a safetensors *header* rewrite (the offsets are relative to the tensor buffer, so every tensor byte is untouched), recorded in the sidecar as `lora_layout` / `lora_converted_prefix` |
+| kohya / sd-scripts | `lora_down`/`lora_up` + `.alpha` | **converted in place** (2026-09-06) — the character LoRAs people actually train for H3 come out of kohya-style trainers in exactly this shape, and the two things the runner can't read (the naming, the `.alpha` scalar) are both mechanical: `_h3_lora_convert_kohya` renames the keys onto the runner's `lora_A`/`lora_B` and folds alpha/rank into `lora_B`, so strength 1.0 means "as trained" — same as every other file. Recorded in the sidecar as `lora_layout: "kohya"`. |
 | diffusers / PEFT | split `to_q`/`to_k`/`to_v`, `ff.net.*` | **refused, by design** |
-| kohya | `lora_down`/`lora_up` + `.alpha` | **refused, by design** |
 
-The refusals are not laziness. A diffusers-namespace adapter needs a runtime
+The diffusers refusal is not laziness. That adapter needs a runtime
 `alpha / rank` multiplier that **is not in the file** — LightX2V's is
 `8 / 128 = 0.0625`, supplied externally by its own inference script — and
 applying it at 1.0 renders coloured noise, not a slightly-off clip. See
 `LIGHTX2V_LORA_FIX.md` and `scripts/convert_lightx2v_lora.py` in the engine
-repo for the manual path. The panel says exactly this in the error.
+repo for the manual path. The panel says exactly this in the error, and
+since a diffusers-layout file trained for LTX is the file people most often
+try here by mistake, the import UI also tells them it looks like an LTX
+LoRA and won't run on H3.
 
 **CivitAI.** The browser's video context has family pills (`ltx` / `h3`),
 preselected from the active engine, so an LTX user's default view is unchanged.
@@ -357,11 +628,12 @@ is hidden entirely on a pack that predates it.
 
 ## What H3 does *not* do
 
-- **Modes**: Text and Image only. Every other mode (FFLF, Extend, Remix,
-  Character, A2V) is LTX-pipeline-specific; the picker snaps back to LTX with a
-  note. Character does too — it submits `mode=t2v` but stacks **LTX** LoRAs, and
-  those cannot load on H3 (see LoRAs below, which is about H3's own library).
-- **LoRA STACKING**: H3 takes exactly one adapter — see LoRAs below.
+- **Modes**: Remix and Character are LTX-pipeline-specific; the picker snaps
+  back to LTX with a note. Character submits `mode=t2v` but stacks **LTX**
+  LoRAs, and those cannot load on H3 (see LoRAs above, which is about H3's own
+  library). Text, Image, Keyframes, Extend, Lip-sync and Add sound all render
+  on H3 since 4.19 — see "Media modes" above.
+- **LoRA STACKING**: up to four adapters on a stacking runner — see LoRAs above.
 - **Orientation, accel, temporal interpolation, the LTX upscale control**: none
   apply. Those carry `data-ltx-only` and fold away under
   `body[data-engine="h3"]`. H3 has its own export control (`h3_upscale`,
@@ -375,8 +647,20 @@ FL2VA first-frame conditioning landed on the engine repo **after** the branch
 installed `scripts/generate_staged.py` for the flag
 (`h3_supports_first_frame()`), reports it as `/status.h3.first_frame`, and keeps
 Image mode on LTX when it's absent — so an older checkout degrades to Text-only
-instead of dying 30 s into a render with an argparse error. **Bump `H3_BRANCH`
-in `install_h3.js` once the first-frame work is published.**
+instead of dying 30 s into a render with an argparse error. (Historical: the
+first-frame work has long been published.)
+
+### The engine pin (4.19.0)
+
+The engine an install runs is an exact commit: `H3_PIN_SHA` + `H3_PIN_REF` in
+`scripts/pinokio/h3_checkout.sh`, called by both `install_h3.js` (Install,
+Repair, "Update Hailuo H3 runner") and `scripts/post_update.sh` (Update, and
+the panel's Update now). Through 4.18.x it was the tip of
+`codex/h3-engine-v2`, so a push to that branch reached every install with no
+release behind it. To move the engine: push the commit to a ref on
+`mrbizarro/minimax-h3-mlx` (a new branch or tag — never force-move one), change
+both lines in one commit, and ship it in a Phosphene release.
+`test_h3_engine_pin.py` pins the behaviour.
 
 ---
 
@@ -420,7 +704,7 @@ restart. `GET /status` → `.h3` tells you what resolved:
 
 | Symptom | Cause |
 |---|---|
-| Engine switcher not visible at all | Under the **46 GB** floor. `h3.capable` is false, so there is only one engine left to choose between and the switcher hides with its divider. A 48 GB-class Mac whose reduced-RAM Q8 DiT pack is not on disk **no longer lands here** — see the RAM bands below. |
+| Engine switcher not visible at all | Under the **36 GB** floor. `h3.capable` is false, so there is only one engine left to choose between and the switcher hides with its divider. A 48 GB-class Mac whose reduced-RAM Q8 DiT pack is not on disk **no longer lands here** — see the RAM bands below. |
 | H3 pill dashed, "not installed" | `h3.missing` lists exactly which component didn't resolve |
 | Image mode snaps back to LTX | `h3.first_frame` false — the installed runner has no `--first-frame` |
 | `ffmpeg not found on PATH` | the runner pipes raw RGB into `ffmpeg`; the panel prepends `FFMPEG_BIN` to the subprocess PATH, so this means the bundled binary is missing |

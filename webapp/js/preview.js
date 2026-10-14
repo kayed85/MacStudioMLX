@@ -142,7 +142,7 @@ function _restoreSelectedOutputAfterLive() {
     <div class="ps-empty-sub">Generate something on the left and the result lands here.</div>
   </div>`;
   const surface = wrap.closest('.player-surface');
-  if (surface) { surface.removeAttribute('data-orient'); surface.style.removeProperty('--media-aspect'); }
+  if (surface) { surface.removeAttribute('data-song'); clearStageAspect(surface); }
 }
 
 function _handoffLiveStageToOutput(path) {
@@ -196,9 +196,7 @@ function _renderLiveStageFrame(s, preview) {
   // small strip inside a landscape box).
   const _lw = parseInt((cur.params || {}).width, 10) || 16;
   const _lh = parseInt((cur.params || {}).height, 10) || 9;
-  surface.style.setProperty('--media-aspect', `${_lw} / ${_lh}`);
-  if (_lh > _lw) surface.setAttribute('data-orient', 'vertical');
-  else surface.removeAttribute('data-orient');
+  setStageAspect(surface, _lw, _lh);
   wrap.classList.remove('empty');
   wrap.classList.add('live-stage');
   wrap.dataset.liveJobId = String(cur.id);
@@ -1606,6 +1604,31 @@ function renderCivitaiGrid(items, append) {
   grid.appendChild(frag);
 }
 
+// 4.18.0: what the Install button says while a CivitAI file downloads —
+// the percentage and the megabytes, or just the megabytes when the server
+// sent no length. Pure, so it is tested by running it.
+function civitaiProgressLabel(st) {
+  const mb = (n) => Math.round((Number(n) || 0) / (1024 * 1024));
+  if (!st || !st.ok) return 'Downloading…';
+  if (st.state === 'cancelled') return 'Cancelling…';
+  if (st.state === 'installing') return 'Installing…';
+  if (st.total > 0) {
+    const pct = Math.max(0, Math.min(100, Math.floor(100 * st.bytes / st.total)));
+    return `Downloading ${pct}% · ${mb(st.bytes)} of ${mb(st.total)} MB`;
+  }
+  return st.bytes > 0 ? `Downloading · ${mb(st.bytes)} MB` : 'Downloading…';
+}
+
+function _civitaiToken() {
+  try {
+    const a = new Uint8Array(12);
+    crypto.getRandomValues(a);
+    return 'dl' + Array.from(a, b => b.toString(16).padStart(2, '0')).join('');
+  } catch (e) {
+    return 'dl' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+  }
+}
+
 async function civitaiInstall(btn, item) {
   btn.disabled = true;
   const origLabel = btn.textContent;
@@ -1619,6 +1642,46 @@ async function civitaiInstall(btn, item) {
     fd.set('download_url', item.download_url);
   }
   fd.set('meta', JSON.stringify(item));
+  // 4.18.0: a CivitAI download shows its progress on the button and can be
+  // cancelled from a button beside it (Hugging Face downloads cannot be
+  // stopped part-way, so they keep the plain label).
+  let token = '', pollTimer = null, cancelBtn = null;
+  if (!fromHf) {
+    token = _civitaiToken();
+    fd.set('token', token);
+    cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'ghost-btn civitai-cancel-btn';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.title = 'Stop this download — nothing half-downloaded is kept';
+    cancelBtn.addEventListener('click', async () => {
+      cancelBtn.disabled = true;
+      cancelBtn.textContent = 'Cancelling…';
+      let ok = false;
+      try {
+        const r = await fetch('/civitai/download/cancel', { method: 'POST', body: new URLSearchParams({ token }) });
+        ok = !!(await r.json()).ok;
+      } catch (e) {}
+      // Refused = it already arrived and is being put in place (or just
+      // finished): say so instead of a "Cancelling…" that never happens.
+      if (!ok && cancelBtn.isConnected) cancelBtn.textContent = 'Too late — finishing';
+    });
+    btn.insertAdjacentElement('afterend', cancelBtn);
+    const tick = async () => {
+      try {
+        const r = await fetch('/civitai/download/state?token=' + encodeURIComponent(token));
+        const st = await r.json();
+        if (st && st.ok && token) btn.textContent = civitaiProgressLabel(st);
+      } catch (e) {}
+      if (token) pollTimer = setTimeout(tick, 700);
+    };
+    pollTimer = setTimeout(tick, 400);
+  }
+  const stopProgress = () => {
+    token = '';
+    if (pollTimer) clearTimeout(pollTimer);
+    if (cancelBtn) cancelBtn.remove();
+  };
   try {
     const r = await fetch(fromHf ? '/hf/loras/download' : '/civitai/download', {
       method: 'POST',
@@ -1626,6 +1689,15 @@ async function civitaiInstall(btn, item) {
       body: new URLSearchParams(fd),
     });
     const data = await r.json();
+    stopProgress();
+    if (data && data.cancelled) {
+      const status = document.getElementById('civitaiStatus');
+      status.textContent = 'Download cancelled — nothing was kept.';
+      status.className = 'civitai-status-line';
+      btn.disabled = false;
+      btn.textContent = origLabel;
+      return;
+    }
     if (!r.ok || !data.ok) {
       const status = document.getElementById('civitaiStatus');
       status.textContent = `Download failed: ${data.error || 'HTTP ' + r.status}`;
@@ -1685,6 +1757,7 @@ async function civitaiInstall(btn, item) {
     const det = document.getElementById('lorasDetails');
     if (det) det.open = true;
   } catch (e) {
+    stopProgress();
     document.getElementById('civitaiStatus').textContent = 'Network error: ' + (e.message || e);
     document.getElementById('civitaiStatus').className = 'civitai-status-line err';
     btn.disabled = false;
@@ -1742,6 +1815,10 @@ document.addEventListener('DOMContentLoaded', () => {
 //   ⊘ missing (red)             — nothing on disk
 //   ↻ downloading (blue, anim)  — hf is currently fetching this repo
 function openModelsModal() {
+  // SYS-19: the health popover's Models row opens this modal too (the
+  // real #modelsPill element is relocated into the popover by
+  // _hcRelocate) -- same under-the-popover overlap as the Tier modal.
+  if (typeof closeHealthPop === 'function') closeHealthPop();
   document.getElementById('modelsModal').style.display = 'flex';
   refreshModelsModal();
 }
@@ -1758,7 +1835,23 @@ async function refreshModelsModal({ silent = false } = {}) {
     if (!silent) hint.textContent = 'Failed to load models. Panel might be restarting — try again.';
     return;
   }
-  const repos = data.repos || [];
+  // SYS-17: the modal listed repos in registry order, which put the
+  // PREVIOUS-generation LTX-2.3 Q4 first (red border, unmet) and the
+  // engine this build actually renders with (LTX-2.5 base) 8th. Sorted
+  // client-side into the groups the fix asked for: installed/required
+  // for the active generation, then this generation's add-ons, then
+  // previous-generation rows last (still shown -- training needs them --
+  // just not leading with the one thing that reads as broken on a
+  // perfectly healthy install).
+  const repos = (data.repos || []).slice().sort((a, b) => {
+    const rank = (r) => {
+      if (!r.active) return 3;                          // previous generation
+      if (r.kind !== 'optional' && r.complete) return 0;  // required, installed
+      if (r.complete) return 1;                          // optional, installed
+      return 2;                                          // this generation, not yet fetched
+    };
+    return rank(a) - rank(b);
+  });
   const active = data.active_download;
   hint.innerHTML = data.hf_available
     ? `Each row shows what's on disk. Click <b>Download</b> to fetch the missing files; progress streams to the log at the bottom of the page. Everything is resumable and checksum-verified.`
@@ -1819,13 +1912,24 @@ async function refreshModelsModal({ silent = false } = {}) {
       : r.kind === 'optional'
       ? `<span style="color:var(--muted)">optional</span>`
       : `<span style="color:var(--success,#3fb950)">required</span>`;
+    // SYS-42: this row used to lead with "dgrauet/ltx-2.3-mlx-q4 ->
+    // mlx_models/ltx-2.3-mlx-q4" — a repo id and a filesystem path, always
+    // visible, ahead of the one thing a non-engineer can act on (what this
+    // pack unlocks, how big it is, whether it's here). The report's own fix:
+    // "one line per pack ... Put the path and repo behind 'Details'." The
+    // outcome line now leads; repo_id/local_dir move into a closed
+    // <details> that opens the same info for anyone who does want it
+    // (debugging a mis-pointed LTX_Q8_LOCAL, filing an issue, etc).
     return `
       <li class="${cls}">
         <span class="icon">${icon}</span>
         <div class="meta">
           <span class="ttl">${escapeHtml(r.name)} · ${kindBadge}</span>
-          <span class="sub">${escapeHtml(r.repo_id)} → ${escapeHtml(r.local_dir)}</span>
           <span class="sub">${statusText}${r.blurb ? ' · ' + escapeHtml(r.blurb) : ''}</span>
+          <details class="model-row-details">
+            <summary>Details</summary>
+            <span class="sub">${escapeHtml(r.repo_id)} → ${escapeHtml(r.local_dir)}</span>
+          </details>
         </div>
         ${btnHtml}
       </li>`;
@@ -1862,7 +1966,25 @@ async function refreshModelsModal({ silent = false } = {}) {
         </li>`;
     }
   }
-  list.innerHTML = (rows + h3Row) || `<li class="empty-state">No model manifest found — required_files.json is missing or unreadable.</li>`;
+  let musicRow = '';
+  const music = (LAST_STATUS && LAST_STATUS.music) || BOOT.music;
+  if (music && music.capable) {
+    const inst = (LAST_STATUS && LAST_STATUS.music_install) || {};
+    const statusText = music.available
+      ? `Ready · Compose unlocked in the Audio tab · ${escapeHtml(music.root || '')}`
+      : inst.active ? `Installing… ${inst.percent || 1}% · ${escapeHtml(inst.step_label || '')}`
+      : music.repairable ? 'Weights on disk · engine needs repair'
+      : `Available to install · one click here or in Audio → Compose · ~11 GB · needs ${music.min_ram_gb} GB unified memory`;
+    musicRow = `<li class="${music.available ? 'ready' : 'missing'}">
+      <span class="icon">♪</span><div class="meta">
+        <span class="ttl">YuE2 · music engine</span>
+        <span class="sub">Lyrics and a style description in, a finished song out — vocals and arrangement together</span>
+        <span class="sub">${statusText}</span></div>
+      ${music.available ? '<button class="ghost" disabled>Installed</button>'
+        : `<button onclick="openMusicInstallCard()">${inst.active ? 'Progress' : music.repairable ? 'Repair' : 'Install'}</button>`}
+    </li>`;
+  }
+  list.innerHTML = (rows + h3Row + musicRow) || `<li class="empty-state">No model manifest found — required_files.json is missing or unreadable.</li>`;
   // Footer summarises required vs optional counts.
   // Count only what THIS BUILD needs. 2.3's two base rows were inside
   // "Required: N/M ready", which made §7.1's first-visit contract
@@ -1904,7 +2026,7 @@ async function cancelDownload() {
 // Inline handlers in the markup and the other files resolve these through
 // the global scope; everything NOT listed here is private to this module.
 Object.assign(globalThis, {
-  civitaiSetSource, civitaiSourceRowSync, civitaiSetKind,
+  civitaiSetSource, civitaiSourceRowSync, civitaiSetKind, civitaiProgressLabel,
   normalizeLivePreview, _liveStageMediaHeld, _showLiveReturnChip, _hideLiveStageChrome,
   _restoreSelectedOutputAfterLive, _handoffLiveStageToOutput, returnToLiveRender, _renderLiveStageFrame,
   renderLiveStage, renderNowPreview, stopEarly, markNoVoiceTouched,

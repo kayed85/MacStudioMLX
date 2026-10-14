@@ -355,8 +355,8 @@ class ValidatorSplit(unittest.TestCase):
         yield "bad_mode", _board([_shot(1, mode="montage")]), {}
         yield "empty_prompt", _board([_shot(1, prompt="  ")]), {}
         yield ("unknown_char",
-               _board([_shot(1, character_id="ariatrn", trigger="ariatrn",
-                             prompt="ariatrn walks")]),
+               _board([_shot(1, character_id="chartest_c", trigger="chartest_c",
+                             prompt="chartest_c walks")]),
                {"known_character_ids": ["bizarrotrn"]})
         yield ("missing_trigger",
                _board([_shot(1, character_id="bizarrotrn", trigger="bizarrotrn")]),
@@ -440,8 +440,8 @@ class ValidatorSplit(unittest.TestCase):
 
     def test_unknown_character_carries_the_installed_list(self):
         errs = sb.validate_storyboard_detail(
-            _board([_shot(1, character_id="ariatrn", trigger="ariatrn",
-                          prompt="ariatrn walks")]),
+            _board([_shot(1, character_id="chartest_c", trigger="chartest_c",
+                          prompt="chartest_c walks")]),
             known_character_ids=["bizarrotrn"])
         self.assertEqual(errs[0]["data"]["have"], ["bizarrotrn"])
 
@@ -456,6 +456,36 @@ class Persistence(unittest.TestCase):
             rows = sb.list_storyboards(Path(d))
             self.assertEqual(rows[0]["id"], "sb_test")
             self.assertEqual(rows[0]["shots"], 1)
+
+    def test_list_is_sorted_by_updated_not_created(self):
+        # FILM-43: "Recent" means "touched most recently", not "minted
+        # first" — a board planned days ago that you edited a minute ago
+        # belongs at the top.
+        with tempfile.TemporaryDirectory() as d:
+            old_but_touched = _board([_shot(1)])
+            old_but_touched["id"] = "sb_old_touched"
+            old_but_touched["created_at"] = 1000
+            old_but_touched["updated_at"] = 9000
+            sb.save_storyboard(Path(d), old_but_touched)
+
+            new_untouched = _board([_shot(1)])
+            new_untouched["id"] = "sb_new_untouched"
+            new_untouched["created_at"] = 5000
+            new_untouched["updated_at"] = 5000
+            sb.save_storyboard(Path(d), new_untouched)
+
+            rows = sb.list_storyboards(Path(d))
+            self.assertEqual([r["id"] for r in rows],
+                             ["sb_old_touched", "sb_new_untouched"])
+
+    def test_a_board_with_no_updated_at_falls_back_to_created_at(self):
+        with tempfile.TemporaryDirectory() as d:
+            board = _board([_shot(1)])
+            board["created_at"] = 42
+            board.pop("updated_at", None)
+            sb.save_storyboard(Path(d), board)
+            rows = sb.list_storyboards(Path(d))
+            self.assertEqual(rows[0]["updated_at"], 42)
 
     def test_additive_fields_survive_and_do_not_invalidate(self):
         board = _board([_shot(1, grade="keep", note="more light", draft_job_id="j-1")],
@@ -522,7 +552,7 @@ class DialogueFitsTheShot(unittest.TestCase):
 
     def test_a_silent_shot_has_no_pacing_problem(self):
         self.assertIsNone(sb.shot_pacing_problem(
-            "ariatrn scrubs the door with a foam-loaded sponge", 4.04))
+            "chartest_c scrubs the door with a foam-loaded sponge", 4.04))
 
     def test_contractions_do_not_end_the_count_early(self):
         # A quote flanked by letters is an apostrophe, not the end of the
@@ -552,6 +582,64 @@ class DialogueFitsTheShot(unittest.TestCase):
                              duration_s=4.0)])
         codes = [e["code"] for e in sb.validate_storyboard_detail(board)]
         self.assertIn("dialogue_does_not_fit", codes)
+
+
+class JapaneseAndFrenchDialogueIsNotInvisible(unittest.TestCase):
+    """FILM-45: English-only parsing broke non-Latin and accented films.
+
+    A Japanese line was quoted with 「…」/『…』, never the ASCII apostrophe
+    the old regexes required — so `_SPOKEN_WORDS_RE` (drives the a2v
+    stillness/lip-sync gate) and `spoken_spans`/`shot_pacing_problem`
+    (drives the dialogue-fits-the-shot check and the frame-fit correction)
+    both saw "no speech at all" on a shot that plainly had some. A French
+    line in «guillemets» hit the same wall. And even once a span WAS found,
+    `.split()` on an unspaced CJK line counted it as one giant "word".
+    """
+
+    def test_a_japanese_corner_bracket_quote_registers_as_speech(self):
+        p = "彼女は微笑んで、「こんにちは、世界」と言った。"
+        self.assertTrue(sb._SPOKEN_WORDS_RE.search(p), p)
+        spans = sb.spoken_spans(p)
+        self.assertEqual(spans, ["こんにちは、世界"])
+
+    def test_a_japanese_white_corner_bracket_quote_registers_too(self):
+        p = "彼は『さようなら』と静かに言った。"
+        self.assertTrue(sb._SPOKEN_WORDS_RE.search(p), p)
+        self.assertEqual(sb.spoken_spans(p), ["さようなら"])
+
+    def test_a_french_guillemet_quote_registers_as_speech(self):
+        p = "Elle sourit et dit «bonjour tout le monde»."
+        self.assertTrue(sb._SPOKEN_WORDS_RE.search(p), p)
+        self.assertEqual(sb.spoken_spans(p), ["bonjour tout le monde"])
+
+    def test_western_quotes_still_work_unchanged(self):
+        p = "She says: 'hello there, friend.'"
+        self.assertTrue(sb._SPOKEN_WORDS_RE.search(p), p)
+        self.assertEqual(sb.spoken_spans(p), ["hello there, friend."])
+
+    def test_a_single_word_western_quote_does_not_count_as_speech(self):
+        # "2+ words" is still the bar for the Western form — this must not
+        # regress while fixing the CJK/French forms.
+        self.assertFalse(sb._SPOKEN_WORDS_RE.search("she says 'no'"))
+
+    def test_cjk_characters_count_as_individual_words_for_pacing(self):
+        # No spaces between these ten characters; a plain .split() would
+        # have counted this as ONE word and badly under-timed the shot.
+        self.assertEqual(sb.spoken_word_count("こんにちは世界また会いましょう"), 15)
+
+    def test_western_word_counting_is_unaffected(self):
+        self.assertEqual(sb.spoken_word_count("hello there my friend"), 4)
+
+    def test_a_mixed_cjk_and_latin_line_counts_both(self):
+        self.assertEqual(sb.spoken_word_count("hello 世界"), 3)
+
+    def test_an_unspaced_japanese_line_gets_a_real_pacing_check(self):
+        # A 20-character sung/spoken CJK line inside a 1-second shot must be
+        # flagged as overstuffed — under the old .split() count it looked
+        # like "1 word", which no duration would ever flag as too long.
+        p = "「" + ("あ" * 20) + "」" + "と彼女は言った。"
+        prob = sb.shot_pacing_problem(p, 1.0)
+        self.assertIsNotNone(prob)
 
 
 class TrainedVoiceActuallyLoads(unittest.TestCase):
@@ -587,7 +675,7 @@ class TrainedVoiceActuallyLoads(unittest.TestCase):
     def test_a_silent_shot_still_leaves_the_voice_off(self):
         # The other half of the contract: a voice LoRA loaded onto a shot with
         # nothing to say is the babble this gate exists to prevent.
-        j = self._job("ariatrn a woman scrubs the door with a foam-loaded sponge")
+        j = self._job("chartest_c a woman scrubs the door with a foam-loaded sponge")
         self.assertEqual(j["no_voice"], "on")
 
     def test_an_empty_tag_is_not_a_line(self):
@@ -598,7 +686,7 @@ class TrainedVoiceActuallyLoads(unittest.TestCase):
         # nothing to say, or a line delivered by a stranger's voice.
         for p in ("bizarrotrn says: 'Ship it.'",
                   "A man says: <d>[English] Ship it.</d>",
-                  "ariatrn scrubs the door in silence"):
+                  "chartest_c scrubs the door in silence"):
             speaks_law = sb.shot_speech_problem(p) is None and bool(
                 sb._SPOKEN_WORDS_RE.search(p))
             speaks_gate = self._job(p)["no_voice"] == "off"
@@ -648,7 +736,7 @@ class Wardrobe(unittest.TestCase):
     def test_it_only_applies_to_the_character_it_belongs_to(self):
         w = sb.board_wardrobe({"cast": self.CAST})
         got = sb.compose_shot_prompt(
-            {"n": 1, "character_id": "ariatrn", "trigger": "ariatrn",
+            {"n": 1, "character_id": "chartest_c", "trigger": "chartest_c",
              "prompt": "a woman washes a car"}, {}, w)
         self.assertNotIn("Hawaiian", got)
 
@@ -660,6 +748,45 @@ class Wardrobe(unittest.TestCase):
             {"quality": "balanced", "width": 1024, "height": 576, "frames": 121},
             wardrobe=w)
         self.assertIn("Hawaiian", job["prompt"])
+
+
+class H3ThreeFieldsCompose(unittest.TestCase):
+    """The room, the frame and the eyeline land INSIDE the H3 description.
+
+    An H3 shot's prompt is the three-field form. Appending the composed parts
+    to the whole prompt put them after `non_diegetic_music: N/A` — a located
+    sitcom shot rendered with the apartment in its score (2026-09-08).
+    """
+    H3 = ("integrated_multimodal_description: [Shot 1] Live-action, a man says: "
+          "<d>[English] Hi.</d> His mouth settles closed. No text appears at any point."
+          "\n\noverall_soundscape: Room tone.\n\nnon_diegetic_music: N/A")
+    LOCS = {"apt": {"id": "apt", "description": "a sitcom apartment"}}
+
+    def test_the_additions_go_into_the_description(self):
+        got = sb.compose_shot_prompt(
+            {"n": 1, "prompt": self.H3, "location_id": "apt", "framing": "medium shot",
+             "eyeline": "right", "pronoun": "he", "engine": "h3"}, self.LOCS)
+        head, tail = got.split("\n\noverall_soundscape:")
+        self.assertIn("medium shot", head)
+        self.assertIn("a sitcom apartment", head)
+        self.assertIn("his eyes fixed past the right edge of frame", head)
+        self.assertTrue(head.endswith("."), head[-40:])
+        self.assertEqual(tail, " Room tone.\n\nnon_diegetic_music: N/A")
+        self.assertNotIn("apartment", tail)
+
+    def test_nothing_to_add_leaves_the_prompt_byte_identical(self):
+        self.assertEqual(sb.compose_shot_prompt({"n": 1, "prompt": self.H3}, {}), self.H3)
+
+    def test_a_prose_prompt_composes_exactly_as_before(self):
+        got = sb.compose_shot_prompt(
+            {"n": 1, "prompt": "a man waves.", "location_id": "apt",
+             "framing": "medium shot"}, self.LOCS)
+        self.assertEqual(got, "a man waves., medium shot, a sitcom apartment")
+
+    def test_split_h3_fields_round_trips(self):
+        head, tail = sb.split_h3_fields(self.H3)
+        self.assertEqual(head + tail, self.H3)
+        self.assertEqual(sb.split_h3_fields("plain prose"), ("plain prose", ""))
 
 
 class SpeechLawAtBoardLevel(unittest.TestCase):
@@ -674,17 +801,17 @@ class SpeechLawAtBoardLevel(unittest.TestCase):
     the second gibberish clip, and the GOOD ones from the board that fixed it.
     """
     BAD = ("bizarrotrn a man in a dark navy suit sits upright and addresses the camera",
-           "ariatrn a woman pushes her wet hair back and announces something to the lens",
+           "chartest_c a woman pushes her wet hair back and announces something to the lens",
            "bizarrotrn a man asks a dry follow-up question",
            "a weary man explains the situation to the room")
 
     GOOD = ("bizarrotrn announces in a big brassy showman's voice: "
             "'Ladies and gentlemen — version four point six.'",
-            "ariatrn says brightly and clearly: 'Update the app. "
+            "chartest_c says brightly and clearly: 'Update the app. "
             "There is a timeline editor now.'",
             "A man on a dune ridge says: <d>[English] They said this was impossible.</d>")
 
-    SILENT = ("ariatrn scrubs slow circles across the door with a foam-loaded sponge",
+    SILENT = ("chartest_c scrubs slow circles across the door with a foam-loaded sponge",
               "Tight on a sponge pressed against the panel, foam bulging and water running",
               "bizarrotrn walks to the window and looks out at the rain without a word")
 
@@ -726,6 +853,44 @@ class SpeechLawAtBoardLevel(unittest.TestCase):
         msg = next(e["message"] for e in sb.validate_storyboard_detail(board)
                    if e["code"] == "speech_without_words")
         self.assertIn("Write the line", msg)
+
+
+class SingingIsNotFlaggedAsUnwrittenSpeech(unittest.TestCase):
+    """FILM-55: the owner's own board flagged real singing shots — "'sings'
+    implies someone is speaking, but no spoken line is written" — because a
+    re-plan (or an older save, from before FILM-21) had left the shot's mode
+    reading "text" while it was still lip-synced to the song. mode == "a2v"
+    was already exempt; this pins two more paths to the same exemption:
+    the shot's own `audio` field (set once by music_video.emit, untouched by
+    a mode drift) and the board simply carrying a song at all.
+    """
+    PROMPT = "close-up, singing to camera"
+
+    def test_an_a2v_shot_was_already_exempt(self):
+        board = _board([dict(_shot(1), prompt=self.PROMPT, mode="a2v")])
+        codes = [e["code"] for e in sb.validate_storyboard_detail(board)]
+        self.assertNotIn("speech_without_words", codes)
+
+    def test_a_mode_drifted_shot_is_exempt_if_it_still_carries_audio(self):
+        # The exact shape of the owner's bug: mode says "text" (a re-plan
+        # dropped it) but the shot is still, in fact, singing.
+        board = _board([dict(_shot(1), prompt=self.PROMPT, mode="text",
+                             audio="/out/song.wav")])
+        codes = [e["code"] for e in sb.validate_storyboard_detail(board)]
+        self.assertNotIn("speech_without_words", codes)
+
+    def test_any_shot_on_a_board_with_a_song_is_exempt(self):
+        board = _board([dict(_shot(1), prompt=self.PROMPT, mode="text")],
+                        music_video={"song": "/out/song.wav"})
+        codes = [e["code"] for e in sb.validate_storyboard_detail(board)]
+        self.assertNotIn("speech_without_words", codes)
+
+    def test_an_ordinary_board_with_no_song_is_still_protected(self):
+        # The exemption must not swallow the real bug it exists to catch.
+        board = _board([dict(_shot(1), prompt="bizarrotrn addresses the camera",
+                             mode="text", character_id=None, trigger=None)])
+        codes = [e["code"] for e in sb.validate_storyboard_detail(board)]
+        self.assertIn("speech_without_words", codes)
 
 
 class Locations(unittest.TestCase):
@@ -804,6 +969,60 @@ class Locations(unittest.TestCase):
         self.assertEqual(sb.validate_storyboard(board), [])
 
 
+class Light(unittest.TestCase):
+    """FILM-14 (item 4): the same fix as Locations, one axis over — a cut
+    jumps visibly when each shot re-invents its own lighting. Written ONCE
+    on the board and appended by compose_shot_prompt to every shot not yet
+    rendered, same "patch never overwrite, injected at render time" shape.
+    """
+    NOTE = "warm practical lamps, single source, deep shadows"
+
+    def test_the_light_note_reaches_the_rendered_prompt(self):
+        shot = {"n": 1, "trigger": "bizarrotrn", "prompt": "speaks to camera"}
+        got = sb.compose_shot_prompt(shot, light=self.NOTE)
+        self.assertIn(self.NOTE, got)
+        self.assertTrue(got.startswith("bizarrotrn speaks to camera"),
+                        "subject and action still come first")
+
+    def test_it_lands_after_the_location_not_instead_of_it(self):
+        loc = {"id": "study", "name": "The study",
+               "description": "a dark oak-panelled study"}
+        shot = {"n": 1, "trigger": "x", "prompt": "leans on the desk",
+                "location_id": "study"}
+        got = sb.compose_shot_prompt(shot, {"study": loc}, light=self.NOTE)
+        self.assertIn("oak-panelled", got)
+        self.assertIn(self.NOTE, got)
+        self.assertLess(got.index("oak-panelled"), got.index(self.NOTE))
+
+    def test_a_board_with_no_light_note_is_completely_unchanged(self):
+        shot = {"n": 1, "trigger": "x", "prompt": "does a thing"}
+        self.assertEqual(sb.compose_shot_prompt(shot, light=""), "x does a thing")
+        self.assertEqual(sb.compose_shot_prompt(shot), "x does a thing")
+
+    def test_a_shot_that_already_wrote_its_own_light_is_not_doubled(self):
+        shot = {"n": 1, "trigger": "x",
+                "prompt": f"stands by the window, {self.NOTE}"}
+        got = sb.compose_shot_prompt(shot, light=self.NOTE)
+        self.assertEqual(got.lower().count(self.NOTE.lower()), 1)
+
+    def test_shot_to_job_injects_it_because_that_is_the_only_choke_point(self):
+        shot = {"n": 1, "mode": "character", "trigger": "bizarrotrn",
+                "prompt": "speaks", "framing": "medium close-up"}
+        job = sb.shot_to_job(shot, {"quality": "balanced", "width": 1024,
+                                    "height": 576, "frames": 121},
+                             light=self.NOTE)
+        self.assertIn(self.NOTE, job["prompt"])
+        self.assertIn("medium close-up", job["prompt"])
+
+    def test_board_light_reads_the_boards_own_field(self):
+        board = _board([_shot(1)], light=self.NOTE)
+        self.assertEqual(sb.board_light(board), self.NOTE)
+
+    def test_board_light_is_empty_string_not_none_when_absent(self):
+        board = _board([_shot(1)])
+        self.assertEqual(sb.board_light(board), "")
+
+
 class LocationViews(unittest.TestCase):
     """THE CAR WASH — the acceptance benchmark, on the deterministic half.
 
@@ -869,7 +1088,7 @@ class LocationViews(unittest.TestCase):
             self._shot("establishing", eyeline="right", pronoun="he"), self.LOCS)
         her = sb.compose_shot_prompt(
             dict(self._shot("reverse", eyeline="left", pronoun="she"),
-                 trigger="ariatrn", prompt="keeps scrubbing"), self.LOCS)
+                 trigger="chartest_c", prompt="keeps scrubbing"), self.LOCS)
         self.assertIn("his eyes fixed past the right edge of frame", him)
         self.assertIn("her eyes fixed past the left edge of frame", her)
         self.assertEqual(sb.eyeline_complement("right"), "left")

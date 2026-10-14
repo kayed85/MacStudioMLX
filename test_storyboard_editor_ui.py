@@ -50,6 +50,25 @@ def panel_html_render() -> str:
             .replace("__SEQS__", _p.SEQ_NOUN_PL)
             .replace("__SEQ__", _p.SEQ_NOUN))
 
+def _editor_keydown(src: str) -> str:
+    """The EDITOR's own keydown listener, not the first one in the bundle.
+
+    There is more than one `document.addEventListener('keydown'` in the
+    webapp — the engine menu has its own — so anchoring on the call would
+    read the wrong body and pass or fail for the wrong reason.
+    """
+    mark = "if (!SBE.open || document.body.dataset.workflow !== 'editor') return;"
+    i = src.index(mark)
+    j = src.index("document.addEventListener('keydown'", 0)
+    while True:
+        k = src.find("document.addEventListener('keydown'", j + 1)
+        if k < 0 or k > i:
+            break
+        j = k
+    body = src[j:]
+    return body[:body.index("\n});")]
+
+
 NODE = shutil.which("node")
 
 # The model functions are pure — arrays in, arrays out. The four that are not
@@ -78,6 +97,11 @@ FUNCTIONS = (
     # Where a dragged pixel lands is the whole feature and the one thing that
     # cannot be checked by looking at it.
     "sbeTlClamp", "sbeLaneHeights", "sbeTlPrefRead", "sbeTlPrefWrite",
+    # ...and the floor is no longer a number: it is the sum of the lane set
+    # that is ON SCREEN, which is what lets the handle push a timeline with
+    # small sound lanes 114px lower than one with tall ones.
+    "sbeLaneBase", "sbeLaneCap", "sbeTlFloor", "sbeTlRoof", "sbeAudioSmall",
+    "sbeSoundMode", "sbeTlPrefKey",
     # The level line's geometry, which three gestures now share instead of
     # each carrying a copy of a 20px band.
     "sbeStripY", "sbeStripGain", "sbeStripEditable", "sbeKeysLegend",
@@ -141,8 +165,16 @@ FUNCTIONS = (
     "sbeAudioDrift", "sbeAudioInSync", "sbeAudioIsThePicture",
     "sbeDriftLabel", "sbeSyncBadge",
     "sbeSyncMark", "sbeSyncCarry", "sbeResyncAudio",
+    # MOVING SEVERAL CLIPS AT ONCE. Closed-form, and that is the whole point:
+    # the legal range of a group delta is the intersection of "no gap goes
+    # negative" over every boundary between a moving clip and a still one, so
+    # "the selection keeps its spacing" and "it stops at its neighbour" are
+    # arithmetic rather than something to check by dragging and squinting.
+    "sbeGroupLimits", "sbeMoveGroup",
     # The save that cannot be dropped, and the failure that cannot be missed.
     "sbeSaveInner", "sbeSaveAlarm", "sbeSaveAlarmClear", "sbeQueueSave",
+    # EDITOR-11: a save adopts the healed timings the server wrote.
+    "sbeAdoptSavedTimings",
     # The crash lane itself, so save → backup → recovery can be DRIVEN rather
     # than grepped for the presence of its guards.
     "sbeBackup", "sbeDraftOp", "sbeNameMode",
@@ -150,6 +182,26 @@ FUNCTIONS = (
     # to stack; this decides which is open and which is a chip.
     "sbePaintNotices", "sbeNoticeOpen", "sbeNoticeClick", "sbeNoticeLater",
     "sbeErrsToggle",
+    # The two clip-sound lanes (A/B): the insert paths and the save body call
+    # these, so every harness that extracts those needs them too.
+    "sbeSoundLane", "sbeLaneName", "sbeSetSoundLane", "sbeAlternateLanes",
+    "sbeLaneAfter", "sbeLaneFit",
+    # FILM package (2026-09-29 mega review) — slip and roll edits, the
+    # frame timecode, and the take/replace maths. Pure by the same rule as
+    # everything above: arithmetic nobody should have to check by dragging.
+    "sbeFmtTC", "sbeSlip", "sbeRollEdit", "sbeReplaceClip",
+    # FILM-04 — the song as the film's master clock in Replace mode.
+    "sbeMusicAt", "sbeMusicMaster", "sbeSongPlayhead",
+    # FILM-05 — the per-clip song-sync readout and Snap to song.
+    "sbeShotForClip", "sbeSongSyncOffset", "sbeSnapToSong",
+    # FILM-05 item 4 — auto-lock a2v clips against moves that break sync.
+    "sbeSongLocked",
+    # FILM-14 — the 5-slider grade.
+    "sbeGrade", "sbeGradeIsNeutral", "sbeSetGrade", "sbeCopyGrade", "sbeGradeCss",
+    # FILM-58 — markers, copy/paste, sequence aspect.
+    "sbeMarkerAdd", "sbeMarkerRemove", "sbeMarkerSetLabel", "sbeMarkerSetKind",
+    "sbeClipboardCopy", "sbeClipboardPasteAttrs", "sbeClipboardPasteClips",
+    "sbeSeqAspect", "sbeSetSeqAspect",
 )
 
 SHIM = r"""
@@ -188,6 +240,21 @@ const SBE_SNAP_PX = 9;
 const SBE_GUESS_CONFIDENCE = 0.4;
 const SBE_BRIGHT_MAX = 0.5;
 const SBE_STILL_SECONDS = 3.0;
+// FILM-14. Keep equal to the panel's — test_editor_film_grade reads both.
+const SBE_GRADE_EXPOSURE_MAX = 0.5;
+const SBE_GRADE_CONTRAST_MIN = 0.5, SBE_GRADE_CONTRAST_MAX = 1.8;
+const SBE_GRADE_SATURATION_MIN = 0.0, SBE_GRADE_SATURATION_MAX = 2.5;
+const SBE_GRADE_TEMP_TINT_MAX = 1.0;
+// FILM-58.
+const SBE_SEQ_ASPECTS = { '16:9': 16 / 9, '9:16': 9 / 16, '1:1': 1 };
+const SBE_PASTE_ATTR_FIELDS = ['adjust', 'frame', 'fx', 'speed'];
+const SBE_GRADE_FIELDS = {
+  exposure: [-SBE_GRADE_EXPOSURE_MAX, SBE_GRADE_EXPOSURE_MAX, 0],
+  contrast: [SBE_GRADE_CONTRAST_MIN, SBE_GRADE_CONTRAST_MAX, 1],
+  saturation: [SBE_GRADE_SATURATION_MIN, SBE_GRADE_SATURATION_MAX, 1],
+  temp: [-SBE_GRADE_TEMP_TINT_MAX, SBE_GRADE_TEMP_TINT_MAX, 0],
+  tint: [-SBE_GRADE_TEMP_TINT_MAX, SBE_GRADE_TEMP_TINT_MAX, 0],
+};
 // Editor v2. Keep equal to the panel's — test_editor_v2 reads both.
 const SBE_SPEED_MIN = 0.25;
 const SBE_SPEED_MAX = 4.0;
@@ -212,8 +279,8 @@ const SBE_TL_CHROME = 32;
 const SBE_LANES = [
   { key: 'ov',    base: 32, cap:  56, share: 0.08 },
   { key: 'track', base: 64, cap: 120, share: 0.14 },
-  { key: 'alane', base: 44, cap: 190, share: 0.44 },
-  { key: 'wave',  base: 108, cap: 240, share: 0.34 },
+  { key: 'alane', base: 44, cap: 190, share: 0.44, audio: true, small: 18 },
+  { key: 'wave',  base: 108, cap: 240, share: 0.34, audio: true, small: 20 },
 ];
 const SBE_TL_MIN_H = 280;
 const SBE_TL_MAX_H = 638;
@@ -318,6 +385,10 @@ const SBE = {
   // The timeline's height: the preference, what the window could give it, and
   // the ceiling the monitors impose.
   tlH: SBE_TL_MIN_H, tlNow: SBE_TL_MIN_H, tlMax: SBE_TL_MAX_H, tlDrag: null,
+  // SOUND MODE, so every lane is at its full height: the numbers below were
+  // written for the full lane set (floor 280, roof 638). Picture mode — the
+  // thin lanes — is probed where it is named (tlPref, test_audio_compact).
+  mode: 'sound',
 };
 // One fetch stub, scripted per case.
 let FETCHES = [];
@@ -1004,6 +1075,15 @@ out.backupLivesAfterASave = [!!(await sbeBackup(true)), FETCHES.length,
 out.backupNamesItsDraft = JSON.parse(FETCHES[0].body || '{}').draft;
 // A backup that does not land is the safety net gone, and only the alarm says so.
 SBE.dirty = true;
+// FILM-57: sbeBackup now skips the network call for CONTENT it already
+// backed up successfully — the watchdog's own re-arm-every-tick loop used to
+// re-POST the same unchanged document every 1.4s forever. This scenario is a
+// genuinely new attempt (whatever failed here is not what the previous line
+// already has safely on the server), so it clears the memory that dedup
+// reads rather than changing the content — the alarm this asserts is about
+// a NEW write failing, not about the dedup skip, which is covered on its
+// own in test_editor_save_integrity.TheWatchdogStopsCallingWhenNothingChanged.
+SBE.lastBackupSig = '';
 NEXT = { status: 500, body: { ok: false, error: 'disk is full' } };
 out.backupFailureIsLoud = [await sbeBackup(true), !!SBE.saveFailed];
 SBE.saveFailed = ''; els.sbeAlarm.hidden = true;
@@ -1283,14 +1363,23 @@ out.holeCounterOnHisFilm = (() => {
 // ---- THE NET'S OWN STATE ------------------------------------------------
 out.protectedChip = (() => {
   const read = () => ({ text: sbeEl('sbeProtected').textContent,
+                        hidden: !!sbeEl('sbeProtected').hidden,
+                        tooltip: sbeEl('sbeState').title,
                         cold: sbeEl('sbeProtected').classList.contains('is-cold') });
   const was = { open: SBE.open, id: SBE.id, dirty: SBE.dirty,
                 dirtyAt: SBE.dirtyAt, backedUpAt: SBE.backedUpAt };
   SBE.open = true; SBE.id = 'sb_t'; SBE.otherEditor = '';
+  // FILM-38: cold is stated in the WATCHDOG's own terms now — the oldest
+  // unwritten change (dirtyAt) is older than the grace AND no backup has
+  // landed since it. Ageing only `backedUpAt` while `dirtyAt` stayed fresh
+  // used to read as cold anyway (the bug this fixture now exercises the fix
+  // for) — a brand new edit with no backup yet is "backing up…", not alarmed.
   SBE.dirty = true; SBE.dirtyAt = Date.now();
   SBE.backedUpAt = Date.now() - 3000;   sbePaintProtected(); const fresh = read();
-  SBE.backedUpAt = Date.now() - 40000;  sbePaintProtected(); const cold = read();
-  SBE.backedUpAt = 0;                   sbePaintProtected(); const never = read();
+  SBE.dirtyAt = Date.now() - 40000; SBE.backedUpAt = 0;
+  sbePaintProtected(); const cold = read();
+  SBE.dirtyAt = Date.now(); SBE.backedUpAt = 0;
+  sbePaintProtected(); const never = read();
   Object.assign(SBE, was);
   return [fresh, cold, never];
 })();
@@ -1920,7 +2009,13 @@ out.musicDragNowhereChangesNothing = (() => {
 out.draftSwitchRefusesWhenTheBackupCannotWrite = await (async () => {
   // A REAL write failure, not an unanswered offer: the snapshot POST fails,
   // so the work on screen has nowhere to go and the switch must not proceed.
-  SBE.backup = null;
+  // FILM-06 made the FIRST edit off a clean timeline fire its own
+  // fire-and-forget sbeBackup() (previously that write waited out a 1.4s
+  // debounce that never elapsed inside this script, so nothing upstream
+  // could still be "in flight" here) — an earlier scenario's own first edit
+  // may still be an unsettled promise holding SBE.backingUp, which this
+  // scenario does not own and must not inherit.
+  SBE.backup = null; SBE.backingUp = false;
   SBE.dirty = true; SBE.conflict = 0;
   FETCHES = [];
   NEXT = { status: 500, body: { ok: false, error: 'disk is full' } };
@@ -1967,6 +2062,19 @@ out.tlClamp = {
   ceiling: sbeTlClamp(9000, 99999),
   junk: sbeTlClamp('kittens', 600),
 };
+// THE SOUND AREA AT ITS TWO SIZES. The floor is the sum of the lane set that
+// is on screen, so making the sound lanes small has to MOVE it — that is the
+// whole of "I cannot push it down if I want to compact it" — and a lane that
+// is supposed to be thin may never take a dragged pixel.
+out.tlSmall = {
+  floorOpen: sbeTlFloor(false), floorSmall: sbeTlFloor(true),
+  roofOpen: sbeTlRoof(false), roofSmall: sbeTlRoof(true),
+  lanesSmall: sbeLaneHeights(sbeTlFloor(true), true),
+  lanesSmallDragged: sbeLaneHeights(sbeTlFloor(true) + 200, true),
+  clampSmall: [sbeTlClamp(10, 600, true), sbeTlClamp(9000, 99999, true)],
+  // Defaulted, with nothing small on screen: every existing caller's meaning.
+  floorNow: sbeTlFloor(), roofNow: sbeTlRoof(),
+};
 out.lanesAtFloor = sbeLaneHeights(SBE_TL_MIN_H);
 out.lanesAtCeiling = sbeLaneHeights(SBE_TL_MAX_H);
 out.lanesMid = sbeLaneHeights(SBE_TL_MIN_H + 100);
@@ -1992,8 +2100,9 @@ out.rulerFixed = [out.lanesAtFloor.ruler, out.lanesAtCeiling.ruler];
 out.tlPref = (() => {
   const seen = {};
   STORE.clear();
+  SBE.mode = 'picture';                       // the default on a real screen
   seen.fresh = sbeTlPrefRead();               // nothing stored yet
-  sbeTlPrefWrite(392);
+  sbeTlPrefWrite(200);
   seen.stored = STORE.get('phos_sbe_tl_h');
   seen.restored = sbeTlPrefRead();            // ...as a new tab would read it
   STORE.set('phos_sbe_tl_h', '99999');
@@ -2001,7 +2110,18 @@ out.tlPref = (() => {
   STORE.set('phos_sbe_tl_h', 'not-a-height');
   seen.junk = sbeTlPrefRead();
   seen.keys = [...STORE.keys()];
+  sbeTlPrefWrite(200);                        // a real number again, over the junk
+  // SOUND MODE HAS ITS OWN KEY AND ITS OWN ENDS: fresh is the roof of the
+  // full lanes, and what it stores never touches picture mode's number.
+  SBE.mode = 'sound';
+  seen.soundFresh = sbeTlPrefRead();
+  sbeTlPrefWrite(400);
+  seen.soundKeys = [...STORE.keys()].sort();
+  seen.soundRestored = sbeTlPrefRead();
+  SBE.mode = 'picture';
+  seen.pictureAfter = sbeTlPrefRead();
   STORE.clear();
+  SBE.mode = 'sound';                         // back to the harness's default
   return seen;
 })();
 // AND IT IS NOT IN THE DOCUMENT. The save payload is the whole of what the
@@ -2169,6 +2289,76 @@ out.overlayLayer = (() => {
   return { during: during, after: after };
 })();
 
+// ---- MOVING SEVERAL CLIPS AT ONCE ---------------------------------------
+// Four shots, packed, with a deliberate 1s hole between b and c. Every case
+// below is a thing a person would otherwise have to check by dragging.
+const GRP = () => lay([
+  clip({ id: 'a', end: 2, film_start: 0, film_end: 2 }),
+  clip({ id: 'b', end: 2, film_start: 2, film_end: 4 }),
+  clip({ id: 'c', end: 2, film_start: 5, film_end: 7 }),
+  clip({ id: 'd', end: 2, film_start: 7, film_end: 9 })]);
+const at = cs => cs.map(c => [c.id, c.film_start]);
+out.grpPacked = (() => {
+  // a..d is everything, so there is no boundary to stop it going later and
+  // the film's own head stops it coming earlier.
+  const l = sbeGroupLimits(GRP(), ['a', 'b', 'c', 'd']);
+  return [l.lo, l.hi === Infinity];
+})();
+out.grpBoundedBothSides = (() => {
+  // b and c are hemmed in by a (ends at 2) and d: b may not go earlier at
+  // all, and the pair may go later only by the hole in front of d, which is
+  // zero here because c is hard against it.
+  const l = sbeGroupLimits(GRP(), ['b', 'c']);
+  return [l.lo, l.hi];
+})();
+out.grpRoomIsTheGap = (() => {
+  // c and d can slide earlier by exactly the 1s hole in front of c, and
+  // later without limit — nothing follows d.
+  const l = sbeGroupLimits(GRP(), ['c', 'd']);
+  return [l.lo, l.hi === Infinity];
+})();
+out.grpKeepsItsSpacing = (() => {
+  const cs = GRP();
+  const before = at(cs);
+  const r = sbeMoveGroup(cs, ['c', 'd'], 3);
+  const after = at(r.clips);
+  // c and d moved by the same amount, a and b did not move at all, and the
+  // hole INSIDE the selection is exactly as long as it was.
+  return [r.ok, before, after,
+          sbeById(r.clips, 'd').film_start - sbeById(r.clips, 'c').film_start,
+          before[3][1] - before[2][1]];
+})();
+out.grpClampsAtTheNeighbour = (() => {
+  const r = sbeMoveGroup(GRP(), ['c', 'd'], -99);
+  // -99 is impossible; the answer is the 1s hole and not a negative gap.
+  return [r.ok, r.moved, at(r.clips)];
+})();
+out.grpRefusesALockedMember = (() => {
+  const cs = GRP();
+  sbeById(cs, 'c').locked = true;
+  const r = sbeMoveGroup(cs, ['c', 'd'], 1);
+  return [r.ok, r.why, JSON.stringify(at(r.clips)) === JSON.stringify(at(GRP()))];
+})();
+out.grpCarriesTheSound = (() => {
+  // A BLOCK SLIDE IS NOT A J-CUT. Dragging ONE picture deliberately leaves
+  // its strip behind — that is how a J-cut is made — but sliding a selection
+  // means "put these shots a second later", and a strip left behind would be
+  // a sync error nobody asked for. The offset inside the selection survives.
+  let cs = sbeSetAudioLink(GRP(), 'c', false).clips;
+  cs = sbeAudioEdit(cs, 'c', 'move', sbeClipAudio(sbeById(cs, 'c')).film_start + 0.5).clips;
+  const drift0 = sbeAudioDrift(sbeById(cs, 'c'));
+  const r = sbeMoveGroup(cs, ['c', 'd'], 1.5);
+  const c = sbeById(r.clips, 'c');
+  return [r.ok, +drift0.toFixed(4), +sbeAudioDrift(c).toFixed(4),
+          +(c.audio.film_start - 0.5 - 1.5).toFixed(4), +c.film_start.toFixed(4)];
+})();
+out.grpOneClipIsJustAMove = (() => {
+  // The nudge keys go through the same function, so it has to answer for a
+  // selection of one.
+  const r = sbeMoveGroup(GRP(), ['c'], -0.5);
+  return [r.ok, at(r.clips)];
+})();
+
 process.stdout.write(JSON.stringify(out));
 """
 
@@ -2211,6 +2401,53 @@ class TimelineClient(unittest.TestCase):
         self.assertIsNone(self.r["peaksNone"])
 
     # ---- the beat grid ---------------------------------------------------
+    # ---- moving several clips at once ------------------------------------
+    def test_the_group_delta_is_clamped_by_every_boundary_it_crosses(self):
+        # a 0-2, b 2-4, [1s hole], c 5-7, d 7-9.
+        lo, unbounded = self.r["grpPacked"]
+        self.assertEqual(lo, 0)          # the film's own head
+        self.assertTrue(unbounded)       # nothing follows the last clip
+        self.assertEqual(self.r["grpBoundedBothSides"], [0, 0])
+        lo2, unbounded2 = self.r["grpRoomIsTheGap"]
+        self.assertEqual(lo2, -1)        # exactly the hole in front of c
+        self.assertTrue(unbounded2)
+
+    def test_the_selection_keeps_its_spacing_and_nothing_else_moves(self):
+        ok, before, after, span, wasSpan = self.r["grpKeepsItsSpacing"]
+        self.assertTrue(ok)
+        self.assertEqual(before[:2], after[:2])          # a and b stay put
+        self.assertEqual([r[1] for r in after[2:]], [8, 10])
+        self.assertEqual(span, wasSpan)                  # the hole inside it
+        self.assertEqual(after[2][1] - before[2][1], after[3][1] - before[3][1])
+
+    def test_an_impossible_delta_lands_on_the_neighbour_not_through_it(self):
+        ok, moved, pos = self.r["grpClampsAtTheNeighbour"]
+        self.assertTrue(ok)
+        self.assertEqual(moved, -1)
+        self.assertEqual([r[1] for r in pos], [0, 2, 4, 6])
+
+    def test_one_locked_member_refuses_the_whole_slide_and_changes_nothing(self):
+        ok, why, untouched = self.r["grpRefusesALockedMember"]
+        self.assertFalse(ok)
+        self.assertEqual(why, "locked")
+        self.assertTrue(untouched)
+
+    def test_a_block_slide_carries_the_sound_and_keeps_the_j_cut(self):
+        # Dragging ONE picture deliberately leaves its strip behind — that is
+        # how a J-cut is made. Sliding a SELECTION is not that gesture, and a
+        # strip left behind would be a sync error nobody asked for.
+        ok, drift0, drift1, stripDelta, filmStart = self.r["grpCarriesTheSound"]
+        self.assertTrue(ok)
+        self.assertEqual(drift0, drift1)     # the offset inside it survives
+        self.assertEqual(stripDelta, 5)      # the strip moved by the same 1.5
+        self.assertEqual(filmStart, 6.5)
+
+    def test_a_selection_of_one_goes_through_the_same_function(self):
+        # The nudge keys use it for any count, so it has to answer for one.
+        ok, pos = self.r["grpOneClipIsJustAMove"]
+        self.assertTrue(ok)
+        self.assertEqual([r[1] for r in pos], [0, 2, 4.5, 7])
+
     def test_the_grid_carries_beats_and_marks_downbeats(self):
         self.assertEqual(self.r["grid"][:3],
                          [[0, True], [0.5, False], [1, False]])
@@ -2811,11 +3048,15 @@ class SavingCannotFailQuietly(unittest.TestCase):
         # `true` and re-queuing through that lane turned the second of two
         # rapid Save presses into a backup write, with edit.json left at the
         # older revision and the alarm reading clear.
-        self.assertEqual(self.r["midFlightRemembered"], "backup")
+        # 2026-09-24 (SB5-14): a QUIET request is a save too now. Every
+        # `sbeSave(true)` left is Render / export / relink waiting on edit.json,
+        # and downgrading it to a backup let them run against the previous
+        # cut. `test_editor_save_integrity.py` drives the interleaving itself.
+        self.assertEqual(self.r["midFlightRemembered"], "save")
         self.assertEqual(self.r["midFlightRemembersASave"], "save")
         fn = extract_function("sbeSave", self.src)
         self.assertIn("finally", fn)
-        self.assertIn("if (again === 'save') sbeSave(quiet, force);", fn)
+        self.assertIn("if (again && SBE.dirty && !SBE.conflict && SBE.open) return sbeSave(quiet, false);", fn)
 
     def test_the_in_flight_flag_cannot_stick_after_a_throw(self):
         self.assertFalse(self.r["flagClearedAfterThrow"])
@@ -3008,10 +3249,19 @@ class SplitEditsInTheBrowser(unittest.TestCase):
                             inner.index('id="%s"' % b))
 
     def test_the_toggle_is_offered_on_a_video_clip_and_only_there(self):
-        fn = extract_function("sbePaintInspector", self.src)
-        self.assertIn("sbeToggleAudioLink()", fn)
+        # IT LIVES ON THE CLIP BAR NOW, not in the inspector — it is the verb
+        # the owner named first ("for instance, unlink and link audio") and it
+        # was in a 212px column in the corner. What is gated is unchanged: the
+        # verb exists, it is reachable, and only a video clip is offered it.
+        self.assertIn('id="sbeCbLink"', self.src)
+        self.assertIn('onclick="sbeToggleAudioLink()"', self.src)
+        fn = extract_function("sbeCbarModel", self.src)
+        self.assertIn("sbeCbLink", fn)
         self.assertIn("kind === 'video'", fn)
         self.assertIn("Unlink sound", fn)
+        # ...and a clip with no sound of its own is told WHY, rather than
+        # having the button quietly dropped.
+        self.assertIn("Only a video clip has sound of its own", fn)
 
     def test_the_height_floor_is_the_sum_of_its_lanes(self):
         # sbeFitMonitors budgets the monitors against this constant, so a lane
@@ -3025,16 +3275,29 @@ class SplitEditsInTheBrowser(unittest.TestCase):
         chrome = int(re.search(r"const SBE_TL_CHROME = (\d+);",
                                self.src).group(1))
         lanes = re.findall(
-            r"\{ key: '(\w+)',\s+base:\s*(\d+), cap:\s*(\d+), share: ([\d.]+) \}",
+            r"\{ key: '(\w+)',\s+base:\s*(\d+), cap:\s*(\d+), share: ([\d.]+)",
             self.src)
         self.assertEqual([l[0] for l in lanes], ["ov", "track", "alane", "wave"])
         # These two are read by the layout harness's injected probe JS, so
         # the editor module publishes them as globalThis properties rather
         # than module-private consts (slice 3, docs/ARCHITECTURE.md).
-        floor = int(re.search(r"globalThis\.SBE_TL_MIN_H = (\d+);", self.src).group(1))
-        ceil_ = int(re.search(r"globalThis\.SBE_TL_MAX_H = (\d+);", self.src).group(1))
-        self.assertEqual(floor, chrome + sum(int(l[1]) for l in lanes))
-        self.assertEqual(ceil_, chrome + sum(int(l[2]) for l in lanes))
+        # AND THE FLOOR IS NO LONGER A NUMBER AT ALL. It is computed from the
+        # lane set that is on screen, because the sound lanes have two heights
+        # now and a constant floor is what stopped the owner compacting his
+        # timeline: "I can also not push it down if I want to compact it."
+        self.assertIn("globalThis.SBE_TL_MIN_H = sbeTlFloor(false);", self.src)
+        self.assertIn("globalThis.SBE_TL_MAX_H = sbeTlRoof(false);", self.src)
+        base_of = extract_function("sbeLaneBase", self.src)
+        self.assertIn("(small && L.audio) ? L.small : L.base", base_of)
+        for fn, part in (("sbeTlFloor", "sbeLaneBase"), ("sbeTlRoof", "sbeLaneCap")):
+            body = extract_function(fn, self.src)
+            self.assertIn("let n = SBE_TL_CHROME;", body)
+            self.assertIn("for (const L of SBE_LANES) n += " + part + "(L, s);", body)
+        # The numbers those rules produce are checked in the browser-side probe
+        # (test_small_sound_lanes_lower_the_floor_and_never_grow); here it is
+        # enough that nobody can type one in again.
+        floor = chrome + sum(int(l[1]) for l in lanes)
+        self.assertEqual(floor, 280)
         # And the CSS fallback — what the page shows for the frame before the
         # JS runs — is the same number.
         self.assertIn("min-height: var(--sbe-tl-h, %dpx);" % floor, self.src)
@@ -3055,7 +3318,7 @@ class SplitEditsInTheBrowser(unittest.TestCase):
         # factor would give the picture track 41% of the drag and the sound
         # strip 14%, which is the opposite of the sentence above.
         lanes = dict((m[0], float(m[3])) for m in re.findall(
-            r"\{ key: '(\w+)',\s+base:\s*(\d+), cap:\s*(\d+), share: ([\d.]+) \}",
+            r"\{ key: '(\w+)',\s+base:\s*(\d+), cap:\s*(\d+), share: ([\d.]+)",
             self.src))
         self.assertAlmostEqual(sum(lanes.values()), 1.0, places=6)
         self.assertGreaterEqual(lanes["alane"] + lanes["wave"], 0.75)
@@ -3259,10 +3522,17 @@ class TheStripIsAnEditingSurface(unittest.TestCase):
     def test_the_verb_is_offered_only_once_the_halves_are_separate(self):
         # On a linked clip "delete the sound" and "mute" would be the same
         # button twice.
-        fn = extract_function("sbePaintInspector", self.src)
-        self.assertIn("sbeDeleteStripSel()", fn)
-        i = fn.index("sbeDeleteStripSel()")
-        self.assertIn("sbeClipAudio(c).split", fn[max(0, i - 400):i])
+        self.assertIn('onclick="sbeDeleteStripSel()"', self.src)
+        fn = extract_function("sbeCbarModel", self.src)
+        # `split` is the gate, and it is derived from the clip's own window.
+        self.assertIn("const split = !!(vid && w && w.split)", fn)
+        i = fn.index("sbeCbDelSound")
+        row = fn[i:i + 900]
+        self.assertIn("!split ?", row)
+        # ...and the refusal SAYS the reason, which the inspector could not:
+        # it dropped the button, so "delete sound" read as a missing feature
+        # on every linked clip, which is almost every clip.
+        self.assertIn("same button twice", row)
 
     def test_the_overlay_lane_teaches_itself(self):
         # An empty lane is a sentence, not a blank — the convention the track
@@ -3911,12 +4181,14 @@ class MutingAClipsOwnSound(unittest.TestCase):
         # ...and it is NOT the same state as a file with no audio track.
         self.assertIn(".sbe-aclip.is-mute", self.src)
 
-    def test_the_inspector_offers_it_on_any_video_clip_with_sound(self):
-        fn = extract_function("sbePaintInspector", self.src)
-        self.assertIn("sbeToggleClipMute()", fn)
+    def test_the_clip_bar_offers_it_on_any_video_clip_with_sound(self):
+        self.assertIn('id="sbeCbMute"', self.src)
+        self.assertIn('onclick="sbeToggleClipMute()"', self.src)
+        fn = extract_function("sbeCbarModel", self.src)
         self.assertIn("Mute sound", fn)
         self.assertIn("Unmute sound", fn)
         self.assertIn("c.has_audio !== false", fn)
+        self.assertIn("no sound of its own to", fn)
 
     def test_the_PREVIEW_is_the_third_output_and_agrees(self):
         # The render drops the clip's lane and the export disables its audio
@@ -4036,24 +4308,84 @@ class TheNetSaysWhenItLastCaughtYou(unittest.TestCase):
 
     def test_fresh_reads_as_protected_and_stale_reads_as_NOT(self):
         fresh, cold, never = self.r["protectedChip"]
-        self.assertIn("protected", fresh["text"])
+        # FILM-37: the routine case used to sit in the header as its own
+        # always-visible text, permanently spending width the title/state/
+        # draft-chip needed — at 1366-1440px that was what truncated
+        # "saved · rev7" down to "saved · r", well above the breakpoint that
+        # was supposed to fold the state text first. It still says the same
+        # thing, just in the status pill's tooltip rather than on screen.
+        self.assertTrue(fresh["hidden"])
+        self.assertEqual(fresh["text"], "")
+        self.assertIn("protected", fresh["tooltip"])
         self.assertFalse(fresh["cold"])
         # Past the watchdog's own grace, the chip goes cold on the SAME
         # threshold the banner alarms on — two indicators that can disagree
-        # are one indicator and one bug.
+        # are one indicator and one bug. An ALARM earns the width back: it
+        # is the one case in this chip that is actionable.
+        self.assertFalse(cold["hidden"])
         self.assertIn("NOT PROTECTED", cold["text"])
+        self.assertEqual(cold["tooltip"], cold["text"])
         self.assertTrue(cold["cold"])
-        self.assertIn("not backed up yet", never["text"])
+        # FILM-38: a BRAND NEW edit, no backup landed yet, is not alarming —
+        # it is the normal half-second between an edit and the (now
+        # near-immediate, FILM-06) snapshot reaching the server. Red is
+        # reserved for a write that is actually late, so this one is quiet
+        # on screen too — "backing up…" lives in the tooltip.
+        self.assertTrue(never["hidden"])
+        self.assertIn("backing up", never["tooltip"])
+        self.assertFalse(never["cold"])
 
-    def test_cold_is_stated_against_the_last_SUCCESSFUL_write(self):
-        # Not against `dirtyAt`: the outage froze that pair in a way that read
-        # "protected" for seven hours. How long ago the net actually caught
-        # this tab cannot be faked by a stuck flag.
+    def test_cold_now_AGREES_with_the_watchdog_instead_of_only_claiming_to(self):
+        # FILM-38: the comment used to say "the SAME threshold the watchdog
+        # alarms on" while comparing only against `backedUpAt` — which is
+        # cold the instant `dirty` becomes true, before the snapshot has had
+        # one network round trip. `dirtyAt` was avoided because the old
+        # stale-session outage froze it in a way that read "protected" for
+        # seven hours — that outage is closed (docs/EDITOR_SAVE_MODEL.md §5),
+        # and the watchdog (sbeTick) has safely compared `dirtyAt` this whole
+        # time. The chip now uses the identical expression.
         fn = extract_function("sbePaintProtected", self.src)
-        self.assertIn("SBE.backedUpAt", fn)
         cold = fn[fn.index("const cold"):]
-        cold = cold[:cold.index(";")]
-        self.assertNotIn("dirtyAt", cold)
+        cold = cold[:cold.index(";", cold.index("SBE.dirtyAt"))]
+        self.assertIn("SBE.dirtyAt", cold)
+        self.assertIn("SBE_SAVE_GRACE_MS", cold)
+        self.assertIn("SBE.backedUpAt", cold)
+        tick = extract_function("sbeTick", self.src)
+        self.assertIn("SBE.backedUpAt < SBE.dirtyAt", tick)
+
+
+class ThePoolFiltersAreOneRow(unittest.TestCase):
+    """FILM-37: five sources (This __SEQCAP__ / Other __SEQS__ / Generations /
+    Images / Sound) at a 40% flex-basis wrapped into up to three rows —
+    measured 1.5 rows at 1366x768 — eating vertical space the pool's own
+    list needed. They are a single non-wrapping row now."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.src = panel_source()
+
+    def test_the_row_does_not_wrap(self):
+        css = self.src[self.src.index(".ed-pool-tabs {"):]
+        rule = css[:css.index("}") + 1]
+        self.assertIn("flex-wrap: nowrap", rule)
+
+    def test_the_five_sources_are_one_select_that_fits_the_pool(self):
+        # 4.17: five pills in one row clipped into each other in the ~260 px
+        # pool at 1280-1440 px; a labelled select names every source in full.
+        tabs = self.src[self.src.index('id="edPoolTabs"'):]
+        tabs = tabs[:tabs.index("</select>")]
+        self.assertIn('<select id="edPoolSrcSelect"', tabs)
+        self.assertIn('onchange="edPoolSrc(this.value)"', tabs)
+        self.assertEqual(tabs.count("<option "), 5)
+        css = self.src[self.src.index(".ed-pool-tabs .ed-pool-src {"):]
+        rule = css[:css.index("}") + 1]
+        self.assertIn("min-width: 0", rule)
+
+    def test_all_five_tabs_are_still_there(self):
+        tabs = self.src[self.src.index('id="edPoolTabs"'):]
+        tabs = tabs[:tabs.index("</div>")]
+        for src in ("film", "other", "gallery", "images", "sound"):
+            self.assertIn('data-src="%s"' % src, tabs)
 
 
 class OneNoticeSurface(unittest.TestCase):
@@ -4090,7 +4422,14 @@ class OneNoticeSurface(unittest.TestCase):
         # worked on. It is an invitation to go and look.
         got = self.r["noticeQuietIsAlwaysAChip"]
         self.assertEqual(got["folded"], ["sbeRecover"])
-        self.assertFalse(got["wrapHidden"])
+        # ...and ALONE it is a chip in the HEADER (#sbeRecoverChip), not a row
+        # of its own under it: the row is hidden until the chip is clicked.
+        self.assertTrue(got["wrapHidden"])
+        self.assertIn('id="sbeRecoverChip"', self.src)
+        self.assertIn("onclick=\"sbeNoticeOpen('sbeRecover')\"", self.src)
+        paint = extract_function("sbePaintNotices", self.src)
+        self.assertIn("open[0] === 'sbeRecover'", paint)
+        self.assertIn("if (chipOnly) wrap.hidden = true;", paint)
         self.assertIn('data-quiet="1"', self.src)
         # ...and it points at the place versions live rather than acting.
         el = self.src[self.src.index('id="sbeRecover"'):]
@@ -4441,13 +4780,20 @@ class TheSoundStaysWhereItWasPut(unittest.TestCase):
             # ...and it happens BEFORE the drag is armed, or pointerdown wins.
             self.assertLess(body.index("sbe-sync"), body.index("setPointerCapture"))
 
-    def test_the_inspector_offers_the_rematch_next_to_the_relink(self):
-        fn = extract_function("sbePaintInspector", self.src)
-        self.assertIn("sbeResyncSel()", fn)
+    def test_the_clip_bar_puts_the_rematch_next_to_the_relink(self):
+        self.assertIn('id="sbeCbResync"', self.src)
+        self.assertIn('onclick="sbeResyncSel()"', self.src)
+        fn = extract_function("sbeCbarModel", self.src)
         self.assertIn("Resync sound", fn)
         self.assertIn("sbeAudioInSync(c)", fn)
-        # The two verbs are different and the inspector says which is which.
+        # THE TWO ARE ADJACENT AND SAY WHICH IS WHICH. The thing that is hard
+        # to hold in your head is the difference between them — one makes the
+        # pair permanent, the other only slides the sound back under its own
+        # frame — so they sit side by side and both tooltips name it.
         self.assertLess(fn.index("Re-link sound"), fn.index("Resync sound"))
+        self.assertLess(self.src.index('id="sbeCbLink"'),
+                        self.src.index('id="sbeCbResync"'))
+        self.assertIn("Resync is the", fn)
 
     def test_a_locked_shot_says_so_instead_of_a_forbidden_cursor(self):
         # `.sbe-clip.is-locked` sets `cursor: not-allowed` and hides both
@@ -4457,7 +4803,7 @@ class TheSoundStaysWhereItWasPut(unittest.TestCase):
         self.assertIn(".sbe-clip.is-locked { cursor: not-allowed; }", self.src)
         body = extract_function("sbeOnTrackDown", self.src)
         self.assertIn("c.locked", body)
-        self.assertIn("click Unlock in the", body)
+        self.assertIn("press Unlock on the bar", body)
         # ...and the refusal happens BEFORE the drag is armed.
         self.assertLess(body.index("c.locked"), body.index("setPointerCapture"))
         lane = extract_function("sbeOnAudioDown", self.src)
@@ -4541,7 +4887,7 @@ class TheSoundStaysWhereItWasPut(unittest.TestCase):
         # handle must not be sized against a number somebody can move. The
         # block inside a lane is inset 6px top and bottom; the strip 3px.
         lanes = dict(re.findall(
-            r"\{ key: '(\w+)',\s+base:\s*(\d+), cap:\s*\d+, share: [\d.]+ \}",
+            r"\{ key: '(\w+)',\s+base:\s*(\d+), cap:\s*\d+, share: [\d.]+",
             src))
         for key, inset in (("track", 12), ("alane", 7)):
             block = int(lanes[key]) - inset
@@ -4623,10 +4969,17 @@ class TheSoundStaysWhereItWasPut(unittest.TestCase):
         self.assertIn("SBE.drag = null;", extract_function("sbeOnAudioDown", self.src))
 
     def test_the_toggle_names_the_offset_it_is_about_to_freeze(self):
-        fn = extract_function("sbePaintInspector", self.src)
+        fn = extract_function("sbeCbarModel", self.src)
         self.assertIn("'Link sound'", fn)
         self.assertIn("Re-link sound", fn)
         self.assertIn("sbeAudioInSync(c)", fn)
+        # THE OFFSET MOVED FROM THE LABEL TO THE TOOLTIP, and it had to: a
+        # label that grows by "at +0.40s" changes the button's width, and the
+        # clip bar measures its own width to decide what overflows — so the
+        # row would re-fit itself every time a strip was dragged. The number
+        # is still said before it is frozen.
+        i = fn.index("sbeCbLink")
+        self.assertIn("sbeDriftLabel(drift)", fn[i:i + 1600])
 
     def test_every_reflow_marks_the_sound_before_it_moves_the_picture(self):
         # The carry is the fix, and a new operation that calls sbeLayout without
@@ -4762,9 +5115,12 @@ class TimelineVersions(unittest.TestCase):
         # sbeAdopt sets the mode dropdown to agree with the document on every
         # load, and that call was marking the document dirty and queueing a
         # write — so every OPEN of every film produced a save nobody made.
+        # FILM-33 moved the actual dirtying into sbeMusicCommit (the shared
+        # writer every soundtrack gesture now goes through), so the guard's
+        # job is to return before THAT is ever reached.
         fn = extract_function("sbeSetMusicMode", self.src)
         self.assertIn("if (String(SBE.audio.mode || 'under') === mode) return;", fn)
-        self.assertLess(fn.index("=== mode) return"), fn.index("SBE.dirty = true"))
+        self.assertLess(fn.index("=== mode) return"), fn.index("sbeMusicCommit("))
 
     def test_the_lane_has_nothing_left_to_guard(self):
         # The guard is gone because the thing it guarded is gone: snapshots
@@ -4830,6 +5186,14 @@ class TimelineVersions(unittest.TestCase):
         # name. See docs/EDITOR_SAVE_MODEL.md §4.
         self.assertIn("your saved draft is untouched", paint)
         self.assertNotIn("Nothing has been changed", paint)
+
+    def test_the_bar_says_WHAT_changed_when_the_server_names_it(self):
+        # FILM-54: `b.diff` is `edit_diff_summary`'s answer, server-side —
+        # "1 clip changed: 02 brightness +0.30" instead of the two counts
+        # matching being the only thing on screen.
+        paint = extract_function("sbePaintRecovery", self.src)
+        self.assertIn("b.diff", paint)
+        self.assertLess(paint.index("b.diff"), paint.index("your saved draft"))
         # The offer is painted on adopt; nothing calls sbeRecover for you.
         adopt = extract_function("sbeAdopt", self.src)
         self.assertIn("sbePaintRecovery()", adopt)
@@ -4942,6 +5306,36 @@ class TheTimelineIsResizable(unittest.TestCase):
         # dead band under the soundtrack.
         self.assertEqual(self.r["laneSums"], [0, 0, 0])
 
+    def test_small_sound_lanes_lower_the_floor_and_never_grow(self):
+        # "The sound expands lower. The picture is so tiny… and I can also not
+        # push it down if I want to compact it." The floor WAS a constant — the
+        # sum of every lane's full height — so the handle could never ask for
+        # less than the sound lanes' 44 + 108, whatever the user wanted. It is
+        # computed from the lane set on screen now, and these are the numbers
+        # that make the handle reach lower and hand the difference to the
+        # picture (sbeFitMonitors subtracts exactly these two terms).
+        s = self.r["tlSmall"]
+        self.assertEqual(s["floorOpen"], 280)
+        self.assertEqual(s["floorSmall"], 32 + 32 + 64 + 18 + 20)
+        self.assertEqual(s["floorOpen"] - s["floorSmall"], 114)
+        self.assertEqual(s["roofOpen"], 638)
+        self.assertEqual(s["roofSmall"], 32 + 56 + 120 + 18 + 20)
+        # Nothing on screen is small, so an unasked question means "as drawn".
+        self.assertEqual([s["floorNow"], s["roofNow"]],
+                         [s["floorOpen"], s["roofOpen"]])
+        # A LANE THAT IS SUPPOSED TO BE THIN NEVER TAKES A DRAGGED PIXEL —
+        # otherwise "compact" lasts until the first drag.
+        self.assertEqual(s["lanesSmall"]["alane"], 18)
+        self.assertEqual(s["lanesSmall"]["wave"], 20)
+        self.assertEqual(s["lanesSmallDragged"]["alane"], 18)
+        self.assertEqual(s["lanesSmallDragged"]["wave"], 20)
+        # ...and the 200px that lane could not take was not dropped: the
+        # picture and the overlay took it, up to their own caps.
+        self.assertEqual(s["lanesSmallDragged"]["track"], 120)
+        self.assertEqual(s["lanesSmallDragged"]["ov"], 56)
+        # Both ends of the clamp move with the lane set.
+        self.assertEqual(s["clampSmall"], [s["floorSmall"], s["roofSmall"]])
+
     def test_the_sound_takes_the_biggest_share_because_that_was_the_ask(self):
         g = self.r["laneGain"]
         self.assertEqual(sum(g.values()), 100)
@@ -4980,12 +5374,18 @@ class TheTimelineIsResizable(unittest.TestCase):
     # ---- where the preference lives -------------------------------------
     def test_the_height_survives_a_reload_and_is_clamped_on_the_way_back(self):
         p = self.r["tlPref"]
-        self.assertEqual(p["fresh"], 280)          # nothing stored → the floor
-        self.assertEqual(p["stored"], "392")
-        self.assertEqual(p["restored"], 392)       # what the next tab reads
-        self.assertEqual(p["absurd"], 638)         # a stored screenful is capped
-        self.assertEqual(p["junk"], 280)           # ...and junk is the floor
+        # PICTURE MODE (the default): the thin lanes' own ends — floor 166,
+        # roof 246 — not the full-height 280 / 638, which are sound mode's.
+        self.assertEqual(p["fresh"], 166)          # nothing stored → the floor
+        self.assertEqual(p["stored"], "200")
+        self.assertEqual(p["restored"], 200)       # what the next tab reads
+        self.assertEqual(p["absurd"], 246)         # a stored screenful is capped
+        self.assertEqual(p["junk"], 166)           # ...and junk is the floor
         self.assertEqual(p["keys"], ["phos_sbe_tl_h"])
+        self.assertEqual(p["soundFresh"], 638)     # sound mode starts at the roof
+        self.assertEqual(p["soundKeys"], ["phos_sbe_tl_h", "phos_sbe_tl_h_sound"])
+        self.assertEqual(p["soundRestored"], 400)
+        self.assertEqual(p["pictureAfter"], 200)   # untouched by sound mode's write
 
     def test_the_height_is_a_view_preference_and_NOT_sequence_data(self):
         # It is not in the save payload, so a drag cannot bump the document's
@@ -4993,8 +5393,9 @@ class TheTimelineIsResizable(unittest.TestCase):
         # else's screen. localStorage is where every other view preference in
         # this panel already lives.
         self.assertEqual(self.r["tlIsNotInTheSave"], [-1, -1, -1])
-        self.assertIn("localStorage.getItem('phos_sbe_tl_h')", self.src)
-        self.assertIn("localStorage.setItem('phos_sbe_tl_h'", self.src)
+        self.assertIn("localStorage.getItem(sbeTlPrefKey())", self.src)
+        self.assertIn("localStorage.setItem(sbeTlPrefKey()", self.src)
+        self.assertIn("'phos_sbe_tl_h_sound' : 'phos_sbe_tl_h'", self.src)
         # The server's document model has never heard of it.
         model = (Path(__file__).resolve().parent
                  / "storyboard_editor.py").read_text(encoding="utf-8")
@@ -5013,9 +5414,12 @@ class TheTimelineIsResizable(unittest.TestCase):
         # below it: sbeFitMonitors budgets against every child of the column
         # it can measure, so a grip with a height of its own would have been
         # paid for out of the picture.
-        transport = self.src[self.src.index('<div class="sbe-transport">'):]
-        transport = transport[:transport.index("<div class=\"sbe-tl\"")]
-        self.assertIn('id="sbeTlGrab"', transport)
+        # The grab hangs below the TOOL ROW (the clip bar and the timeline's
+        # own controls, one row) — the transport row it used to live in went
+        # under the Program monitor.
+        toolrow = self.src[self.src.index('<div class="sbe-toolrow" id="sbeToolRow">'):]
+        toolrow = toolrow[:toolrow.index("<div class=\"sbe-tl\"")]
+        self.assertIn('id="sbeTlGrab"', toolrow)
         css = self.src[self.src.index(".sbe-tl-grab {"):]
         css = css[:css.index(".sbe-tl-grab:focus-visible {")]
         self.assertIn("position: absolute", css)
@@ -5296,12 +5700,19 @@ class TheLevelLineTeachesItself(unittest.TestCase):
         self.assertIn("w.len + 1e-6", fn)
         insp = extract_function("sbePaintInspector", self.src)
         self.assertIn("sbeAddPointAtPlayhead()", insp)
-        self.assertIn("sbeClearPoints()", insp)
+        # CLEARING THEM IS ON THE CLIP BAR — the owner asked for "some kind of
+        # delete button for the anchors of the audio", and the inspector's
+        # version only appeared once there was something to clear, which is a
+        # button nobody could know existed.
+        self.assertIn('id="sbeCbPoints"', self.src)
+        self.assertIn('onclick="sbeClearPoints()"', self.src)
+        self.assertIn("level anchors", extract_function("sbeCbarModel", self.src))
         # A linked strip says what to do instead of offering a refusing button.
         self.assertIn("unlink the sound to shape its", insp)
 
     def test_the_legend_lists_the_gestures_that_actually_exist(self):
-        legend = self.r["legend"]
+        # The rows live in the shortcut table the legend draws.
+        legend = (ROOT / "webapp" / "js" / "shortcuts.js").read_text(encoding="utf-8")
         for phrase in ("click the yellow line", "drag it to set",
                        "right-click it to remove", "top edge"):
             self.assertIn(phrase, legend)
@@ -5498,7 +5909,7 @@ class TheHeaderIsOneRow(unittest.TestCase):
         self.assertIn("classList.toggle('primary'", self.src)
         # ...and every editor row that hosts buttons cancels the stretch.
         for rule in (".sbe-head .ghost-btn, .sbe-head .primary {",
-                     ".sbe-transport .primary {",
+                     ".sbe-toolrow .ghost-btn, .sbe-toolrow .primary {",
                      ".sbe-recover .ghost-btn, .sbe-recover .primary {",
                      ".sbe-vers-new .primary {"):
             self.assertIn(rule, self.src, "%s is gone — the row it styled "
@@ -5510,15 +5921,14 @@ class TheHeaderIsOneRow(unittest.TestCase):
                           "button stretch" % rule)
 
     def test_the_two_rows_the_calm_layout_added_cannot_wrap_either(self):
-        # The transport is the other flex row that gained controls, and the
-        # gutter is a fixed column beside a scroller. Measured at 1100px: the
-        # transport is 34px and one row, the gutter 124px.
-        t = self.src[self.src.index("\n    .sbe-transport {"):]
+        # The tool row is the other flex row with controls on it, and the
+        # gutter is a fixed column beside a scroller. The tool row does NOT
+        # wrap: the clip bar inside it overflows into its More menu instead
+        # (see TheClipBar), so the row is 28px at every width.
+        t = self.src[self.src.index("\n    .sbe-toolrow {"):]
         t = t[:t.index("}")]
-        self.assertIn("flex-wrap: wrap", t)   # it MAY wrap: it is the row that
-        # has somewhere to go — nothing below it is pinned to the viewport, and
-        # sbeFitMonitors measures whatever height it ends up with. Stated here
-        # so the difference from the header is a decision, not an oversight.
+        self.assertIn("display: flex", t)
+        self.assertNotIn("flex-wrap: wrap", t)
         g = self.src[self.src.index("\n    .sbe-gutter {"):]
         g = g[:g.index("}")]
         self.assertIn("flex: 0 0 124px", g)
@@ -5594,13 +6004,14 @@ class TheCalmChrome(unittest.TestCase):
         self.assertIn("document.addEventListener('click', sbePopGlobal, true);",
                       self.src)
 
-    def test_escape_closes_the_menu_before_the_document(self):
-        # Esc has always closed the document here; a menu is one layer above
-        # it, and closing the whole cut out from under an open menu is the
-        # surprise this ordering exists to prevent.
+    def test_escape_closes_the_menu_and_never_the_document(self):
+        # A menu is the thing on top, so Escape closes it first. And Escape
+        # no longer closes the document at all: the Escape that closed the
+        # Docs (or cleared a selection) used to shut the film behind it.
         i = self.src.index("if (sbePopAnyOpen()) { sbePopCloseAll(''); return; }")
-        j = self.src.index("sbeClose();", i)
-        self.assertLess(i, j)
+        branch = self.src[i:self.src.index("RENDER HAS A KEY", i)]
+        self.assertNotIn("sbeClose();", branch)
+        self.assertIn("return;", branch)
 
     def test_the_soundtracks_row_became_its_lane_header(self):
         # It was a full-width strip at the top of the column, four inches from
@@ -5645,6 +6056,396 @@ class TheCalmChrome(unittest.TestCase):
         self.assertIn("' of ' + n", fn)
 
 
+class TheClipBar(unittest.TestCase):
+    """The verbs an editor uses all day, above the tracks, always on screen.
+
+    "It's really hard when you are using the editor of Phosphene to use the
+    basic tools you actually need to use all the time, for instance, unlink
+    and link audio... We have some, but they are hidden inside that menu, the
+    toggle menu on the right. That is not a good use."
+
+    Every one of them already existed, in the inspector, in a 212px column, in
+    the corner of the screen, drawn identically to a brightness slider — and
+    four of them appeared and disappeared with the clip's state, which is how
+    "Delete sound" managed to be invisible on almost every clip. What is gated
+    here is the SPLIT: the verbs are on the bar, the properties are in the
+    inspector, and neither drifts back into the other.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.src = panel_source()
+        cls.html = panel_html_render()
+        cls.bar = cls.html[cls.html.index('id="sbeCbar"'):]
+        cls.bar = cls.bar[:cls.bar.index('id="sbeTlWrap"')]
+
+    # ---- the ten verbs ---------------------------------------------------
+    VERBS = (
+        ("sbeCbSplit", "sbeSplitHere()", "Split"),
+        ("sbeCbLift", "sbeLiftSelected()", "Lift"),
+        ("sbeCbRipple", "sbeRippleSelected()", "Ripple delete"),
+        ("sbeCbDup", "sbeDuplicateSel()", "Duplicate"),
+        ("sbeCbLink", "sbeToggleAudioLink()", "Unlink sound"),
+        ("sbeCbResync", "sbeResyncSel()", "Resync sound"),
+        ("sbeCbMute", "sbeToggleClipMute()", "Mute sound"),
+        ("sbeCbDelSound", "sbeDeleteStripSel()", "Delete sound"),
+        ("sbeCbPoints", "sbeClearPoints()", "Clear points"),
+        ("sbeCbLock", "sbeToggleLock()", "Lock"),
+        ("sbeCbFaceFix", "sbeFaceFixSel()", "Face Fix ×2"),
+    )
+
+    def test_every_verb_is_in_the_real_markup_with_a_handler(self):
+        for cid, act, label in self.VERBS:
+            el = extract_element(cid, self.src)
+            self.assertIn('onclick="%s"' % act, el, cid)
+            # the label, read off the row itself (extract_element hands back
+            # the opening tag, and the label is the element's own content)
+            row = self.bar[self.bar.index('id="%s"' % cid):]
+            self.assertIn("<b>%s</b>" % label, row[:400], cid)
+            # ...and the handler is on the GLOBAL scope. editor.js is a module,
+            # so an inline onclick that resolves to a module-private name is a
+            # button that silently does nothing at event time — the v4.9.0
+            # regression, and exactly what lint_webapp.mjs is for.
+            self.assertIn(act.rstrip("()"), self.src)
+
+    def test_the_order_is_the_order_a_cutter_works_in(self):
+        # Cut, then remove, then the sound, then the pin. The sound group is
+        # second because it is the one he named: "I find myself all the time
+        # un-syncing and syncing."
+        pos = [self.bar.index('id="%s"' % cid) for cid, _, _ in self.VERBS]
+        self.assertEqual(pos, sorted(pos))
+
+    def test_the_bar_sits_above_the_tracks_and_below_the_monitors(self):
+        # Where Resolve and Final Cut both put it, and where the owner pointed:
+        # "we have an empty corner that we can use in the upper part of the
+        # timeline".
+        for a, b in (('id="sbeMonitors"', 'id="sbeCbar"'),
+                     ('id="sbeCbar"', 'id="sbeTlGrab"'),
+                     ('id="sbeTlGrab"', 'id="sbeTlWrap"')):
+            self.assertLess(self.html.index(a), self.html.index(b), (a, b))
+
+    def test_a_verb_that_cannot_fire_is_DISABLED_and_says_why(self):
+        # The whole difference between this and the inspector. A control that
+        # is not on screen teaches nothing and reads as a feature that does
+        # not exist; a disabled one carries the sentence that would make it
+        # work. sbePaintCbar sets `disabled` from `why` and puts `why` in the
+        # title, so there is no way to have one without the other.
+        fn = extract_function("sbePaintCbar", self.src)
+        self.assertIn("el.disabled = !!r.why", fn)
+        self.assertIn("el.title = r.why || r.title", fn)
+        model = extract_function("sbeCbarModel", self.src)
+        # ...and with nothing selected, every row that needs a clip has one.
+        self.assertIn("const noSel", model)
+        self.assertIn("Shift-click a second one", model)
+
+    def test_split_keeps_up_with_the_playhead_and_not_just_the_selection(self):
+        # THE ONE ROW WHOSE STATE FOLLOWS THE PLAYHEAD. `sbeSeek` and the
+        # playback loop repaint the head and the time and deliberately not the
+        # rest of the screen — so Split sat greyed out over the middle of a
+        # shot a scrub had just landed in, and stayed that way until the next
+        # real edit. Caught in the browser while shooting the screenshots.
+        self.assertIn("sbeCbarPlayhead()",
+                      extract_function("sbePaintHead", self.src))
+        fn = extract_function("sbeCbarPlayhead", self.src)
+        self.assertIn("sbeSplitWhy()", fn)
+        self.assertIn("el.disabled", fn)
+        # One definition of the reason, shared by the full paint and the
+        # per-frame refresh, or the two would drift.
+        self.assertIn("sbeSplitWhy()", extract_function("sbeCbarModel", self.src))
+        why = extract_function("sbeSplitWhy", self.src)
+        self.assertIn("sbeClipAt(SBE.clips, SBE.playhead)", why)
+        self.assertIn("under.locked", why)
+        self.assertIn("SBE_MIN_CLIP", why)
+
+    def test_the_readout_says_what_is_about_to_be_acted_on(self):
+        # "Ripple delete" over an unnamed selection is the one gesture nobody
+        # should have to guess at, and multi-select made the question real.
+        self.assertIn('id="sbeCbarWho"', self.bar)
+        model = extract_function("sbeCbarModel", self.src)
+        self.assertIn("clips selected", model)
+        self.assertIn("Nothing selected", model)
+
+    def test_the_three_toggles_swap_their_icon_as_well_as_their_label(self):
+        model = extract_function("sbeCbarModel", self.src)
+        for icon in ("#ic-link", "#ic-unlink", "#ic-sound", "#ic-mute",
+                     "#ic-lock", "#ic-unlock"):
+            self.assertIn(icon, model, icon)
+            self.assertIn('id="%s"' % icon.lstrip("#"), self.html, icon)
+
+    # ---- the split, and that it stays split ------------------------------
+    PROMOTED = ("sbeToggleLock()", "sbeDuplicateSel()", "sbeLiftSelected()",
+                "sbeRippleSelected()", "sbeToggleAudioLink()",
+                "sbeToggleClipMute()", "sbeDeleteStripSel()",
+                "sbeResyncSel()", "sbeClearPoints()")
+
+    def test_the_promoted_verbs_are_NOT_also_in_the_inspector(self):
+        # Not tidiness: two copies of one control is two chances for one of
+        # them to go on offering a verb the model has stopped accepting, and
+        # it puts the clutter back that this whole pass removed.
+        insp = extract_function("sbePaintInspector", self.src)
+        for act in self.PROMOTED:
+            self.assertNotIn(act, insp, act)
+
+    def test_the_inspector_keeps_the_properties_and_says_that_it_has(self):
+        insp = extract_function("sbePaintInspector", self.src)
+        for keep in ("sbeSpeedCommit", "sbeFadeCommit", "sbeBrightCommit",
+                     "sbeRetakeSel()", "sbeTxCommit", "sbeOvTextCommit",
+                     "sbeFramingCommit", "sbeAudioFadeCommit",
+                     "sbeAddPointAtPlayhead()"):
+            self.assertIn(keep, insp, keep)
+        # "You can leave it if the person wants to dig into the options and
+        # then put advanced options there."
+        self.assertIn("Advanced", insp)
+        self.assertIn("the bar above the tracks", insp)
+        self.assertIn(".sbe-sect-lead", self.src)
+
+    def test_nothing_still_points_the_user_at_the_inspector_for_a_moved_verb(self):
+        # Four toasts said "in the inspector" about buttons that are not there
+        # any more. A stale address is worse than no address.
+        js = "\n".join((ROOT / "webapp" / "js" / f).read_text(encoding="utf-8")
+                        for f in ("editor.js",))
+        for line in js.splitlines():
+            if line.lstrip().startswith("//"):
+                continue
+            self.assertNotIn("in the inspector", line, line.strip()[:80])
+
+    # ---- it may not push the tracks down ---------------------------------
+    def test_the_bar_overflows_and_NEVER_wraps(self):
+        # `flex-wrap: wrap` would answer a narrow pane with a second row, and
+        # a second row is height sbeFitMonitors then takes off the PICTURE.
+        css = self.src[self.src.index("    .sbe-cbar {"):]
+        css = css[:css.index(".sbe-toolrow {")]
+        self.assertIn("flex-wrap: nowrap", css)
+        self.assertIn("overflow: hidden", css)
+        # ...and the fold is restated, because `display: inline-flex` on the
+        # class beats the UA's `[hidden] { display: none }` — the overflow
+        # button stayed on screen with the attribute set.
+        self.assertIn(".sbe-cbar-btn[hidden]", css)
+        self.assertIn("display: none !important", css)
+        fit = extract_function("sbeCbarFit", self.src)
+        self.assertIn("bar.scrollWidth <= bar.clientWidth", fit)
+        self.assertIn("sbeCbarMenu", fit)
+        # Measured once per width-and-label change, not once per painted frame:
+        # sbePaint runs on every frame of a drag and of playback.
+        self.assertIn("bar.dataset.fit === sig", fit)
+        # Every button comes HOME when the pane is widened — one copy of each
+        # control, in its stamped order, never two.
+        self.assertIn("dataset.ord", fit)
+
+    def test_the_overflow_panel_and_the_context_menu_can_both_be_shut(self):
+        # A fixed panel that Escape and a click elsewhere do not know about is
+        # a panel that sits over the film until the page is reloaded.
+        self.assertIn("const SBE_POPS = [", self.src)
+        pops = self.src[self.src.index("const SBE_POPS = ["):]
+        pops = pops[:pops.index("]")]
+        for p in ("sbeCbarMenu", "sbeCtxMenu"):
+            self.assertIn(p, pops, p)
+        for p in ("sbeCbarMenu", "sbeCtxMenu"):
+            self.assertIn('id="%s"' % p, self.html, p)
+
+
+class SelectingSeveralClips(unittest.TestCase):
+    """"You should be able to select, hit Shift, and select multiple clips and
+    move them together. It's very important."
+
+    The arithmetic is in `TimelineClient`; this is the wiring and the two
+    modifiers that were already taken by the same gesture.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.src = panel_source()
+        cls.down = extract_function("sbeOnTrackDown", cls.src)
+        cls.up = extract_function("sbeOnTrackUp", cls.src)
+
+    def test_the_primary_stays_a_single_id_and_the_set_contains_it(self):
+        # `SBE.sel` is read at fifty-odd call sites and every one of them means
+        # "the one clip the inspector is describing". The set is additional,
+        # and its invariant is repaired in ONE place rather than at every
+        # assignment — a set maintained by hand at each of them is a set that
+        # is stale by the next feature.
+        norm = extract_function("sbeSelNormalise", self.src)
+        self.assertIn("SBE.selSet", norm)
+        self.assertIn("s = [String(SBE.sel)]", norm)
+        self.assertIn("sbeSelNormalise()", extract_function("sbePaint", self.src))
+
+    def test_shift_takes_the_range_and_cmd_toggles_one(self):
+        self.assertIn("sbeSelectRange(id)", self.down)
+        self.assertIn("toggle = id", self.down)
+        # ⌘ CANNOT BE DECIDED ON POINTERDOWN: the same chord is ripple-drag.
+        # It is resolved on pointerup, and only if the pointer never moved.
+        self.assertIn("d.toggle", self.up)
+        self.assertIn("!d.moved", self.up)
+        self.assertIn("sbeSelectToggle(d.toggle)", self.up)
+
+    def test_a_click_inside_a_selection_keeps_it_so_the_block_can_be_dragged(self):
+        # The rule Premiere and Resolve share, and the reason a group move is
+        # possible at all. A click that does not drag then collapses to the
+        # one clip, on pointerup.
+        self.assertIn("collapse = id", self.down)
+        self.assertIn("sbeSelectOne(d.collapse)", self.up)
+
+    def test_the_drag_becomes_a_block_slide_and_ONE_undo_step(self):
+        self.assertIn("'movemany'", self.down)
+        self.assertIn("sbeSelIds()", self.down)
+        move = extract_function("sbeOnTrackMove", self.src)
+        self.assertIn("sbeMoveGroup(SBE.clips", move)
+        # The drag registers its single undo step in sbeOnTrackUp from the
+        # pointerdown snapshot, exactly as a one-clip drag does.
+        self.assertIn("SBE.undo.push(d.before)", self.up)
+
+    def test_a_group_verb_is_one_undo_step_and_reports_what_it_skipped(self):
+        fn = extract_function("sbeMutateEach", self.src)
+        self.assertIn("SBE.undo.push(before)", fn)
+        self.assertEqual(fn.count("SBE.undo.push("), 1)
+        # A locked member does not abort the rest — refusing the whole gesture
+        # over one pinned shot would make a multiple selection unusable — and
+        # the ones left alone are named.
+        self.assertIn("why.length", fn)
+        self.assertIn("were left as they were", fn)
+        # Nothing landed means nothing is KEPT: the refusals ran against the
+        # live array, so the snapshot goes back rather than being trusted.
+        self.assertIn("sbeRestore(before)", fn)
+
+    def test_a_mixed_selection_converges_rather_than_inverting_clip_by_clip(self):
+        # Pressing Lock over three shots where one is already pinned has to end
+        # with three pinned shots — that is what the button says. Per-clip
+        # inversion would leave the row half on and half off and the label
+        # lying about both.
+        for fn in ("sbeToggleLock", "sbeToggleAudioLink"):
+            body = extract_function(fn, self.src)
+            self.assertIn("ids", body)
+        self.assertIn("const on = !first.locked",
+                      extract_function("sbeToggleLock", self.src))
+
+    def test_empty_track_and_escape_both_clear_it(self):
+        # There is always an obvious way back to nothing, which is what makes
+        # ⌘-click and shift-click safe to experiment with.
+        self.assertIn("SBE.selSet = []", self.down)
+        keys = _editor_keydown(self.src)
+        self.assertIn("sbeSelectAll()", keys)
+        self.assertIn("sbeSelectNone()", keys)
+        # ...and Escape never closes the document: a second Escape used to
+        # throw the editor out of the timeline, and so did the Escape that
+        # closed the Docs on top of it. Closing is the ⋯ menu's Close.
+        esc = keys[keys.index("ev.key === 'Escape'"):]
+        esc = esc[:esc.index("RENDER HAS A KEY")]
+        self.assertIn("sbeSelectNone()", esc)
+        self.assertNotIn("sbeClose()", esc)
+
+    def test_the_selection_is_drawn_on_both_lanes_and_the_primary_is_marked(self):
+        # With four shots selected the inspector still describes ONE of them,
+        # so the primary has to be pickable out of the row.
+        trk = extract_function("sbePaintTrack", self.src)
+        self.assertIn("selMap[String(c.id)]", trk)
+        self.assertIn("is-primary", trk)
+        self.assertIn(".sbe-clip.is-sel.is-primary", self.src)
+        self.assertIn("aSelMap[String(c.id)]",
+                      extract_function("sbePaintAudioLane", self.src))
+
+
+class TheEverydayGesturesThatWereMissing(unittest.TestCase):
+    """The audit that came with the toolbar: "find other things that you
+    overlook in the basic design of this thing so we actually have a
+    functional editor." These are the ones that were cheap and safe."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.src = panel_source()
+        cls.keys = _editor_keydown(cls.src)
+
+    def test_cmd_s_SAVES_and_does_not_split_the_shot(self):
+        # It has been documented as the manual save since the save model was
+        # written — docs/EDITOR_SAVE_MODEL.md §1, "`Save` (and ⌘S)" — and it
+        # has never done it: the bare-S split took the key first with no
+        # modifier guard, so the one chord every person on a Mac presses to
+        # make their work safe SPLIT THE SHOT under the playhead.
+        i = self.keys.index("sbeSaveNow()")
+        j = self.keys.index("sbeSplitHere()")
+        self.assertLess(i, j)
+        self.assertIn("(ev.metaKey || ev.ctrlKey) && (ev.key === 's'", self.keys)
+        self.assertIn("(ev.key === 's' || ev.key === 'S') && !ev.metaKey",
+                      self.keys)
+
+    def test_the_arrows_nudge_the_selection_and_still_move_the_playhead(self):
+        self.assertIn("ev.altKey && (ev.key === 'ArrowLeft'", self.keys)
+        self.assertIn("sbeNudge(", self.keys)
+        # The bare arrows stay the playhead's — the more frequent of the two.
+        self.assertLess(self.keys.index("sbeNudge("),
+                        self.keys.index("if (ev.key === 'ArrowLeft')"))
+        fn = extract_function("sbeNudge", self.src)
+        self.assertIn("sbeGroupLimits(", fn)
+        # A CLAMPED NUDGE SAYS SO rather than burning a revision per keypress:
+        # it produces no change, and sbeMutate would still stamp the document
+        # dirty, push an undo step that undoes nothing and queue a save.
+        self.assertIn("nothing to give", fn)
+
+    def test_a_chord_is_let_through_a_field_because_it_cannot_be_a_character(self):
+        # FILM-36: dragging the Brightness or Zoom slider leaves focus on a
+        # range input, and the field guard used to hide ⌘S/⌘Z/⌘⇧Z/⌘E behind
+        # it entirely — the browser's own "Save Page As" fired instead, or
+        # nothing did. These four chords are let through BEFORE the field
+        # guard because a modifier held is never someone typing a character.
+        before_guard = self.keys[:self.keys.index("if (inField) return;")]
+        self.assertIn("sbeSaveNow()", before_guard)
+        self.assertIn("sbeUndo()", before_guard)
+        self.assertIn("sbeRedo()", before_guard)
+        self.assertIn("sbeRenderFilm()", before_guard)
+        # ...and it is scoped to those four, not every modifier chord — a
+        # text field's own ⌘A (select its text) or ⌘Z (undo typing) must
+        # keep working, which a blanket "any modifier" exemption would break.
+        self.assertNotIn("sbeSelectAll()", before_guard)
+        self.assertNotIn("sbeInspectToggle()", before_guard)
+
+    def test_space_plays_from_a_range_or_checkbox_but_not_a_text_field(self):
+        # A range or checkbox never uses Space to enter TEXT, so play/pause
+        # is not competing with anything the field would otherwise do with
+        # it — unlike a text input, where Space has to keep typing a space.
+        before_guard = self.keys[:self.keys.index("if (inField) return;")]
+        self.assertIn("t.type === 'range' || t.type === 'checkbox'", before_guard)
+        self.assertIn("sbeTogglePlay()", before_guard)
+
+    def test_home_end_and_the_zoom_keys_exist(self):
+        for bit in ("ev.key === 'Home'", "ev.key === 'End'", "sbeZoom("):
+            self.assertIn(bit, self.keys, bit)
+
+    def test_the_sound_pair_has_keys_and_the_legend_names_them(self):
+        self.assertIn("sbeToggleAudioLink()", self.keys)
+        self.assertIn("sbeResyncSel()", self.keys)
+        # The legend draws the ONE shortcut table (webapp/js/shortcuts.js);
+        # the words it teaches are that table's rows.
+        self.assertIn("shortcutRows(['editor', 'editor-mouse']",
+                      extract_function("sbeKeysLegend", self.src))
+        table = (ROOT / "webapp" / "js" / "shortcuts.js").read_text(encoding="utf-8")
+        for bit in ("'shift+l'", "'shift+r'", "'home', 'end'", "Nudge the selected clips",
+                    "Right-click", "Select the range"):
+            self.assertIn(bit, table, bit)
+
+    def test_a_right_click_answers_with_the_editor_and_not_the_browser(self):
+        fn = extract_function("sbeCtxOpen", self.src)
+        self.assertIn("ev.preventDefault()", fn)
+        self.assertIn("sbeCbarModel()", fn)      # one table, never a second copy
+        self.assertIn("if (r.why) continue", fn)  # only what can actually fire
+        # A hole's only two verbs.
+        self.assertIn("Close this hole", fn)
+        self.assertIn("sbeGenOpen(", fn)
+        # ...and it is clamped inside the window, at the pointer.
+        self.assertIn("window.innerWidth", fn)
+        self.assertIn("window.innerHeight", fn)
+        wire = self.src[self.src.index("function sbeWire()"):]
+        self.assertIn("track.addEventListener('contextmenu', sbeCtxOpen)", wire)
+
+    def test_a_hole_can_be_closed_and_the_sound_travels_with_it(self):
+        fn = extract_function("sbeCloseGapAt", self.src)
+        self.assertIn("sbeHoles(SBE.clips)", fn)
+        self.assertIn("after._gap = 0", fn)
+        # A CLOSE IS A HEAL, NOT A DRAG — the same reasoning sbeAdoptGaps gives
+        # for the sub-frame version of exactly this operation.
+        self.assertIn("sbeSyncMark(", fn)
+        self.assertIn("sbeSyncCarry(", fn)
+        self.assertLess(fn.index("sbeSyncMark("), fn.index("sbeSyncCarry("))
+
+
 class TimelineMarkup(unittest.TestCase):
     """The controls the JS drives have to EXIST, in the real markup."""
 
@@ -5686,10 +6487,26 @@ class TimelineMarkup(unittest.TestCase):
         fn = extract_function("sbeAuto", self.src)
         self.assertIn("THROWS AWAY", fn)
 
-    def test_the_render_discloses_that_the_concat_closes_gaps(self):
+    def test_the_render_warns_about_holes_without_blocking_it(self):
+        # FILM-27: the assembler now pads a hole with black at its exact
+        # length instead of closing it, so a native confirm() gating the
+        # render on "are you sure" was the wrong weight — and the wrong
+        # surface — for "this will show some black". The warning is in-app
+        # and does not stop the render.
+        # FILM-28: gaps_note is read once the JOB finishes (sbeRenderFinish),
+        # not in sbeRenderFilm itself, which now only starts it — the
+        # disclosure has to hold across the whole chain, same as the
+        # "never navigates" claim above.
         fn = extract_function("sbeRenderFilm", self.src)
-        self.assertIn("gaps_note", fn)
-        self.assertIn("CONCATENATES", fn)
+        self.assertIn("sbeNoticeHoles", fn)
+        self.assertNotIn("confirm(", fn)
+        chain = fn + extract_function("sbeRenderPoll", self.src) \
+            + extract_function("sbeRenderFinish", self.src)
+        self.assertIn("gaps_note", chain)
+        self.assertNotIn("confirm(", chain)
+        notice = extract_function("sbeNoticeHoles", self.src)
+        self.assertIn("play as black", notice)
+        self.assertIn("phos-toast-action", notice)
 
     def test_generate_shows_the_params_that_will_ACTUALLY_render(self):
         # make_job silently drops any form field it does not name, so the
@@ -5699,12 +6516,34 @@ class TimelineMarkup(unittest.TestCase):
         self.assertIn("r.params", fn)
         self.assertIn("sbeGenParams", fn)
 
+    def test_a_retake_sends_its_own_path_not_just_its_id(self):
+        # FILM-35: the server used to resolve retake_of by loading the SAVED
+        # edit.json and looking the clip id up in it — a clip split,
+        # duplicated or added since the last manual Save was not in that
+        # file yet, and the retake refused for a clip plainly on screen. The
+        # client already has the path; sending it is what lets the server
+        # skip the stale file entirely.
+        self.assertIn("retakePath: c.path", extract_function("sbeRetakeSel", self.src))
+        open_fn = extract_function("sbeGenOpen", self.src)
+        self.assertIn("_sbeRetakePath = (opts && opts.retakePath) || ''", open_fn)
+        submit = extract_function("sbeGenSubmit", self.src)
+        self.assertIn("fd.set('retake_path', _sbeRetakePath)", submit)
+
+    def test_the_landed_take_poll_no_longer_waits_for_a_clean_timeline(self):
+        # FILM-35: unsaved is the NORMAL state of a timeline someone is
+        # cutting — gating this on `!SBE.dirty` meant the notice almost
+        # never fired. sbeLoad(true) is already safe while dirty (it never
+        # adopts the arrangement, only refreshes facts around it).
+        tick = extract_function("sbeTick", self.src)
+        self.assertIn("if (SBE.awaitingClip && !SBE.drag && !SBE.saving) {", tick)
+        self.assertNotIn("SBE.awaitingClip && !SBE.dirty", tick)
+
     def test_the_preview_prefers_the_proxy_and_labels_the_fallback(self):
         fn = extract_function("sbeClipUrl", self.src)
         self.assertIn("c.proxy", fn)
         self.assertIn("proxy_url", panel_source()[:0] + "proxy_url")
         badge = extract_function("sbeShowFrameAt", self.src)
-        self.assertIn("SOURCE (slow", badge)
+        self.assertIn("SOURCE — slow to seek", badge)
 
     # The three below are SOURCE assertions, not behaviour, because the thing
     # under test is CSS and there is no way to run CSS in node. They are here
@@ -5750,16 +6589,47 @@ class TimelineMarkup(unittest.TestCase):
         # (the test above still counts exactly one video in it); the source is
         # a second element with its own video, still, badge and empty state.
         row = self.src[self.src.index('<div class="sbe-monitors" id="sbeMonitors">'):]
-        row = row[:row.index('<div class="sbe-transport">')]
+        row = row[:row.index('<!-- ============== THE CLIP BAR')]
         self.assertIn('id="sbeSrcVideo"', row)
         self.assertIn('id="sbeSrcStill"', row)
         self.assertIn('id="sbeSrcAddBtn"', row)
         self.assertIn('id="sbeStage"', row)                 # the program
-        self.assertIn("Click a clip to preview it.", row)
+        self.assertIn("Drop a clip here to preview", row)
         # Two monitors, two videos — and no third one that nobody owns.
         self.assertEqual(row.count("<video id="), 2)
         # The source is a player, not a second editor: no track, no trim.
         self.assertNotIn("sbe-track", row)
+
+    def test_the_source_monitor_collapses_while_nothing_is_loaded(self):
+        # FILM-37: "Nothing loaded" used to sit in the full 16:9 box
+        # regardless — about a third of the row, permanently. Collapsed to a
+        # 64px rail while empty, and it can never disagree with the bar's
+        # own "Nothing loaded" text: both read the exact same `!row`.
+        css = self.src[self.src.index(".sbe-monitors > .sbe-mon-src {"):]
+        css = css[:css.index(".sbe-monitors > .sbe-mon-prog")]
+        self.assertIn(".sbe-mon-src.is-empty { width: 64px; }", css)
+        fn = extract_function("sbePaintSource", self.src)
+        self.assertIn("mon.classList.toggle('is-empty', !row)", fn)
+        # The toggle happens before the SAME `if (!row)` branch that writes
+        # "Nothing loaded" — one test of the state, not two that could drift.
+        self.assertLess(fn.index("classList.toggle('is-empty'"),
+                        fn.index("'Nothing loaded'"))
+
+    def test_the_inspector_is_a_drawer_below_1600px(self):
+        # FILM-37: at 1366-1440px the rail shared width with the monitors
+        # through a JS-computed --sbe-rail-w that measured about 210px there
+        # — the "2x" speed control clipped inside it. Below 1600px it comes
+        # out of that row's width budget entirely (position: fixed) at a
+        # width wide enough to read every control: 320px.
+        css = self.src[self.src.index("@media (max-width: 1599px) {\n      .sbe-rail {"):]
+        css = css[:css.index("/* ---- the stage:")]
+        self.assertIn("position: fixed", css)
+        self.assertIn("width: 320px", css)
+        # It still toggles on the exact mechanism sbeInspectSet already
+        # flips — nothing about opening/closing it changed, only where an
+        # open one sits.
+        fn = extract_function("sbeInspectSet", self.src)
+        self.assertIn("rail.hidden = !SBE.inspect", fn)
 
     def test_only_one_monitor_ever_plays(self):
         # Two elements is two decoders only if both decode. sbePlay stops the
@@ -5926,7 +6796,7 @@ class TimelineMarkup(unittest.TestCase):
         # row it is sizing, or the budget becomes its own input. The timeline
         # is counted at its CSS floor for exactly that reason.
         fn = extract_function("sbeFitMonitors", self.src)
-        self.assertIn("SBE_TL_MIN_H", fn)
+        self.assertIn("sbeTlFloor()", fn)
         self.assertIn("clientHeight", fn)
         self.assertIn("sbeMonitorFit(", fn)
         self.assertIn("--sbe-prog-h", fn)
@@ -6021,7 +6891,12 @@ class TimelineMarkup(unittest.TestCase):
         self.assertNotIn("sbeTeardown()", wf)
         susp = extract_function("sbeSuspend", self.src)
         self.assertIn("sbeStop()", susp)                    # the picture stops
-        self.assertIn("sbeSave(true)", susp)                # the work is kept
+        # FILM-29: a tab switch is not the user pressing Save — it is the
+        # backup lane's job, same as sbeCloseDoc next to it. `sbeSave(true)`
+        # here would be a silent write to edit.json the owner explicitly
+        # refused ("autosave to edit.json" — docs/EDITOR_SAVE_MODEL.md §"Deliberately not built").
+        self.assertIn("sbeBackup(true)", susp)              # the work is kept…
+        self.assertNotIn("sbeSave(true)", susp)             # …without a silent manual save
         self.assertNotIn("SBE.open = false", susp)          # the document is not
 
     def test_the_document_only_closes_when_the_document_is_closed(self):
@@ -6043,7 +6918,7 @@ class TimelineMarkup(unittest.TestCase):
     def test_the_editor_tab_exists_and_is_always_reachable(self):
         # A tab with no board open is the whole point: "an editor that only
         # exists inside a storyboard is an editor most clips can never reach".
-        self.assertIn('<button data-workflow="editor">', self.src)
+        self.assertIn('<button data-workflow="editor"', self.src)
         self.assertIn(">Editor<", self.src)
         # It MUST be in the localStorage restore list or the tab never comes
         # back across a reload — the trap the comment beside it documents.
@@ -6069,6 +6944,22 @@ class TimelineMarkup(unittest.TestCase):
         self.assertNotIn("if (!SB.id) return", fn)
         self.assertIn("edDoc()", fn)         # last document, remembered
         self.assertIn("edRemember(want)", fn)
+
+    def test_opening_the_already_open_film_resumes_it_rather_than_reloading(self):
+        # FILM-16: falling through to `sbeLoad()` below is a NON-QUIET load,
+        # which always adopts the server's last SAVED document — so "Open in
+        # Editor" on the film already open (the rail's step 3, or coming back
+        # from Storyboard to check a prompt) silently threw away every edit
+        # since the last Save. sbeResume() re-reads QUIETLY, which protects
+        # unsaved work; this must be checked and returned from BEFORE the
+        # unconditional `sbeLoad()` a few lines down.
+        fn = extract_function("sbeOpen", self.src)
+        self.assertIn("if (SBE.open && SBE.id === want) { sbeResume(); return; }", fn)
+        self.assertLess(fn.index("SBE.id === want) { sbeResume(); return; }"),
+                        fn.index("sbeLoad();"))
+        # sbeResume, in turn, re-reads quiet — never the adopting load.
+        resume = extract_function("sbeResume", self.src)
+        self.assertIn("sbeLoad(true)", resume)
 
     def test_the_narrow_layout_stops_stretching_so_the_page_can_scroll(self):
         # .layout is `flex: 1 1 auto` in a flex body, so the breakpoint's
@@ -6104,7 +6995,7 @@ class TimelineMarkup(unittest.TestCase):
         shots = extract_function("edPoolLoadFilmShots", self.src)
         self.assertIn("'/storyboard/get?id='", shots)
 
-    def test_adding_a_clip_lands_it_on_the_TRACK_and_saves(self):
+    def test_adding_a_clip_lands_it_on_the_TRACK_and_backs_up(self):
         # Not on the board, and not in a chip row waiting to be placed: the
         # click said "put this in my film", so it goes on the timeline.
         fn = extract_function("edPoolAdd", self.src)
@@ -6112,7 +7003,11 @@ class TimelineMarkup(unittest.TestCase):
         self.assertIn("sbePlaceUnplaced", fn)
         self.assertIn("sbeFilmDuration(cs)", fn)          # a CLICK: at the END
         self.assertIn("sbeInsertAt(cs, item, at)", fn)    # a DROP: where it fell
-        self.assertIn("sbeSave(true)", fn)
+        # FILM-29: `sbeMutate` above already marked this dirty and queued the
+        # crash backup. A follow-up `sbeSave(true)` here was a second, silent
+        # write to edit.json the user never pressed Save for.
+        self.assertNotIn("sbeSave(true)", fn)
+        self.assertIn("sbeMutate(cs =>", fn)
 
     def test_adding_a_clip_from_another_film_uses_the_import_subset_param(self):
         # `only=` has been on the server since the import shipped and no
@@ -6141,6 +7036,32 @@ class TimelineMarkup(unittest.TestCase):
         # …and the first screenful does not wait for a callback, because
         # intersection callbacks do not run in an occluded tab.
         self.assertIn(".slice(0, 12)", obs)
+
+    def test_the_pool_plus_lands_at_the_playhead_not_always_the_end(self):
+        # FILM-40: "+" always meant "put this at the end" — a clip swapped
+        # in mid-cut meant a click here and then a drag all the way back to
+        # where you actually were. ⌥+click keeps the old behaviour for the
+        # one time "the end" is actually wanted.
+        fn = extract_function("edPoolPaint", self.src)
+        self.assertIn("edPoolAdd(' + i +\n        ', event.altKey ? undefined : SBE.playhead)", fn)
+
+    def test_the_empty_pool_does_not_contradict_a_timeline_that_has_clips(self):
+        # FILM-40: "This __SEQ__ has no rendered clips yet" while 9 clips
+        # sat on the timeline — a film cut from imported or Video-tab clips
+        # has nothing of its OWN in this pool source, which is a different,
+        # true sentence.
+        fn = extract_function("edPoolPaint", self.src)
+        self.assertIn("(SBE.clips || []).length", fn)
+        self.assertIn("Nothing left to add from this __SEQ__", fn)
+
+    def test_the_60_row_cap_has_a_way_past_it(self):
+        # FILM-40: "60 of 75 shown." with no way to see the rest.
+        fn = extract_function("edPoolPaint", self.src)
+        self.assertIn("edPoolShowAll()", fn)
+        self.assertIn("Show all ", fn)
+        show_all = extract_function("edPoolShowAll", self.src)
+        self.assertIn("ED.limit = Infinity", show_all)
+        self.assertIn("edPoolPaint()", show_all)
 
     # ---- relink ---------------------------------------------------------
     def test_the_relink_banner_says_how_many_and_offers_one_button(self):
@@ -6232,6 +7153,60 @@ class TimelineMarkup(unittest.TestCase):
         self.assertIn(".sbe-clip.is-slug", css)
         self.assertIn(".sbe-clip.is-still", css)
 
+    def test_a_video_clip_shows_a_poster_from_its_proxy_only(self):
+        # FILM-39: video clips had no filmstrip at all — one first-frame
+        # poster now, taken from the PROXY (never the original: a clip with
+        # no proxy is exactly the one flagged SLOW for the same reason, no
+        # fast seek), and never requested for offline media (that file is
+        # already known not to answer).
+        fn = extract_function("sbePaintTrack", self.src)
+        self.assertIn("kind === 'video' && c.proxy && !offline", fn)
+        self.assertIn("/storyboard/edit/poster?id=", fn)
+        self.assertIn("String(c.proxy).split('/').pop()", fn)
+        # The route is board-scoped like the proxy video route it mirrors —
+        # `id=` before `name=`, not a bare clip path.
+        route = fn[fn.index("/storyboard/edit/poster?id="):]
+        self.assertLess(route.index("&name="), route.index("&w="))
+
+    def test_the_two_clip_sound_lanes_are_not_both_called_A1(self):
+        # FILM-39: "Clip sound A" and "Clip sound B" were both labelled
+        # <i>A1</i> in the gutter — the one place a glance is supposed to
+        # tell the two lanes apart.
+        gutter = self.src[self.src.index('id="sbeGutter"'):]
+        gutter = gutter[:gutter.index('sbe-mix-row')]
+        self.assertIn("<i>A1a</i>", gutter)
+        self.assertIn("<i>A1b</i>", gutter)
+        self.assertNotIn("<i>A1</i>", gutter)
+
+    def test_the_slow_flag_explains_itself_instead_of_saying_SLOW(self):
+        # FILM-39: "SLOW" was jargon with no tooltip and no action. It means
+        # no proxy yet — scrubbing decodes from the source GOP — which is
+        # exactly what Prepare fixes.
+        fn = extract_function("sbePaintTrack", self.src)
+        self.assertNotIn("'SLOW'", fn)
+        # 4.17: the flag is also the fix — its title says a click runs it.
+        self.assertIn("click to run Prepare", fn)
+
+    def test_a_genuine_open_lands_at_the_top_and_fits_a_long_film(self):
+        # FILM-57/39: the playhead used to survive a switch to a different
+        # film (a short film opened after a long one could land PAST ITS
+        # OWN END, on black) and the zoom stayed at the default regardless
+        # of length (a 2:52 film opened showing about 10s of it). Neither
+        # may fire on a quiet re-read, which must not move anything the
+        # user is already looking at.
+        fn = extract_function("sbeAdopt", self.src)
+        self.assertIn("if (!quiet) SBE.playhead = 0;", fn)
+        self.assertIn("if (!quiet) {\n    const fit = sbeZoomMin();", fn)
+        # The switch branch of sbeOpen (a DIFFERENT film already open) falls
+        # through to a bare `sbeLoad()` — no `quiet` argument, so it lands on
+        # sbeLoad's non-quiet default and reaches this same `!quiet` branch.
+        # A switch between two open films is not a special case; it is one
+        # more genuine open.
+        op = extract_function("sbeOpen", self.src)
+        self.assertIn("if (SBE.open && SBE.id && SBE.id !== want) sbeCloseDoc({ quiet: true });", op)
+        self.assertIn("sbeLoad();", op)
+        self.assertNotIn("sbeLoad(true)", op)
+
     def test_the_brightness_slider_previews_live_and_commits_once(self):
         # oninput at pointer speed would push eighty undo steps and eighty
         # saves for one gesture; onchange fires once, when the drag ends.
@@ -6281,23 +7256,36 @@ class TimelineMarkup(unittest.TestCase):
         self.assertIn("ev.preventDefault()", start)
         add = extract_function("edPoolAdd", self.src)
         self.assertIn("if (ED.suppressClick && dropAt === undefined)", add)
-        # Add-at-the-end still works and still lands at the end — it is the +
-        # on the row now rather than the whole row, because clicking the row
-        # previews. `stopPropagation` is what keeps one press from doing both.
+        # The + is on the row now rather than the whole row, because
+        # clicking the row previews. `stopPropagation` is what keeps one
+        # press from doing both. FILM-40: it lands at the playhead now, not
+        # always the end — ⌥+click is the escape hatch back to "the end".
         pool = extract_function("edPoolPaint", self.src)
-        self.assertIn("edPoolAdd(' + i + ')", pool)
+        self.assertIn("edPoolAdd(' + i +\n        ', event.altKey ? undefined : SBE.playhead)", pool)
         self.assertIn("event.stopPropagation()", pool)
         self.assertIn('onpointerdown="edPoolDragStart(event,', pool)
 
-    def test_shift_reorders_and_a_plain_drag_still_moves(self):
+    def test_altshift_reorders_and_a_plain_drag_still_moves(self):
+        # SHIFT ALONE IS THE RANGE SELECTION NOW — "you should be able to
+        # select, hit Shift, and select multiple clips and move them together.
+        # It's very important." — so reorder took alt+shift, which costs it
+        # nothing: a reorder chooses a NEIGHBOUR rather than a time, so it
+        # never snapped to the grid alt suppresses. It also became two named
+        # items in the right-click menu, which is easier to find than the
+        # modifier it gave up.
         down = extract_function("sbeOnTrackDown", self.src)
-        self.assertIn("ev.shiftKey ? 'reorder' : 'move'", down)
+        self.assertIn("(ev.shiftKey && ev.altKey) ? 'reorder'", down)
+        self.assertIn("sbeSelectRange(id)", down)
         move = extract_function("sbeOnTrackMove", self.src)
         self.assertIn("sbeReorderTo(SBE.clips", move)
         self.assertIn("sbeMoveTo(SBE.clips", move)
-        # The legend teaches it, in the same voice as the Alt override.
-        self.assertIn("reorder instead of move", extract_function(
-            "sbeKeysLegend", self.src))
+        # The legend teaches both, in the same voice as the Alt override.
+        table = (ROOT / "webapp" / "js" / "shortcuts.js").read_text(encoding="utf-8")
+        self.assertIn("Reorder instead of move", table)
+        self.assertIn("Select the range", table)
+        ctx = extract_function("sbeCtxOpen", self.src)
+        self.assertIn("Move earlier", ctx)
+        self.assertIn("Move later", ctx)
 
     def test_the_nle_export_is_offered_and_says_what_the_audio_is(self):
         self.assertIn('id="sbeNleBtn"', self.src)
@@ -6400,18 +7388,26 @@ class TimelineMarkup(unittest.TestCase):
 # zeroes the take" is executed, not grepped for.
 # ---------------------------------------------------------------------------
 
+# ---- One Shot is a TAB (2026-09-08) --------------------------------------------
+# Its own composer (webapp/js/oneshot.js), its own API (POST /oneshot). The
+# contract below runs the real module functions in node against a DOM shim:
+# entering the tab, the length chips, the beats gutter, the character pick
+# that turns the handoff on, and the ONE document the tab posts.
 ONESHOT_FUNCTIONS = (
-    "setMode", "defaultRemixMode", "updatePromptPlaceholder",
-    "takePartSeconds", "setTakeSeconds", "takePrefill", "takePrefillClick",
-    "beatsInput", "oneshotActive", "oneshotBackendMode", "oneshotEnter",
-    "oneshotLeave", "oneshotRefreshLabels", "oneshotSyncAnchor",
-    "_setTakeToggle", "setTakeLightLock", "setTakeRetake",
-    "takeLengthLabel", "oneshotSummary", "restoreFoldedLtxLength", "framesToDuration",
+    "osEl", "osEsc", "osLengthLabel", "osPartSeconds", "osClock", "osActiveQuality", "osH3Available",
+    "osBeatsList", "osDocument", "osRenderEngine", "osRenderLengths", "osQualityRows", "osRenderQualities",
+    "osRenderCharacters", "osRenderToggles", "osRenderAnchor", "osRenderBeats", "osSetBeats", "osBeatsInput",
+    "osPartsText", "osPartsShort",
+    "osRenderSummary", "osRenderAll", "osSetEngine", "osSetSeconds", "osSetQuality", "osSetCharacter",
+    "osToggle", "osSplitPrompt", "osVerdict", "osPaintStatus", "oneshotOpenFromParams", "osWire",
+    "_osStoredSeconds", "_osApplyStoredPrefs",
+    # the async ones osWire binds; the shim's fetch answers {ok:false}, so they are inert here
+    "osPlanBeats", "osGenerate", "osUpload", "osClearAnchor", "osEstimate", "osStatusTick",
+    "osStartStatus", "osStopStatus", "osLoadOptions", "oneshotTabEnter", "oneshotTabLeave",
 )
 
 ONESHOT_SHIM = r"""
 'use strict';
-// A classList that REMEMBERS, because the assertions read it back.
 function _cls() {
   const set = new Set();
   return {
@@ -6423,230 +7419,361 @@ function _cls() {
   };
 }
 const _els = {};
+const _made = [];
 function _mk(id, props) {
   let _v = '';
   const e = Object.assign({
-    id, textContent: '', placeholder: '', className: '', innerHTML: '',
-    dataset: {}, hidden: false, style: {}, classList: _cls(), files: [],
-    querySelector() { return null; }, querySelectorAll() { return []; },
+    id, textContent: '', placeholder: '', className: '', innerHTML: '', title: '',
+    dataset: {}, hidden: false, style: {}, classList: _cls(), files: [], checked: false, rows: 6, disabled: false,
+    children: [], parentElement: null,
+    querySelector() { return null; },
+    querySelectorAll(sel) { return _qsa(sel, this); },
     setAttribute(k, v) { this['_attr_' + k] = v; }, getAttribute(k) { return this['_attr_' + k] ?? null; },
     removeAttribute(k) { delete this['_attr_' + k]; if (k === 'src') this.src = ''; },
     appendChild() {}, remove() {}, addEventListener() {}, focus() {}, blur() {},
     dispatchEvent() { return true; },
   }, props || {});
   Object.defineProperty(e, 'value', {
-    get() { return _v; },
-    set(x) { _v = (x === null || x === undefined) ? '' : String(x); },
+    get() { return _v; }, set(x) { _v = (x === null || x === undefined) ? '' : String(x); },
     enumerable: true, configurable: true,
   });
   if (props && Object.prototype.hasOwnProperty.call(props, 'value')) e.value = props.value;
-  _els[id] = e;
+  if (id) _els[id] = e;
+  _made.push(e);
   return e;
 }
-// The REAL chips: every data-mode in #modeGroup, every data-take in #takeGroup,
-// the two toggle pairs — read out of index.html by the test and handed in.
-const MODE_CHIPS = __MODE_CHIPS__.map((m, i) => _mk('_mode' + i, { dataset: { mode: m } }));
-const TAKE_CHIPS = __TAKE_CHIPS__.map((t, i) => {
-  const parts = _mk('_parts' + i);
-  return _mk('_take' + i, { dataset: { take: String(t) }, querySelector: (sel) => sel === '.take-parts' ? parts : null });
+// innerHTML written by the renderers is parsed for the chips it makes: every
+// <button ... data-os-xxx="v"> becomes a shim button with that dataset entry,
+// and 'active' in its class attribute becomes classList.active.
+function _chipsFrom(html) {
+  const out = [];
+  const re = /<(button|input)[^>]*?class="([^"]*)"[^>]*?data-os-([a-z]+)="([^"]*)"[^>]*>(?:[\s\S]*?<\/button>)?/g;
+  let m;
+  while ((m = re.exec(html))) {
+    const b = _mk('', { dataset: {} });
+    b.dataset['os' + m[3][0].toUpperCase() + m[3].slice(1)] = m[4];
+    if (/\bactive\b/.test(m[2])) b.classList.add('active');
+    if (m[1] === 'input') { const v = m[0].match(/ value="([^"]*)"/); b.value = v ? v[1].replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&') : ''; }
+    b._html = m[0];
+    out.push(b);
+  }
+  return out;
+}
+const _groups = {};
+function _group(id) {
+  if (_groups[id]) return _groups[id];
+  const g = _mk(id, {});
+  let _html = '';
+  Object.defineProperty(g, 'innerHTML', {
+    get() { return _html; },
+    set(h) { _html = String(h || ''); g._chips = _chipsFrom(_html); },
+    enumerable: true, configurable: true,
+  });
+  g._chips = [];
+  g.querySelectorAll = (sel) => g._chips.filter(c => {
+    const m = sel.match(/data-os-([a-z]+)/);
+    return !m || (c.dataset['os' + m[1][0].toUpperCase() + m[1].slice(1)] !== undefined);
+  });
+  _groups[id] = g;
+  return g;
+}
+['osLengthGroup', 'osQualityGroup', 'osCharacterGroup', 'osParts', 'osBeats'].forEach(_group);
+global.window = global; global.window.clipboardData = null;
+const ENGINE_CHIPS = ['ltx', 'h3'].map(e => _mk('', { dataset: { osEngine: e } }));
+const TOGGLES = {};
+[['light', ['on', 'off']], ['retake', ['on', 'off']], ['handoff', ['speech', 'last']]].forEach(([name, vals]) => {
+  const group = _mk('', { dataset: { osToggle: name } });
+  group.parentElement = _mk('', {});
+  const chips = vals.map(v => _mk('', { dataset: { osValue: v } }));
+  group.querySelectorAll = () => chips;
+  TOGGLES[name] = { group, chips };
 });
-const LIGHT_CHIPS = ['on', 'off'].map((v, i) => _mk('_light' + i, { dataset: { takeLight: v } }));
-const RETAKE_CHIPS = ['on', 'off'].map((v, i) => _mk('_retake' + i, { dataset: { takeRetake: v } }));
+function _qsa(sel) {
+  if (sel === '#osEngineGroup .pill-btn' || sel === '#osEngineGroup [data-os-engine]') return ENGINE_CHIPS;
+  if (sel === '[data-os-toggle]') return Object.values(TOGGLES).map(t => t.group);
+  if (sel === '[data-os-toggle="handoff"]') return [TOGGLES.handoff.group];
+  return [];
+}
+// the rows box answers its own querySelector (Enter/Backspace focus moves)
+_groups.osBeats.querySelector = () => null;
+function _unusedQsa() {
+}
 global.document = {
   getElementById: (id) => _els[id] || _mk(id),
-  querySelector: () => null,
-  querySelectorAll: (sel) => ({
-    '#modeGroup .pill-btn': MODE_CHIPS,
-    '#takeGroup .pill-btn': TAKE_CHIPS,
-    '#takeLightLockGroup .pill-btn': LIGHT_CHIPS,
-    '#takeRetakeGroup .pill-btn': RETAKE_CHIPS,
-  })[sel] || [],
-  createElement: () => _mk('_tmp'),
+  querySelector: (sel) => sel === '[data-os-toggle="handoff"]' ? TOGGLES.handoff.group : null,
+  querySelectorAll: _qsa,
+  createElement: () => _mk(''),
   addEventListener: () => {},
   readyState: 'complete',
   body: { dataset: { engine: 'ltx' }, classList: _cls() },
 };
-global.window = global;
 global.console = console;
-const FPS = 24;
-// The LTX length axis as BOOT ships it — key + frames is what the restore reads.
-const BOOT = { ltx: { default_length: '5s', lengths: [
-  { key: '3s', frames: 73 }, { key: '5s', frames: 121 }, { key: '10s', frames: 241 } ] } };
-// The page's initial state, as the markup ships it.
-_mk('mode', { value: 't2v' });
-_mk('ltx_length', { value: '10s' });
-_mk('frames', { value: '241' });
-_mk('duration', { value: '10.00' });
-_mk('take_seconds', { value: '0' });
-_mk('take_light_lock', { value: 'on' });
-_mk('take_retake', { value: 'on' });
-_mk('takeAxes', { hidden: __PANEL_HIDDEN__ });
-_mk('beatsRow', { hidden: true });
-_mk('prompt', { value: 'She pushes off down the avenue. A van sweeps past. She drops off the kerb.' });
-_mk('i2vMode', { value: 'i2v' });   // Image mode's audio-source select, as shipped
-let currentMode = 't2v';
-// setMode's collaborators. Stubs, not extractions: the property under test is
-// the One Shot contract, not the paint.
-const REMIX_MODES = ['ingredients', 'control', 'restore'];
-let LAST_STATUS = null;
-global.ingredientsServed = () => true;
-global._portalLoraPicker = () => {};
-global.renderLorasList = () => {};
-global.updateAccelAvailability = () => {};
-global.updateTemporalAvailability = () => {};
-global.updateDerived = () => {};
-global.updateCustomizeSummary = () => {};
-global.updateModelsCard = () => {};
-global._updateCharsPickerVisibility = () => {};
-global._autoMainOutputsFilterForMode = () => {};
-global._syncEngineForMode = () => {};
-global.isKeyframeModeChipActive = () => false;
-global.setQuality = () => {};
-const refreshed = [];
-global.takeRefresh = async () => { refreshed.push(document.getElementById('take_seconds').value); };
-global.fetch = async () => ({ json: async () => ({ ok: true }) });
+global.activeElement = null;
+Object.defineProperty(global.document, 'activeElement', { get() { return null; } });
+global.fetch = async () => ({ json: async () => ({ ok: false }) });
+const switched = [];
+global.workflowSwitch = (n) => switched.push(n);
+const OS_SECONDS = [30, 45, 60, 90, 120];
 """
 
 ONESHOT_BODY = r"""
 const $ = (id) => document.getElementById(id);
 const active = (list, key) => list.filter(b => b.classList.contains('active')).map(b => b.dataset[key]);
+const chipsOf = (id) => $(id)._chips || [];
 const out = {};
-out.start = { mode: $('mode').value, take: $('take_seconds').value, panelHidden: $('takeAxes').hidden };
-
-setMode('oneshot');
+OS.options = {
+  ok: true, seconds: [30, 45, 60, 90, 120], beat_seconds: 5,
+  engines: { ltx: { available: true, part_seconds: 10, qualities: [
+              { key: 'quick', label: 'Quick', eta_min: 2 }, { key: 'balanced', label: 'Balanced', eta_min: 4.6 },
+              { key: 'standard', label: 'Standard', eta_min: 7.7 }, { key: 'high', label: 'High', eta_min: 12 }] },
+            h3: { available: true, part_seconds: 15, qualities: [
+              { key: 'draft', label: 'Draft', size: '640×384' }, { key: 'standard', label: 'Standard', size: '768×448' },
+              { key: 'high', label: 'High', size: '1024×576' }, { key: 'native', label: 'Native', size: '1344×768' }] } },
+  characters: [{ id: 'bizarrotrn', name: 'Bizarro', has_voice: true }],
+  character_qualities: [{ key: 'draft', label: 'Draft', sub: '' }, { key: 'pro', label: 'Pro', sub: '' },
+                        { key: 'high', label: 'High', sub: '' }, { key: 'high_720p', label: 'High · 720p', sub: '' }],
+  handoff: ['last', 'speech'], planner: true,
+};
+OS.optionsAt = Date.now();
+osWire();
+osRenderAll();
 out.enter = {
-  currentMode, mode: $('mode').value, take: $('take_seconds').value,
-  panelHidden: $('takeAxes').hidden, beatsRowHidden: $('beatsRow').hidden,
-  bodyClass: document.body.classList.contains('oneshot-mode'),
-  chips: active(MODE_CHIPS, 'mode'), takeChips: active(TAKE_CHIPS, 'take'),
-  light: $('take_light_lock').value, retake: $('take_retake').value,
-  lightChips: active(LIGHT_CHIPS, 'takeLight'), retakeChips: active(RETAKE_CHIPS, 'takeRetake'),
-  parts: TAKE_CHIPS.map(b => b.querySelector('.take-parts').textContent),
-  note: $('takeEngineNote').textContent,
-  beats: $('beats').value, beatsHint: $('beatsHint').textContent,
-  placeholder: $('prompt').placeholder,
-  refreshed: refreshed.slice(),
+  engine: OS.engine, seconds: OS.seconds, quality: osActiveQuality(),
+  lengths: chipsOf('osLengthGroup').map(c => c.dataset.osSeconds), activeLength: active(chipsOf('osLengthGroup'), 'osSeconds'),
+  parts: chipsOf('osLengthGroup').map(c => (c._html.match(/(\d+ × \d+ s(?: \+ \d+ s)?)/) || [])[1]),
+  qualities: chipsOf('osQualityGroup').map(c => c.dataset.osQuality),
+  characters: chipsOf('osCharacterGroup').map(c => c.dataset.osCharacter),
+  beats: osBeatsList(), beatsHint: $('osBeatsHint').textContent,
+  rows: chipsOf('osBeats').length,
+  first: ($('osBeats').innerHTML.match(/<span class="os-stamp">([^<]+)</) || [])[1],
+  handoff: OS.handoff, handoffChips: active(TOGGLES.handoff.chips, 'osValue'),
+  summary: $('osSummary').innerHTML, characterBlockHidden: $('osCharacterBlock').hidden,
 };
-
-// The switcher moves to H3: the parts are 15 s now, and the note says so.
-document.body.dataset.engine = 'h3';
-oneshotRefreshLabels();
-out.h3 = { parts: TAKE_CHIPS.map(b => b.querySelector('.take-parts').textContent), note: $('takeEngineNote').textContent };
-document.body.dataset.engine = 'ltx';
-oneshotRefreshLabels();
-
-// An anchor image flips the backend mode to i2v; clearing it flips back.
-$('image').value = '/uploads/frame_one.png';
-oneshotSyncAnchor();
-out.anchored = { mode: $('mode').value, thumbHidden: $('oneshotAnchorThumb').hidden,
-                 thumbSrc: $('oneshotAnchorThumb').src, clearHidden: $('oneshotAnchorClear').hidden,
-                 name: $('oneshotAnchorName').textContent };
-$('image').value = '';
-oneshotSyncAnchor();
-out.unanchored = { mode: $('mode').value, thumbHidden: $('oneshotAnchorThumb').hidden, clearHidden: $('oneshotAnchorClear').hidden };
-
-// The toggles write the hidden fields make_job reads, as on/off.
-setTakeLightLock('off'); setTakeRetake('off');
-out.toggledOff = { light: $('take_light_lock').value, retake: $('take_retake').value,
-                   lightChips: active(LIGHT_CHIPS, 'takeLight'), retakeChips: active(RETAKE_CHIPS, 'takeRetake') };
-setTakeLightLock('garbage'); setTakeRetake(undefined);
-out.toggledBack = { light: $('take_light_lock').value, retake: $('take_retake').value };
-
-// A longer shot, and the beats button over a box that already has lines.
-setTakeSeconds(120);
-$('beats_text').value = 'only one line';
-beatsInput();
-out.len120 = { take: $('take_seconds').value, takeChips: active(TAKE_CHIPS, 'take'), beats: $('beats').value };
-takePrefillClick();
-out.prefilled = { lines: $('beats_text').value.split('\n').length, beats: $('beats').value };
-
-// The footer strip's summary, per engine, from the same length.
-out.summary = {
-  ltx60: oneshotSummary(60, 'ltx'), h3_90: oneshotSummary(90, 'h3'),
-  ltx30: oneshotSummary(30, 'ltx'), ltx120: oneshotSummary(120, 'ltx'), off: oneshotSummary(0, 'ltx'),
-  labels: [30, 45, 60, 90, 120].map(takeLengthLabel),
-};
-// An engine round trip while the Length strip is folded: H3's tier wrote 73
-// into #frames; the restore puts the folded LTX length (10s → 241) back.
-$('frames').value = '73'; $('duration').value = '3.00';
-out.restored = { ok: restoreFoldedLtxLength(), frames: $('frames').value, duration: $('duration').value };
-// LEAVING the mode: any other setMode zeroes the take and folds the panel —
-// and puts the two continuity fields back to on, so a normal clip's sidecar
-// carries no One Shot noise. Both are left OFF here on purpose.
-setTakeLightLock('off'); setTakeRetake('off');
-setMode('t2v');
-out.leave = {
-  currentMode, mode: $('mode').value, take: $('take_seconds').value, beats: $('beats').value,
-  panelHidden: $('takeAxes').hidden, bodyClass: document.body.classList.contains('oneshot-mode'),
-  chips: active(MODE_CHIPS, 'mode'),
-  light: $('take_light_lock').value, retake: $('take_retake').value,
-  lightChips: active(LIGHT_CHIPS, 'takeLight'), retakeChips: active(RETAKE_CHIPS, 'takeRetake'),
-};
-// ...including the early-return modes (character returns before the generic
-// path), which is where a hook placed too low would miss.
-setMode('oneshot');
-out.reenter = { take: $('take_seconds').value, panelHidden: $('takeAxes').hidden, takeChips: active(TAKE_CHIPS, 'take') };
-setMode('character');
-out.leaveViaCharacter = { currentMode, mode: $('mode').value, take: $('take_seconds').value, panelHidden: $('takeAxes').hidden };
-// A One Shot with an anchor enters straight into i2v.
-$('image').value = '/uploads/frame_one.png';
-setMode('oneshot');
-out.enterAnchored = { mode: $('mode').value, take: $('take_seconds').value };
-setMode('i2v');
-out.leaveToImage = { mode: $('mode').value, take: $('take_seconds').value, panelHidden: $('takeAxes').hidden };
-process.stdout.write(JSON.stringify(out));
+// The document with only a prompt: one paragraph is a complete request.
+$('osPrompt').value = 'A hen skates down Broadway at night.';
+out.docPromptOnly = osDocument();
+// A shorter shot: the gutter follows the length.
+osSetSeconds(30);
+out.len30 = { seconds: OS.seconds, rows: chipsOf('osBeats').length,
+              activeLength: active(chipsOf('osLengthGroup'), 'osSeconds'), hint: $('osBeatsHint').textContent };
+// Beats typed: the hint counts, rows past the end are flagged, the document carries the list.
+osSetBeats(['she pushes off', '', 'a van sweeps past', '1', '2', '3', '4', '5']);
+out.beats = { hint: $('osBeatsHint').textContent, rows: chipsOf('osBeats').length,
+              over: ($('osBeats').innerHTML.match(/os-beat-row over/g) || []).length, doc: osDocument().beats,
+              values: chipsOf('osBeats').map(c => c.value) };
+// Split the prompt: sentences become lines.
+$('osPrompt').value = 'She pushes off. A van sweeps past! Pigeons burst up? Then nothing.';
+osSplitPrompt();
+out.split = osBeatsList();
+// A character turns the handoff on, the qualities become the character's, and the document names it.
+osSetCharacter('bizarrotrn');
+out.character = { handoff: OS.handoff, handoffChips: active(TOGGLES.handoff.chips, 'osValue'), quality: osActiveQuality(),
+                  qualities: chipsOf('osQualityGroup').map(c => c.dataset.osQuality), doc: osDocument() };
+// The user's own choice on the handoff survives picking nobody again.
+osToggle('handoff', 'last');
+osSetCharacter('');
+out.handoffKept = OS.handoff;
+// H3: 15 s parts, its own qualities, no character, no handoff row.
+osSetEngine('h3');
+out.h3 = { parts: chipsOf('osLengthGroup').map(c => (c._html.match(/(\d+ × \d+ s(?: \+ \d+ s)?)/) || [])[1]),
+           qualities: chipsOf('osQualityGroup').map(c => c.dataset.osQuality), quality: osActiveQuality(),
+           characterBlockHidden: $('osCharacterBlock').hidden, handoffRowHidden: TOGGLES.handoff.group.parentElement.hidden,
+           doc: osDocument() };
+// A 45 s shot on LTX is four 10 s parts and one of 5 s, and the tab says so.
+osSetEngine('ltx');
+osSetSeconds(45);
+out.len45 = { summary: $('osSummary').innerHTML, chip: (chipsOf('osLengthGroup').find(c => c.dataset.osSeconds === '45')._html.match(/(\d+ × \d+ s(?: \+ \d+ s)?)/) || [])[1] };
+osSetSeconds(30);
+// Picking a character, then H3: the character is cleared, not carried into a job H3 cannot use.
+osSetCharacter('bizarrotrn');
+osSetEngine('h3');
+out.h3Cleared = { character: OS.character, handoff: OS.handoff, doc: osDocument() };
+osSetEngine('ltx');
+// Load Params of a finished one shot rebuilds the document and opens the tab.
+oneshotOpenFromParams({ prompt: 'the tram', engine: 'ltx', character_id: 'bizarrotrn', quality_choice: 'pro', seed: '4242',
+  take: { seconds: 90, beats: ['a', '', 'c'], camera: 'a slow push in', handoff: 'speech', light_lock: '', retake: false } });
+out.loaded = { engine: OS.engine, seconds: OS.seconds, prompt: $('osPrompt').value, beats: osBeatsList(),
+               camera: $('osCamera').value, handoff: OS.handoff, light: OS.light, retake: OS.retake,
+               character: OS.character, seed: $('osSeed').value, switched: switched.slice() };
+// The verdict words a user reads on the status strip.
+out.verdicts = [0.54, 0.22, -0.13, null].map(v => osVerdict(v).cls);
+osPaintStatus({ ok: true, current: { id: 'j1', label: 'tram', engine: 'ltx', seconds: 30, parts: 3, part: 2, lipsync: [0.4], drift: [0.1] }, queued: [], recent: [], log: ['[10:00:00] [take] part 1: lip-sync +0.40'] });
+out.status = { title: $('osStatusTitle').textContent, meta: $('osStatusMeta').textContent,
+               parts: chipsOf('osParts').length, partsHtml: $('osParts').innerHTML, log: $('osLog').textContent, hidden: $('osStatus').hidden };
+OS.lastSubmitted = 'mine';
+osPaintStatus({ ok: true, current: { id: 'j1', label: 'tram', engine: 'ltx', seconds: 30, parts: 3, part: 2, lipsync: [], drift: [] },
+  queued: [{ id: 'other', label: 'other', seconds: 60, parts: 6 }, { id: 'mine', label: 'coast ride', seconds: 30, parts: 3 }], recent: [], paused: true, log: [] });
+out.statusMine = { title: $('osStatusTitle').textContent, meta: $('osStatusMeta').textContent };
+console.log(JSON.stringify(out));
 """
-
-
-def _oneshot_markup(src: str) -> dict:
-    """The real chips out of the real markup, for the shim."""
-    html = (ROOT / "webapp" / "index.html").read_text(encoding="utf-8")
-    bar = html[html.index('id="modeGroup"'):]
-    bar = bar[:bar.index("</div>")]
-    modes = re.findall(r'data-mode="([^"]+)"', bar)
-    group = html[html.index('id="takeGroup"'):]
-    group = group[:group.index("</div>")]
-    takes = [int(t) for t in re.findall(r'data-take="(\d+)"', group)]
-    panel = extract_element("takeAxes", src)
-    return {"modes": modes, "takes": takes, "panel_hidden": " hidden" in panel or panel.endswith("hidden>")}
 
 
 def run_oneshot_contract() -> dict:
     if NODE is None:
         raise unittest.SkipTest("node not on PATH")
     source = panel_source()
-    m = _oneshot_markup(source)
-    shim = (ONESHOT_SHIM
-            .replace("__MODE_CHIPS__", json.dumps(m["modes"]))
-            .replace("__TAKE_CHIPS__", json.dumps(m["takes"]))
-            .replace("__PANEL_HIDDEN__", "true" if m["panel_hidden"] else "false"))
-    # The length table is a module const, not a function — read it as it is.
-    choices = re.search(r"^const TAKE_CHOICES = \[[^\]]*\];", source, re.M)
-    if not choices:
-        raise AssertionError("TAKE_CHOICES not found in the panel source")
-    # The remembered length is a module `let`, read as it is like the table.
-    last = re.search(r"^let _oneshotLastSeconds = \d+;", source, re.M)
-    if not last:
-        raise AssertionError("_oneshotLastSeconds not found in the panel source")
-    script = (shim + choices.group(0) + "\n" + last.group(0) + "\n"
+    state = re.search(r"^const OS = \{.*?^\};", source, re.M | re.S)
+    if not state:
+        raise AssertionError("the OS state object was not found in oneshot.js")
+    script = (ONESHOT_SHIM + state.group(0) + "\n"
               + "\n".join(extract_function(n, source) for n in ONESHOT_FUNCTIONS)
               + "\n" + ONESHOT_BODY)
     with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:
         fh.write(script)
         path = Path(fh.name)
     try:
-        result = subprocess.run([NODE, str(path)], capture_output=True,
-                                text=True, timeout=60)
+        result = subprocess.run([NODE, str(path)], capture_output=True, text=True, timeout=60)
         if result.returncode:
             raise AssertionError(result.stdout + "\n" + result.stderr)
-        return json.loads(result.stdout)
+        return json.loads(result.stdout.strip().splitlines()[-1])
     finally:
         path.unlink(missing_ok=True)
 
 
-class OneShotIsAMode(unittest.TestCase):
-    """The mode chip, the panel, and the one property that matters most: a
-    normal clip never carries take_seconds."""
+class RoundTwoTipsSourceIcons(unittest.TestCase):
+    """Round 2 of the layout redesign (2026-09-17), the owner after using it:
+
+      "The tooltips on the buttons are too slow."
+      "You have two empty dark spaces on the sides … you can still add the
+       preview clip for a place where you can drag the clips and see them."
+      "The icons are not very clear, are really weird, and maybe deformed."
+      "The on/off toggles for the screen panels … it's not clear."
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.html = (ROOT / "webapp" / "index.html").read_text(encoding="utf-8")
+        cls.js = (ROOT / "webapp" / "js" / "editor.js").read_text(encoding="utf-8")
+        cls.tips = (ROOT / "webapp" / "js" / "tips.js").read_text(encoding="utf-8")
+        cls.css = (ROOT / "webapp" / "style" / "panel.css").read_text(encoding="utf-8")
+
+    # ---- icons ----------------------------------------------------------------
+    def test_every_editor_glyph_is_a_symbol_with_its_own_viewbox(self):
+        # THE DEFORMATION: bare <g>s drawn on a 24-unit grid, used from an <svg>
+        # with no viewBox, so a 15px box showed the top-left 15 units of each.
+        sprite = self.html[self.html.index('<svg class="sbe-icons"'):]
+        sprite = sprite[:sprite.index("</defs></svg>")]
+        self.assertNotIn("<g id=", sprite)
+        ids = re.findall(r'<symbol id="(ic-[\w-]+)" viewBox="0 0 256 256">', sprite)
+        self.assertEqual(len(ids), sprite.count("<symbol "))
+        used = set(re.findall(r'#(ic-[\w-]+)', self.html + self.js))
+        self.assertEqual(used - set(ids), set(), "an icon is used that the sprite does not define")
+        for want in ("ic-split", "ic-lift", "ic-ripple", "ic-dup", "ic-link", "ic-unlink",
+                     "ic-mute", "ic-sound", "ic-lock", "ic-unlock", "ic-facefix", "ic-wave",
+                     "ic-inspect", "ic-full", "ic-panels", "ic-source"):
+            self.assertIn(want, ids)
+        # scissors for split, the Phosphor geometry the panel already ships
+        split = sprite[sprite.index('id="ic-split"'):]
+        self.assertIn('<circle cx="76" cy="68" r="28"/>', split[:split.index("</symbol>")])
+
+    def test_the_stroke_is_set_once_in_symbol_units(self):
+        rule = self.css[self.css.index("    .sbe-cbar-i {"):]
+        rule = rule[:rule.index("}")]
+        self.assertIn("stroke-width: 22;", rule)
+        self.assertIn("#sbeCbar > .sbe-cbar-btn .sbe-cbar-i, .sbe-tbtn .sbe-cbar-i { width: 18px; height: 18px; }", self.css)
+        self.assertNotIn("'🔇' : '🔊'", self.js)
+        self.assertIn("SBE.muted ? '#ic-mute' : '#ic-sound'", extract_function("sbeSetMute", self.js))
+
+    # ---- the View group --------------------------------------------------------
+    def test_the_panel_toggles_are_one_labelled_group_in_the_header(self):
+        head = self.html[self.html.index('<header class="carousel-head sbe-head">'):]
+        head = head[:head.index("</header>")]
+        view = head[head.index('id="sbeView"'):]
+        view = view[:view.index("        </span>\n")]
+        for bid, label in (("sbeSrcBtn", "Source"), ("sbeInspectBtn", "Inspector"),
+                           ("sbeSoundBtn", "Sound"), ("sbePanelsBtn", "Panels")):
+            btn = view[view.index('id="%s"' % bid):]
+            btn = btn[:btn.index("</button>")]
+            self.assertIn("aria-pressed=", btn, bid)
+            self.assertIn("<b>%s</b>" % label, btn, bid)
+        self.assertIn('id="sbeFullBtn"', view)
+        # nowhere else: not under the picture, not on the tool row
+        rest = self.html.replace(view, "")
+        for bid in ("sbeSrcBtn", "sbeInspectBtn", "sbeSoundBtn", "sbePanelsBtn", "sbeFullBtn"):
+            self.assertNotIn('id="%s"' % bid, rest, bid)
+
+    def test_pressed_means_the_panel_is_showing_and_the_tip_says_what_a_click_does(self):
+        fn = extract_function("sbePaintPanels", self.js)
+        self.assertIn("!(document.body && document.body.classList.contains('ed-focus')), 'Side panels'", fn)
+        self.assertIn("sbeSrcShown(), 'Source monitor'", fn)
+        self.assertIn("!!SBE.inspect, 'Inspector'", fn)
+        tip = extract_function("sbeViewTip", self.js)
+        self.assertIn("(pressed ? onText : offText) + sbeKeyHint(keyId)", tip)
+        self.assertIn('.sbe-vbtn[aria-pressed="true"]', self.css)
+
+    # ---- the Source monitor ------------------------------------------------------
+    def test_the_source_monitor_is_on_screen_unless_this_browser_hid_it(self):
+        self.assertIn('<div class="sbe-mon sbe-mon-src" id="sbeSrcMon">', self.html)
+        self.assertIn("srcOn: sbeSrcRead(),", self.js)
+        self.assertIn("return v !== 'hidden';", extract_function("sbeSrcRead", self.js))
+        self.assertIn("sbeSrcWrite(false);", extract_function("sbeSrcClose", self.js))
+        self.assertIn("sbeSrcWrite(true);", extract_function("sbeSrcMonToggle", self.js))
+        # both columns are exactly their picture's width, so neither is squeezed out of 16:9
+        self.assertIn(".sbe-monitors > .sbe-mon-src { flex: 0 0 auto; width: calc(var(--sbe-src-h) * 16 / 9); }", self.css)
+
+    def test_the_source_monitor_is_a_drop_target_for_the_pool_and_the_track(self):
+        self.assertIn("Drop a clip here to preview", self.html)
+        move = extract_function("edPoolDragMove", self.js)
+        self.assertIn("sbeSrcDropHover(ev, d.row.kind !== 'sound')", move)
+        end = extract_function("edPoolDragEnd", self.js)
+        self.assertIn("if (d.toSrc) { edPoolPreview(d.index); return; }", end)
+        self.assertLess(end.index("d.toSrc"), end.index("edPoolSound("))
+        tmove = extract_function("sbeOnTrackMove", self.js)
+        self.assertIn("d.toSrc = sbeSrcDropHover(ev, true);", tmove)
+        tup = extract_function("sbeOnTrackUp", self.js)
+        # the track is restored BEFORE anything else happens: a drop on the monitor is never an edit
+        self.assertIn("SBE.clips = JSON.parse(d.before);", tup[tup.index("if (d.toSrc)"):])
+        self.assertLess(tup.index("if (d.toSrc)"), tup.index("SBE.undo.push"))
+        load = extract_function("sbeSrcLoadClip", self.js)
+        self.assertIn("sbeKind(c) === 'slug'", load)
+        self.assertIn(".sbe-mon-src.is-drop-over .sbe-stage", self.css)
+
+    # ---- the tooltips ---------------------------------------------------------------
+    def test_one_fast_tooltip_replaces_the_native_one_on_icon_buttons(self):
+        self.assertIn("const TIP_DELAY_MS = 150;", self.tips)
+        for sel in ("'.sbe-ibtn'", "'.sbe-vbtn'", "'#sbeCbar .sbe-cbar-btn'", "'.po-act'"):
+            self.assertIn(sel, self.tips)
+        adopt = extract_function("tipAdopt", self.tips)
+        self.assertIn("el.removeAttribute('title');", adopt)
+        self.assertIn("setAttribute('aria-label'", adopt)
+        self.assertIn("attributeFilter: ['title']", self.tips)
+        self.assertIn("matches(':focus-visible')", self.tips)
+        self.assertIn("prefers-reduced-motion: reduce", self.css[self.css.index(".phos-tip {"):])
+        place = extract_function("tipPlace", self.tips)
+        self.assertIn("vw - TIP_MARGIN - w", place)
+        self.assertIn("r.top - TIP_GAP - h", place)
+        # warm: the next tip along a row is immediate
+        arm = extract_function("tipArm", self.tips)
+        self.assertIn("if (warm) { tipShow(target); return; }", arm)
+
+    def test_the_tooltip_splits_name_body_and_keys(self):
+        if not shutil.which("node"):
+            self.skipTest("node not installed")
+        # the whole module, on a stub page: it must load with nothing but listeners
+        code = """
+globalThis.document = { addEventListener() {}, documentElement: {} };
+globalThis.window = { addEventListener() {} };
+globalThis.shortcutHint = (id) => ({ 'editor.inspector': '⌘I', 'editor.split': 'S or ⌘K or ⌘B' })[id] || '';
+""" + self.tips + """
+const el = (sc) => ({ getAttribute: (k) => k === 'data-shortcut' ? sc : null });
+console.log(JSON.stringify([
+  tipSplit(el('editor.inspector'), 'Inspector — hidden. Click to show it. (⌘I)'),
+  tipSplit(el(null), 'Ripple delete\\nTakes the clip off. (⇧⌫)'),
+  tipSplit(el('editor.split'), 'Split\\nCuts at the playhead (S or ⌘K or ⌘B)'),
+  tipSplit(el(null), 'Undo'),
+]));
+"""
+        out = subprocess.run(["node", "-e", code], capture_output=True, text=True, check=True).stdout
+        a, b, c, d = json.loads(out)
+        self.assertEqual((a["name"], a["body"], a["keys"]), ("Inspector", "Hidden. Click to show it.", ["⌘I"]))
+        self.assertEqual((b["name"], b["body"], b["keys"]), ("Ripple delete", "Takes the clip off.", ["⇧⌫"]))
+        self.assertEqual(c["keys"], ["S", "⌘K", "⌘B"])
+        self.assertEqual((d["name"], d["body"], d["keys"]), ("Undo", "", []))
+
+
+class OneShotIsATab(unittest.TestCase):
+    """Its own door: a tab beside Video, its own composer, one document to
+    POST /oneshot, and the video form carries none of it any more."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -6655,239 +7782,142 @@ class OneShotIsAMode(unittest.TestCase):
         cls.r = run_oneshot_contract()
 
     # ---- the markup ---------------------------------------------------------
-    def test_the_chip_is_in_the_mode_bar_between_image_and_fflf(self):
+    def test_the_tab_sits_right_after_video(self):
+        bar = self.html[self.html.index('id="workflowTabs"'):]
+        bar = bar[:bar.index("</nav>")]
+        tabs = re.findall(r'data-workflow="([^"]+)"', bar)
+        self.assertEqual(tabs[:2], ["manual", "oneshot"])
+        self.assertIn(">One Shot</button>", bar.replace("</svg>One Shot", ">One Shot"))
+
+    def test_the_video_form_carries_no_one_shot_any_more(self):
         bar = self.html[self.html.index('id="modeGroup"'):]
         bar = bar[:bar.index("</div>")]
-        modes = re.findall(r'data-mode="([^"]+)"', bar)
-        self.assertIn("oneshot", modes)
-        self.assertEqual(modes.index("oneshot"), modes.index("i2v") + 1)
-        self.assertEqual(modes[modes.index("oneshot") + 1], "keyframe")
-        chip = re.search(r'<button[^>]*data-mode="oneshot"[^>]*>(.*?)</button>', bar, re.S).group(1)
-        self.assertTrue(chip.startswith("One Shot"))
-        self.assertIn("never cuts", chip)
-
-    def test_the_panel_ships_folded_and_keeps_its_ids(self):
-        el = extract_element("takeAxes", self.src)
-        self.assertIn("hidden", el)
-        self.assertIn("oneshot-panel", el)
-        panel = self.html[self.html.index('id="takeAxes"'):]
-        panel = panel[:panel.index('id="takeEngineNote"')]
-        for needed in ('id="takeGroup"', 'id="beatsRow"', 'id="beats_text"', 'id="beatsHint"',
-                       'id="takeEstimate"', 'id="beatsPrefillBtn"', 'id="oneshotAnchorFile"',
-                       'id="oneshotAnchorThumb"', 'id="oneshotAnchorClear"',
-                       'id="takeLightLockGroup"', 'id="takeRetakeGroup"',
-                       'href="/docs/prompting"'):
-            self.assertIn(needed, panel, needed)
-        # In its own mode there is no Off chip — leaving the mode is Off.
-        takes = re.findall(r'data-take="(\d+)"', panel)
-        self.assertEqual(takes, ["30", "45", "60", "90", "120"])
-
-    def test_the_two_continuity_fields_are_in_the_video_form_and_default_on(self):
+        self.assertNotIn("oneshot", re.findall(r'data-mode="([^"]+)"', bar))
         form = self.html[self.html.index('id="genForm"'):]
         form = form[:form.index("</form>")]
-        for name in ("take_light_lock", "take_retake"):
-            el = extract_element(name, form)
-            self.assertIn('type="hidden"', el)
-            self.assertIn(f'name="{name}"', el)
-            self.assertIn('value="on"', el)
-        # ...and the fields they sit beside, so FormData posts the whole shot.
-        for name in ("take_seconds", "beats", "image"):
-            self.assertIn(f'name="{name}"', form)
+        for name in ("take_seconds", "beats", "take_light_lock", "take_retake", "take_camera"):
+            self.assertNotIn(f'name="{name}"', form, name)
+        self.assertNotIn('id="takeAxes"', self.html)
 
-    def test_the_old_name_is_gone_from_everything_a_user_reads(self):
-        stray = []
-        files = [ROOT / "webapp" / "index.html", ROOT / "docs" / "PROMPTING.md",
-                 *sorted((ROOT / "webapp" / "js").glob("*.js"))]
-        for f in files:
-            for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
-                if re.search(r"\bone[ -]take\b", line, re.I):
-                    stray.append(f"{f.name}:{i}: {line.strip()[:80]}")
-        self.assertEqual(stray, [], "the feature is called One Shot")
-
-    # ---- the executed contract ----------------------------------------------
-    def test_a_fresh_page_carries_no_take(self):
-        self.assertEqual(self.r["start"], {"mode": "t2v", "take": "0", "panelHidden": True})
-
-    def test_entering_the_mode_opens_the_panel_on_t2v_with_a_length(self):
-        e = self.r["enter"]
-        self.assertEqual(e["currentMode"], "oneshot")
-        self.assertEqual(e["mode"], "t2v")
-        self.assertEqual(e["take"], "60")
-        self.assertFalse(e["panelHidden"])
-        self.assertFalse(e["beatsRowHidden"])
-        self.assertTrue(e["bodyClass"])
-        self.assertEqual(e["chips"], ["oneshot"])
-        self.assertEqual(e["takeChips"], ["60"])
-        self.assertIn("never cuts", e["placeholder"])
-        self.assertEqual(e["refreshed"], ["60"], "the estimate is asked for on entry")
-
-    def test_the_beats_prefill_from_the_prompt_on_entry(self):
-        e = self.r["enter"]
-        self.assertEqual(json.loads(e["beats"])[:3],
-                         ["She pushes off down the avenue.", "A van sweeps past.", "She drops off the kerb."])
-        self.assertIn("12 lines of 5 s", e["beatsHint"])
-        self.assertIn("3 written", e["beatsHint"])
-        self.assertIn("leave a line blank to hold on the scene", e["beatsHint"])
-        self.assertNotIn("beats of", e["beatsHint"])
-
-    def test_the_toggles_default_on_and_write_on_off(self):
-        e = self.r["enter"]
-        self.assertEqual((e["light"], e["retake"]), ("on", "on"))
-        self.assertEqual((e["lightChips"], e["retakeChips"]), (["on"], ["on"]))
-        t = self.r["toggledOff"]
-        self.assertEqual((t["light"], t["retake"]), ("off", "off"))
-        self.assertEqual((t["lightChips"], t["retakeChips"]), (["off"], ["off"]))
-        self.assertEqual(self.r["toggledBack"], {"light": "on", "retake": "on"})
-
-    def test_parts_are_10s_on_ltx_and_15s_on_h3(self):
-        # One line per chip — "3 × 10 s", not "3 PARTS OF 10 S" wrapping to a
-        # 95px chip — so the strip keeps the Quality strip's height.
-        self.assertEqual(self.r["enter"]["parts"],
-                         ["3 × 10 s", "5 × 10 s", "6 × 10 s", "9 × 10 s", "12 × 10 s"])
-        self.assertEqual(self.r["enter"]["note"], "LTX — 10-second parts that continue from the last frame.")
-        self.assertEqual(self.r["h3"]["parts"],
-                         ["2 × 15 s", "3 × 15 s", "4 × 15 s", "6 × 15 s", "8 × 15 s"])
-        self.assertEqual(self.r["h3"]["note"], "Hailuo H3 — 15-second parts that continue from each other.")
-        self.assertNotIn("proven", self.r["h3"]["note"])
-
-    def test_the_footer_strip_says_the_shot_not_a_five_second_clip(self):
-        s = self.r["summary"]
-        self.assertEqual(s["ltx60"], "1 min · 6 parts of 10 s")
-        self.assertEqual(s["h3_90"], "1½ min · 6 parts of 15 s")
-        self.assertEqual(s["ltx30"], "30 s · 3 parts of 10 s")
-        self.assertEqual(s["ltx120"], "2 min · 12 parts of 10 s")
-        self.assertEqual(s["off"], "", "no shot, no summary — the clip line stays")
-        self.assertEqual(s["labels"], ["30 s", "45 s", "1 min", "1½ min", "2 min"])
-        fn = extract_function("updateDerived", self.src)
-        self.assertIn("oneshotSummary", fn)
-        self.assertIn("take_seconds", fn)
-        self.assertLess(fn.index("derivedFooter"), fn.index("oneshotSummary"),
-                        "the summary is the FOOTER strip's line")
-
-    def test_an_engine_round_trip_leaves_the_folded_ltx_length_alone(self):
-        r = self.r["restored"]
-        self.assertTrue(r["ok"])
-        self.assertEqual((r["frames"], r["duration"]), ("241", "10.00"))
-        fn = extract_function("setEngine", self.src)
-        self.assertIn("restoreFoldedLtxLength", fn)
-        # The snap from H3's 17n+5 grid is what wrote "3s" onto the folded
-        # strip; in One Shot the restore runs INSTEAD of it, not after it.
-        i = fn.index("currentMode === 'oneshot'")
-        self.assertLess(i, fn.index("snapFramesTo8kPlus1();"))
-        self.assertIn("setTakeSeconds", fn, "the mode's own state is re-asserted after the swap")
-
-    def test_an_anchor_image_makes_it_i2v_and_clearing_it_makes_it_t2v(self):
-        a = self.r["anchored"]
-        self.assertEqual(a["mode"], "i2v")
-        self.assertFalse(a["thumbHidden"])
-        self.assertIn("frame_one.png", a["thumbSrc"])
-        self.assertFalse(a["clearHidden"])
-        self.assertEqual(a["name"], "frame_one.png")
-        self.assertEqual(self.r["unanchored"], {"mode": "t2v", "thumbHidden": True, "clearHidden": True})
-        self.assertEqual(self.r["enterAnchored"], {"mode": "i2v", "take": "120"},
-                         "the remembered length, not the default")
-
-    def test_a_length_chip_and_the_write_the_beats_button(self):
-        self.assertEqual(self.r["len120"]["take"], "120")
-        self.assertEqual(self.r["len120"]["takeChips"], ["120"])
-        self.assertEqual(json.loads(self.r["len120"]["beats"]), ["only one line"])
-        self.assertEqual(self.r["prefilled"]["lines"], 3)
-
-    def test_leaving_the_mode_zeroes_the_take_and_folds_the_panel(self):
-        for key in ("leave", "leaveViaCharacter", "leaveToImage"):
-            l = self.r[key]
-            self.assertEqual(l["take"], "0", key)
-            self.assertTrue(l["panelHidden"], key)
-        l = self.r["leave"]
-        self.assertEqual(l["currentMode"], "t2v")
-        self.assertEqual(l["mode"], "t2v")
-        self.assertEqual(l["beats"], "")
-        self.assertFalse(l["bodyClass"])
-        self.assertEqual(l["chips"], ["t2v"])
-        self.assertEqual(self.r["leaveViaCharacter"]["currentMode"], "character")
-        self.assertEqual(self.r["leaveToImage"]["mode"], "i2v")
-
-    def test_leaving_the_mode_puts_the_continuity_fields_back_to_on(self):
-        # Both were switched OFF before leaving. They are hidden inputs in the
-        # video form, so FormData posts them with every clip — a normal clip
-        # must not carry an "off" from a mode it is not in.
-        l = self.r["leave"]
-        self.assertEqual((l["light"], l["retake"]), ("on", "on"))
-        self.assertEqual((l["lightChips"], l["retakeChips"]), (["on"], ["on"]))
-
-    def test_the_length_is_remembered_across_leaving_and_re_entering(self):
-        # 120 was chosen, the mode was left (take → 0) and re-entered: the
-        # panel reopens on 2 min, not on the 1 min default.
-        self.assertEqual(self.r["reenter"], {"take": "120", "panelHidden": False, "takeChips": ["120"]})
-
-    # ---- the copy -----------------------------------------------------------
-    def _panel_text(self):
-        panel = self.html[self.html.index('id="takeAxes"'):]
-        panel = panel[:panel.index('id="takeEngineNote"')]
-        panel = re.sub(r"<!--.*?-->", " ", panel, flags=re.S)
-        return re.sub(r"<[^>]+>", " ", panel)
+    def test_the_section_has_its_fields_and_its_module(self):
+        sec = self.html[self.html.index('id="oneshotSectionTab"'):]
+        sec = sec[:sec.index('id="audioSectionTab"')]
+        for needed in ('id="osEngineGroup"', 'id="osPrompt"', 'id="osAnchorFile"', 'id="osCharacterGroup"',
+                       'id="osLengthGroup"', 'id="osQualityGroup"', 'id="osEstimate"', 'id="osBeats"',
+                       'id="osCharacterNote"', 'id="osBeatsHint"', 'id="osSplitBtn"', 'id="osPlanBtn"', 'id="osCamera"',
+                       'data-os-toggle="light"', 'data-os-toggle="retake"', 'data-os-toggle="handoff"',
+                       'id="osSeed"', 'id="osGenBtn"', 'id="osStatus"', 'id="osParts"', 'href="/docs/prompting"'):
+            self.assertIn(needed, sec, needed)
+        self.assertIn('<script type="module" src="/webapp/js/oneshot.js"></script>', self.html)
+        tags = re.findall(r'<script type="module" src="/webapp/js/([\w.-]+)\.js"></script>', self.html)
+        self.assertEqual(tags[-1], "main", "main.js stays the last module")
+        self.assertIn("oneshot", tags)
 
     def test_the_word_take_is_not_in_anything_a_user_reads(self):
-        text = self._panel_text()
-        self.assertFalse(re.search(r"\b(re)?takes?\b", text, re.I), text)
-        for fn in ("beatsInput", "oneshotRefreshLabels", "takeRefresh", "oneshotSummary", "takeLengthLabel"):
-            body = extract_function(fn, self.src)
-            strings = re.findall(r"""(['"`])((?:(?!\1).)*)\1""", body)
-            for _, lit in strings:
-                if lit[:1] in "./#":      # a selector, an id or a URL — not copy
-                    continue
-                self.assertFalse(re.search(r"\b(re)?takes?\b", lit, re.I), f"{fn}: {lit}")
+        sec = self.html[self.html.index('id="oneshotSectionTab"'):]
+        sec = sec[:sec.index('id="audioSectionTab"')]
+        text = re.sub(r"<!--.*?-->", "", sec, flags=re.S)
+        text = re.sub(r"<[^>]+>", " ", text)
+        self.assertNotRegex(text, r"\btake\b", "the user reads 'one shot', never 'take'")
 
-    def test_the_panel_copy(self):
-        text = " ".join(self._panel_text().split())
-        for needed in ("Start frame", "optional · the shot starts from this picture",
-                       "Split my prompt into beats",
-                       "one line per 5 seconds — what happens in that moment",
-                       "Lock the light", "keeps the time of day and weather the same in every line",
-                       "Redo a part that drifts", "if a part changes the light, it is rendered once more"):
-            self.assertIn(needed, text, needed)
-        for gone in ("Anchor image", "Write the beats for me", "Retake", "holds the moment"):
-            self.assertNotIn(gone, text, gone)
-        # The split button lives in the Beats label row, not on a row of its own.
-        row = self.html[self.html.index('id="beatsRow"'):self.html.index('id="beats_text"')]
-        self.assertIn('id="beatsPrefillBtn"', row)
-        self.assertNotIn("beats-tools", self.html)
-        # The hint counter and the overflow line, executed.
-        self.assertIn("extra line", extract_function("beatsInput", self.src))
-        self.assertIn("will be dropped", extract_function("beatsInput", self.src))
+    # ---- the module, run -----------------------------------------------------
+    def test_entering_the_tab_defaults_to_thirty_seconds_on_ltx_with_nothing_written(self):
+        # VA-15: the default was 60 s (6 parts, ~28 min committed before any
+        # price showed near Generate). Now 30 s (3 parts, ~15 min — the
+        # owner's own sample length).
+        e = self.r["enter"]
+        self.assertEqual((e["engine"], e["seconds"], e["quality"]), ("ltx", 30, "balanced"))
+        self.assertEqual(e["lengths"], ["30", "45", "60", "90", "120"])
+        self.assertEqual(e["activeLength"], ["30"])
+        self.assertEqual(e["parts"], ["3 × 10 s", "4 × 10 s + 5 s", "6 × 10 s", "9 × 10 s", "12 × 10 s"])
+        self.assertEqual(e["qualities"], ["quick", "balanced", "standard", "high"])
+        self.assertEqual(e["characters"], ["", "bizarrotrn"])
+        self.assertEqual(e["beats"], [])
+        self.assertIn("the prompt carries the whole shot", e["beatsHint"])
+        self.assertEqual((e["rows"], e["first"]), (6, "0:00"))
+        self.assertEqual((e["handoff"], e["handoffChips"]), ("last", ["last"]))
+        self.assertIn("30 s", e["summary"]); self.assertIn("3 parts of 10 s", e["summary"])
+        self.assertEqual(self.r["len45"]["chip"], "4 × 10 s + 5 s")
+        self.assertIn("4 × 10 s + 5 s", self.r["len45"]["summary"])
+        self.assertFalse(e["characterBlockHidden"])
 
-    def test_the_storyboard_names_it_one_shot(self):
-        chip = re.search(r'<button[^>]*data-sb-shots="take"[^>]*>(.*?)</button>', self.html, re.S).group(1)
-        self.assertIn(">One Shot<", chip)
-        row = self.html[self.html.index('id="sbTakeRow"'):self.html.index('id="sbTakeGroup"')]
-        self.assertIn("One Shot length", row)
-        self.assertNotIn("How long", row)
-        # ...and the row really folds: .cz-control sets a display of its own.
-        css = (ROOT / "webapp" / "style" / "panel.css").read_text(encoding="utf-8")
-        self.assertRegex(css, r"\.cz-control\[hidden\]\s*\{\s*display:\s*none\s*!important;?\s*\}")
+    def test_one_paragraph_is_a_complete_document(self):
+        d = self.r["docPromptOnly"]
+        self.assertEqual(d["prompt"], "A hen skates down Broadway at night.")
+        self.assertEqual((d["seconds"], d["engine"], d["quality"]), (30, "ltx", "balanced"))
+        self.assertNotIn("beats", d); self.assertNotIn("character_id", d); self.assertNotIn("image", d)
+        self.assertEqual((d["light_lock"], d["retake"], d["handoff"]), ("on", "on", "last"))
 
-    def test_the_leave_hook_runs_before_every_early_return(self):
-        fn = extract_function("setMode", self.src)
-        self.assertLess(fn.index("oneshotLeave"), fn.index("if (mode === 'train')"))
-        self.assertLess(fn.index("oneshotLeave"), fn.index("if (mode === 'character')"))
-        self.assertLess(fn.index("oneshotLeave"), fn.index("if (mode === 'image')"))
+    def test_the_rows_and_the_hint_follow_the_length_and_the_lines(self):
+        self.assertEqual(self.r["len30"]["rows"], 6)
+        self.assertEqual(self.r["len30"]["activeLength"], ["30"])
+        b = self.r["beats"]
+        self.assertIn("6 lines of 5 s", b["hint"]); self.assertIn("7 written", b["hint"])
+        self.assertIn("2 rows past the end will be dropped", b["hint"])
+        self.assertEqual((b["rows"], b["over"]), (8, 2))
+        self.assertEqual(b["values"], ["she pushes off", "", "a van sweeps past", "1", "2", "3", "4", "5"])
+        self.assertEqual(b["doc"], ["she pushes off", "", "a van sweeps past", "1", "2", "3", "4", "5"])
+        self.assertEqual(self.r["split"], ["She pushes off.", "A van sweeps past!", "Pigeons burst up?", "Then nothing."])
 
-    def test_load_params_reopens_a_one_shot_from_its_sidecar(self):
-        fn = extract_function("loadParams", self.src)
-        self.assertIn("setMode('oneshot')", fn)
-        self.assertLess(fn.index("setMode('oneshot')"), fn.index("setMode('extend')"))
-        self.assertIn("setTakeLightLock", fn)
-        self.assertIn("setTakeRetake", fn)
+    def test_a_character_turns_the_handoff_on_and_the_user_can_turn_it_back(self):
+        c = self.r["character"]
+        self.assertEqual((c["handoff"], c["handoffChips"], c["quality"]), ("speech", ["speech"], "pro"))
+        self.assertEqual(c["qualities"], ["draft", "pro", "high", "high_720p"])
+        self.assertEqual((c["doc"]["character_id"], c["doc"]["handoff"], c["doc"]["quality"]), ("bizarrotrn", "speech", "pro"))
+        self.assertEqual(self.r["handoffKept"], "last")
 
-    def test_the_engine_switch_refreshes_the_part_labels(self):
-        fn = extract_function("setEngine", self.src)
-        self.assertIn("oneshotRefreshLabels", fn)
-        self.assertIn("takeRefresh", fn)
+    def test_h3_is_fifteen_second_parts_without_a_character(self):
+        h = self.r["h3"]
+        self.assertEqual(h["parts"], ["2 × 15 s", "3 × 15 s", "4 × 15 s", "6 × 15 s", "8 × 15 s"])
+        self.assertEqual(h["qualities"], ["draft", "standard", "high", "native"])
+        self.assertEqual(h["quality"], "standard")
+        self.assertTrue(h["characterBlockHidden"]); self.assertTrue(h["handoffRowHidden"])
+        self.assertEqual(h["doc"]["engine"], "h3"); self.assertNotIn("character_id", h["doc"])
+        c = self.r["h3Cleared"]
+        self.assertEqual((c["character"], c["handoff"]), ("", "last"))
+        self.assertNotIn("character_id", c["doc"])
 
-    def test_both_engines_serve_the_mode(self):
-        fn = extract_function("engineServesMode", self.src)
-        self.assertIn("mode === 'oneshot'", fn)
+    def test_load_params_rebuilds_the_document_and_opens_the_tab(self):
+        l = self.r["loaded"]
+        self.assertEqual((l["engine"], l["seconds"], l["prompt"]), ("ltx", 90, "the tram"))
+        self.assertEqual(l["beats"], ["a", "", "c"])
+        self.assertEqual((l["camera"], l["handoff"], l["light"], l["retake"]), ("a slow push in", "speech", "off", "off"))
+        self.assertEqual((l["character"], l["seed"]), ("bizarrotrn", "4242"))
+        self.assertEqual(l["switched"][-1], "oneshot")
+
+    def test_the_status_strip_names_the_part_and_the_verdict(self):
+        self.assertEqual(self.r["verdicts"], ["ok", "mid", "bad", "quiet"])
+        s = self.r["status"]
+        self.assertFalse(s["hidden"])
+        self.assertIn("Rendering", s["title"]); self.assertIn("tram", s["title"])
+        self.assertIn("part 2 of 3", s["meta"])
+        self.assertEqual(len(re.findall(r'class="os-part ', s["partsHtml"])), 3)
+        self.assertIn("voice on the mouth (+0.40)", s["partsHtml"]); self.assertIn("part 2 · rendering", s["partsHtml"])
+        self.assertIn("lip-sync +0.40", s["log"]); self.assertNotIn("[take]", s["log"])
+        m = self.r["statusMine"]
+        self.assertIn("Queued, paused", m["title"]); self.assertIn("coast ride", m["title"])
+        self.assertIn("1 ahead of it", m["meta"]); self.assertIn("paused", m["meta"])
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
+class RoomToneShipReview(unittest.TestCase):
+    """Codex ship review 2026-09-18, two confirmed defects in the room-tone
+    apply path. Source assertions, because both are async UI paths."""
+
+    JS = (Path(__file__).resolve().parent / "webapp" / "js" / "editor.js").read_text(encoding="utf-8")
+
+    def test_the_bed_lands_on_the_timeline_that_asked_for_it(self):
+        # Open film B while A's bed is being made and the response used to
+        # replace B's bed with A's file.
+        i = self.JS.index("async function edRtApply")
+        body = self.JS[i:i + 3000]
+        self.assertIn("const askedFor = String(SBE.id", body)
+        self.assertIn("!== askedFor", body)
+        self.assertLess(body.index("const askedFor"), body.index("await sbeRtRequest"))
+
+    def test_a_rebuild_keeps_the_fader_the_user_set(self):
+        # `room_tone.level` is the level the bed was MADE with; the fader writes
+        # `track.gain`. Rebuilding from the metadata reset a bed pulled down to
+        # 10% back to 35% (+11 dB).
+        self.assertIn("function sbeRtLevelOfTrack", self.JS)
+        i = self.JS.index("async function edRtApply")
+        self.assertIn("sbeRtLevelOfTrack(cur.track)", self.JS[i:i + 2000])

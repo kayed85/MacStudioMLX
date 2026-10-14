@@ -47,9 +47,11 @@ constants. ~1 s.
 
 from __future__ import annotations
 
+import atexit
 import importlib.util
 import json
 import os
+import shutil
 import struct
 import sys
 import tempfile
@@ -132,7 +134,70 @@ def load_panel(version_id: str | None):
     mod = importlib.util.module_from_spec(spec)
     sys.modules["panel_under_test"] = mod
     spec.loader.exec_module(mod)
+    use_fixture_character(mod)
     return mod
+
+
+# THE CHARACTER CASES MUST NOT DEPEND ON WHO RUNS THE GATE (issue #90).
+# They used to name `bizarrotrn`, the maintainer's own reference character —
+# user data that is not in the repo — so on every other install make_job
+# refused with "character 'bizarrotrn' not found" and five cases failed for a
+# reason that says nothing about schedules. The gate now builds a throwaway
+# character the way the Characters tab discovers one (`list_characters()`
+# scans LORAS_DIR for `<trigger>_v2.safetensors` + `<trigger>.audio.safetensors`
+# and reads mlx_models/characters/<trigger>/bundle.json), in a temp dir, and
+# points the panel module under test at it. The real discovery code, the
+# real face+voice contract and the real make_job still run.
+#
+# One thing is pinned: the per-file LTX compatibility read. It compares the
+# adapter's tensor names against whichever LTX transformer this machine has
+# installed (none, 2.3 or 2.5), so it would make the gate machine-dependent
+# again, and adapter compatibility is test_lora_compat.py's job, not this
+# gate's. It is answered as "unknown", the same answer an install without the
+# active transformer gets — which make_job lets through.
+FIXTURE_CHARACTER = "schedgatetrn"
+_FIXTURE_ROOT = Path(tempfile.mkdtemp(prefix="phos-sched-character-"))
+atexit.register(shutil.rmtree, _FIXTURE_ROOT, True)
+
+
+def _write_empty_safetensors(path: Path) -> None:
+    """A valid safetensors file with no tensors: 8-byte LE header length,
+    then the JSON header, space-padded to 8 bytes as the format requires."""
+    import json
+    import struct
+    header = json.dumps({"__metadata__": {"fixture": "assert_schedules"}}).encode()
+    header += b" " * (-len(header) % 8)
+    path.write_bytes(struct.pack("<Q", len(header)) + header)
+
+
+def _build_fixture_character() -> tuple[Path, Path]:
+    loras = _FIXTURE_ROOT / "loras"
+    characters = _FIXTURE_ROOT / "characters"
+    loras.mkdir(parents=True, exist_ok=True)
+    (characters / FIXTURE_CHARACTER).mkdir(parents=True, exist_ok=True)
+    _write_empty_safetensors(loras / f"{FIXTURE_CHARACTER}_v2.safetensors")
+    _write_empty_safetensors(loras / f"{FIXTURE_CHARACTER}.audio.safetensors")
+    (characters / FIXTURE_CHARACTER / "bundle.json").write_text(
+        '{"name": "Schedule Gate", "pronoun": "they", "subject_noun": "person"}',
+        encoding="utf-8")
+    return loras, characters
+
+
+def use_fixture_character(p) -> None:
+    loras, characters = _build_fixture_character()
+    p.LORAS_DIR = loras
+    p._CHARACTERS_CACHE_PATH = characters
+    p._ltx_lora_compatibility = lambda path: {
+        "ltx_compatible": None,
+        "ltx_compat_reason": "pinned by assert_schedules (not under test here)",
+        "ltx_fusion_tally": None,
+    }
+    found = [c["id"] for c in p.list_characters()]
+    if found != [FIXTURE_CHARACTER]:
+        raise SystemExit(
+            f"assert_schedules: fixture character discovery returned {found!r}, "
+            f"expected [{FIXTURE_CHARACTER!r}] — list_characters() no longer "
+            f"reads LORAS_DIR, so the character cases would not test anything")
 
 
 # The modes a user can actually submit from the panel, with the minimum form
@@ -141,8 +206,8 @@ MODE_FORMS = {
     "t2v":          {"mode": "t2v"},
     "t2v_high":     {"mode": "t2v", "quality": "high"},
     "i2v":          {"mode": "i2v"},
-    "character":    {"mode": "t2v", "character_id": "bizarrotrn"},
-    "character_high": {"mode": "t2v", "character_id": "bizarrotrn",
+    "character":    {"mode": "t2v", "character_id": FIXTURE_CHARACTER},
+    "character_high": {"mode": "t2v", "character_id": FIXTURE_CHARACTER,
                        "quality_choice": "high"},
     "keyframe":     {"mode": "keyframe"},
     "extend":       {"mode": "extend", "video_path": "/tmp/x.mp4"},
@@ -225,7 +290,7 @@ def run() -> None:
         # there without pretending the 2.3 UI offers the token.
         if version_id == "ltx25":
             mode_forms["character_high720"] = {
-                "mode": "t2v", "character_id": "bizarrotrn",
+                "mode": "t2v", "character_id": FIXTURE_CHARACTER,
                 "quality_choice": "high720",
             }
         for label, form in mode_forms.items():

@@ -83,6 +83,40 @@ class TheRetake(unittest.TestCase):
         self.assertNotIn("draft_output", new)
         stj.assert_called_once()
 
+    def test_a_retake_does_not_inherit_the_sources_job_ids(self):
+        # FILM-09: the source shot carries a FINISHED delivery job. The old
+        # exclude list checked `k.endswith("_job")`, but the real field is
+        # `final_job_id` — which does NOT end in "_job" — so it rode along
+        # onto the "new" retake shot, and the reconciler folded the OLD
+        # final clip back onto it: "Retake (Delivery)" silently handed back
+        # the same clip it started from.
+        self.board["shots"][0].update({
+            "draft_job_id": "j-old-draft", "final_job_id": "j-old-final",
+            "still_job_id": "j-old-still", "error": "a stale error",
+            "lipsync": {"score": 0.9, "attempts": 1, "kept": "/x/old.mp4"},
+        })
+        h = FakeHandler()
+        with mock.patch.object(panel, "_sb_known_character_ids", return_value=["bizarrotrn"]), \
+                mock.patch.object(panel, "_sb_h3_available", return_value=False), \
+                mock.patch.object(storyboard, "shot_to_job", return_value={"mode": "t2v", "prompt": "p"}):
+            h.post("edit/generate", {"id": "sb_t", "prompt": "he turns, slower",
+                                     "duration": "4", "film_start": "0",
+                                     "retake_of": "c1"})
+        self.assertEqual(h.status, 202, h.payload)
+        new = self.board["shots"][-1]
+        # `final_job_id`, `still_job_id`, `error` and `lipsync` must never
+        # ride along at all — the new shot has not rendered yet.
+        for key in ("final_job_id", "still_job_id", "error", "lipsync"):
+            self.assertNotIn(key, new, f"retake inherited the source's {key!r}")
+        # `draft_job_id` IS legitimately set — by queuing THIS shot's OWN
+        # job a moment later — but it must be the fresh id, never the
+        # source's old one.
+        self.assertEqual(new.get("draft_job_id"), "j-take")
+        self.assertNotEqual(new.get("draft_job_id"), "j-old-draft")
+        # the clone contract for everything else still holds
+        self.assertEqual(new["character_id"], "bizarrotrn")
+        self.assertEqual(new["location"], "the study")
+
     def test_a_retake_of_a_clip_that_left_is_refused(self):
         h = FakeHandler()
         h.post("edit/generate", {"id": "sb_t", "prompt": "x", "retake_of": "zz"})

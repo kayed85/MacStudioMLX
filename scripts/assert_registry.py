@@ -44,6 +44,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import struct
 import sys
 import tempfile
@@ -62,6 +63,23 @@ os.environ["PHOSPHENE_ANALYTICS_DISABLED"] = "1"
 os.environ["PHOSPHENE_DISABLE_VERSION_CHECK"] = "1"
 os.environ.setdefault("LTX_PORT", "8299")
 sys.path.insert(0, str(ROOT))
+
+# IMPORT THE PANEL WITH THE MODEL LOCATIONS PINOKIO GIVES IT (issue #90).
+# start.js exports LTX_MODEL / LTX_MODEL_HQ / LTX_GEMMA / LTX_MODELS_DIR /
+# LTX_Q8_LOCAL as fixed {{cwd}} paths on every launch. Without them the panel
+# falls back to the HF repo id for LTX_MODEL whenever mlx_models/ltx-2.3-mlx-q4
+# is absent — which, since install.js stopped downloading LTX-2.3, is every
+# fresh install — so this gate judged `_canonical_layout()` (and with it the
+# anti-mosaic preflight) on an environment no user's panel ever runs in, and
+# failed on any install without the optional 2.3 pack. Read from start.js
+# itself so the two cannot drift; a caller's own value still wins.
+_START_JS = (ROOT / "start.js").read_text(encoding="utf-8")
+for _key in ("LTX_MODEL", "LTX_MODEL_HQ", "LTX_GEMMA", "LTX_MODELS_DIR", "LTX_Q8_LOCAL"):
+    _m = re.search(r'^\s*%s:\s*"([^"]+)"' % _key, _START_JS, re.M)
+    if not _m:
+        raise SystemExit(f"assert_registry: start.js no longer exports {_key}; "
+                         "update the launch environment this gate imports with")
+    os.environ.setdefault(_key, _m.group(1).replace("{{cwd}}", str(ROOT)))
 
 # The alias must NOT be "panel": that name now belongs to the route-handler
 # package (panel/routes_*.py, slice 4 of docs/ARCHITECTURE.md), and the panel
@@ -101,7 +119,8 @@ for _repo in _req_data.get("repos", []):
             pass
 p.MODEL_ID = str(p.pack_path("q4", "ltx23"))
 
-OK = FAIL = DEFECT = 0
+OK = FAIL = DEFECT = SKIP = 0
+_skips: list[str] = []
 _failures: list[str] = []
 
 
@@ -141,6 +160,37 @@ def no_raise(label, fn):
     except Exception as exc:  # noqa: BLE001
         FAIL += 1
         _failures.append(f"{label}: raised {type(exc).__name__}: {exc}")
+
+
+def skip(label, reason):
+    """A check this install cannot answer. Printed, counted, never a pass."""
+    global SKIP
+    SKIP += 1
+    _skips.append(f"{label}: {reason}")
+
+
+def not_installed(quant, version_id):
+    """A reason string when (version, quant) is an OPT-IN pack this install
+    never downloaded, else "" (issue #90).
+
+    install.js downloads the DEFAULT generation's q4 pack; every other pack
+    (the LTX-2.3 packs since "LTX-2.3 is no longer downloaded", the q8 High
+    packs) is fetched from Settings -> Models only when wanted. Asserting
+    such a pack "complete" on an install that never asked for it failed this
+    gate on every fresh install. Not one of the pack's files on disk means
+    not installed -> SKIP. ANY of them present means installed, and a
+    partial pack is still a FAIL — that is the June-2026 mosaic this gate
+    exists for. The default generation's q4 is never optional."""
+    if quant == "q4" and p.model_version(version_id).get("default"):
+        return ""
+    repo = p.pack_repo(quant, version_id)
+    if not repo:
+        return ""
+    missing = set(p.pack_missing_files(quant, version_id))
+    if missing and missing >= set(repo["files"]):
+        return (f"{p.model_version(version_id)['label']} {quant.upper()} pack is "
+                f"not installed here ({p.pack_path(quant, version_id)})")
+    return ""
 
 
 def known_defect(tag, label, got, current, should_be):
@@ -261,8 +311,18 @@ eq("the add-on is a guest in the q8 directory",
 # Storyboard), but both fragments come from this one registry-backed helper.
 # Exercise BOTH generations: checking only the active default is how literal
 # "Install Q8 (30 GB)" copy passed while the LTX23 pin needed 37 GB.
-_q23_copy = p.q8_character_install_copy("ltx23")
-_q25_copy = p.q8_character_install_copy("ltx25")
+#
+# Read as a Q8-capable Mac (issue #90): below the Q8 RAM floor the helper
+# deliberately drops the "Install ... (size)" offer (SYS-18) and names the
+# pack without a size, so on a <48 GB Mac the size assertions below failed
+# for a reason that is correct behaviour there.
+_saved_caps = p.SYSTEM_CAPS
+p.SYSTEM_CAPS = p.CAPABILITIES["standard"]
+try:
+    _q23_copy = p.q8_character_install_copy("ltx23")
+    _q25_copy = p.q8_character_install_copy("ltx25")
+finally:
+    p.SYSTEM_CAPS = _saved_caps
 eq("2.3 character install copy names its own pack",
    "LTX 2.3" in _q23_copy and "37 GB" in _q23_copy, True)
 eq("2.3 character install copy never advertises the 2.5 pack",
@@ -300,10 +360,19 @@ eq("q8_available_anywhere delegates", p.q8_available_anywhere(), p.pack_availabl
 eq("an unregistered quant invents no missing files", p.pack_missing_files("q9"), [])
 for vid in ("ltx23", "ltx25"):
     for q in ("q4", "q8"):
+        if not_installed(q, vid):
+            skip(f"this install is complete ({vid}/{q})", not_installed(q, vid))
+            continue
         eq(f"this install is complete ({vid}/{q})", p.pack_missing_files(q, vid), [])
     eq(f"this install has {vid}'s text encoder", p.text_encoder_missing_files(vid), [])
-eq("the HQ surface is complete on this box", p.hq_surface_missing("ltx25"), [])
-eq("2.3 has no HQ surface of its own to be missing", p.hq_surface_missing("ltx23"), [])
+if not_installed("q8", "ltx25"):
+    skip("the HQ surface is complete on this box", not_installed("q8", "ltx25"))
+else:
+    eq("the HQ surface is complete on this box", p.hq_surface_missing("ltx25"), [])
+if not_installed("q8", "ltx23"):
+    skip("2.3 has no HQ surface of its own to be missing", not_installed("q8", "ltx23"))
+else:
+    eq("2.3 has no HQ surface of its own to be missing", p.hq_surface_missing("ltx23"), [])
 
 # =============================================================================
 # 6. cap_tier — the machine's RAM vs the version's ceiling
@@ -366,10 +435,12 @@ _saved_canon = p._canonical_layout
 p._canonical_layout = lambda: True
 try:
     for vid in ("ltx23", "ltx25"):
-        no_raise(f"a complete pack passes ({vid}/q4)",
-                 lambda vid=vid: p.ltx_pack_preflight("q4", "X", vid))
-        no_raise(f"a complete pack passes ({vid}/q8)",
-                 lambda vid=vid: p.ltx_pack_preflight("q8", "X", vid))
+        for q in ("q4", "q8"):
+            if not_installed(q, vid):
+                skip(f"a complete pack passes ({vid}/{q})", not_installed(q, vid))
+                continue
+            no_raise(f"a complete pack passes ({vid}/{q})",
+                     lambda vid=vid, q=q: p.ltx_pack_preflight(q, "X", vid))
     no_raise("an unregistered quant is a no-op", lambda: p.ltx_pack_preflight("q9", "X"))
 
     with tempfile.TemporaryDirectory() as td:
@@ -409,7 +480,11 @@ try:
             pack["path"] = saved
             p.pack_available_anywhere = _saved_anywhere
     eq("the 2.3 q8 path is restored", p.pack_path("q8", "ltx23"), p.Q8_LOCAL_PATH)
-    no_raise("preflight is quiet again", lambda: p.ltx_pack_preflight("q8", "X", "ltx23"))
+    if not_installed("q8", "ltx23"):
+        skip("preflight is quiet again", not_installed("q8", "ltx23"))
+    else:
+        no_raise("preflight is quiet again",
+                 lambda: p.ltx_pack_preflight("q8", "X", "ltx23"))
 finally:
     p._canonical_layout = _saved_canon
 
@@ -557,9 +632,15 @@ _SHIPPED_CANVASES = {
     "high":      (1024, 576),
     "high_720p": (1280, 704),
 }
+# The NATIVE canvas is the contract (issue #90): on a <48 GB Mac the tier's
+# t2v_max_dim clamps the rendered canvas at import and records the shipped
+# one as native_width/native_height (EST-13), so comparing the live width
+# failed on every Compact-tier Mac for behaviour that is correct there.
 for _k, _wh in _SHIPPED_CANVASES.items():
+    _cell = p.LTX_QUALITIES[_k]
     eq(f"{_k} keeps its shipped canvas",
-       (p.LTX_QUALITIES[_k]["width"], p.LTX_QUALITIES[_k]["height"]), _wh)
+       (int(_cell.get("native_width") or _cell["width"]),
+        int(_cell.get("native_height") or _cell["height"])), _wh)
 eq("no quality key has been added or dropped without updating this gate",
    sorted(p.LTX_QUALITIES), sorted(_SHIPPED_CANVASES))
 
@@ -602,7 +683,31 @@ for _key in p.LTX_MEASURED_ETA:
 # lengths remain modelled.
 eq("high at 5s is the measured row",
    p.LTX_TIERS["high_5s"]["eta_measured"], True)
-eq("high uses the owner-approved label", p.LTX_TIERS["high_5s"]["eta"], "~4 min")
+# The LABEL is chip-dependent by design (issue #90): `_build_ltx_tiers` prints
+# the measured row's own string only at the M4 Max baseline (hw == 1.0) and
+# a computed `_fmt_eta(minutes * hw)` everywhere else, so an M4 Pro (hw 1.7)
+# reads "~7 min". Asserting the literal "~4 min" against the live table made
+# this gate pass or fail by which Mac ran it. What is asserted instead is the
+# selector itself, with the speed factor pinned, plus that the live table is
+# the selector's answer for whatever this Mac's factor is.
+_high_row = p.LTX_MEASURED_ETA[(p.ACTIVE_MODEL_VERSION, "high", "5s", "q8")]
+eq("high's measured row carries the owner-approved label", _high_row[1], "~4 min")
+_saved_hw = p._ltx_speed_factor
+try:
+    p._ltx_speed_factor = lambda: 1.0
+    eq("high uses the owner-approved label at the M4 Max baseline (hw 1.0)",
+       p._build_ltx_tiers()["high_5s"]["eta"], "~4 min")
+    p._ltx_speed_factor = lambda: 1.7
+    _slow = p._build_ltx_tiers()["high_5s"]
+    eq("...a slower Mac (hw 1.7) prices the measured row by its own factor",
+       _slow["eta"], p._fmt_eta(_high_row[0] * 1.7))
+    eq("...and that is not the M4 Max label", _slow["eta"] != "~4 min", True)
+finally:
+    p._ltx_speed_factor = _saved_hw
+_hw_here = p._ltx_speed_factor()
+eq(f"the live high label is the selector's answer for this Mac (hw {_hw_here:.2f})",
+   p.LTX_TIERS["high_5s"]["eta"],
+   "~4 min" if _hw_here == 1.0 else p._fmt_eta(_high_row[0] * _hw_here))
 eq("...and High is measured at its shipped canvas",
    (p.LTX_TIERS["high_5s"]["width"],
     p.LTX_TIERS["high_5s"]["height"],
@@ -624,8 +729,12 @@ for _ln in p.LTX_LENGTHS:
 print()
 for f in _failures:
     print("FAIL  " + f)
+for s_ in _skips:
+    print("SKIP  " + s_)
 print()
-print(f"{OK} passed, {FAIL} failed, {DEFECT} known defect(s) pinned")
+print(f"{OK} passed, {FAIL} failed, {SKIP} skipped, {DEFECT} known defect(s) pinned")
+if SKIP:
+    print("A skip is NOT a pass: those checks need the pack installed. See the SKIP lines.")
 if DEFECT:
     print("A pinned defect is NOT a pass. See the DEFECT lines above.")
 raise SystemExit(1 if FAIL else 0)

@@ -205,12 +205,20 @@ class TheAutoPipeline(unittest.TestCase):
                            {"n": 2, "status": "skipped"},
                            {"n": 3, "final_output": "/x/c.mp4"}]}
         edit = {"version": 2, "clips": [{"id": "a"}, {"id": "c"}], "beats": {"bpm": 120}}
+        # FILM-20: the final save now goes through _sb_patch_board, which
+        # RE-LOADS the board rather than trusting this in-memory copy — the
+        # whole point being that anything changed on disk in the meantime
+        # (here: nothing) is what gets `auto_film` patched onto it, not this
+        # possibly-stale object. load_storyboard is mocked to hand back an
+        # equivalent copy of the board, as it would from disk.
         with mock.patch.object(panel, "_sbe_auto_edit", return_value=edit) as ae, \
                 mock.patch.object(panel, "_sbe_board_dir", return_value=Path("/tmp/x")), \
                 mock.patch("storyboard_editor.save_edit") as save, \
                 mock.patch("storyboard_editor.load_edit", return_value=edit), \
                 mock.patch.object(panel, "_sbe_render_edit",
                                   return_value={"ok": True, "path": "/x/film.mp4"}) as rend, \
+                mock.patch.object(panel.storyboard, "load_storyboard",
+                                  return_value=dict(board, shots=list(board["shots"]))) as sb_load, \
                 mock.patch.object(panel.storyboard, "save_storyboard") as sb_save, \
                 mock.patch.object(panel, "push"):
             film = panel._sb_auto_film(board)
@@ -218,5 +226,7 @@ class TheAutoPipeline(unittest.TestCase):
         save.assert_called_once()
         rend.assert_called_once()
         self.assertEqual(film["path"], "/x/film.mp4")
-        self.assertEqual(board["auto_film"], "/x/film.mp4")
+        sb_load.assert_called_once_with(panel.STATE_DIR, "b")
         sb_save.assert_called_once()
+        saved_board = sb_save.call_args[0][1]
+        self.assertEqual(saved_board["auto_film"], "/x/film.mp4")

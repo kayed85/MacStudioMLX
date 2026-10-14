@@ -48,9 +48,9 @@ MAX_HEADER_BYTES = 64 * 1024 * 1024
 #:   ===========================================  =========  =========
 #:   adapter                                      rank       median
 #:   ===========================================  =========  =========
-#:   ``elontrn_v2`` (validated recipe)            32         1.63e-03
-#:   ``ariatrn_v2`` (validated recipe)            32         1.45e-03
-#:   ``eltrumpo_v2`` (validated recipe)           32         1.41e-03
+#:   ``chartest_a_v2`` (validated recipe)            32         1.63e-03
+#:   ``chartest_c_v2`` (validated recipe)            32         1.45e-03
+#:   ``chartest_b_v2`` (validated recipe)           32         1.41e-03
 #:   ``bizarrotrn_v2`` (sample character)         32         8.84e-04
 #:   ``LTX2.3-Rogue…`` (third-party, works)       16         1.84e-03
 #:   ``Fantasy_Painterly`` (third-party, works)   32         5.36e-04
@@ -166,6 +166,30 @@ def _tensor_header_cached(path_raw: str, size: int, mtime_ns: int) -> dict[str, 
     if not isinstance(header, dict):
         raise LoraCompatibilityError(
             f"Cannot inspect '{path.name}': safetensors header is not an object."
+        )
+    # A TRUNCATED FILE HAS AN INTACT HEADER. An interrupted CivitAI/Hub
+    # download keeps its header (the first bytes) and loses its tail, so every
+    # key check passed and the strength probe then read short and died with
+    # numpy's "cannot reshape array of size 57408 into shape (32,2048)" — 14
+    # failed renders on one install (fleet, 4.16.1/4.16.2), naming nothing.
+    # The header says exactly how many payload bytes follow; compare.
+    try:
+        payload_end = max(
+            (int(v["data_offsets"][1]) for k, v in header.items()
+             if k != "__metadata__" and isinstance(v, dict)
+             and isinstance(v.get("data_offsets"), (list, tuple))
+             and len(v["data_offsets"]) == 2),
+            default=0,
+        )
+    except (TypeError, ValueError):
+        payload_end = 0
+    expected = 8 + header_size + payload_end
+    if payload_end and size < expected:
+        raise LoraCompatibilityError(
+            f"'{path.name}' is incomplete: the file is {size / 1e6:.1f} MB but "
+            f"it should be {expected / 1e6:.1f} MB, so its download was cut "
+            f"short. Delete it and download it again. Rendering was refused "
+            f"before it could produce a result without it."
         )
     return {
         str(key): value
@@ -383,6 +407,16 @@ def measure_adapter_effect(
             fh.seek(payload_base + start)
             raw = fh.read(end - start)
             dtype, conversion = spec
+            want = 1
+            for dim in info["shape"]:
+                want *= int(dim)
+            if len(raw) != end - start or len(raw) != want * np.dtype(dtype).itemsize:
+                # Short read or a header that disagrees with itself: say which
+                # file, never numpy's reshape error (see the header check).
+                raise LoraCompatibilityError(
+                    f"'{path.name}' is damaged: tensor {key} should hold "
+                    f"{want} values but {len(raw) // np.dtype(dtype).itemsize} "
+                    f"are there. Delete the file and download it again.")
             flat = np.frombuffer(raw, dtype=dtype)
             if conversion == "bf16":
                 flat = (flat.astype(np.uint32) << 16).view(np.float32)

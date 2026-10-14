@@ -169,6 +169,12 @@ def get_train_file(h, parsed) -> None:
 # ====== Train Character — start training (enqueue a mode='train' job)
 @post("/train/start")
 def post_train_start(h, path, qs, ctype) -> None:
+    # SYS-41: this used to fire train_start unconditionally, before the RAM
+    # refusal a few lines down — so a Mac under TRAIN_MIN_RAM_GB clicking
+    # Start (SYS-03: now gated at the tab entry for the UI, but this route
+    # is also reachable directly) counted as a "train start" the fleet
+    # dashboard could not tell apart from a real attempt. Moved past the
+    # refusal; the refusal itself now counts separately as train_refused.
     _rb = h._read_form_body()
     if _rb is None:
         return
@@ -176,6 +182,12 @@ def post_train_start(h, path, qs, ctype) -> None:
     train_job_id = (form.get("train_job_id", [""])[0] or "").strip()
     if not train_job_id:
         h._json({"error": "train_job_id required"}, 400); return
+    if float(P.SYSTEM_RAM_GB or 0) and float(P.SYSTEM_RAM_GB) < P.TRAIN_MIN_RAM_GB:
+        P._analytics_feature("train_refused", "ram")
+        h._json({"error": f"Training needs at least {P.TRAIN_MIN_RAM_GB} GB of memory; this Mac has "
+                          f"{float(P.SYSTEM_RAM_GB):.0f} GB. On this machine the trainer runs out of memory "
+                          f"before it finishes."}, 409); return
+    P._analytics_feature("train_start")
     try:
         train_job_id = P._safe_job_id(train_job_id)
     except ValueError as e:
@@ -532,7 +544,7 @@ def post_train_auto_caption(h, path, qs, ctype) -> None:
                 cmd,
                 stdout=P.subprocess.PIPE,
                 stderr=P.subprocess.STDOUT,
-                text=True,
+                text=True, errors="replace",
                 bufsize=1,
                 # Own process group so /stop's killpg can take down
                 # the captioner + any child it spawned.
@@ -678,10 +690,13 @@ def post_train_upload(h, path, qs, ctype) -> None:
             h._json({"error": "no filename"}, 400); return
         ext = P.Path(fld.filename).suffix.lower()
         original_stem = P.Path(fld.filename).stem
-        if ext not in P.TRAIN_IMAGE_EXTS and ext not in P.TRAIN_CAPTION_EXTS:
+        # SYS-02: TRAIN_IMAGE_UPLOAD_EXTS also accepts HEIC/HEIF/AVIF — the
+        # image branch below converts them to JPEG before writing to disk,
+        # so TRAIN_IMAGE_EXTS (what actually lands in images_dir) is unchanged.
+        if ext not in P.TRAIN_IMAGE_UPLOAD_EXTS and ext not in P.TRAIN_CAPTION_EXTS:
             h._json({
                 "error": f"unsupported file type {ext!r}; want one of "
-                         f"{sorted(P.TRAIN_IMAGE_EXTS | P.TRAIN_CAPTION_EXTS)}"
+                         f"{sorted(P.TRAIN_IMAGE_UPLOAD_EXTS | P.TRAIN_CAPTION_EXTS)}"
             }, 400)
             return
 
@@ -734,13 +749,23 @@ def post_train_upload(h, path, qs, ctype) -> None:
             }, 409)
             return
 
+        # SYS-01/SYS-02: normalize before it lands in the dataset — EXIF
+        # orientation applied + stripped, HEIC/HEIF/AVIF converted to JPEG.
+        # Without this the trainer's own thumbnails (which promise "the 1:1
+        # centre-crop the trainer will see") looked upright in the browser
+        # while the trainer centre-cropped sideways faces from the same
+        # bytes, and a HEIC drop silently vanished from the grid.
+        raw = fld.file.read()
+        raw, out_ext, norm_err = P.normalize_ingested_image_bytes(raw, fld.filename)
+        if norm_err:
+            h._json({"error": norm_err}, 400); return
         # Numeric ordering: char_001.jpg, char_002.jpg, ...
         # Lets the lab side load them in a deterministic order.
         next_idx = len(existing) + 1
-        saved_name = f"char_{next_idx:03d}{ext}"
+        saved_name = f"char_{next_idx:03d}{out_ext}"
         saved_stem = f"char_{next_idx:03d}"
         dest = images_dir / saved_name
-        dest.write_bytes(fld.file.read())
+        dest.write_bytes(raw)
         # Record original_stem → saved_stem so a later caption with
         # the original filename pairs on arrival.
         P._train_set_caption_map_entry(ds, original_stem, saved_stem)
@@ -1066,7 +1091,7 @@ def post_train_upload_voice(h, path, qs, ctype) -> None:
                      "-show_entries", "format=duration",
                      "-of", "default=noprint_wrappers=1:nokey=1",
                      str(dest)],
-                    capture_output=True, text=True, timeout=10,
+                    capture_output=True, text=True, errors="replace", timeout=10,
                 )
                 if out.returncode == 0 and out.stdout.strip():
                     duration_s = float(out.stdout.strip())

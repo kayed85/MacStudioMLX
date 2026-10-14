@@ -270,6 +270,15 @@ class PromptEnhanceEndpointTest(unittest.TestCase):
             previous = {key: os.environ.get(key) for key in overrides}
             os.environ.update(overrides)
             panel = None
+            # Loading the panel a second time re-points every panel.routes_*
+            # module's P at THIS copy (mlx_ltx_panel wires `_routes_mod.P =
+            # sys.modules[__name__]` at import). Left that way, every later
+            # suite in a whole-suite run called its routes against the dead
+            # copy — its own OUTPUT/STATE patches invisible, 404s all round
+            # (test_routes' wiring check, the room-tone/uploads/new-take
+            # route suites). Snapshot and restore the binding.
+            bound_p = {name: mod.P for name, mod in list(sys.modules.items())
+                       if name.startswith("panel.routes_") and hasattr(mod, "P")}
             try:
                 spec = importlib.util.spec_from_file_location(
                     "prompt_enhance_panel_under_test", ROOT / "mlx_ltx_panel.py"
@@ -337,6 +346,10 @@ class PromptEnhanceEndpointTest(unittest.TestCase):
                             if stream is not None and not stream.closed:
                                 stream.close()
                 sys.modules.pop("prompt_enhance_panel_under_test", None)
+                for name, bound in bound_p.items():
+                    mod = sys.modules.get(name)
+                    if mod is not None:
+                        mod.P = bound
                 for key, value in previous.items():
                     if value is None:
                         os.environ.pop(key, None)

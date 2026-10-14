@@ -35,9 +35,9 @@ Add a job to the panel's queue. Returns immediately; the helper renders it async
 
 | Field | Type | Note |
 |---|---|---|
-| `mode` | `t2v` \| `i2v` \| `extend` \| `keyframe` \| `image` | Job type. |
+| `mode` | `t2v` \| `i2v` \| `extend` \| `keyframe` \| `a2v` \| `v2a` \| `image` | Job type. `v2a` (Add sound) is Hailuo H3 only. |
 | `prompt` | string | Full prompt text. Trigger words for LoRAs go here. |
-| `negative_prompt` | string | Optional. Usually empty. |
+| `negative_prompt` | string | Optional. Honoured only where the pipeline runs classifier-free guidance: `high`, `extend`, `keyframe`, `a2v`. The distilled `quick` / `balanced` / `standard` paths have no guidance branch and ignore it (they used to fold the terms into the prompt, which made the model draw them, #81). |
 | `width`, `height` | int | Both divisible by 32. |
 | `frames` | int | Must satisfy `frames % 8 == 1`. 121 = 5s, 169 = 7s, 241 = 10s. |
 | `frame_rate` | float | Default `24`. LTX is trained at 24 fps; deviation degrades quality. |
@@ -62,12 +62,23 @@ Add a job to the panel's queue. Returns immediately; the helper renders it async
 | `window_invariants` | What must not change between windows (who, where, light, lens). Re-injected into every later window. |
 | `loras` | JSON-encoded array | See LoRA payload below. |
 
+**Hailuo H3 (`engine=h3`), 4.19 fields.** H3 renders `t2v`, `i2v`, `keyframe`, `extend`, `a2v` and `v2a`; each mode past `i2v` needs a flag on the INSTALLED runner (`/status.h3.keyframes` / `.extend` / `.audio_drive` / `.video_to_audio`), and a job for one the runner lacks renders on LTX with a sentence (Add sound has no LTX lane and is refused with the update sentence instead).
+
+| Field | Type | Note |
+|---|---|---|
+| `h3_quality`, `h3_length` | string | The cell. `h3_quality=fast_hd` = the 640×384 Fast pass + Upscale & Face Fix to 1280×768, queued together; Fast and the fix are forced. |
+| `h3_continuity` | `on` \| `off` | Default `on`: a chained window carries the last 17 frames of the previous one and their sound (`--chain-context-frames 17`). `off` = the one-still hand-over. |
+| `start_image`, `end_image`, `keyframes_json` | path / JSON | `mode=keyframe`. On H3 the start frame is optional (an end frame alone is MiniMax's last-frame task); `keyframes_json` beats land at their `frame_index` on the 24 fps timeline. |
+| `video_path`, `h3_extend_seconds` | path / float | `mode=extend`: any clip, continued from its last 17 frames and their sound; 0.5–15 s added after it. |
+| `audio`, `image`, `frames`, `audio_start_time`, `audio_stem_auto` | | `mode=a2v` with `engine=h3`: the track is held exactly and the picture rendered to it; `frames` (24 fps) is the length, capped at the audio left after `audio_start_time` and at 30 s; `audio_stem_auto=on` conditions on the separated vocal and delivers the original. |
+| `video_path` | path | `mode=v2a` (Add sound, H3 only): the clip's picture is kept exactly and only its sound is generated; up to 60 s. |
+
 **LoRA payload:** the `loras` field is a JSON-encoded array of `{path, strength}` objects. Stack as many as needed: On Hailuo H3, stacking needs the engine's repeatable `--lora` (`/status.h3.loras.max_stack` > 1); an older pack takes one adapter and the `h3_lora_slot` field decides whether it goes to Turbo or to the LoRA.
 
 ```json
 [
-  {"path": "<panel-root>/mlx_models/loras/ariatrn_v2.safetensors", "strength": 1.0},
-  {"path": "<panel-root>/mlx_models/loras/ariatrn.audio.safetensors", "strength": 1.0}
+  {"path": "<panel-root>/mlx_models/loras/chartest_c_v2.safetensors", "strength": 1.0},
+  {"path": "<panel-root>/mlx_models/loras/chartest_c.audio.safetensors", "strength": 1.0}
 ]
 ```
 
@@ -114,7 +125,11 @@ Returns `{"ok": true}`.
 
 ### `POST /queue/clear`
 
-Empty the queue. Returns `{"ok": true, "cleared": <count>}`.
+Empty the queue. Returns `{"cleared": <count>, "ids": [...], "undo_token": "<hex>"|null}`.
+The token undoes THIS clear once, for 60 s (`POST /queue/restore` with
+`{"token": "<hex>"}` puts back exactly the removed jobs, original ids included,
+ahead of anything queued since). A later clear supersedes it; an expired or
+spent token answers `410`.
 
 ### `POST /queue/pause`, `POST /queue/resume`
 
@@ -122,7 +137,10 @@ Pause/resume the queue dispatcher (does not affect a job already running).
 
 ### `POST /stop`
 
-Request the running job to stop. Returns `{"ok": true}`.
+Request the running job to stop. Returns `{"ok": true}`. Optional `?id=<job id>`
+(what the panel sends): stop only if that job is still the one running —
+otherwise `409 {"stale": true}` and nothing is stopped. `/stop/after_part`
+takes the same `id`.
 
 ### `POST /queue/batch`
 
@@ -136,6 +154,45 @@ Submit multiple prompts as one batch.
 ---
 
 ## Status — poll job state
+
+### One Shot — its own door: `POST /oneshot` (2026-09-08)
+
+One Shot is a workflow tab and a first-class API. A script posts the same
+document the tab posts — one JSON object — and gets the queued job back:
+
+```bash
+curl -s -X POST http://127.0.0.1:8198/oneshot -H 'Content-Type: application/json' -d '{
+  "prompt": "A red vintage tram rolls through a rain-soaked Lisbon street at night; a woman with a yellow umbrella waits at the stop. The bell rings twice; rain on the roof.",
+  "seconds": 60,
+  "engine": "ltx",
+  "quality": "balanced",
+  "camera": "a slow, steady push in along the street",
+  "beats": ["the tram comes round the corner", "", "the woman steps to the kerb"],
+  "handoff": "last"
+}'
+# → {"ok": true, "id": "j-…", "plan": {"seconds": 60, "parts": 6, "beats": 12, "engine": "ltx", "handoff": "last", "minutes": 28.2, "eta": "~28 min"}}
+```
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `prompt` | str | **required** | The whole shot, once: who, where, the time of day and the weather, the sound. With no beats it carries every five seconds. |
+| `seconds` | int | `60` | One of 30 / 45 / 60 / 90 / 120. Any other value is refused, never rounded (a 75 used to render as one clip). |
+| `engine` | `ltx` / `h3` | `ltx` | LTX renders 10 s parts (faces, voices, dialogue); H3 renders 15 s parts (motion, landscapes). H3 is refused when not installed. |
+| `quality` | str | engine default | LTX: `quick` / `balanced` / `standard` / `high`; with a character: `draft` / `pro` / `high` / `high_720p`; H3: `draft` / `standard` / `high` / `native`. |
+| `beats` | list or newline text | none | One line per five seconds. A blank line holds that moment; extra lines are dropped. Absent = the prompt is every beat. |
+| `camera` | str | `""` | One move for the whole shot, its direction and speed; carried into every part (`take_camera`). |
+| `image` | path | none | A start frame already on this Mac — upload first with `POST /upload` (field `image`) and pass the returned `path`. Makes the first part i2v. |
+| `character_id` | str | none | A trained character (LTX only). Defaults quality to `pro`, the export to 720p Sharp, and `handoff` to `speech`. `character_strength`, `voice_strength` optional. |
+| `handoff` | `last` / `speech` | `last` (`speech` with a character) | Where a part hands off: its last frame, or a talking frame with the last word carried over the next part (see the take contract below). |
+| `light_lock` / `retake` | on/off | `on` | The continuity sentence on every beat; one drift retake per part. |
+| `seed`, `label`, `no_music`, `turbo` (H3), `upscale`, `upscale_method` | | | As on `/queue/add`. |
+
+`GET /oneshot/options` — what this Mac can do: `seconds`, `engines.{ltx,h3}` (available, `part_seconds`, `qualities`), `character_qualities`, `characters` (id, name, trigger, has_voice), `planner`.
+`GET /oneshot/estimate?engine=&quality=&seconds=` — `parts`, `part_seconds`, `beats`, `minutes`, `eta`.
+`POST /oneshot/plan` `{prompt, seconds, engine}` — the Storyboard planner writes one beat per five seconds from the prompt (blocks 20–40 s): `{ok, beats:[…]}`.
+`GET /oneshot/status` — `current` (id, label, part, parts, `lipsync` per part, `drift`, handoff), `queued`, `recent`, and the take's own `log` lines.
+
+Under the hood every One Shot is the take contract below — `POST /oneshot` maps the document onto `make_job`'s form, so the tab, the API and `/queue/add` render exactly the same job.
 
 ### One take — `take_seconds` + `beats` on `POST /queue/add`
 
@@ -286,6 +343,15 @@ Cached ten minutes per lane and query.
 Form `repo`, `filename`, `meta` (the item JSON). Downloads through `huggingface_hub` (the saved HF token when present)
 into the lane's LoRA directory, runs the H3 layout probe, and writes the same sidecar a CivitAI install writes plus
 `source`, `hf_repo`, `hf_url`. Returns `{ ok, skipped, name, path, sidecar_path, lane, layout, converted }`.
+
+### `GET /civitai/download/state` · `POST /civitai/download/cancel` (4.18.0)
+
+`POST /civitai/download` takes an optional form field `token` (8-64 characters, `A-Z a-z 0-9 _ -`) chosen by
+the caller. While that download runs, `GET /civitai/download/state?token=…` returns
+`{ ok, state: "running"|"cancelled", bytes, total, name }` (404 once it has finished), and
+`POST /civitai/download/cancel` with `token` stops it at the next 256 KB chunk: the partial file is removed,
+nothing is registered, and the download's own response is `{ ok: false, cancelled: true, error }`.
+Without a token a download runs exactly as before.
 
 ### `GET /loras/updates`
 
@@ -523,7 +589,7 @@ Renders a multi-view turnaround sheet from the character's reference image (bund
 
 ```json
 {
-  "engine_override": "hidream_inline",
+  "engine_override": "qwen_edit_inline",
   "views": ["front", "profile_left", "three_quarter"],
   "wardrobe": "a red flight jacket",
   "seed": -1
@@ -666,6 +732,7 @@ The Editor is a **top-level workflow**, not a stage of the storyboard: engine-ag
 | `GET /storyboard/edit/peaks?id=<bid>` | The waveform. Hundreds of KB — fetch once, **never on a poll**. `404` until `prepare` has run. |
 | `GET /storyboard/edit/proxy?id=<bid>&name=<file>.mp4` | A proxy video, served with **range support**. Safari will not seek a `<video>` whose server answers plain `200`, which would undo the entire reason proxies exist. `name` must match `[A-Za-z0-9._-]{1,120}\.mp4` — it is a basename the server minted, so anything else is a probe. |
 | `GET /storyboard/edit/uploads` | Videos the user brought with them (`panel_uploads/timeline/`, newest first, capped at 200). Kept out of `OUTPUT` on purpose, which is why they need a route at all; images do not, they land in the library the gallery already walks. |
+| `GET /storyboard/edit/sounds?id=<bid>` | The media pool's **Sound** source: `{sounds: [{path, name, where, mtime}], dir}` — the film's own `audio/` folder (`where: "film"`) first, then the sound files (`.wav .m4a .mp3 .aac .flac .aif .ogg .opus`) at the top of `OUTPUT`, newest first, capped at 300. No probing; the length is read when a sound is added. |
 | `GET /storyboard/edit/drafts?id=<bid>` | `{active, drafts: [...], backup}` — see **Drafts** below. |
 | `GET /storyboard/edit/versions?id=<bid>` | **Metadata only**: name, revision, when kept, clip count, duration, plus `keep` (= `EDIT_HISTORY_KEEP`, 50). The documents themselves are read once, by `restore`, on the user's word. Opening the panel must not be a download. |
 
@@ -675,6 +742,7 @@ The Editor is a **top-level workflow**, not a stage of the storyboard: engine-ag
 |---|---|---|
 | `prepare` | `id`, `music`, `target_seconds` | Build proxies + peaks. `400` if `music` is not a file. |
 | `add-clip` | `id`, `from`, `only`, `path`, `title`, `kind` | `kind` is `video` \| `still` \| `slug` — passing it is what stops an image landing as a video with no frames. |
+| `add-sound` | `id`, `path` | One file for an **audio track**: probed (`{path, title, duration_s, has_video, imported}`), `400` when it carries no sound. A file outside `OUTPUT` is hardlinked (copied across volumes) into the film's own `audio/` folder first, because `/file` only serves `OUTPUT` and a sound the preview cannot play is half a sound. The strip is placed and saved by the client. |
 | `relink` | `id`, `only` | Re-point clips at their finished (delivery) files. **A finished RETAKE is never part of that batch** — it is offered against its clip with `retake: true` in the payload's `relink` rows and adopted one clip at a time with `only=<clip id>`. |
 | `cancel` | `id` | Cancel the prepare job. |
 | `auto` | `id`, `music`, `target_seconds`, `min_shot`, `max_shot` | Re-run the machine's cut. Lands in the **automatic** lane. |
@@ -738,7 +806,24 @@ Video clips only. Same three numbers as the picture, for the SOUND — so the so
 
 **The PRESENCE of the field is the switch, not the values in it.** Do not derive "linked" from `audio` equalling the picture window: unlinking writes the window the clip already has, so a clip the user had just unlinked would read as linked and refuse to be dragged. The toggle adds the object or deletes it; nothing else decides. `normalise_edit` rounds the field but **never removes it** for the same reason, and strips it entirely from a still or a slug.
 
-Audio windows may not overlap each other any more than the pictures may. This is still one video track and one music lane — a split edit is a butt join that lands somewhere else, not a mix.
+Audio windows may not overlap each other any more than the pictures may. A split edit is a butt join that lands somewhere else, not a mix — the mix is what `audio_tracks` is for.
+
+#### `audio_tracks[]` — A3, A4, … under the music
+
+```jsonc
+"audio_tracks": [
+  {"id": "t…", "name": "Laughs", "muted": true, "gain": 0.8,
+   "strips": [{"id": "k…", "path": "/…/laugh.wav", "start": 0.0, "end": 2.0,
+               "film_start": 12.5, "duration": 4.1, "gain": 0.5,
+               "muted": true, "locked": true, "title": "laugh (copy)",
+               "afx": {"fade_in": 0.5, "fade_out": 0.25, "points": [[1.0, 0.6]]}}]}]
+```
+
+Any number of tracks, each holding any number of strips. `start`/`end` are the in/out points inside the file (a strip plays at 1x, so it is `end - start` long on the film); `film_start` is a timeline second, laid out with `adelay` exactly as the bed is. `afx` is the same envelope object a clip's sound and the bed carry, read by `audio_gain_points`; the strip's `gain` and the track's `gain` (linear 0–1) multiply it — `track_strip_gain_points` is the one curve the preview, the render and the export read. **Absent is none and neutral is absent**: an edit with no tracks has no key, so it loads, saves and renders byte-identically; an empty track is kept.
+
+**Strips on the same track may not overlap** (`audio_track_strips_overlap`, an error, `TOUCH_TOLERANCE` for a butt join); strips on different tracks overlap and mix. Shape errors: `audio_tracks_shape`, `audio_track_shape`, `audio_track_name`, `audio_track_muted`, `audio_track_gain(_range)`, `audio_track_strips`, `track_strip_shape`, `track_strip_path`, `track_strip_start`, `track_strip_end`, `track_strip_film_start`, `track_strip_window`, `track_strip_past_the_end`, `track_strip_gain(_range)`, `track_strip_muted`, `track_strip_locked`, `track_strip_title`, `track_strip_afx*`.
+
+**Render:** every audible strip (not muted, track not muted, curve not silent) is one `-vn -i` after the overlays, `atrim` → `volume` (its curve, on the strip clock) → `aresample` → `adelay` (in samples) → `apad` → `atrim` to the film, and all of them are `amix`ed (`normalize=0`, `duration=first`) over the clips' sound and the bed under the one `asoftclip` limiter; the film facts carry `sound_strips` and `mix_peak`. A strip whose file is gone refuses the render with its path and track. **Export:** each track is its own FCP7 audio track (clipitems with in/out, level keyframes, `<enabled>FALSE</enabled>` for a mute) and each strip an After Effects layer named `<track> · <title>`.
 
 #### `transitions[]` — a typed object that owns a BOUNDARY
 
@@ -838,7 +923,21 @@ Shut down a ComfyUI process if Phosphene started one.
 
 ### `GET /version/check`, `POST /version/pull`
 
-Self-update against the GitHub repo.
+Self-update against the GitHub repo. `/version/pull` is a `git pull` only: it
+does not run `scripts/post_update.sh`, so anything an Update installs (new
+packages, weights) is not installed by it. Since 4.17.4 the panel installs a
+missing Lip-sync voice separator itself at the next start (see
+`/a2v/separator`).
+
+### `POST /engine/repair`
+
+Re-runs only the engine-environment step (`scripts/pinokio/ltx_engine_env.sh`,
+the same step Install runs): re-installs the render engine's Python packages
+into its venv, in the background. No downloads, no venv rebuild, no Stop.
+Answers `202` (started), `200 {nothing_to_do}` (the engine is fine), or `409`
+(a repair is running, or `installing: true` - Pinokio's own Install is still
+writing the venv). Progress and outcome ride `GET /status` -> `engine_env`
+(`ok`, `fault`, `installing`, `repair.{state, active, log, error}`).
 
 ## Push alerts — the completion alert for a closed tab
 
@@ -871,13 +970,17 @@ vendor reports gone (404 / 410) is dropped.
 
 ### `POST /prompt/enhance`
 
-`Content-Type: application/json`. Pre-rewrites a prompt with Gemma. Used by the panel's "✨ Enhance" button. **Avoid when LoRA trigger words are present** — the rewriter can drop them.
+Form-encoded. Pre-rewrites a prompt with Gemma. Used by the panel's Enhance buttons (Video and Lip-sync).
 
-```json
-{ "prompt": "...", "mode": "t2v" }
-```
+| Field | Note |
+|---|---|
+| `prompt` | required |
+| `mode` | `t2v` (default), `i2v` or `a2v` (Lip-sync: the i2v helper prompt plus the lip-sync prompt law) |
+| `preserve_tokens` | JSON list (or comma list) of words the result must keep, case-exact — trigger words |
+| `translate` | `0` keeps a non-Latin prompt in its own language; default translates to English |
+| `loras` | 4.18.0: JSON list of installed LoRA paths on the render. The panel reads each one's name, trigger words and guide (else the creator's description) from the LoRA library — paths it does not list are ignored — and hands at most 4, bounded, to the helper as fenced reference text. A LoRA whose trigger words are all missing from the result gets its first trigger put back at the front. |
 
-Returns `{"original": "...", "enhanced": "..."}`.
+Returns `{ ok, original, enhanced, mode, elapsed_sec, source_non_latin, translated, lora_notes_used: [names], lora_triggers_added: [words] }`; `{ error }` with 409 while a render holds the GPU.
 
 ### `POST /upload`
 

@@ -691,7 +691,6 @@
 > with no venv promotes to an installed mflux family instead of failing
 > every Studio render. Pinokio: no replies to the 4.9.3 post or from @vxlab
 > yet; no new threads. GitHub: no new activity on any open issue.
->>>>>>> upstream/main
 
 > **🩹 2026-09-03 — v4.9.3: the full-review fixes, shipped as a plain bugfix.**
 > Everything in the 09-02 review entry below, plus #74 (Update now moves the

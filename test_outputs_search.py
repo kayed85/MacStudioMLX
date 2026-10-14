@@ -23,13 +23,25 @@ class TheWords(unittest.TestCase):
             {"engine": "ltx", "model": "/m/ltx-2.5-mlx-q8", "temporal": {"mode": "fps12_interp24"}},
             {"prompt": "A woman turns to the window", "mode": "i2v", "quality": "balanced",
              "width": 1280, "height": 704, "frames": 121, "seed_used": 4242,
-             "character_id": "ariatrn",
+             "character_id": "chartest_c",
              "loras": [{"path": "/l/Crisp_Enhance.safetensors", "strength": 0.8}, "/l/hdr.safetensors"]})
         for w in ("a woman turns", "i2v", "balanced", "1280x704", "121f", "4242",
-                  "ariatrn", "crisp_enhance", "hdr", "ltx-2.5-mlx-q8", "fps12_interp24"):
+                  "chartest_c", "crisp_enhance", "hdr", "ltx-2.5-mlx-q8", "fps12_interp24"):
             self.assertIn(w, q, w)
         self.assertEqual(panel._output_search_text({}, {}), "")
         self.assertEqual(panel._output_search_text({"bad": object()}, {"prompt": None}), "")
+
+    def test_image_studio_sidecars_are_searchable_by_prompt_seed_and_size(self):
+        """Codex UI-07: image sidecars keep these at the top level."""
+        q = panel._output_search_text(
+            {"prompt": "a zebra on Mars", "seed": 42, "width": 1024, "height": 1024,
+             "engine": "mflux", "model": "qwen-image-edit-2511"}, {})
+        for w in ("a zebra on mars", "42", "1024x1024", "mflux"):
+            self.assertIn(w, q, w)
+        # params still wins where both exist
+        q2 = panel._output_search_text({"prompt": "top"}, {"prompt": "nested"})
+        self.assertIn("nested", q2)
+        self.assertNotIn("top", q2)
 
     def test_list_outputs_carries_q(self):
         with tempfile.TemporaryDirectory() as d:

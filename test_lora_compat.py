@@ -443,6 +443,30 @@ class AdapterCliTests(unittest.TestCase):
 
 
 
+def _full_training_presets() -> dict:
+    """TRAIN_PRESETS as a >=64 GB Mac boots with it, on any Mac.
+
+    Issue #90: below 64 GB, `_select_train_profile` REPLACES the table at
+    import with the compact one (TheSub64GbHighIsNotTheGradedRecipe asserts
+    those pills), and nothing keeps a copy of the original. Reading the live
+    table made the >=64 GB pill assertions fail on every 48 GB Mac. The full
+    table is the literal assigned in the panel source, evaluated (not
+    grepped); on a Mac that runs it, it must also BE the live table, so the
+    literal cannot drift from what such a Mac is served."""
+    import ast
+    import mlx_ltx_panel as panel
+    tree = ast.parse(Path(panel.__file__).read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+                getattr(t, "id", None) == "TRAIN_PRESETS" for t in node.targets):
+            table = ast.literal_eval(node.value)
+            if not panel.TRAIN_PROFILE.get("compact"):
+                assert table == panel.TRAIN_PRESETS, \
+                    "a >=64 GB Mac is not served the TRAIN_PRESETS literal"
+            return table
+    raise AssertionError("TRAIN_PRESETS is no longer a literal assignment")
+
+
 class AGreenTallyIsNotProof(unittest.TestCase):
     """A LoRA can train to completion, write a valid safetensors, load without
     a warning and change NOTHING — the deltas are too small to move the model.
@@ -466,15 +490,11 @@ class AGreenTallyIsNotProof(unittest.TestCase):
     def test_the_two_ungraded_presets_say_so_on_the_pill(self):
         # The rank-32 recipe is the one measured on faces. Saying "fast" and
         # letting the user infer "as good, sooner" is the pill doing the lying.
-        import mlx_ltx_panel as panel
-        self.assertIn("ungraded", panel.TRAIN_PRESETS["quick"]["subtitle"])
-        self.assertIn("ungraded", panel.TRAIN_PRESETS["medium"]["subtitle"])
-        if panel.TRAIN_PROFILE.get("compact"):
-            self.assertIn("NOT the rank-32 recipe", panel.TRAIN_PRESETS["high"]["subtitle"])
-            self.assertIn("ungraded", panel.TRAIN_PRESETS["high"]["subtitle"])
-        else:
-            self.assertNotIn("ungraded", panel.TRAIN_PRESETS["high"]["subtitle"])
-            self.assertIn("validated", panel.TRAIN_PRESETS["high"]["subtitle"])
+        presets = _full_training_presets()
+        self.assertIn("ungraded", presets["quick"]["subtitle"])
+        self.assertIn("ungraded", presets["medium"]["subtitle"])
+        self.assertNotIn("ungraded", presets["high"]["subtitle"])
+        self.assertIn("validated", presets["high"]["subtitle"])
 
     def test_the_trainer_event_is_read_and_a_weak_run_is_not_a_plain_done(self):
         root = Path(__file__).resolve().parent
@@ -530,12 +550,8 @@ class TheDefaultIsTheRecommendation(unittest.TestCase):
         self.assertIn("train_default_preset", src)
 
     def test_quick_says_what_it_is_for_rather_than_only_that_it_is_fast(self):
-        import mlx_ltx_panel as panel
-        if panel.TRAIN_PROFILE.get("compact"):
-            self.assertIn("identity ungraded", panel.TRAIN_PRESETS["quick"]["subtitle"])
-        else:
-            self.assertIn("a look, not a face",
-                          panel.TRAIN_PRESETS["quick"]["subtitle"])
+        self.assertIn("a look, not a face",
+                      _full_training_presets()["quick"]["subtitle"])
 
 
 class TheSub64GbHighIsNotTheGradedRecipe(unittest.TestCase):

@@ -33,17 +33,24 @@ webapp/                 ← the frontend, as plain files served from disk
 │   ├── health.js       ← version pill, update pop-up/banner, health chip
 │   ├── storyboard.js   ← the Storyboard tab
 │   ├── editor.js       ← the timeline editor
+│   ├── oneshot.js      ← the One Shot tab (its own composer; posts to /oneshot)
 │   └── main.js         ← the kickoff sequence — ALWAYS the last tag (see below)
 └── style/
     └── panel.css       ← ALL panel CSS (slice 1, landed)
 mlx_warm_helper.py      ← the render subprocess (JSON over stdin/stdout);
                           not part of the web frontend at all
+extend_splice.py        ← an Extend's delivery (issue #48): the source file's
+                          own frames (H.264 copied bit-exact when possible) +
+                          only the new frames, audio encoded once from a
+                          lossless master; numpy + ffmpeg, no model
 ltx_windows.py          ← PURE: the sliding-window schedule and per-window
                           prompt contract for long LTX clips; the panel turns
                           it into one generate + N extend calls
 storyboard_editor.py    ← the Editor's document model: clips, overlays
                           (cards and titles), transitions, the mix — every
                           accessor the preview, render and export share
+room_tone.py            ← PURE numpy: the Editor's room-tone beds (film-derived
+                          or preset ambience, periodic loop, BS.1770 level)
 panel_assets/
 └── stats.html          ← the /stats dashboard (predates webapp/; same
                           served-from-disk idea)

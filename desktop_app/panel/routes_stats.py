@@ -40,8 +40,15 @@ def stats_page(h, parsed) -> None:
 
 @get("/stats/data")
 def stats_data(h, parsed) -> None:
+    # `range` (7d/30d/90d/all, default 30d) trims the archive server-side —
+    # see P._stats_data_for_range for the cache-per-range shape. Unknown/
+    # missing values fall back to the default rather than erroring, so an
+    # old cached page hitting this route with no ?range= still works.
+    qs = parse_qs(parsed.query)
+    range_key = (qs.get("range", [P.STATS_RANGE_DEFAULT])[0] or
+                 P.STATS_RANGE_DEFAULT)
     try:
-        body = P.STATS_DATA_FILE.read_bytes()
+        body = P._stats_data_for_range(range_key)
     except FileNotFoundError:
         # No snapshot yet — return an empty but valid JSONL so the
         # dashboard's "no data yet" path renders cleanly.
@@ -64,7 +71,10 @@ def stats_data(h, parsed) -> None:
 def stats_usage(h, parsed) -> None:
     try:
         qs = parse_qs(parsed.query)
-        report = P._usage_report(force=qs.get("force", ["0"])[0] == "1")
+        range_key = (qs.get("range", [P.STATS_RANGE_DEFAULT])[0] or
+                     P.STATS_RANGE_DEFAULT)
+        report = P._usage_report(force=qs.get("force", ["0"])[0] == "1",
+                                  range_key=range_key)
     except Exception as exc:
         report = {"ok": False, "source": "local",
                   "error": str(exc)[:200]}

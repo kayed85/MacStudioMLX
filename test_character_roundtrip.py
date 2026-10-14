@@ -635,7 +635,12 @@ class TestQueueCharacterVoiceContract(unittest.TestCase):
                                           if audio_declared_missing else None)),
             }
             saved = (P.list_characters, P.persist_queue, P.push,
-                     P._active_ltx_transformer_path, P.h3_capable)
+                     P._active_ltx_transformer_path, P.h3_capable,
+                     P.job_input_refusal)
+            # This contract is about the CHARACTER, posted for every mode with
+            # no picture / clip / song (4.17.5's input refusal would answer
+            # those first; test_queue_input_refusal.py covers it).
+            P.job_input_refusal = lambda params: None
             P.list_characters = lambda: [char]
             P.persist_queue = lambda: None
             P.push = lambda line: None
@@ -657,7 +662,8 @@ class TestQueueCharacterVoiceContract(unittest.TestCase):
                     params["loras"] = [dict(x) for x in params.get("loras") or []]
             finally:
                 (P.list_characters, P.persist_queue, P.push,
-                 P._active_ltx_transformer_path, P.h3_capable) = saved
+                 P._active_ltx_transformer_path, P.h3_capable,
+                 P.job_input_refusal) = saved
         return reply, params
 
     def test_reported_t2v_api_case_stacks_face_and_trained_voice(self):
@@ -797,12 +803,13 @@ class TestQueueCharacterVoiceContract(unittest.TestCase):
         installed, the Mac lacks the RAM, or the mode is one H3 does not serve.
         The character refusal used to re-read the RAW form field instead of the
         resolved engine, so a request that was about to render correctly on LTX
-        with the full character stack got a 400 instead. `extend` is one of the
-        modes H3 never serves, so this can be asserted without depending on
+        with the full character stack got a 400 instead. `restore` (Colorize)
+        is one of the modes H3 never serves (`extend` was, until 4.19 taught H3
+        to continue a clip), so this can be asserted without depending on
         whether H3 is installed on the machine running the test.
         """
         reply, params = self._post({
-            "mode": "extend", "engine": "h3", "character_id": "bizarrotrn",
+            "mode": "restore", "engine": "h3", "character_id": "bizarrotrn",
             "prompt": "bizarrotrn keeps speaking",
         })
         self.assertEqual(reply["status"], 200, reply)

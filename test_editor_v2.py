@@ -105,8 +105,14 @@ class ATransitionOwnsABoundary(unittest.TestCase):
 
     def test_the_picture_lane_rule_is_untouched(self):
         # The invariant this whole design exists to keep: pictures may not
-        # overlap, and WARNING_CODES still holds exactly the one code.
-        self.assertEqual(sedit.WARNING_CODES, frozenset({"clips_audio_overlap"}))
+        # overlap. WARNING_CODES has grown since this was written — FILM-31
+        # added `still_missing` for the same reason `clips_audio_overlap` is
+        # here (persisting the user's work always wins, once the thing it
+        # warns about is something the assembler can render safely) — but
+        # `clips_overlap` (two PICTURES claiming the same second) must never
+        # join it.
+        self.assertIn("clips_audio_overlap", sedit.WARNING_CODES)
+        self.assertNotIn("clips_overlap", sedit.WARNING_CODES)
         doc = _two()
         doc["clips"][1]["film_start"] = 2.5
         doc["clips"][1]["film_end"] = 5.5

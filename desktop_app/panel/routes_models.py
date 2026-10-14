@@ -76,7 +76,14 @@ def post_models_remove(h, path, qs, ctype) -> None:
 
     targets: list[P.Path] = []
     label = ""
-    if key.startswith("version:"):
+    if key == "music":
+        with P.LOCK:
+            jobs = [P.STATE.get("current")] + list(P.STATE.get("queue") or [])
+            if any(j and (j.get("params") or {}).get("engine") == "music" for j in jobs):
+                h._json({"error": "Music is queued or rendering — stop or remove those jobs first."}, 409); return
+        targets = [P.MUSIC_MODELS] if P.MUSIC_MODELS.is_dir() else []
+        label = "YuE2 weights"
+    elif key.startswith("version:"):
         vid = key.split(":", 1)[1]
         ver = next((v for v in P.MODEL_VERSIONS if v["id"] == vid), None)
         if not ver:
@@ -159,9 +166,15 @@ def post_models_remove(h, path, qs, ctype) -> None:
 @post("/models/cancel")
 def post_models_cancel(h, path, qs, ctype) -> None:
     # Best-effort kill — the next status poll will see active=False.
+    # `cancelled` is what stops the worker's retry loop (INST-07): killing the
+    # process alone made the attempt look failed and the worker started the
+    # next one. The slot itself stays held until the worker releases it, so a
+    # new download cannot start and be wiped by the old worker's cleanup.
     with P.DOWNLOAD_LOCK:
         was_active = P.DOWNLOAD["active"]
         rid = P.DOWNLOAD.get("repo_id")
+        if was_active:
+            P.DOWNLOAD["cancelled"] = True
     if not was_active:
         h._json({"error": "no active download"}, 404); return
     P._kill_active_download()
@@ -222,6 +235,26 @@ def post_models_repair(h, path, qs, ctype) -> None:
                     "note": f"no corrupt files detected for {key!r}"}); return
     if P.HF_BIN is None and (repo.get("mirror") or {}).get("kind") != "github-release":
         h._json({"error": "hf binary not found. Reinstall Phosphene."}, 500); return
+    # CLAIM THE SLOT FIRST, delete second. This deleted the files and only
+    # then found another download running — answering 409 "Wait or Cancel"
+    # with nothing started to replace what it had just removed (Codex INST-11).
+    with P.DOWNLOAD_LOCK:
+        if P.DOWNLOAD["active"]:
+            h._json({"error": f"another download is in progress: "
+                                 f"{P.DOWNLOAD['repo_id']}. Wait or Cancel."}, 409); return
+        P.DOWNLOAD["active"] = True
+        P.DOWNLOAD["key"] = key
+        P.DOWNLOAD["repo_id"] = repo["repo_id"]
+        P.DOWNLOAD["started_ts"] = P.time.time()
+        P.DOWNLOAD["last_line"] = "repairing…"
+    # The deep-check findings for this repo are CONSUMED by this repair. They
+    # carry no file identity, so left in place a second Repair — after this
+    # one had fetched good copies — would delete the now-valid files again.
+    # A fresh deep check re-finds anything still wrong.
+    with P._DEEP_VERIFY_LOCK:
+        _dv = P._DEEP_VERIFY.get("result")
+        if isinstance(_dv, dict) and _dv.get("bad"):
+            _dv["bad"] = [b for b in _dv["bad"] if b.get("repo") != key]
     target = P.Q8_LOCAL_PATH if key == "q8" else (P.ROOT / repo["local_dir"])
     deleted = []
     for fname in bad:
@@ -233,15 +266,6 @@ def post_models_repair(h, path, qs, ctype) -> None:
                         deleted.append(fname)
             except OSError:
                 pass
-    with P.DOWNLOAD_LOCK:
-        if P.DOWNLOAD["active"]:
-            h._json({"error": f"another download is in progress: "
-                                 f"{P.DOWNLOAD['repo_id']}. Wait or Cancel."}, 409); return
-        P.DOWNLOAD["active"] = True
-        P.DOWNLOAD["key"] = key
-        P.DOWNLOAD["repo_id"] = repo["repo_id"]
-        P.DOWNLOAD["started_ts"] = P.time.time()
-        P.DOWNLOAD["last_line"] = "repairing…"
     with P._INTEGRITY_LOCK:           # bust the cache so the next scan re-checks
         P._INTEGRITY_CACHE["ts"] = 0.0
     P.push(f"[repair] {key}: deleted {len(deleted)} corrupt/partial file(s) "
@@ -283,3 +307,80 @@ def get_system_recommended_models(h, path, qs) -> None:
         }
     h._json({"ok": True, "system": rec})
 
+
+@post("/music/install")
+def post_music_install(h, path, qs, ctype) -> None:
+    # Audio → Compose's "Install music engine" / "Repair music engine". Runs
+    # install_music.js's own steps as a background task; progress rides
+    # /status.music_install. Resumable: every step skips finished work.
+    _rb = h._read_form_body()
+    if _rb is None:
+        return
+    _body, form = _rb
+    kind = "repair" if (form.get("kind", [""])[0] or "") == "repair" else "install"
+    code, payload = P.music_install_start(kind)
+    h._json(payload, code); return
+
+
+@get("/a2v/separator")
+def get_a2v_separator(h, parsed) -> None:
+    # "Listen to the voice only": can this install separate a vocal, and is
+    # an install running? File checks only - cheap enough to poll.
+    h._json(P.a2v_separator_status()); return
+
+
+@post("/a2v/separator/install")
+def post_a2v_separator_install(h, path, qs, ctype) -> None:
+    # The Lip-sync form's "Install vocal separation" button. Runs the same
+    # scripts/pinokio/a2v_stems_deps.sh that install.js and Update run.
+    _rb = h._read_form_body()
+    if _rb is None:
+        return
+    code, payload = P.a2v_separator_install_start()
+    h._json(payload, code); return
+
+
+@post("/engine/repair")
+def post_engine_repair(h, path, qs, ctype) -> None:
+    # 4.17.4: "Repair engine" - the engine-env bar and a venv_broken failure
+    # card both press this. Re-runs ONLY scripts/pinokio/ltx_engine_env.sh
+    # (install.js's engine step) in the background; progress rides
+    # /status.engine_env. No downloads, no Stop needed.
+    _rb = h._read_form_body()
+    if _rb is None:
+        return
+    code, payload = P.engine_env_repair_start()
+    h._json(payload, code); return
+
+
+@post("/music/cover/install")
+def post_music_cover_install(h, path, qs, ctype) -> None:
+    # The opt-in ~2.8 GB that lets YuE2 read a score off a real recording.
+    # Separate from /music/install because the engine works without it.
+    code, payload = P.music_cover_fetch_start()
+    h._json(payload, code); return
+
+
+@get("/music/lora/status")
+def get_music_lora_status(h, parsed) -> None:
+    # What the Voice / style picker can offer right now, plus whatever the
+    # background download is doing. /status carries the same block for the
+    # first paint; this route is what the picker polls while fetching.
+    h._json({**P.music_lora_status(), "fetch": P.music_lora_fetch_state()}); return
+
+
+@post("/music/lora/fetch")
+def post_music_lora_fetch(h, path, qs, ctype) -> None:
+    # The opt-in ~210 MB that makes Instrumental a real adapter instead of a
+    # prompt convention. Separate from /music/install: the engine writes songs
+    # without it, and a user who never asks for one never pays for it.
+    code, payload = P.music_lora_fetch_start()
+    h._json(payload, code); return
+
+
+@post("/music/install/stop")
+def post_music_install_stop(h, path, qs, ctype) -> None:
+    if not P.music_install_stop():
+        h._json({"error": "no music engine install is running"}, 404); return
+    P.push("[music-install] stop requested")
+    h._json({"ok": True}); return

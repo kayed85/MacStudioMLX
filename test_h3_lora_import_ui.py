@@ -67,7 +67,18 @@ installShim();
 el('h3LoraImportBtn', {{textContent: 'Import H3 LoRA',
                         innerHTML: '<svg></svg>Import H3 LoRA'}});
 el('h3LoraImportFile');
+el('phosToast');
 globalThis._alerts = [];
+globalThis.alert = (m) => globalThis._alerts.push(String(m));
+// H3-10: importH3Lora() moved from alert() to the panel's own phosToast() —
+// stub it the same shape the real one has (message + opts), local to this
+// test file rather than the shared shim, since this is the one caller that
+// needs it right now.
+globalThis._toasts = [];
+globalThis.phosToast = (message, opts) => {{
+  globalThis._toasts.push({{message: String(message), opts: opts || {{}}}});
+  return null;
+}};
 const _userFetch = {fetch_js};
 globalThis._refreshed = 0;
 globalThis.fetch = async (url, init) => {{
@@ -82,6 +93,7 @@ const btn = document.getElementById('h3LoraImportBtn');
 await importH3Lora({file_js});
 console.log(JSON.stringify({{
   alerts: globalThis._alerts,
+  toasts: globalThis._toasts,
   refreshed: globalThis._refreshed,
   fetched: globalThis._fetched || null,
   btnDisabled: btn.disabled,
@@ -99,11 +111,17 @@ def ok_fetch(payload: dict) -> str:
 
 
 class TestImportH3LoraClient(unittest.TestCase):
+    # H3-10: importH3Lora() moved every outcome from alert() to the panel's
+    # own phosToast() (a native dialog blocks the tab and reads as a browser
+    # error, not part of the app). Every test below now reads out["toasts"]
+    # and asserts out["alerts"] stayed empty — the regression this suite
+    # exists to catch is the alert() coming back, not just the message text.
     def test_a_non_safetensors_file_never_reaches_the_network(self):
         out = drive(ok_fetch({"ok": True}), "{name: 'adapter.zip', size: 10}")
         self.assertIsNone(out["fetched"])
-        self.assertEqual(len(out["alerts"]), 1)
-        self.assertIn(".safetensors", out["alerts"][0])
+        self.assertEqual(out["alerts"], [])
+        self.assertEqual(len(out["toasts"]), 1)
+        self.assertIn(".safetensors", out["toasts"][0]["message"])
 
     def test_a_successful_import_posts_to_the_documented_route(self):
         out = drive(
@@ -113,15 +131,17 @@ class TestImportH3LoraClient(unittest.TestCase):
         self.assertEqual(out["fetched"], {"url": "/h3/loras/import",
                                           "method": "POST"})
         self.assertEqual(out["refreshed"], 1)
-        self.assertIn("208 module pairs", out["alerts"][0])
+        self.assertEqual(out["alerts"], [])
+        self.assertIn("208 module pairs", out["toasts"][0]["message"])
+        self.assertEqual(out["toasts"][0]["opts"].get("kind"), "success")
 
     def test_one_pair_is_not_reported_as_1_module_pairs(self):
         out = drive(
             ok_fetch({"ok": True, "filename": "a.safetensors", "pairs": 1,
                       "converted": False, "recommended_strength": 1.0}),
             "{name: 'a.safetensors', size: 999}")
-        self.assertIn("1 module pair)", out["alerts"][0])
-        self.assertNotIn("1 module pairs", out["alerts"][0])
+        self.assertIn("1 module pair)", out["toasts"][0]["message"])
+        self.assertNotIn("1 module pairs", out["toasts"][0]["message"])
 
     def test_a_non_unit_scale_is_told_to_the_user_not_just_the_sidecar(self):
         """The H3 loader applies no alpha, so the strength control is where the
@@ -132,22 +152,24 @@ class TestImportH3LoraClient(unittest.TestCase):
             ok_fetch({"ok": True, "filename": "a.safetensors", "pairs": 208,
                       "converted": True, "recommended_strength": 0.0625}),
             "{name: 'a.safetensors', size: 999}")
-        self.assertIn("0.0625", out["alerts"][0])
-        self.assertIn("Key namespace converted safely", out["alerts"][0])
+        self.assertIn("0.0625", out["toasts"][0]["message"])
+        self.assertIn("Key namespace converted safely", out["toasts"][0]["message"])
 
     def test_a_unit_scale_does_not_clutter_the_message(self):
         out = drive(
             ok_fetch({"ok": True, "filename": "a.safetensors", "pairs": 2,
                       "converted": False, "recommended_strength": 1.0}),
             "{name: 'a.safetensors', size: 999}")
-        self.assertNotIn("Recommended strength", out["alerts"][0])
+        self.assertNotIn("Recommended strength", out["toasts"][0]["message"])
 
     def test_a_server_refusal_is_shown_verbatim_and_the_button_recovers(self):
         fetch_js = ("async () => ({ok: false, status: 400, json: async () => "
                     "({ok: false, error: 'my-adapter.safetensors has unmatched "
                     "H3 LoRA tensors.'})})")
         out = drive(fetch_js, "{name: 'my-adapter.safetensors', size: 999}")
-        self.assertIn("my-adapter.safetensors has unmatched", out["alerts"][0])
+        self.assertEqual(out["alerts"], [])
+        self.assertIn("my-adapter.safetensors has unmatched", out["toasts"][0]["message"])
+        self.assertEqual(out["toasts"][0]["opts"].get("kind"), "danger")
         self.assertEqual(out["refreshed"], 0)
         self.assertFalse(out["btnDisabled"])
         self.assertIn("Import H3 LoRA", out["btnHTML"])
@@ -155,7 +177,8 @@ class TestImportH3LoraClient(unittest.TestCase):
     def test_a_thrown_network_error_still_restores_the_button(self):
         out = drive("async () => { throw new Error('offline'); }",
                     "{name: 'a.safetensors', size: 999}")
-        self.assertIn("offline", out["alerts"][0])
+        self.assertEqual(out["alerts"], [])
+        self.assertIn("offline", out["toasts"][0]["message"])
         self.assertFalse(out["btnDisabled"])
         self.assertIn("Import H3 LoRA", out["btnHTML"])
 

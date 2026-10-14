@@ -90,13 +90,16 @@ def _prefixed_lora(prefix: str = "diffusion_model.",
 
 
 def _kohya_header() -> bytes:
+    # Each tensor declares 4 bytes (one F32), so the payload must carry them:
+    # a header whose offsets are [0, 0] but whose dtype/shape need data is
+    # malformed, and mx.load rejects it on newer MLX builds.
     header = {
-        "lora_unet_blocks_24_attn_qkv_proj.lora_down.weight": {"dtype": "F32", "shape": [1, 1], "data_offsets": [0, 0]},
-        "lora_unet_blocks_24_attn_qkv_proj.lora_up.weight": {"dtype": "F32", "shape": [1, 1], "data_offsets": [0, 0]},
-        "lora_unet_blocks_24_attn_qkv_proj.alpha": {"dtype": "F32", "shape": [1, 1], "data_offsets": [0, 0]},
+        "lora_unet_blocks_24_attn_qkv_proj.lora_down.weight": {"dtype": "F32", "shape": [1, 1], "data_offsets": [0, 4]},
+        "lora_unet_blocks_24_attn_qkv_proj.lora_up.weight": {"dtype": "F32", "shape": [1, 1], "data_offsets": [4, 8]},
+        "lora_unet_blocks_24_attn_qkv_proj.alpha": {"dtype": "F32", "shape": [1, 1], "data_offsets": [8, 12]},
     }
     encoded = json.dumps(header).encode("utf-8")
-    return len(encoded).to_bytes(8, "little") + encoded
+    return len(encoded).to_bytes(8, "little") + encoded + struct.pack("<fff", 1.0, 1.0, 1.0)
 
 
 def _diffusers_header() -> bytes:
@@ -115,8 +118,16 @@ class TestH3LoraFileImport(unittest.TestCase):
         self.dir = Path(self.tmp.name)
         self.old_dir = P._safe_h3_loras_dir
         P._safe_h3_loras_dir = lambda: self.dir
+        # As an install with no H3 DiT on disk (issue #90). With the weights
+        # installed, every import is also checked against the REAL DiT's
+        # module names, so these fixtures passed or failed by what was in
+        # mlx_models/hailuo-h3 (an unreadable DiT refused them all). The
+        # module check has its own cases, which pin the target set.
+        self.old_targets = P._h3_lora_target_modules
+        P._h3_lora_target_modules = lambda: None
 
     def tearDown(self):
+        P._h3_lora_target_modules = self.old_targets
         P._safe_h3_loras_dir = self.old_dir
         self.tmp.cleanup()
 
@@ -139,6 +150,21 @@ class TestH3LoraFileImport(unittest.TestCase):
         names = sorted(p.name for p in self.dir.iterdir())
         self.assertEqual(names, ["raw-kohya.json", "raw-kohya.safetensors"])
         self.assertEqual(P._h3_lora_layout(self.dir / "raw-kohya.safetensors")["layout"], "bare")
+
+    def test_non_ascii_filenames_import(self):
+        """Codex H3-05: `日本語.safetensors` was refused as the wrong extension —
+        sanitising the whole name ate the stem and the dot with it."""
+        a = P.import_h3_lora_file("日本語.safetensors", _safetensors_lora())
+        self.assertTrue(a["filename"].endswith(".safetensors"), a)
+        self.assertTrue((self.dir / a["filename"]).is_file())
+        b = P.import_h3_lora_file("人物 LoRA.safetensors", _safetensors_lora())
+        self.assertEqual(b["filename"], "LoRA.safetensors")
+        c = P.import_h3_lora_file("別の人.safetensors", _safetensors_lora())
+        self.assertNotEqual(c["filename"], a["filename"], "two Japanese names collided")
+        for bad in ("日本語.bin", ".safetensors", "../x.ckpt"):
+            with self.assertRaises(ValueError):
+                P._h3_lora_import_name(bad)
+        self.assertEqual(P._h3_lora_import_name("../../etc/x.safetensors"), "x.safetensors")
 
     def test_refuses_non_safetensors_uploads(self):
         with self.assertRaisesRegex(ValueError, "\.safetensors"):
@@ -330,7 +356,11 @@ class TestH3LoraFileImport(unittest.TestCase):
                  + "\n" + (ROOT / "webapp" / "index.html").read_text(encoding="utf-8"))
         for _m in sorted((ROOT / "webapp" / "js").glob("*.js")):
             panel += "\n" + _m.read_text(encoding="utf-8")
-        self.assertIn("Import H3 LoRA", panel)
+        # The label itself is "Import" now (four buttons share one header row
+        # and the long labels wrapped it onto three lines); the control is
+        # identified by its id and the phrase lives in its tooltip.
+        self.assertIn("Import H3 LoRA", panel)          # tooltip
+        self.assertIn('id="h3LoraImportBtn"', panel)    # the control
         self.assertIn("/h3/loras/import", panel)
 
 

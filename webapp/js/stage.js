@@ -44,7 +44,11 @@ function imgStudioUpdateValidity() {
     invalidReason = 'This engine needs a ' + engInfo.mac_gb_needed + ' GB Mac — this one has '
       + (_IMG_HOST_RAM_GB || '?') + ' GB. Auto (the 4B FLUX engine) fits here.';
   } else if (needsRefs && refsCount === 0) {
-    invalidReason = 'Pick at least 1 reference image (drop a file into one of the 3 slots above) — Qwen-Image-Edit composes against an image, it cannot run text-only. Use the Lightning preset only after picking a ref.';
+    // SYS-14: "Pick a reference image" was the whole message -- for
+    // someone who came here to make a FIRST picture from words (no photo
+    // to drop yet), that's a dead end with no next step. Names the
+    // engine that actually does this.
+    invalidReason = 'This engine composes against a photo — drop one into a slot above, or switch Engine (below) to "Ideogram 4" to make a picture from words alone.';
   }
   // Non-blocking notice (does NOT disable Generate): Ideogram is text-only,
   // so a loaded reference is silently dropped unless the reference bridge is
@@ -58,11 +62,33 @@ function imgStudioUpdateValidity() {
       && !(typeof ideoState === 'object' && ideoState.refBridge)) {
     softNotice = 'Heads up: Ideogram is text-only, so your reference image will be IGNORED. Turn on "Use reference" above to have Ideogram redraw it from a description, or switch to a Reference Edit engine for a faithful copy.';
   }
+  // SYS-13: `image_ram` is the #1 refusal (78 installs/30d) and the
+  // FREE-memory branch specifically fires at RENDER time, after the job
+  // waited in the queue -- the fits_mac check above already prevents
+  // submitting an engine that can NEVER fit this Mac, but not a heavier
+  // engine that fits in principle while other apps are currently holding
+  // the RAM it needs. ram_need_gb (image/engine_status, the same number
+  // the server's own preflight compares) vs. the live memory poll gives
+  // the same warning BEFORE queueing instead of after. Soft on purpose
+  // (matches the fix note: a 24 GB engine on a 48 GB Mac should warn, not
+  // hard-refuse -- memory frees up, and the server still does the
+  // authoritative check right before it actually loads the model).
+  if (!invalidReason && !softNotice && engInfo && engInfo.fits_mac !== false
+      && typeof engInfo.ram_need_gb === 'number'
+      && typeof LAST_STATUS === 'object' && LAST_STATUS && LAST_STATUS.memory) {
+    const mem = LAST_STATUS.memory;
+    const freeGb = Math.max(0, (Number(mem.total_gb) || 0) - (Number(mem.used_gb) || 0));
+    if (freeGb < engInfo.ram_need_gb) {
+      softNotice = `Heads up: this engine typically needs ~${engInfo.ram_need_gb.toFixed(0)} GB free, `
+        + `and only ~${freeGb.toFixed(1)} GB is free right now. It may still work — Phosphene frees `
+        + `the idle video engine first — but closing other apps (browsers, another render) first is safer.`;
+    }
+  }
   // Don't override the busy state — imgStudioGenerate manages disabled
   // during in-flight gens.
   if (!IMG_STUDIO.busy) {
     btn.disabled = !!invalidReason;
-    btn.title = invalidReason || 'Generate (Cmd/Ctrl+Enter)';
+    btn.title = invalidReason || ('Generate' + ((typeof shortcutHint === 'function') ? ' (' + shortcutHint('prompt.generate') + ')' : ''));
     if (status && !status.textContent.startsWith('Generating')) {
       if (invalidReason) {
         status.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-warning-fill"/></svg>' + escapeHtml(invalidReason);
@@ -280,6 +306,11 @@ function imgStudioApplyMemoryFit() {
   }
 }
 
+// The last /image/engine_status answer, for the modules that decide an
+// engine off it (the gallery's ✦ Quality chip). Read-only by contract.
+function imgStudioEngineStatus() {
+  return _IMG_ENGINE_STATUS || {};
+}
 async function imgStudioRefreshEngineStatus() {
   try {
     const r = await fetch('/image/engine_status');
@@ -1913,7 +1944,7 @@ async function imgStudioEnhancePrompt() {
 // the global scope; everything NOT listed here is private to this module.
 Object.assign(globalThis, {
   imgStudioUpdateValidity, imgStudioWireRefSlots, imgStudioRenderSlot, imgStudioUpdateRefWarning,
-  imgStudioRefreshEngineStatus, ideoUpdateSetupNote, imgStudioUpdateEstimate, imgStudioRefreshRecent,
+  imgStudioRefreshEngineStatus, imgStudioEngineStatus, ideoUpdateSetupNote, imgStudioUpdateEstimate, imgStudioRefreshRecent,
   imgStudioOnPillClick, ideoInLayout, stageSetMode, ideoSyncStage,
   ideoSyncVisibility, ideoSyncRefBridge, ideoSetMode, ideoApplyAspect,
   ideoSetRender, ideoUndo, ideoInsertBox, ideoUpdateSel,

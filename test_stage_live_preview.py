@@ -122,6 +122,11 @@ FUNCTIONS = (
     "returnToLiveRender",
     "_renderLiveStageFrame",
     "renderLiveStage",
+    # 4.16.2: the stage's shape goes through ONE door (queue.js), which also
+    # re-fits the player to leave the Outputs pane on screen. The fit itself is
+    # a layout measurement (test_outputs_layout_geometry.py); here it is a no-op.
+    "setStageAspect",
+    "clearStageAspect",
 )
 
 
@@ -129,7 +134,8 @@ def run_contract() -> dict:
     if NODE is None:
         raise unittest.SkipTest("node not on PATH")
     source = panel_source()
-    script = DOM_SHIM + "\n".join(extract_function(name, source) for name in FUNCTIONS) + r"""
+    script = DOM_SHIM + "function fitStagePlayer() {}\n" + "\n".join(
+        extract_function(name, source) for name in FUNCTIONS) + r"""
 const out = {};
 
 activePath = null; _liveStageOwnsPlayer = true;

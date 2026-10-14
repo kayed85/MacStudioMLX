@@ -62,12 +62,17 @@ class FilmDir(unittest.TestCase):
     def test_the_folder_is_date_and_slug_under_the_outputs_root(self):
         d = panel._sb_film_dir(_board())
         self.assertEqual(d.parent, panel.OUTPUT / "storyboards")
-        self.assertTrue(d.name.endswith("_the-last-dawn"), d.name)
+        # ...and the board: date + title alone was shared by every board made
+        # the same day under the same name (SB5-05). A board whose old
+        # date+title folder is already on disk keeps it — see
+        # test_storyboard_film_integrity.py.
+        self.assertTrue(d.name.endswith("_the-last-dawn_sb-film-test"), d.name)
         day = time.strftime("%Y-%m-%d", time.localtime(1_700_000_000))
         self.assertTrue(d.name.startswith(day), d.name)
 
     def test_an_untitled_board_still_gets_a_folder(self):
-        self.assertTrue(str(panel._sb_film_dir(_board(title=""))).endswith("_storyboard"))
+        self.assertTrue(str(panel._sb_film_dir(_board(title=""))).endswith(
+            "_storyboard_sb-film-test"))
 
     def test_the_export_writes_into_exactly_that_folder(self):
         # The whole point of the helper: the writer and the reader agree by
@@ -216,7 +221,9 @@ class Sidecar(unittest.TestCase):
             out = Path(tmp) / "x_film.mp4"
 
             def fake_ffmpeg(cmd, *a, **kw):
-                out.write_bytes(b"\0" * 4096)
+                # The encoder writes its OWN last argument — a hidden sibling
+                # that replaces the film only once it is whole (SB5-06).
+                Path(cmd[-1]).write_bytes(b"\0" * 4096)
 
             probe = {"w": 1024, "h": 576, "duration": 5.0,
                      "has_audio": True, "sample_rate": 48000}
@@ -519,17 +526,187 @@ class FilmMarkup(unittest.TestCase):
         # soundtrack nobody can see.
         self.assertIn("v.pause()", extract_function("sbShow"))
 
-    def test_both_assemblies_end_on_the_film(self):
-        # A toast that fades is what made the finished film invisible.
-        self.assertIn("sbFilmOpen", extract_function("sbeRenderFilm"))
+    def test_the_boards_own_export_still_ends_on_the_film(self):
+        # sbExport is the Storyboard tab's one-button export — there is no
+        # timeline open to stay on, so landing on the Film screen is still
+        # the right destination for it.
         self.assertIn("sbFilmOpen", extract_function("sbExport"))
 
-    def test_the_render_still_discloses_that_the_concat_closes_gaps(self):
-        # The disclosure the editor gate already locks — proving the landing
-        # was added to it, not swapped for it.
-        fn = extract_function("sbeRenderFilm")
-        self.assertIn("gaps_note", fn)
-        self.assertIn("CONCATENATES", fn)
+    def test_the_editors_render_stays_on_the_timeline_now(self):
+        # FILM-24: this used to end by switching to Storyboard and opening
+        # the Film screen unconditionally — which, combined with the
+        # tab-entry race (FILM-02), sometimes landed on a DIFFERENT film's
+        # Film screen behind a "Rendered N clips" toast. Rendering to check
+        # a cut is the normal loop, not a reason to leave it: the render now
+        # stays on the timeline and offers "Open"/"Show in Finder" instead
+        # of forcing the trip.
+        # FILM-28: the render is a JOB now — sbeRenderFilm only starts it;
+        # sbeRenderPoll watches it and sbeRenderFinish is where a finished
+        # film actually lands. The "never navigates" claim has to hold for
+        # the whole chain, not just the function that kicks it off.
+        chain = "".join(extract_function(n) for n in
+                        ("sbeRenderFilm", "sbeRenderPoll", "sbeRenderSettle",
+                         "sbeRenderFinish"))
+        self.assertNotIn("workflowSwitch", chain)
+        self.assertNotIn("sbFilmOpen", chain)
+        self.assertIn("sbePaintRenderChip", chain)
+        opener = extract_function("sbeOpenFilmScreen")
+        self.assertIn("workflowSwitch", opener)
+        self.assertIn("sbFilmOpen", opener)
+
+    def test_the_render_still_discloses_holes_without_blocking(self):
+        # FILM-27: the hole disclosure the editor gate locks in detail —
+        # proving the "stay on the timeline" landing (FILM-24) was added to
+        # the same chain, not swapped for it.
+        chain = "".join(extract_function(n) for n in
+                        ("sbeRenderFilm", "sbeRenderPoll", "sbeRenderFinish"))
+        self.assertIn("gaps_note", chain)
+        self.assertIn("sbeNoticeHoles", chain)
+        self.assertNotIn("confirm(", chain)
+
+    def test_open_the_timeline_calls_a_step_sbGo_actually_handles(self):
+        # FILM-25: sbGo() handles exactly 'plan', 'shots', 'edit' and 'film'
+        # (see FilmClient's "every door" case above) — 'arrange' was never
+        # one of them, so the Film screen's "Open the timeline" button did
+        # nothing at all.
+        self.assertIn("sbGo('edit')", extract_function("sbFilmPaint"))
+        self.assertNotIn("sbGo('arrange')", extract_function("sbFilmPaint"))
+
+
+# =============================================================================
+# "To film" from the Video tab — FILM-26
+# =============================================================================
+ADD_TO_FILM_SHIM = r"""
+'use strict';
+function escapeHtml(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
+function mkSelect() {
+  return { style: { display: 'none' }, innerHTML: '', value: '',
+           opened: false, showPicker() { this.opened = true; }, focus() {} };
+}
+const _els = { sbAddSelect: mkSelect() };
+function sbEl(id) { return _els[id]; }
+const _ls = {};
+const localStorage = {
+  getItem(k) { return Object.prototype.hasOwnProperty.call(_ls, k) ? _ls[k] : null; },
+  setItem(k, v) { _ls[k] = v; },
+  removeItem(k) { delete _ls[k]; },
+};
+const fetches = [];
+let NEXT = { ok: true, title: 'My Film', n: 4 };
+async function fetch(url, opts) {
+  fetches.push({ url, body: opts && opts.body });
+  return { json: async () => NEXT };
+}
+const toasts = [];
+function phosToast(m) { toasts.push(String(m)); }
+function _flashActionDone() {}
+function sbRefreshBoards() {}
+let activePath = '/out/clip_007.mp4';
+__FN__
+async function main() {
+  const out = {};
+
+  // ---- more than one film: reveal, don't add -----------------------------
+  SB.boards = [{ id: 'a', title: 'Film A' }, { id: 'b', title: 'Film B' }];
+  _ls.phos_sb_open = 'b';                       // last-used
+  fetches.length = 0;
+  await sbAddActiveToBoard();
+  out.revealedNotFetched = fetches.length;
+  out.selShown = _els.sbAddSelect.style.display;
+  out.selOpened = _els.sbAddSelect.opened;
+  out.selHtml = _els.sbAddSelect.innerHTML;
+
+  // ---- picking the FIRST real film (the one that used to be pre-selected,
+  // so choosing it fired no onchange at all) now goes through -------------
+  fetches.length = 0;
+  await sbAddActiveToBoard('b');
+  out.pickedFirstListedUrl = (fetches[0] || {}).url;
+  out.pickedFirstListedId = fetches[0] && fetches[0].body.get('id');
+  out.selHiddenAfter = _els.sbAddSelect.style.display;
+
+  // ---- exactly one film: adds straight through, no select ---------------
+  SB.boards = [{ id: 'only', title: 'Only Film' }];
+  _els.sbAddSelect.style.display = 'none';
+  fetches.length = 0;
+  await sbAddActiveToBoard();
+  out.oneFilmUrl = (fetches[0] || {}).url;
+  out.oneFilmId = fetches[0] && fetches[0].body.get('id');
+  out.oneFilmSelShown = _els.sbAddSelect.style.display;
+
+  // ---- no films at all: goes to "new" ------------------------------------
+  SB.boards = [];
+  fetches.length = 0;
+  await sbAddActiveToBoard();
+  out.noFilmsId = fetches[0] && fetches[0].body.get('id');
+
+  process.stdout.write(JSON.stringify(out));
+}
+main();
+"""
+
+
+def run_add_to_film() -> dict:
+    if NODE is None:
+        raise unittest.SkipTest("node not on PATH")
+    script = "const SB = { id: '', boards: [] };\n" + ADD_TO_FILM_SHIM.replace(
+        "__FN__", extract_function("sbAddActiveToBoard"))
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:
+        fh.write(script)
+        path = Path(fh.name)
+    try:
+        res = subprocess.run([NODE, str(path)], capture_output=True, text=True,
+                             timeout=60)
+        if res.returncode:
+            raise AssertionError(res.stdout + "\n" + res.stderr)
+        return json.loads(res.stdout)
+    finally:
+        path.unlink(missing_ok=True)
+
+
+@unittest.skipUnless(NODE, "needs node")
+class AddToFilmPicker(unittest.TestCase):
+    """FILM-26 — the picker opened already showing its first real film
+    selected, so choosing exactly that film fired no `onchange` and the
+    button looked broken. A leading placeholder makes every real choice a
+    change; `showPicker()` opens the native list instead of leaving a
+    revealed-but-closed 20px control behind.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.r = run_add_to_film()
+
+    def test_more_than_one_film_reveals_the_picker_rather_than_guessing(self):
+        self.assertEqual(self.r["revealedNotFetched"], 0)
+        self.assertEqual(self.r["selShown"], "")
+        self.assertTrue(self.r["selOpened"])
+
+    def test_the_first_option_is_a_placeholder_nobody_can_land_on_by_accident(self):
+        html = self.r["selHtml"]
+        self.assertLess(html.index('value=""'), html.index('value="a"'))
+        self.assertIn("disabled", html.split("</option>")[0])
+
+    def test_the_last_used_film_is_offered_first(self):
+        html = self.r["selHtml"]
+        self.assertLess(html.index('value="b"'), html.index('value="a"'))
+
+    def test_new_film_is_still_the_last_option(self):
+        html = self.r["selHtml"]
+        self.assertLess(html.index('value="a"'), html.index('value="new"'))
+        self.assertIn("new film", html)
+
+    def test_picking_the_film_that_used_to_be_pre_selected_now_actually_adds(self):
+        self.assertEqual(self.r["pickedFirstListedUrl"], "/storyboard/add-shot")
+        self.assertEqual(self.r["pickedFirstListedId"], "b")
+        self.assertEqual(self.r["selHiddenAfter"], "none")
+
+    def test_exactly_one_film_skips_the_picker_entirely(self):
+        self.assertEqual(self.r["oneFilmUrl"], "/storyboard/add-shot")
+        self.assertEqual(self.r["oneFilmId"], "only")
+        self.assertEqual(self.r["oneFilmSelShown"], "none")
+
+    def test_no_films_at_all_offers_a_new_one(self):
+        self.assertEqual(self.r["noFilmsId"], "new")
 
 
 if __name__ == "__main__":

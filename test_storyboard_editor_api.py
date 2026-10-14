@@ -101,6 +101,11 @@ class FakeHandler:
         # complete 404 response onto the same socket — was invisible to 250
         # green tests.
         self.handled = None
+        # A raw (send_response/send_header/end_headers/wfile.write) response
+        # — the poster route's own shape, not the _json/_serve_video_with_
+        # range doors every other route here already stands in for.
+        self.headers_sent = {}
+        self.body = b""
 
     def _json(self, payload, status: int = 200):
         self.payload, self.status = payload, status
@@ -110,6 +115,26 @@ class FakeHandler:
 
     def _serve_video_with_range(self, path):
         self.served = Path(path)
+
+    def send_response(self, code, *a):
+        self.status = code
+
+    def send_header(self, key, value):
+        self.headers_sent[key] = value
+
+    def end_headers(self):
+        pass
+
+    class _Wfile:
+        def __init__(self, outer):
+            self._outer = outer
+
+        def write(self, data):
+            self._outer.body += data
+
+    @property
+    def wfile(self):
+        return FakeHandler._Wfile(self)
 
     # the two methods under test, bound to this stand-in
     def get(self, url: str):
@@ -1020,14 +1045,17 @@ class RenderRoute(EditorCase):
         self.assertEqual(af.call_args.kwargs["music"], str(song))
         self.assertEqual(af.call_args.kwargs["music_start"], 12.5)
 
-    def test_gaps_are_DISCLOSED_because_the_concat_closes_them(self):
+    def test_gaps_are_DISCLOSED_because_they_now_play_as_black(self):
+        # FILM-27: the assembler pads a gap with black instead of closing
+        # it, so the note says that instead of warning the film will be
+        # shorter than the timeline.
         self.edit_with([_clip(str(self.clips[0]), 0.0, 2.0, 0.0),
                         _clip(str(self.clips[1]), 0.0, 2.0, 7.0)])
         with mock.patch.object(panel, "_sb_assemble_film",
                                return_value={"ok": True, "duration": 4.0}):
             h = FakeHandler().post("edit/render", {"id": "sb_t"})
         self.assertEqual(len(h.payload["gaps"]), 1)
-        self.assertIn("closed by the concatenation", h.payload["gaps_note"])
+        self.assertIn("play as black", h.payload["gaps_note"])
         self.assertEqual(h.payload["timeline_duration"], 9.0)
 
     def test_an_empty_timeline_is_an_honest_refusal(self):
@@ -1148,7 +1176,7 @@ class GenerateIntoAGap(EditorCase):
 
     def test_an_uninstalled_character_is_refused_rather_than_rendering_a_stranger(self):
         with mock.patch.object(panel, "_sb_known_character_ids",
-                               return_value=["aria"]):
+                               return_value=["chartest_c"]):
             h = self.gen(character_id="ghost")
         self.assertEqual(h.status, 400)
         self.assertEqual(panel.STATE["queue"], [])
@@ -1158,24 +1186,24 @@ class GenerateIntoAGap(EditorCase):
 
     def test_an_INSTALLED_character_queues_with_its_face_lora_and_trigger(self):
         # Machine-independent: the character library is mocked, because a test
-        # that only passes on a Mac with `aria` trained is not a test.
-        face = self.root / "aria.safetensors"
+        # that only passes on a Mac with `chartest_c` trained is not a test.
+        face = self.root / "chartest_c.safetensors"
         face.write_bytes(b"lora")
-        rec = {"id": "aria", "trigger": "ariatrn",
+        rec = {"id": "chartest_c", "trigger": "chartest_c",
                "face_lora_path": str(face), "audio_lora_path": None}
         compat = {"ltx_compatible": True, "ltx_compat_reason": "",
                   "ltx_fusion_tally": None}
         with mock.patch.object(panel, "_sb_known_character_ids",
-                               return_value=["aria"]), \
+                               return_value=["chartest_c"]), \
              mock.patch.object(panel, "list_characters", return_value=[rec]), \
              mock.patch.object(panel, "_ltx_lora_compatibility",
                                return_value=compat):
-            h = self.gen(character_id="aria", trigger="ariatrn",
-                         prompt="ariatrn walks through the gate")
+            h = self.gen(character_id="chartest_c", trigger="chartest_c",
+                         prompt="chartest_c walks through the gate")
         self.assertEqual(h.status, 202)
         p = panel.STATE["queue"][0]["params"]
-        self.assertEqual(p["character_id"], "aria")
-        self.assertIn("ariatrn", p["prompt"])       # the trigger, mechanically
+        self.assertEqual(p["character_id"], "chartest_c")
+        self.assertIn("chartest_c", p["prompt"])       # the trigger, mechanically
         self.assertTrue(p["loras"])                 # the face actually loads
         # The pass quality was translated into the character vocabulary on the
         # way through, or this request would have been refused outright.
@@ -1192,6 +1220,74 @@ class GenerateIntoAGap(EditorCase):
                          (policy["width"], policy["height"]))
         board = storyboard.load_storyboard(self.state, "sb_t")
         self.assertEqual(board["shots"][-1]["final_job_id"], h.payload["job_id"])
+
+
+class RetakeResolvesByPathNotByTheSavedFile(EditorCase):
+    """FILM-35 — a retake used to resolve `retake_of` by loading the SAVED
+    edit.json and looking the clip id up in it. A clip split, duplicated or
+    added since the last manual Save — the ordinary state of a timeline
+    under the save model — was not IN that file yet, so the retake refused
+    with "that clip is not on this timeline any more" for a clip plainly
+    selected on screen. The client now sends the clip's own path too, which
+    is everything this route actually needed.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._q = mock.patch.dict(panel.STATE, {"queue": [], "history": [],
+                                                "current": None}, clear=False)
+        self._q.start()
+        self._pq = mock.patch.object(panel, "persist_queue", lambda: None)
+        self._pq.start()
+
+    def tearDown(self):
+        self._pq.stop()
+        self._q.stop()
+        super().tearDown()
+
+    def gen(self, **form):
+        f = {"id": "sb_t", "prompt": "a slow push in on the gate",
+             "duration": "5", "film_start": "12.5"}
+        f.update(form)
+        return FakeHandler().post("edit/generate", f)
+
+    def test_the_path_alone_resolves_the_source_shot(self):
+        # No edit.json on disk at all — the retake still finds shot 1 (whose
+        # draft_output is self.clips[0]) by the path the client sent.
+        h = self.gen(retake_of="not-in-any-saved-file", retake_path=str(self.clips[0]))
+        self.assertEqual(h.status, 202)
+        new_shot = storyboard.load_storyboard(self.state, "sb_t")["shots"][-1]
+        self.assertEqual(new_shot["title"], "shot 1")      # source resolved via clips[0]
+        self.assertEqual(new_shot["edit_slot"]["retake_of"], "not-in-any-saved-file")
+
+    def test_a_stale_saved_timeline_does_not_block_it_either(self):
+        # edit.json IS on disk, but it does not carry the id the client is
+        # retaking (a split made after that save) — retake_path still wins.
+        sedit.save_edit(self.bdir, _edit([
+            {"id": "other-clip", "path": str(self.clips[1]), "proxy": None,
+             "start": 0.0, "end": 5.0, "film_start": 0.0, "film_end": 5.0,
+             "source": "human", "locked": False, "duration": 10.0}]))
+        h = self.gen(retake_of="c-split-after-save", retake_path=str(self.clips[0]))
+        self.assertEqual(h.status, 202)
+        new_shot = storyboard.load_storyboard(self.state, "sb_t")["shots"][-1]
+        self.assertEqual(new_shot["title"], "shot 1")
+
+    def test_with_no_path_at_all_it_falls_back_to_the_saved_file_as_before(self):
+        # Backward compatible: an older client, or a script, that sends only
+        # retake_of still works exactly as it always did.
+        sedit.save_edit(self.bdir, _edit([
+            {"id": "c1", "path": str(self.clips[2]), "proxy": None,
+             "start": 0.0, "end": 5.0, "film_start": 0.0, "film_end": 5.0,
+             "source": "human", "locked": False, "duration": 10.0}]))
+        h = self.gen(retake_of="c1")
+        self.assertEqual(h.status, 202)
+        new_shot = storyboard.load_storyboard(self.state, "sb_t")["shots"][-1]
+        self.assertEqual(new_shot["title"], "shot 3")      # source resolved via clips[2]
+
+    def test_neither_path_nor_a_matching_saved_clip_is_still_refused_cleanly(self):
+        h = self.gen(retake_of="ghost")
+        self.assertEqual(h.status, 400)
+        self.assertEqual(panel.STATE["queue"], [])
 
 
 class PrepareRun(EditorCase):
@@ -1496,6 +1592,86 @@ class AddClipRoute(EditorCase):
 
 
 # =============================================================================
+# OFFLINE MEDIA — FILM-15
+# =============================================================================
+class OfflineMedia(EditorCase):
+    """A moved or trashed file, named — instead of a black preview and a
+    "Rendered N clips" toast over a film that quietly came out shorter.
+    """
+
+    def test_a_clip_whose_file_is_gone_is_flagged_offline(self):
+        gone = self.root / "gone.mp4"    # never written
+        sedit.save_edit(self.bdir, _edit([dict(_clip(gone, 0, 4, 0), id="c1")]))
+        h = FakeHandler().get("/storyboard/edit?id=sb_t")
+        self.assertEqual(h.payload["offline"], ["c1"])
+
+    def test_a_clip_whose_file_exists_is_not_flagged(self):
+        sedit.save_edit(self.bdir, _edit([
+            dict(_clip(self.clips[0], 0, 4, 0), id="c1")]))
+        h = FakeHandler().get("/storyboard/edit?id=sb_t")
+        self.assertEqual(h.payload["offline"], [])
+
+    def test_a_slug_has_no_file_and_is_never_flagged(self):
+        slug = {"id": "s1", "kind": "slug", "path": None, "start": 0.0,
+                "end": 2.0, "film_start": 0.0, "film_end": 2.0,
+                "source": "human", "locked": False}
+        sedit.save_edit(self.bdir, _edit([slug]))
+        h = FakeHandler().get("/storyboard/edit?id=sb_t")
+        self.assertEqual(h.payload["offline"], [])
+
+    def test_going_offline_and_coming_back_both_show_up_live(self):
+        real = self.root / "flickers.mp4"
+        real.write_bytes(b"x")
+        sedit.save_edit(self.bdir, _edit([dict(_clip(real, 0, 4, 0), id="c1")]))
+        self.assertEqual(
+            FakeHandler().get("/storyboard/edit?id=sb_t").payload["offline"], [])
+        real.unlink()
+        self.assertEqual(
+            FakeHandler().get("/storyboard/edit?id=sb_t").payload["offline"], ["c1"])
+        real.write_bytes(b"x")
+        self.assertEqual(
+            FakeHandler().get("/storyboard/edit?id=sb_t").payload["offline"], [])
+
+
+class BoardSummaryCarriesWhetherThereIsATimeline(EditorCase):
+    """FILM-43 — the Editor's film switcher filtered on `clips` (board
+    SHOTS with an output file), so a film cut from Video-tab or imported
+    clips — a real timeline, zero shots of its own — vanished from the
+    list. `has_timeline` is edit.json's own existence, which is the
+    question "does this film have something to edit" actually asks.
+    """
+
+    def test_a_board_with_an_edit_json_has_a_timeline(self):
+        sedit.save_edit(self.bdir, _edit([_clip(self.clips[0], 0.0, 2.0, 0.0)]))
+        row = panel._sb_board_summary(self.board)
+        self.assertTrue(row["has_timeline"])
+
+    def test_a_board_with_no_edit_json_does_not(self):
+        empty = _board([], bid="sb_empty")
+        storyboard.save_storyboard(self.state, empty)
+        row = panel._sb_board_summary(empty)
+        self.assertFalse(row["has_timeline"])
+        self.assertEqual(row["clips"], 0)          # the OLD signal agrees here
+
+    def test_a_board_cut_from_imported_clips_has_a_timeline_but_no_rendered_shots(self):
+        # The exact case that vanished: no shot of its own ever rendered
+        # (clips == 0, no shots at all) but there is a real cut on the
+        # timeline, imported from elsewhere.
+        empty = _board([], bid="sb_imported")
+        storyboard.save_storyboard(self.state, empty)
+        sedit.save_edit(panel._sbe_board_dir(empty["id"]),
+                        _edit([_clip(self.clips[0], 0.0, 2.0, 0.0)]))
+        row = panel._sb_board_summary(empty)
+        self.assertEqual(row["clips"], 0)
+        self.assertTrue(row["has_timeline"])
+
+    def test_a_broken_editor_module_answers_false_not_a_500(self):
+        with mock.patch.object(panel, "_sbe_import", side_effect=RuntimeError("boom")):
+            row = panel._sb_board_summary(self.board)
+        self.assertFalse(row["has_timeline"])
+
+
+# =============================================================================
 # RELINK — the drafts a delivery pass left behind
 # =============================================================================
 class RelinkDraftToDelivery(EditorCase):
@@ -1589,6 +1765,66 @@ class RelinkDraftToDelivery(EditorCase):
     def test_relinking_without_a_timeline_says_so(self):
         h = FakeHandler().post("edit/relink", {"id": "sb_t"})
         self.assertEqual(h.status, 404)
+
+    def test_relink_reprobes_the_new_files_duration(self):
+        # FILM-15: a draft and its delivered swap are not guaranteed to run
+        # the same length (a re-render, a different pass) — this used to
+        # leave `duration` at the DRAFT's number forever. Here the new file
+        # is longer than the existing window, so there is nothing to lose by
+        # believing it — the Inspector's number stops being stale.
+        final = self.deliver(1, "S01_final.mp4")
+        sedit.save_edit(self.bdir, _edit([
+            dict(_clip(self.clips[0], 0, 4, 0), duration=4.5)]))
+
+        def fake_probe(path):
+            return {"duration": 9.0} if str(path) == str(final) else None
+
+        with mock.patch("storyboard_edit.probe_media", side_effect=fake_probe), \
+             mock.patch.object(panel, "run_ffmpeg_tracked",
+                               side_effect=lambda c, l: (Path(c[-1])
+                                                         .write_bytes(b"p"), ("", ""))[1]):
+            h = FakeHandler().post("edit/relink", {"id": "sb_t"})
+        self.assertTrue(h.payload["ok"])
+        clip = sedit.load_edit(self.bdir)["clips"][0]
+        self.assertEqual(clip["duration"], 9.0)
+
+    def test_relink_to_a_SHORTER_file_still_succeeds_and_leaves_duration_alone(self):
+        # The other half: a delivered pass that came back shorter than its
+        # draft must not turn a relink that always worked into one that
+        # refuses. `save_edit` blocks on `clip_past_the_end`, so applying the
+        # honest (shorter) number here would refuse the whole write — the
+        # timeline would be stuck pointing at the OLD file, unable to adopt
+        # the new one at all. The stale duration is kept; the assembler pads
+        # the now-short slot with black regardless (a different test class),
+        # so nothing about the FILM is less safe for it.
+        final = self.deliver(1, "S01_final.mp4")
+        sedit.save_edit(self.bdir, _edit([
+            dict(_clip(self.clips[0], 0, 4, 0), duration=20.0)]))
+
+        def fake_probe(path):
+            return {"duration": 3.5} if str(path) == str(final) else None
+
+        with mock.patch("storyboard_edit.probe_media", side_effect=fake_probe), \
+             mock.patch.object(panel, "run_ffmpeg_tracked",
+                               side_effect=lambda c, l: (Path(c[-1])
+                                                         .write_bytes(b"p"), ("", ""))[1]):
+            h = FakeHandler().post("edit/relink", {"id": "sb_t"})
+        self.assertTrue(h.payload["ok"], h.payload)
+        clip = sedit.load_edit(self.bdir)["clips"][0]
+        self.assertEqual(clip["path"], str(final))    # the swap still landed
+        self.assertEqual(clip["duration"], 20.0)       # the stale number, on purpose
+        self.assertEqual(sedit.validate_edit(sedit.load_edit(self.bdir)), [])
+
+    def test_relink_leaves_duration_alone_when_the_new_file_cannot_be_probed(self):
+        final = self.deliver(1, "S01_final.mp4")
+        sedit.save_edit(self.bdir, _edit([
+            dict(_clip(self.clips[0], 0, 4, 0), duration=20.0)]))
+        with mock.patch("storyboard_edit.probe_media", return_value=None), \
+             mock.patch.object(panel, "run_ffmpeg_tracked",
+                               side_effect=lambda c, l: (Path(c[-1])
+                                                         .write_bytes(b"p"), ("", ""))[1]):
+            FakeHandler().post("edit/relink", {"id": "sb_t"})
+        self.assertEqual(sedit.load_edit(self.bdir)["clips"][0]["duration"], 20.0)
 
 
 class UnknownActions(EditorCase):
@@ -2102,6 +2338,39 @@ class NleExportRoute(EditorCase):
         h = FakeHandler().post("edit/export-nle", {"id": "sb_t"})
         self.assertEqual(h.status, 404)
         self.assertFalse(h.payload["ok"])
+
+    def test_titles_and_cards_reach_the_project_FILM_50(self):
+        # export_nle() has taken `overlays=` since it was written — this
+        # route just never passed them, so every title and card vanished the
+        # moment a film left for Premiere, Resolve or After Effects.
+        card = self.out / "title.png"
+        card.write_bytes(b"i" * 32)
+        sedit.save_edit(self.bdir, _edit(
+            [_clip(str(self.clips[0]), 0.0, 3.0, 0.0)],
+            overlays=[{"id": "ov1", "kind": "image", "path": str(card),
+                      "title": "Chapter One", "start": 0.0, "end": 1.0,
+                      "film_start": 0.5, "film_end": 1.5}]))
+        with mock.patch.object(panel, "_sb_probe_clip",
+                               return_value={"w": 1024, "h": 576,
+                                             "duration": 9.0,
+                                             "has_audio": True,
+                                             "sample_rate": 48000}), \
+             mock.patch.object(panel, "_sb_probe_still",
+                               return_value={"w": 800, "h": 600,
+                                             "duration": 0.0,
+                                             "has_audio": False,
+                                             "sample_rate": 0}):
+            h = FakeHandler().post("edit/export-nle", {"id": "sb_t"})
+        self.assertTrue(h.payload["ok"], h.payload)
+        xml = Path(h.payload["xml"]).read_text(encoding="utf-8")
+        self.assertIn("Chapter One", xml)
+        jsx = Path(h.payload["jsx"]).read_text(encoding="utf-8")
+        self.assertIn('bring("/media/title.png")', jsx)
+        self.assertIn("overlay 1:", jsx)
+        # The card's own file was carried into the project's media/ folder,
+        # not left pointing at the source gallery.
+        self.assertTrue(any(p.name.startswith("title")
+                            for p in (Path(h.payload["dir"]) / "media").iterdir()))
 
     def test_reveal_computes_its_own_path_from_the_board_id_alone(self):
         # The client sends nothing but the board id, so this can never become
@@ -2933,6 +3202,52 @@ class DraftsAreTheUsersOwn(unittest.TestCase):
             sedit.recover_backup(self.d)
         self.assertEqual(len(sedit.load_edit(self.d)["clips"]), 6)
 
+    # ---- FILM-54: the offer can say WHAT changed ---------------------------
+    def test_a_single_brightness_change_is_named_precisely(self):
+        sedit.save_edit(self.d, self._doc(n=2))
+        bright = self._doc(n=2)
+        bright["clips"][1]["adjust"] = {"brightness": 0.3}
+        sedit.write_backup(self.d, bright)
+        offer = sedit.pending_backup(self.d)
+        self.assertEqual(offer["diff"], "1 clip changed: 02 brightness +0.30")
+
+    def test_a_negative_brightness_change_keeps_its_sign(self):
+        base = self._doc(n=1)
+        base["clips"][0]["adjust"] = {"brightness": 0.3}
+        sedit.save_edit(self.d, base)
+        darker = self._doc(n=1)
+        darker["clips"][0]["adjust"] = {"brightness": -0.1}
+        sedit.write_backup(self.d, darker)
+        self.assertEqual(sedit.pending_backup(self.d)["diff"],
+                         "1 clip changed: 01 brightness -0.40")
+
+    def test_several_kinds_of_change_summarise_by_count(self):
+        sedit.save_edit(self.d, self._doc(n=3))
+        moved = self._doc(n=4)                  # one added
+        moved["clips"][0]["locked"] = True       # and one changed
+        sedit.write_backup(self.d, moved)
+        diff = sedit.pending_backup(self.d)["diff"]
+        self.assertIn("1 clip changed", diff)
+        self.assertIn("1 added", diff)
+
+    def test_a_removed_clip_is_named_as_removed(self):
+        sedit.save_edit(self.d, self._doc(n=3))
+        fewer = self._doc(n=2)
+        sedit.write_backup(self.d, fewer)
+        self.assertEqual(sedit.pending_backup(self.d)["diff"], "1 removed")
+
+    def test_the_soundtrack_alone_is_named_not_miscounted_as_a_clip(self):
+        sedit.save_edit(self.d, self._doc(n=1))
+        with_song = self._doc(n=1)
+        with_song["audio"] = {"path": "/x/song.wav", "offset": 0.0}
+        sedit.write_backup(self.d, with_song)
+        self.assertEqual(sedit.pending_backup(self.d)["diff"], "soundtrack")
+
+    def test_a_digest_equal_backup_is_not_offered_so_there_is_nothing_to_diff(self):
+        sedit.save_edit(self.d, self._doc(n=2))
+        sedit.write_backup(self.d, self._doc(n=2))
+        self.assertIsNone(sedit.pending_backup(self.d))
+
 
 class DraftRoutes(EditorCase):
     def _prime(self):
@@ -3354,18 +3669,24 @@ class LinkingFreezesTheOffset(unittest.TestCase):
     def test_the_cut_list_carries_a_coupled_window_too(self):
         # An assembler that ignored it would render the sound back under the
         # picture — the J-cut would exist in the timeline and not in the film.
+        # This fixture's clip starts at film_start=6.0 (see `_clip` above),
+        # so FILM-27's gap-fill now leads the cut list with a black slug for
+        # the head gap — real behaviour, not noise; find the clip's own
+        # entry by its path rather than assuming index 0.
         cuts = sedit.edit_to_cuts(_edit([self._coupled()]))
-        self.assertEqual(cuts[0]["audio"],
+        mine = next(c for c in cuts if c.get("path"))
+        self.assertEqual(mine["audio"],
                          {"start": 0.0, "end": 4.0, "film_start": 4.0})
         # ...and an ordinary clip still says nothing at all.
         plain = sedit.edit_to_cuts(_edit([self._clip()]))
-        self.assertNotIn("audio", plain[0])
+        plain_mine = next(c for c in plain if c.get("path"))
+        self.assertNotIn("audio", plain_mine)
 
 
-ENDCARD = Path("/Users/salo/pinokio/api/phosphene-dev.git/mlx_outputs/"
-               "endcard_phosphene_46_overlay_A.png")
-PULLOUT = Path("/Users/salo/pinokio/api/phosphene-dev.git/mlx_outputs/"
-               "h3_pullout_ending_turbo_aria.mp4")
+ENDCARD = (Path.home() / "pinokio/api/phosphene-dev.git/mlx_outputs/"
+           "endcard_phosphene_46_overlay_A.png")
+PULLOUT = (Path.home() / "pinokio/api/phosphene-dev.git/mlx_outputs/"
+           "h3_pullout_ending_turbo_chartest_c.mp4")
 
 
 class TheSoundsEnvelope(unittest.TestCase):
@@ -3972,18 +4293,28 @@ class AHoleShorterThanAFrame(unittest.TestCase):
     def test_the_render_and_the_timeline_now_agree_on_the_length(self):
         """Where the black frame came from, and where it did not.
 
-        The assembler consumes `start`/`end` per clip and CONCATENATES, so a
-        hole never reached ffmpeg at all — the rendered film was already the
-        healed length. The PREVIEW is the half that painted black in it. The
-        two therefore disagreed by exactly the hole, silently, and healing is
-        what makes the number on the header the number that comes out.
+        FILM-27: `edit_to_cuts` now fills any gap `edit_gaps` reports (bigger
+        than half a frame, the same threshold `heal_subframe_gaps` uses) with
+        a black slug of its own — so of this doc's three gaps (0.02094,
+        0.01584, 0.004), the ffmpeg-visible one (0.02094, just OVER the
+        threshold) now reaches the render as a slug and is no longer part of
+        the gap between "declared duration" and "what plays". The remaining
+        difference is exactly the two SUB-frame gaps healing already closes
+        on read — `migrate_edit` erases the rest.
         """
         doc = self._doc(0.02094, 0.01584, 0.004)
-        rendered = sum(c["end"] - c["start"] for c in sedit.edit_to_cuts(doc))
-        self.assertAlmostEqual(sedit.edit_duration(doc) - rendered, 0.04078,
+        cuts = sedit.edit_to_cuts(doc)
+        rendered = sum(c["end"] - c["start"] for c in cuts)
+        # The real gap is IN the cut list now, as a slug — not missing from it.
+        self.assertEqual([c["kind"] for c in cuts if c.get("kind") == "slug"],
+                         ["slug"])
+        self.assertAlmostEqual(sedit.edit_duration(doc) - rendered, 0.01984,
                                places=5)
         healed = sedit.migrate_edit(doc)
-        self.assertAlmostEqual(sedit.edit_duration(healed), rendered, places=6)
+        healed_rendered = sum(c["end"] - c["start"]
+                              for c in sedit.edit_to_cuts(healed))
+        self.assertAlmostEqual(sedit.edit_duration(healed), healed_rendered,
+                               places=6)
 
 
 # =============================================================================
@@ -3999,9 +4330,9 @@ class AHoleShorterThanAFrame(unittest.TestCase):
 # runs on a fresh install and so the population the detector must refuse is
 # visible in the test rather than implied by it. The real reported card is
 # asserted too, when it happens to be present.
-PLATE_CARD = Path("/Users/salo/pinokio/api/phosphene-dev.git/panel_uploads/"
-                  "library/manual/20260820/uploads/"
-                  "1787241298782_ChatGPT_Image_Aug_20_2026_06_54_48_PM.png")
+PLATE_CARD = (Path.home() / "pinokio/api/phosphene-dev.git/panel_uploads/"
+              "library/manual/20260820/uploads/"
+              "1787241298782_ChatGPT_Image_Aug_20_2026_06_54_48_PM.png")
 
 
 def _burst(h, w):
@@ -4610,9 +4941,15 @@ class TheSameTakeTwiceIsOrdinaryEditing(unittest.TestCase):
             sedit.save_edit(bdir, dict(first))
             second = sedit.load_edit(bdir)
             self.assertEqual(json.dumps(second["clips"], sort_keys=True), clips_a)
+            # FILM-51: `save_edit` now snaps every clip's length to the
+            # frame grid (heal_subframe_lengths) — clip "five"'s 4.042s is
+            # 97.008 frames, so it becomes 97 frames exactly (4.041667s),
+            # and clip "six"'s unlinked strip carries the same tiny shift
+            # its picture just took, keeping its drift (IN SYNC) unchanged.
             self.assertEqual(second["clips"][1]["audio"],
-                             {"start": 0.0, "end": 4.042, "film_start": 30.35})
-            # ...and a third pass changes nothing either.
+                             {"start": 0.0, "end": 4.042, "film_start": 30.349667})
+            # ...and a third pass changes nothing either — the document is
+            # already frame-exact, so healing it again is a no-op.
             sedit.save_edit(bdir, dict(second))
             self.assertEqual(json.dumps(sedit.load_edit(bdir)["clips"],
                                         sort_keys=True), clips_a)
@@ -4854,15 +5191,64 @@ class TheSaveModel(unittest.TestCase):
             self.assertTrue(first.is_file())          # the older one survives
             self.assertEqual(sedit.pending_backup(bdir)["duration"], 2.0)
 
-    def test_the_lane_is_bounded(self):
+    def test_the_lane_is_bounded_by_time_not_by_a_small_count(self):
+        # FILM-57: a flat count of 20 read as "about 30 s of active editing"
+        # once no-op re-backups stopped burning slots — the same cap that
+        # protected against a runaway loop was, once that loop was fixed at
+        # the source (sbeTick no longer re-arms once nothing has changed),
+        # just a small window on real work. More than the OLD count-20 cap
+        # of genuinely distinct, RECENT snapshots must all survive now.
         with tempfile.TemporaryDirectory() as d:
             bdir = Path(d)
             self._save(bdir, self._doc())
-            for i in range(sedit.SNAPSHOT_KEEP + 6):
+            n = sedit.SNAPSHOT_KEEP + 6
+            for i in range(n):
                 sedit.write_backup(bdir, self._doc(end=4.0 - i * 0.01,
                                                    film_end=4.0 - i * 0.01))
-            self.assertLessEqual(len(sedit._snapshot_paths(bdir)),
-                                 sedit.SNAPSHOT_KEEP)
+            self.assertEqual(len(sedit._snapshot_paths(bdir)), n)
+
+    def test_snapshots_older_than_the_window_are_dropped(self):
+        with tempfile.TemporaryDirectory() as d:
+            bdir = Path(d)
+            self._save(bdir, self._doc())
+            sedit.write_backup(bdir, self._doc(end=3.0, film_end=3.0))
+            old = sedit.latest_snapshot(bdir)[0]
+            # Rename it back in time — same trick `_snapshot_stamp_ms` reads,
+            # so this ages the file without touching the filesystem's mtime.
+            aged = old.with_name(sedit._SNAP_PREFIX
+                                 + f"{1:013d}-000.json")   # 1970, unmissable
+            old.replace(aged)
+            gone = sedit.prune_snapshots(bdir, keep_hours=24, hard_cap=500)
+            self.assertEqual(gone, 1)
+            self.assertFalse(aged.exists())
+
+    def test_a_name_the_pruner_cannot_parse_is_never_aged_out(self):
+        with tempfile.TemporaryDirectory() as d:
+            bdir = Path(d)
+            self._save(bdir, self._doc())
+            hist = sedit.history_dir(bdir, sedit.load_draft_index(bdir)["active"])
+            hist.mkdir(parents=True, exist_ok=True)
+            foreign = hist / (sedit._SNAP_PREFIX + "not-a-timestamp.json")
+            foreign.write_text("{}")
+            gone = sedit.prune_snapshots(bdir, keep_hours=0, hard_cap=500)
+            self.assertEqual(gone, 0)
+            self.assertTrue(foreign.exists())
+
+    def test_the_hard_cap_still_bounds_a_pathological_burst(self):
+        # Not the everyday rule — the backstop for a bug elsewhere hammering
+        # the backup route. All of these are "now", so only the count-based
+        # backstop can be why any of them go.
+        with tempfile.TemporaryDirectory() as d:
+            bdir = Path(d)
+            self._save(bdir, self._doc())
+            n = 12
+            for i in range(n):
+                sedit.write_backup(bdir, self._doc(end=4.0 - i * 0.01,
+                                                   film_end=4.0 - i * 0.01))
+            self.assertEqual(len(sedit._snapshot_paths(bdir)), n)
+            gone = sedit.prune_snapshots(bdir, keep_hours=24, hard_cap=5)
+            self.assertEqual(gone, n - 5)
+            self.assertEqual(len(sedit._snapshot_paths(bdir)), 5)
 
     def test_snapshots_are_listed_in_the_versions_browser_and_marked(self):
         # Rule 3: manual saves, named versions and snapshots together, and
@@ -5005,9 +5391,12 @@ class MutingAClipsOwnSound(unittest.TestCase):
         w = sedit.clip_audio(c)
         self.assertTrue(w["split"])                 # the strip stays put
         self.assertEqual(w["film_start"], 3.0)
+        # film_start=4.0 leaves a head gap FILM-27 now fills with a black
+        # slug at cuts[0] — find this clip's own entry by its path.
         cuts = sedit.edit_to_cuts(_edit([c]))
-        self.assertTrue(cuts[0]["mute"])
-        self.assertEqual(cuts[0]["audio"]["film_start"], 3.0)
+        mine = next(cc for cc in cuts if cc.get("path"))
+        self.assertTrue(mine["mute"])
+        self.assertEqual(mine["audio"]["film_start"], 3.0)
 
     def test_the_cut_list_says_nothing_when_nothing_is_muted(self):
         self.assertNotIn("mute", sedit.edit_to_cuts(_edit([self._clip()]))[0])
@@ -5148,7 +5537,10 @@ class SavingIsNeverBlockedByOverlappingSound(unittest.TestCase):
             sedit.save_edit(bdir, self._pair())            # must not raise
             got = sedit.load_edit(bdir)
             self.assertEqual(got["revision"], 1)
-            self.assertEqual(got["clips"][1]["audio"]["film_start"], 3.104)
+            # FILM-51: clip "a"'s 3.354s (80.496 frames) becomes 80 frames
+            # exactly on save, shifting "b" and its strip by the same
+            # amount — the quarter-second J-cut lead is unchanged.
+            self.assertEqual(got["clips"][1]["audio"]["film_start"], 3.083333)
             sedit.write_backup(bdir, self._pair(lead=0.5))  # nor this
             self.assertIsNotNone(sedit.pending_backup(bdir))
 
@@ -5199,6 +5591,53 @@ class SavingIsNeverBlockedByOverlappingSound(unittest.TestCase):
             (hist / "save-r00009.json").write_text(json.dumps(broken))
             with self.assertRaises(sedit.EditError):
                 sedit.restore_edit(bdir, "save-r00009.json")
+
+
+class SavingIsNeverBlockedByAMissingStill(unittest.TestCase):
+    """FILM-31 — one trashed still image made the WHOLE FILM unsaveable and
+    unbackupable: `still_missing` was blocking, and `write_backup`/`save_edit`
+    both refuse on a blocking error. `still_missing` joins `WARNING_CODES` for
+    the same reason `clips_audio_overlap` did — persisting the user's work
+    always wins — now that it is also SAFE to: the assembler renders a
+    missing still's slot as black at its own length instead of dropping it
+    (FILM-15, `_sb_timeline_segments`), and the same file-exists check that
+    flags the clip is what the Editor badges "offline" (`_sbe_payload`).
+    """
+
+    def _board(self, missing_path):
+        return _edit([{"id": "s", "kind": "still", "path": str(missing_path),
+                       "proxy": None, "start": 0.0, "end": 3.0,
+                       "film_start": 0.0, "film_end": 3.0,
+                       "source": "human", "locked": False}])
+
+    def test_a_missing_still_is_a_WARNING_not_an_error(self):
+        errs = sedit.validate_edit(self._board(Path("/x/gone.png")))
+        self.assertEqual([e["code"] for e in errs], ["still_missing"])
+        self.assertEqual(errs[0].get("severity"), "warning")
+        self.assertEqual(sedit.blocking_errors(errs), [])
+
+    def test_a_real_defect_on_the_same_document_still_blocks(self):
+        broken = self._board(Path("/x/gone.png"))
+        broken["clips"][0]["film_end"] = broken["clips"][0]["film_start"]
+        self.assertTrue(sedit.blocking_errors(sedit.validate_edit(broken)))
+
+    def test_save_and_backup_both_write_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            bdir = Path(d)
+            edit = self._board(Path(d) / "gone.png")
+            sedit.save_edit(bdir, edit)            # must not raise
+            got = sedit.load_edit(bdir)
+            self.assertEqual(got["clips"][0]["kind"], "still")
+            changed = json.loads(json.dumps(edit))
+            changed["clips"][0]["film_end"] = 3.5   # a real, backup-worthy edit
+            sedit.write_backup(bdir, changed)       # must not raise
+            self.assertIsNotNone(sedit.pending_backup(bdir))
+
+    def test_the_still_that_DOES_exist_is_not_flagged(self):
+        with tempfile.TemporaryDirectory() as d:
+            img = Path(d) / "here.png"
+            img.write_bytes(b"x")
+            self.assertEqual(sedit.validate_edit(self._board(img)), [])
 
 
 class TheDuplicatedStripArtifactIsRepairedOnLoad(unittest.TestCase):

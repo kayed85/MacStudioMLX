@@ -82,3 +82,4 @@ Anything bigger belongs here, behind one short `bash …` line.
 | `mflux_pack.sh` | `install_qwen.js` | the image-engine pack (Ideogram 4 + Qwen-Edit) |
 | `h3_preflight.sh` | `install_h3.js` | Hailuo H3 disk/RAM preflight |
 | `h3_build_q8.sh` | `install_h3.js` | the H3 q8 DiT build |
+| `a2v_stems_deps.sh` | `install.js`, `scripts/post_update.sh` (step 7b), `POST /a2v/separator/install` | vocal separation for Lip-sync "Listen to the voice only": demucs 4.0.1 into the engine venv with torch/numpy PINNED to what is on disk, htdemucs weights into `mlx_models/demucs`. The panel runs `scripts/a2v_separate.py` (not the demucs CLI, which dies on torchaudio >= 2.9). Missing separator = the render is refused with an install offer, never quietly run on the full mix |

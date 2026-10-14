@@ -670,6 +670,65 @@ class TestFeedback(unittest.TestCase):
                              json.dumps(before["shots"][i], sort_keys=True),
                              "shot %d drifted during a per-shot re-roll" % (i + 1))
 
+    def test_a_reroll_of_a_singing_shot_keeps_its_music_video_identity(self):
+        # FILM-21: the single-shot re-roll model has no idea a shot is a
+        # music-video singing shot — it returns an ordinary planner shot,
+        # with no awareness that the result needs to stay a2v-safe (that
+        # pass, _enforce_laws, is deliberately skipped for a per-shot
+        # re-roll — see the "Skipped on a per-shot re-roll" comment above).
+        # Before this fix only `status` carried across the splice, so a
+        # Rewrite on a singing shot silently dropped its music_video block,
+        # its audio linkage (the second of the SONG it was rendered
+        # against) and its `a2v` mode itself. This exercises the splice
+        # directly (_coerce_for_mode), the exact mechanism that changed.
+        previous = copy.deepcopy(self.base)
+        previous["shots"][3].update({
+            "n": 4, "mode": "a2v", "uid": "shot_deadbeef",
+            "music_video": {"kind": "singing", "role": "singer",
+                            "film_start": 12.5, "film_end": 22.5,
+                            "panel_mode": "a2v"},
+            "audio": "/x/song.wav", "audio_start_time": 12.5,
+            "audio_stem": "/x/song_vocals.wav",
+            "still": "/x/singer.png", "still_source": "user",
+        })
+        reply_obj = {"title": "The Key", "shots": [_shot(
+            4, description="Live-action, cinematic, a different scene entirely.")]}
+        spec, _warnings = P._coerce_for_mode(
+            reply_obj, "shot", 4, previous, concept="x", n_shots=6, style="",
+            cast=[], board_id="sb_x", engine="ltx", tier="draft",
+            duration_s=5.0, seed_base=1, max_dim=None, sb=storyboard)
+        rewritten = next(s for s in spec["shots"] if s["n"] == 4)
+        self.assertIn("different scene", rewritten["prompt"].lower())  # the rewrite
+        # everything that makes this shot a singing shot of THIS song
+        # survives the rewrite untouched
+        self.assertEqual(rewritten["mode"], "a2v")
+        self.assertEqual(rewritten["uid"], "shot_deadbeef")
+        self.assertEqual(rewritten["music_video"]["film_start"], 12.5)
+        self.assertEqual(rewritten["audio"], "/x/song.wav")
+        self.assertEqual(rewritten["audio_start_time"], 12.5)
+        self.assertEqual(rewritten["audio_stem"], "/x/song_vocals.wav")
+        self.assertEqual(rewritten["still"], "/x/singer.png")
+        self.assertEqual(rewritten["still_source"], "user")
+        # every other shot is untouched
+        for i in (0, 1, 2, 4, 5):
+            self.assertEqual(spec["shots"][i], previous["shots"][i])
+
+    def test_a_reroll_of_an_ordinary_shot_still_only_carries_status(self):
+        # An ordinary (non-music-video) shot must not suddenly start
+        # inheriting fields it never had — the carry list is additive
+        # (`if carry in s`), so a plain shot with no music_video/audio/still
+        # keys is unaffected.
+        previous = copy.deepcopy(self.base)
+        reply_obj = {"title": "The Key", "shots": [_shot(4, description="A door, not a key.")]}
+        spec, _warnings = P._coerce_for_mode(
+            reply_obj, "shot", 4, previous, concept="x", n_shots=6, style="",
+            cast=[], board_id="sb_x", engine="ltx", tier="draft",
+            duration_s=5.0, seed_base=1, max_dim=None, sb=storyboard)
+        rewritten = next(s for s in spec["shots"] if s["n"] == 4)
+        self.assertNotIn("music_video", rewritten)
+        self.assertNotIn("audio", rewritten)
+        self.assertEqual(rewritten.get("mode"), "text")
+
     def test_shot_reroll_prompt_carries_the_neighbours_but_asks_for_one_shot(self):
         _, stub = _plan([json.dumps({"title": "T", "shots": [_shot(4)]})],
                         feedback={"shot": 4, "note": "colder"},
@@ -1720,7 +1779,7 @@ class TestGeographyLaws(unittest.TestCase):
         warn = []
         spec = P._enforce_eyelines(
             self._spec({"character_id": "bizarrotrn", "eyeline": "right"},
-                       {"character_id": "ariatrn", "eyeline": "right"}), warn)
+                       {"character_id": "chartest_c", "eyeline": "right"}), warn)
         self.assertEqual(spec["shots"][1]["eyeline"], "left")
         self.assertIn("180-degree line", warn[0])
 
@@ -1728,7 +1787,7 @@ class TestGeographyLaws(unittest.TestCase):
         warn = []
         spec = P._enforce_eyelines(
             self._spec({"character_id": "bizarrotrn", "eyeline": "right"},
-                       {"character_id": "ariatrn", "eyeline": "left"}), warn)
+                       {"character_id": "chartest_c", "eyeline": "left"}), warn)
         self.assertEqual([s["eyeline"] for s in spec["shots"]], ["right", "left"])
         self.assertEqual(warn, [])
 
@@ -1743,7 +1802,7 @@ class TestGeographyLaws(unittest.TestCase):
     def test_a_cut_to_another_place_does_not_cross_the_line(self):
         warn = []
         spec = self._spec({"character_id": "bizarrotrn", "eyeline": "right"},
-                          {"character_id": "ariatrn", "eyeline": "right"})
+                          {"character_id": "chartest_c", "eyeline": "right"})
         spec["shots"][1]["location_id"] = "kitchen"
         P._enforce_eyelines(spec, warn)
         self.assertEqual(spec["shots"][1]["eyeline"], "right")
@@ -1795,16 +1854,16 @@ class TestGeographyLaws(unittest.TestCase):
     def test_both_laws_run_inside_plan_film(self):
         # A law that is only unit-tested is a law that can be left unwired.
         cast = [{"id": "bizarrotrn", "trigger": "bizarrotrn", "name": "Bizarro"},
-                {"id": "ariatrn", "trigger": "ariatrn", "name": "Aria"}]
+                {"id": "chartest_c", "trigger": "chartest_c", "name": "Chartest C"}]
         rows = [
             {"n": 1, "title": "A", "character_id": "bizarrotrn", "duration_s": 5,
              "camera": "static", "description": "bizarrotrn throws both arms wide and grins.",
              "settle": "he is still", "soundscape": "Hose water, no voices.",
              "music": "N/A", "location": "The car wash", "view": "establishing",
              "eyeline": "right"},
-            {"n": 2, "title": "B", "character_id": "ariatrn", "duration_s": 5,
+            {"n": 2, "title": "B", "character_id": "chartest_c", "duration_s": 5,
              "camera": "static",
-             "description": "ariatrn lifts the sponge from the car and shrugs.",
+             "description": "chartest_c lifts the sponge from the car and shrugs.",
              "settle": "she is still", "soundscape": "Hose water, no voices.",
              "music": "N/A", "location": "The car wash", "view": "reverse",
              "eyeline": "right"},
@@ -1815,7 +1874,7 @@ class TestGeographyLaws(unittest.TestCase):
         self.assertFalse(P.is_plan_error(spec), spec)
         self.assertEqual([s["eyeline"] for s in spec["shots"]], ["right", "left"])
         self.assertEqual(P._load_validator()[0](
-            spec, known_character_ids=["bizarrotrn", "ariatrn"]), [])
+            spec, known_character_ids=["bizarrotrn", "chartest_c"]), [])
         warns = spec["_planner"]["warnings"]
         self.assertTrue(any("180-degree line" in w for w in warns), warns)
         self.assertTrue(any("puts the car back in frame" in w for w in warns), warns)

@@ -32,6 +32,9 @@ const path = require("path")
 // the preflight's behind, so a 36-48 GB Mac was told by the panel that H3 runs
 // and by this menu that H3 does not exist. One number, three files.
 const H3_MIN_BYTES = 36 * 1000 * 1000 * 1000
+// The full bf16 engine's floor (H3_MIN_RAM_GB = 60 in the panel). Below it the
+// compact Q8 engine is the only lane that renders, so its build is REQUIRED.
+const H3_BF16_BYTES = 60 * 1000 * 1000 * 1000
 
 function h3Capable() {
   try {
@@ -42,6 +45,19 @@ function h3Capable() {
     // never run. The user can still install it from the panel's instructions.
     return false
   }
+}
+
+function musicCapable() {
+  try { return os.totalmem() >= 24 * 1000 * 1000 * 1000 } catch (e) { return false }
+}
+
+// SYS-18: the Q8 download entry below was offered on EVERY Mac regardless
+// of RAM — 30 GB of disk and bandwidth for a feature the panel's own tier
+// table (SYSTEM_CAPS["allows_q8"], mlx_ltx_panel.py) refuses under 48 GB
+// (the base/"Compact" tier). Same threshold, same fail-closed shape as
+// h3Capable()/musicCapable() above.
+function q8Capable() {
+  try { return os.totalmem() >= 48 * 1000 * 1000 * 1000 } catch (e) { return false }
 }
 
 function getInstallRoot(info) {
@@ -82,18 +98,36 @@ function loadRequired(installRoot) {
 // Deliberately narrow: `KEY=value`, no continuations, no expansion. Anything
 // this parser cannot read leaves the caller on its default, which is always the
 // shipped behaviour.
-const ENV_KEYS = ["LTX_MODEL_VERSION", "LTX_H3_ROOT", "LTX_H3_MODELS"]
+const ENV_KEYS = ["LTX_MODEL_VERSION", "LTX_H3_ROOT", "LTX_H3_MODELS", "LTX_MUSIC_ROOT", "LTX_MUSIC_MODELS"]
+
+//
+// THE SAME GRAMMAR PINOKIO USES. The launcher reads this file with
+// dotenv.parse (Pinokio 8.2.0 kernel/util.js parse_env), so the shell, the
+// panel and the installers see `LTX_MUSIC_ROOT=/Volumes/Media Drive/YuE` as
+// the whole path. This parser took `(\S+)` and silently dropped any value
+// with a space — quoted or not — so the sidebar probed the default location
+// and offered a fresh install of an engine that was installed, or the wrong
+// repair (Codex INST-13, 2026-09-24). DOTENV_LINE is dotenv's own line rule,
+// copied rather than required: pinokio.js runs in Pinokio's node, where the
+// app's node_modules are not on the resolution path. Last assignment wins,
+// as in dotenv.
+const DOTENV_LINE = /(?:^|^)\s*(?:export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)(\s*'(?:\\'|[^'])*'|\s*"(?:\\"|[^"])*"|\s*`(?:\\`|[^`])*`|[^#\r\n]+)?\s*(?:#.*)?(?:$|$)/mg
 
 function readEnvironment(installRoot) {
   const out = {}
   try {
     const envPath = path.join(installRoot, "ENVIRONMENT")
     if (!fs.existsSync(envPath)) return out
-    const text = fs.readFileSync(envPath, "utf8")
-      .split("\n").filter(l => !/^\s*#/.test(l)).join("\n")
-    for (const key of ENV_KEYS) {
-      const m = text.match(new RegExp("^\\s*" + key + "\\s*=\\s*(\\S+)\\s*$", "m"))
-      if (m) out[key] = m[1].replace(/^["']|["']$/g, "")
+    const text = fs.readFileSync(envPath, "utf8").replace(/\r\n?/g, "\n")
+    let m
+    DOTENV_LINE.lastIndex = 0
+    while ((m = DOTENV_LINE.exec(text)) !== null) {
+      if (!ENV_KEYS.includes(m[1])) continue
+      const value = (m[2] || "").trim().replace(/^(['"`])([\s\S]*)\1$/, "$2")
+      // Pinokio drops an empty value rather than setting it (skill §1), so
+      // an empty one leaves the caller on its default here too.
+      if (value) out[m[1]] = value
+      else delete out[m[1]]
     }
   } catch (e) { /* unreadable ENVIRONMENT: every caller keeps its default */ }
   return out
@@ -121,7 +155,7 @@ module.exports = {
   // became the generation a fresh install renders with — the first sentence a prospective
   // user reads, naming the wrong engine, while a confused existing user hunting a "why
   // does it keep asking for LTX 2.3" answer finds it confirming their suspicion.
-  description: "[BETA — unreleased builds, runs alongside the stable install on port 8199] Local generative video panel for Apple Silicon. Joint audio+video via LTX-2.5 (MLX), with Hailuo H3 as a second engine. T2V, I2V, FFLF, Extend, trained characters. Lossless h264. Hardware-tier feature gating. Free, open source.",
+  description: "[MAC ONLY] Local generative video panel for Apple Silicon. Joint audio+video via LTX-2.5 (MLX), with Hailuo H3 as a second engine. T2V, I2V, FFLF, Extend, trained characters. Lossless h264. Hardware-tier feature gating. Free, open source.",
   icon: "icon.png",
   menu: async (kernel, info) => {
     // Resolve the install root. cocktailpeanut diagnosed that `info.path` is
@@ -302,6 +336,103 @@ module.exports = {
     // "install ~75 GB" when they already have the 75 GB is the thing that
     // made this look like data loss.
     const h3_repair = h3_weights && !h3_ready
+    // The compact Q8 engine, built locally at the end of install_h3.js. A 36-59
+    // GB Mac cannot render H3 without it (the panel's h3_capable()), and once
+    // the weights are complete `h3_ready` is true — so the only entry left was
+    // "Update Hailuo H3 runner", while the panel told the user to click an
+    // "Install Hailuo H3" that was no longer there. Same markers as the panel's
+    // _h3_q8_dit_dir(): config + quant recipe + EVERY shard the index names
+    // (non-empty). "At least one shard" let a pack missing four of five read as
+    // built, hiding the Build entry that repairs it (Codex H3-04). A pack with
+    // no index predates it and keeps the one-shard rule.
+    const h3_q8 = (capH3.model_roots || []).some(root => {
+      try {
+        const dir = h3Path(root + "/h3-dit-q8")
+        if (!fs.existsSync(path.join(dir, "config.json"))
+            || !fs.existsSync(path.join(dir, "quant_config.json"))) return false
+        const idx = path.join(dir, "model.safetensors.index.json")
+        if (!fs.existsSync(idx)) {
+          return fs.readdirSync(dir).some(n => /^model-.*\.safetensors$/.test(n))
+        }
+        const names = [...new Set(Object.values(JSON.parse(fs.readFileSync(idx, "utf8")).weight_map || {}))]
+        return names.length > 0 && names.every(n => {
+          try { const st = fs.statSync(path.join(dir, n)); return st.isFile() && st.size > 0 } catch (e) { return false }
+        })
+      } catch (e) { return false }
+    })
+    let h3_small = false
+    try { h3_small = os.totalmem() < H3_BF16_BYTES } catch (e) {}
+    const h3_needs_build = h3_ready && !h3_q8 && h3_small && h3Capable()
+    // The ONE H3 offer for a machine that cannot render H3 yet, in every menu
+    // state that has a Start or an Open Panel. It used to exist only in the
+    // stopped-panel menu, while the panel's install card (the thing a user reads
+    // WHILE the panel runs) sends them to it: a 48 GB owner on X, 2026-09-24,
+    // "couldn't even install it from the UI". install_h3.js touches only
+    // minimax-h3-mlx/ and mlx_models/hailuo-h3/, its Q8 build streams one tensor
+    // at a time on the CPU, and the panel picks the engine up on its next
+    // /status tick — safe beside a running panel, like the music install.
+    const h3Offer = () => {
+      if (!h3Capable()) return []
+      if (!h3_ready) {
+        return [h3_repair
+          // Quoted verbatim by the panel (H3_REPAIR_MENU_TEXT) -- change both.
+          ? { icon: "fa-solid fa-screwdriver-wrench", text: "Repair Hailuo H3 (weights kept — no re-download)", href: "install_h3.js" }
+          // ENGINES ARE PEERS: "optional" told a user that half the panel's
+          // video capability was a side dish. The entry names what it IS.
+          // The panel's install card quotes this string verbatim -- change both
+          // (H3_INSTALL_MENU_TEXT in mlx_ltx_panel.py).
+          : { icon: "fa-solid fa-comments", text: "Install Hailuo H3 (second video engine, ~75 GB)", href: "install_h3.js" }]
+      }
+      if (h3_needs_build) {
+        // Quoted verbatim by the panel (H3_BUILD_MENU_TEXT) -- change both.
+        return [{ icon: "fa-solid fa-screwdriver-wrench", text: "Build Hailuo H3 compact engine (weights kept — no re-download)", href: "install_h3.js" }]
+      }
+      return []
+    }
+
+    const musicRoot = underRoot(envFile.LTX_MUSIC_ROOT || "yue2-mlx", "")
+    const musicModels = underRoot(envFile.LTX_MUSIC_MODELS || "mlx_models/yue2", "")
+    const musicFile = p => { try { return fs.statSync(p).isFile() } catch (e) { return false } }
+    let musicWeights = false
+    try {
+      const generator = path.join(musicModels, "generator")
+      const files = JSON.parse(fs.readFileSync(path.join(generator, "conversion.json"), "utf8")).files
+      const generatorNames = ["LICENSE", "THIRD_PARTY_NOTICES.md", "ar-8bit.safetensors", "ar-bf16.safetensors",
+        "config.json", "licenses/SnakeBeta-NVIDIA-MIT.txt", "licenses/stable-audio-tools-MIT.txt",
+        "nar-bf16.safetensors", "qwen.tiktoken"]
+      const allowed = new Set([...Object.keys(files), "conversion.json", "README.md"])
+      const clean = (dir, prefix = "") => fs.readdirSync(dir, { withFileTypes: true }).every(e => {
+        const rel = prefix + e.name
+        if (e.isSymbolicLink()) return false
+        if (e.isDirectory()) return [...allowed].some(n => n.startsWith(rel + "/")) && clean(path.join(dir, e.name), rel + "/")
+        return allowed.has(rel)
+      })
+      const vae = path.join(musicModels, "vae")
+      const vfiles = JSON.parse(fs.readFileSync(path.join(vae, "weights_manifest.json"), "utf8")).files
+      const intact = (base, entries) => Object.entries(entries).every(([n, r]) => {
+        if (n.includes("..") || path.isAbsolute(n)) return false
+        const st = fs.lstatSync(path.join(base, n))
+        return st.isFile() && st.size > 0 && st.size === r.bytes && /^[0-9a-f]{64}$/.test(r.sha256)
+      })
+      musicWeights = Object.keys(files).length === generatorNames.length && generatorNames.every(n => files[n])
+        && clean(generator) && intact(generator, files)
+        && vfiles["model.safetensors"].bytes === 530512720
+        && vfiles["model.safetensors"].sha256 === "807ce9d5149fa27c5ad3e6582058469852e908f6c5acc8c8aa338e7ab7751346"
+        && intact(vae, vfiles)
+        && ["config.json", "LICENSE", "THIRD_PARTY_NOTICES.md"].every(n => musicFile(path.join(vae, n)))
+        && fs.readdirSync(path.join(vae, "licenses")).length > 0
+    } catch (e) { /* partial pack: keep the install route available */ }
+    const musicReady = musicWeights && ["python", "python3.12"].some(n => {
+      const p = path.join(musicRoot, ".venv/bin", n)
+      try { fs.accessSync(p, fs.constants.X_OK); return musicFile(p) } catch (e) { return false }
+    })
+      && musicFile(path.join(musicRoot, "pyproject.toml"))
+      && musicFile(path.join(installRoot, "scripts/music/yue2_run.py"))
+    const musicRepair = musicWeights && !musicReady
+    const musicMenu = () => !musicCapable() ? [] : [musicReady || musicRepair
+      ? { icon: "fa-solid fa-screwdriver-wrench", text: "Repair the music engine (weights kept — no re-download)", href: "install_music.js" }
+      : { icon: "fa-solid fa-music", text: "Install the music engine (YuE2, ~11 GB)", href: "install_music.js" }]
+
 
     // Keep the H3 recovery affordance reachable from EVERY menu state, not
     // only the healthy one. Reset wipes ltx-2-mlx, so env_ready goes false and
@@ -311,6 +442,9 @@ module.exports = {
     // venv, weights in a different tree), so offering the repair mid-reinstall
     // is safe and never competes with the default action.
     const pushH3Recovery = (m) => {
+      if (musicRepair && musicCapable()) {
+        m.push({ icon: "fa-solid fa-screwdriver-wrench", text: "Repair the music engine (weights kept — no re-download)", href: "install_music.js" })
+      }
       if (h3_repair && h3Capable()) {
         m.push({ icon: "fa-solid fa-screwdriver-wrench",
                  text: "Repair Hailuo H3 (weights kept — no re-download)",
@@ -339,7 +473,27 @@ module.exports = {
     // what is already on disk. Nothing is re-fetched — hence "models kept".
     const ltx_python = onDisk("ltx-2-mlx/env/bin/python3.11") ||
                        onDisk("ltx-2-mlx/env/bin/python")
-    const ltx_repair = env_ready && !ltx_python
+    // ...and the OTHER half-built shape, which used to look perfectly healthy
+    // here (fleet, 2026-09-20): the interpreter is present but the engine
+    // package never landed in it, so every render dies at helper start with
+    // "ModuleNotFoundError: No module named 'ltx_pipelines_mlx'". Three
+    // installs on 4.13.0 / 4.14.3 / 4.15.0 hit it, one of them 28 times in a
+    // row — with no repair offered, because the file this menu looked at was
+    // exactly the file that existed. The package directory is the honest
+    // marker: pip writes it last.
+    const ltx_pkg = onDisk("ltx-2-mlx/env/lib/python3.11/site-packages/ltx_pipelines_mlx")
+    const ltx_repair = env_ready && (!ltx_python || !ltx_pkg)
+    // WHILE THE PANEL RUNS, the repair cannot be offered directly: install.js
+    // reinstalls into the venv the running panel (and its image engine) holds
+    // open. But the panel's render error names this sidebar entry, and both
+    // running menus used to hide it — the user was sent to a button that did
+    // not exist exactly when they needed it (Codex INST-05, 2026-09-24). So the
+    // running menu says what to do instead, and opens the terminal whose Stop
+    // button is the first half of it.
+    const ltxRepairWhileRunning = () => ltx_repair ? [{
+      icon: "fa-solid fa-screwdriver-wrench",
+      text: "Engine needs repair — Stop the panel, then click Repair Phosphene engine (models kept)",
+      href: "start.js" }] : []
     const pushLtxRepair = (m) => {
       if (ltx_repair) {
         m.push({ icon: "fa-solid fa-screwdriver-wrench",
@@ -409,6 +563,7 @@ module.exports = {
       sharp:      info.running("install_sharp.js"),
       qwen:       info.running("install_qwen.js"),
       h3:         info.running("install_h3.js"),
+      music:      info.running("install_music.js"),
     }
 
     // Running states first — show what's in progress, hide everything else.
@@ -418,6 +573,7 @@ module.exports = {
     if (running.q8download) return [{ default: true, icon: "fa-solid fa-download", text: `Downloading ${q8Name} (${q8Size})`, href: "download_q8.js" }]
     if (running.sharp)      return [{ default: true, icon: "fa-solid fa-wand-magic-sparkles", text: "Installing Sharp upscaler", href: "install_sharp.js" }]
     if (running.qwen)       return [{ default: true, icon: "fa-solid fa-images", text: "Installing Qwen-Image-Edit (multi-ref)", href: "install_qwen.js" }]
+    if (running.music) return [{ default: true, icon: "fa-solid fa-music", text: "Installing the music engine (~11 GB)", href: "install_music.js" }]
     if (running.h3)         return [{ default: true, icon: "fa-solid fa-comments", text: "Installing Hailuo H3 (~75 GB)", href: "install_h3.js" }]
 
     // No env at all → fresh install path. Recovery shortcuts to user content
@@ -438,7 +594,7 @@ module.exports = {
       // Escape hatch. This branch used to offer no Reset at all, so a user
       // whose install died before the venv existed had nothing to click except
       // the thing that kept failing.
-      if (install_attempted) m.push({ icon: "fa-regular fa-circle-xmark", text: "Reset", href: "reset.js" })
+      if (install_attempted) m.push({ icon: "fa-regular fa-circle-xmark", text: "Reset engine (keeps models & outputs)", href: "reset.js" })
       return m
     }
 
@@ -459,7 +615,7 @@ module.exports = {
       if (has_uploads) m.push({ icon: "fa-solid fa-image", text: "Uploads", href: "panel_uploads?fs=true" })
       pushLtxRepair(m)
       pushH3Recovery(m)
-      m.push({ icon: "fa-regular fa-circle-xmark", text: "Reset", href: "reset.js" })
+      m.push({ icon: "fa-regular fa-circle-xmark", text: "Reset engine (keeps models & outputs)", href: "reset.js" })
       return m
     }
 
@@ -468,26 +624,40 @@ module.exports = {
       if (local && local.url) {
         return [
           { default: true, icon: "fa-solid fa-rocket", text: "Open Panel", href: local.url },
+          ...ltxRepairWhileRunning(),
           { icon: "fa-solid fa-terminal", text: "Terminal",   href: "start.js" },
           { icon: "fa-solid fa-film",     text: "Outputs",    href: "mlx_outputs?fs=true" },
           { icon: "fa-solid fa-cube",     text: "Models",     href: "mlx_models?fs=true" },
           { icon: "fa-solid fa-image",    text: "Uploads",    href: "panel_uploads?fs=true" },
+          // Settings → Models tells a running panel's user to click this, so it
+          // has to exist while the panel runs. The install touches only
+          // yue2-mlx/ and mlx_models/yue2/; the panel picks it up on /status.
+          ...musicMenu(),
+          // Same reasoning for H3: the panel's install card points here.
+          ...h3Offer(),
         ]
       }
-      return [{ default: true, icon: "fa-solid fa-terminal", text: "Terminal", href: "start.js" }]
+      return [{ default: true, icon: "fa-solid fa-terminal", text: "Terminal", href: "start.js" }, ...ltxRepairWhileRunning(), ...musicMenu(), ...h3Offer()]
     }
 
     // Healthy install — Start path.
-    const baseMenu = [
-      { default: true, icon: "fa-solid fa-power-off", text: "Start",   href: "start.js" },
+    //
+    // UNLESS THE ENGINE IS BROKEN. `default: true` auto-runs Start, which boots
+    // a panel that cannot render and — see ltxRepairWhileRunning — used to hide
+    // the repair the moment it came up (INST-05). So a broken engine gets no
+    // auto-run at all: Repair goes FIRST, without `default` (auto-running
+    // install.js after a failed attempt is the respawn loop documented at
+    // install_attempted), and Start stays available below it for anyone who
+    // wants the panel anyway.
+    const baseMenu = []
+    if (ltx_repair) pushLtxRepair(baseMenu)
+    baseMenu.push(
+      { default: !ltx_repair, icon: "fa-solid fa-power-off", text: "Start",   href: "start.js" },
       { icon: "fa-solid fa-film",  text: "Outputs", href: "mlx_outputs?fs=true" },
       { icon: "fa-solid fa-cube",  text: "Models",  href: "mlx_models?fs=true" },
       { icon: "fa-solid fa-image", text: "Uploads", href: "panel_uploads?fs=true" },
-    ]
-    // Right under Start, because it is what the user reaches for when Start does
-    // nothing: base models and clone intact, interpreter gone. See ltx_repair.
-    pushLtxRepair(baseMenu)
-    if (!q8_ready) {
+    )
+    if (!q8_ready && q8Capable()) {
       // ~30 GB and what it actually buys on 2.5: trained characters and voices.
       // High additionally needs the separate 29.5 GB add-on, which is offered
       // in Settings -> Models rather than here — one menu entry, one download.
@@ -505,19 +675,21 @@ module.exports = {
       // failed pip step, or a pre-3.2.1 install that hasn't updated). Renamed
       // off "Qwen-Image-Edit" — it enables Ideogram 4 too (cocktailpeanut's
       // confusion: installing "Qwen" to use Ideogram).
-      baseMenu.push({ icon: "fa-solid fa-images", text: "Reinstall image engines (Ideogram 4 + Qwen-Edit)", href: "install_qwen.js" })
+      // SYS-30: "Reinstall" implies it was here before and broke — on a
+      // fresh install that never fetched this pack, that's simply untrue.
+      // qwen_ready collapses both cases (never installed vs. broken) to
+      // the same boolean, so the honest word covers both without
+      // guessing which one this install is.
+      baseMenu.push({ icon: "fa-solid fa-images", text: "Install/repair image engines (Ideogram 4 + Qwen-Edit)", href: "install_qwen.js" })
     }
-    if (!h3_ready && h3Capable()) {
-      // Second VIDEO engine — joint picture + dialogue + sound. Opt-in only:
-      // ~75 GB, 36 GB+ Macs (H3_MIN_BYTES above), MiniMax Community License
-      // with territory restrictions. Hidden entirely on machines that can't
-      // run it, so it never reads as a missing piece of the base install.
-      baseMenu.push(h3_repair
-        ? { icon: "fa-solid fa-screwdriver-wrench", text: "Repair Hailuo H3 (weights kept — no re-download)", href: "install_h3.js" }
-        // ENGINES ARE PEERS: "optional" told a user that half the panel's
-        // video capability was a side dish. The entry names what it IS.
-        // The panel's install card quotes this string verbatim -- change both.
-        : { icon: "fa-solid fa-comments", text: "Install Hailuo H3 (second video engine, ~75 GB)", href: "install_h3.js" })
+    baseMenu.push(...musicMenu())
+    // Second VIDEO engine — joint picture + dialogue + sound. Opt-in only:
+    // ~75 GB, 36 GB+ Macs (H3_MIN_BYTES above), MiniMax Community License
+    // with territory restrictions. Hidden entirely on machines that can't
+    // run it, so it never reads as a missing piece of the base install.
+    const h3Entry = h3Offer()
+    if (h3Entry.length) {
+      baseMenu.push(...h3Entry)
     } else if (h3_ready) {
       // THE DOOR MUST NOT CLOSE BEHIND THE INSTALL. The panel's live-preview
       // note tells users with an older H3 runner to update it "from the
@@ -530,7 +702,7 @@ module.exports = {
     }
     baseMenu.push(
       { icon: "fa-solid fa-rotate", text: "Update", href: "update.js" },
-      { icon: "fa-regular fa-circle-xmark", text: "Reset", href: "reset.js" },
+      { icon: "fa-regular fa-circle-xmark", text: "Reset engine (keeps models & outputs)", href: "reset.js" },
     )
     return baseMenu
   }

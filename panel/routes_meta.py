@@ -14,6 +14,68 @@ from panel.routes import get, get_when, post, post_when
 P = None  # the running mlx_ltx_panel module; assigned at wiring time
 
 
+# Codex UI-6: the crash-report filter (SYS-12) matched on the FILE NAME —
+# "python3*" / "python*" / "phosphene*" — so any other Python program that
+# crashed on the Mac (another app's script, a notebook kernel, a CLI tool)
+# was counted in the modal and zipped verbatim into a Phosphene bug report,
+# its own paths and content included. A name says which interpreter
+# crashed, not whose process it was. The reliable signal is inside the
+# report: an .ips body lists `procPath` and every loaded image
+# (`usedImages[].path`), and a Phosphene process always runs a binary or
+# loads extension modules (mlx, the engines' venvs) from under this
+# install. A report that shows nothing under these roots is ambiguous and
+# is left out — the opt-in checkbox never attaches it.
+_CRASH_NAME_PREFIXES = ("python3", "python", "phosphene")
+_CRASH_MAX_READ_BYTES = 32 * 1024 * 1024
+
+
+def _phosphene_crash_roots() -> tuple[str, ...]:
+    roots: set[str] = set()
+    for name in ("ROOT", "H3_ROOT", "LORA_LAB_ROOT"):
+        base = getattr(P, name, None)
+        if not base:
+            continue
+        for cand in (P.Path(base), P.Path(base) / "ltx-2-mlx"):
+            for form in (cand, cand.resolve() if cand.exists() else None):
+                if form is not None and str(form) not in ("", "/"):
+                    roots.add(str(form).rstrip("/") + "/")
+    return tuple(sorted(roots))
+
+
+def _is_phosphene_crash(path, roots: tuple[str, ...]) -> bool:
+    """True only when the .ips shows a process of THIS install."""
+    try:
+        if path.stat().st_size > _CRASH_MAX_READ_BYTES:
+            return False
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    _header, _, body = text.partition("\n")
+    try:
+        doc = P.json.loads(body)
+    except ValueError:
+        return False
+    if not isinstance(doc, dict):
+        return False
+    paths = [doc.get("procPath")]
+    images = doc.get("usedImages")
+    if isinstance(images, list):
+        paths.extend(i.get("path") for i in images if isinstance(i, dict))
+    return any(isinstance(p, str) and p.startswith(roots) for p in paths)
+
+
+def _phosphene_crash_reports(diag) -> list:
+    """This install's own crash reports in `diag`, newest first."""
+    roots = _phosphene_crash_roots()
+    if not roots:
+        return []
+    cands = [p for p in diag.iterdir()
+             if p.is_file() and p.suffix.lower() == ".ips"
+             and p.name.lower().startswith(_CRASH_NAME_PREFIXES)]
+    cands.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return [p for p in cands if _is_phosphene_crash(p, roots)]
+
+
 @get("/sw.js")
 def get_service_worker(h, parsed) -> None:
     """The push service worker, served from the ROOT so its scope covers the
@@ -149,7 +211,7 @@ def get_panel_bug_context(h, parsed) -> None:
         try:
             mac_ver = P.subprocess.run(
                 ["sw_vers", "-productVersion"],
-                capture_output=True, text=True, timeout=2,
+                capture_output=True, text=True, errors="replace", timeout=2,
             ).stdout.strip()
         except Exception:                                   # noqa: BLE001
             pass
@@ -157,7 +219,7 @@ def get_panel_bug_context(h, parsed) -> None:
         try:
             hw_model = P.subprocess.run(
                 ["sysctl", "-n", "hw.model"],
-                capture_output=True, text=True, timeout=2,
+                capture_output=True, text=True, errors="replace", timeout=2,
             ).stdout.strip()
         except Exception:                                   # noqa: BLE001
             pass
@@ -165,16 +227,25 @@ def get_panel_bug_context(h, parsed) -> None:
         ram_gb = round(float(mem.get("total_gb") or 0.0))
         with P.LOCK:
             tail = list(P.STATE["log"])[-50:]
+        # SYS-12, privacy: this pre-fills the bug-report textarea that
+        # opens a PUBLIC GitHub issue. Log lines routinely carry
+        # /Users/<username>/... paths (panel_uploads, output paths), and
+        # the macOS username is often the person's real name. Scrub before
+        # it ever reaches the browser, not after.
+        tail = [P._bug_report_scrub_line(line) for line in tail]
         # Crash count — the modal hides the "Include crash reports"
         # checkbox when zero so the user doesn't see an empty zip.
+        # SYS-12: counted every .ips on the Mac, regardless of which process
+        # crashed — mismatched what /panel/bug-report actually zips (now
+        # filtered to python3*/Python*/phosphene*; see there). Same filter
+        # here so the modal's count matches what "Include crash reports"
+        # would actually attach.
         crash_count = 0
         try:
             diag = P.Path.home() / "Library" / "Logs" / "DiagnosticReports"
             if diag.is_dir():
-                crash_count = sum(
-                    1 for p in diag.iterdir()
-                    if p.is_file() and p.suffix.lower() == ".ips"
-                )
+                # UI-6: the SAME positive-identification filter the zip uses.
+                crash_count = len(_phosphene_crash_reports(diag))
         except OSError:
             pass
         h._json({
@@ -267,6 +338,14 @@ def post_star_click(h, path, qs, ctype) -> None:
     h._json({"ok": True}); return
 
 
+@post("/version/finish")
+def post_version_finish(h, path, qs, ctype) -> None:
+    # Re-run post_update.sh after a failed in-panel finish (the banner's
+    # "Try again"). Same background run, same refusals.
+    code, payload = P.post_update_start("retry")
+    h._json(payload, code); return
+
+
 @post("/restart")
 def post_restart(h, path, qs, ctype) -> None:
     # The "Restart to finish update" pill used to open an alert() that
@@ -281,6 +360,19 @@ def post_restart(h, path, qs, ctype) -> None:
     # That is exactly what a stale process needs. The queue and
     # settings live on disk, so nothing in flight is lost EXCEPT a
     # running render — which is why a busy panel refuses instead.
+    # The update is not finished until post_update.sh has run: restarting
+    # into new code before that is how a release's new package was skipped.
+    _pu = P.post_update_status()
+    if _pu.get("pending") or _pu.get("active"):
+        h._json({"ok": False, "post_update": True,
+                    "error": "Finishing the update first (installing what the "
+                             "new version needs) - restart becomes available "
+                             "when it is done."}, 409); return
+    if _pu.get("state") == "failed":
+        h._json({"ok": False, "post_update": True,
+                    "error": "The update did not finish: " + str(_pu.get("error"))
+                             + ". Use Pinokio's Update (Stop, then Update), "
+                             "or try again from the update banner."}, 409); return
     with P.LOCK:
         _busy = P.STATE.get("current") is not None
     if _busy:
@@ -343,6 +435,16 @@ def post_analytics_ui(h, path, qs, ctype) -> None:
             h._json({"ok": False, "error": "unknown action"}, 400); return
         P._analytics_capture("update_prompt", {
             "action": action, "version": P.running_version()})
+        if action in ("update_now", "banner_update"):
+            # Remember the build they pressed it ON. The next boot compares:
+            # a different version means the update landed, the same version
+            # means it didn't — which is the 23-of-139 hole that `app_updated`
+            # alone can never show, because a failed update emits nothing.
+            # One local string, overwritten each press, cleared on read.
+            # 4.17.5: "version@sha" - a build that moved without a VERSION
+            # bump is still an update that landed (read in the boot report).
+            P._settings_set_internal(
+                analytics_update_pressed=P.update_pressed_marker())
     elif event == "broadcast_seen":
         P._analytics_capture("broadcast_seen", {"version": P.running_version()})
     elif event == "feature_used":
@@ -449,6 +551,26 @@ def post_version_pull(h, path, qs, ctype) -> None:
             raise RuntimeError(
                 (fetch_proc.stdout + fetch_proc.stderr).decode("utf-8", "replace").strip()
                 or f"git fetch exited {fetch_proc.returncode}")
+        # Step 1b: THE OBSTRUCTION GUARD — the sidebar Update's, run on the
+        # fetched origin/main, before anything can move the tree. `status
+        # -uno` above is blind to untracked and ignored files, and both
+        # moves below destroy them: `pull --ff-only` silently overwrites an
+        # IGNORED file where upstream now tracks one, and the reset
+        # overwrites untracked ones too (Codex INST-01, 2026-09-24).
+        guard = P.ROOT / "scripts" / "pinokio" / "update_obstruction_guard.sh"
+        if not guard.is_file():
+            raise RuntimeError(
+                "scripts/pinokio/update_obstruction_guard.sh is missing - "
+                "not updating. Nothing was changed or deleted; use the "
+                "Pinokio Update instead.")
+        guard_proc = P.subprocess.run(
+            ["bash", str(guard), "origin/main"],
+            cwd=str(P.ROOT), capture_output=True, timeout=60,
+        )
+        if guard_proc.returncode != 0:
+            raise RuntimeError(
+                (guard_proc.stdout + guard_proc.stderr).decode("utf-8", "replace").strip()
+                or "untracked or ignored files are in the way - nothing deleted")
         # Step 2: try a fast-forward pull. Happy path for fresh installs
         # whose local history lines up with origin/main.
         pull_proc = P.subprocess.run(
@@ -462,7 +584,25 @@ def post_version_pull(h, path, qs, ctype) -> None:
         # origin/main. Guards above already proved this is safe
         # (clean tree + on main + nothing ahead), so the reset just
         # snaps the diverged history back to upstream.
+        #
+        # ONLY ON PROVEN DIVERGENCE. Every other refusal — the commonest is
+        # git's own "untracked working tree files would be overwritten" —
+        # used to take this branch too and reset over the file git had just
+        # protected (INST-01). The pre-fetch `ahead` check was against the
+        # OLD origin/main, so it cannot prove anything here; count again
+        # against the fetched one. Zero means history did not diverge,
+        # whatever made the pull fail: stop and report git's message.
         if pull_proc.returncode != 0:
+            ahead_after = (P._git_capture(
+                ["rev-list", "--count", "origin/main..HEAD"]) or "0").strip()
+            try:
+                ahead_after_n = int(ahead_after)
+            except ValueError:
+                ahead_after_n = 0
+            if ahead_after_n <= 0:
+                raise RuntimeError(
+                    f"update blocked - history has NOT diverged, so nothing "
+                    f"was reset or deleted.\n{pull_out}")
             reset_proc = P.subprocess.run(
                 ["git", "-C", str(P.ROOT), "reset", "--hard", "origin/main"],
                 capture_output=True, timeout=30,
@@ -480,6 +620,28 @@ def post_version_pull(h, path, qs, ctype) -> None:
         P._detect_local_install_state()
         post_sha = P._git_capture(["rev-parse", "HEAD"]) or ""
 
+        # 4.17.5 (fleet): NOTHING NEW IS NOT AN UPDATE. Two installs pressed
+        # "Update now" on 4.17.4 itself; the pull moved nothing, the panel
+        # still said "restart to finish", and the restart came back on the
+        # same build - reported as a failed update (update_outcome
+        # restart_pending 4.17.4 -> 4.17.4). When HEAD did not move and this
+        # process already runs what is on disk, there is nothing to restart:
+        # say so, and drop the "pressed Update" marker so the next boot does
+        # not count a no-op as a failure.
+        moved = bool(pre_sha and post_sha and pre_sha != post_sha)
+        if not moved and not P.get_version_state().get("stale_process"):
+            P._settings_set_internal(analytics_update_pressed="")
+            with P._VERSION_LOCK:
+                P._VERSION_STATE["pull_state"] = "current"
+                P._VERSION_STATE["pull_message"] = (
+                    "Already up to date - nothing to restart.")
+            try:
+                P._check_remote_once()
+            except Exception:
+                pass
+            h._json({"ok": True, "moved": False, "state": P.get_version_state()})
+            return
+
         # Did the pull touch anything that needs the heavier Pinokio
         # Update.js (pip reinstalls + patch reapply)? If so, flag it.
         deps_touched = False
@@ -496,10 +658,18 @@ def post_version_pull(h, path, qs, ctype) -> None:
                 # them without the full Update ships new code onto old
                 # dependencies (review 2026-09-02).
                 "scripts/post_update.sh", "scripts/check_post_update.js",
+                # The wheel-build pin both installers read, and the YuE2
+                # engine SHA: only the full Update runs music_checkout.sh, so
+                # a pin-only pull used to say "Stop/Start is enough" and left
+                # new runner code on the old engine (Codex INST-12).
+                "pip-build-constraints.txt", "scripts/music/engine_pin.txt",
             )
             for line in diff_out.splitlines():
                 if (line in deps_signals or line.startswith("ltx-2-mlx/")
-                        or line.startswith("scripts/pinokio/")):
+                        or line.startswith("scripts/pinokio/")
+                        # install_h3.js / install_music.js / install_qwen.js …
+                        # carry their engines' pins the same way install.js does.
+                        or (line.startswith("install") and line.endswith(".js"))):
                     deps_touched = True
                     break
 
@@ -514,6 +684,12 @@ def post_version_pull(h, path, qs, ctype) -> None:
             P._VERSION_STATE["pull_pulled_to_version"] = P._VERSION_STATE["local_version"]
             P._VERSION_STATE["pull_requires_full_update"] = deps_touched
 
+        # Finish the update the way Pinokio's Update does: post_update.sh,
+        # after every pull that moved HEAD (beta, after 4.17.4 - see
+        # post_update_start). Restart stays refused until it is done.
+        if pre_sha and post_sha and pre_sha != post_sha:
+            P.post_update_start("update_now")
+
         # Re-run the remote check so behind_by recalculates to 0
         # (normally) or to whatever new commits landed in the
         # window since we pulled.
@@ -522,7 +698,7 @@ def post_version_pull(h, path, qs, ctype) -> None:
         except Exception:
             pass
 
-        h._json({"ok": True, "state": P.get_version_state()})
+        h._json({"ok": True, "moved": moved, "state": P.get_version_state()})
     except P.subprocess.TimeoutExpired:
         with P._VERSION_LOCK:
             P._VERSION_STATE["pull_state"] = "error"
@@ -680,15 +856,19 @@ def post_panel_bug_report(h, path, qs, ctype) -> None:
             # method and break the bundle endpoint.
             diag = P.Path.home() / "Library" / "Logs" / "DiagnosticReports"
             if diag.is_dir():
-                # Latest 5 ips files (any process; .ips is the only
-                # universal extension across crash sources). Sorted
-                # by mtime descending.
-                ips = sorted(
-                    (p for p in diag.iterdir()
-                     if p.is_file() and p.suffix.lower() == ".ips"),
-                    key=lambda p: p.stat().st_mtime,
-                    reverse=True,
-                )[:5]
+                # SYS-12: this used to take the latest 5 .ips from ANY
+                # process on the Mac — Safari, Mail, a game, whatever last
+                # crashed — and zip it into a Phosphene bug report. The
+                # panel's own crashes are always "python3*" or "Python*"
+                # (see the watchdog error copy: python3.11_*.ips), so
+                # filter to those; an unrelated app's crash tells the
+                # Phosphene maintainer nothing and is a real, unnecessary
+                # privacy cost for the reporter (another app's crash log
+                # can carry its own paths/content, unrelated to this bug).
+                # UI-6: ...and a "python*" name alone is not Phosphene —
+                # _phosphene_crash_reports() reads each report and keeps
+                # only the ones whose process ran from this install.
+                ips = _phosphene_crash_reports(diag)[:5]
                 if ips:
                     # 2026-05-31 review fix: crash .ips files can carry
                     # home paths / usernames. The old predictable
