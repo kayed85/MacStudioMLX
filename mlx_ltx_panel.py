@@ -16280,7 +16280,7 @@ def h3_status() -> dict:
 # Wall ≈ MUSIC_FIXED_SEC + audio seconds × rate, scaled for other chips by the
 # LTX speed table (both are MLX GPU work). The slider is a ceiling, so this
 # prices a song that runs to Max length; most songs end sooner.
-MUSIC_MIN_RAM_GB = 24.0
+MUSIC_MIN_RAM_GB = float(os.environ.get("LTX_MUSIC_MIN_RAM_GB", "12.0"))
 MUSIC_SAMPLE_RATE = 48000
 MUSIC_CHANNELS = 2
 MUSIC_QUALITY_STEPS = {"draft": 8, "final": 32}
@@ -16321,13 +16321,23 @@ MUSIC_TAKES_GPU_LOCK = os.environ.get("PHOSPHENE_MUSIC_TAKES_GPU_LOCK", "") == "
 
 
 def _music_python() -> Path | None:
-    for p in (MUSIC_ROOT / ".venv/bin/python", MUSIC_ROOT / ".venv/bin/python3.12"):
+    pinokio_root = Path.home() / "pinokio/api/yue2-mlx.pinokio.git"
+    candidates = (
+        MUSIC_ROOT / ".venv/bin/python",
+        MUSIC_ROOT / ".venv/bin/python3.12",
+        MUSIC_ROOT / "env/bin/python",
+        MUSIC_ROOT / "env/bin/python3.12",
+        pinokio_root / "env/bin/python",
+        pinokio_root / "env/bin/python3.12",
+    )
+    for p in candidates:
         if p.is_file() and os.access(p, os.X_OK):
             return p
     return None
 
 
 def music_capable() -> bool:
+    # 16 GB Apple Silicon Mac runs MLX 8-bit/4-bit YuE2 smoothly (~6-8 GB peak usage)
     return SYSTEM_RAM_GB >= MUSIC_MIN_RAM_GB
 
 

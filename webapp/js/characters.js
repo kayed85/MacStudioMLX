@@ -429,7 +429,7 @@ function musicInstallRender(el, where) {
   const size = 'YuE2, ~11 GB';
   let html;
   if (!music.capable) {
-    html = `<p class="mi-lead">YuE2 needs about ${escapeHtml(String(music.min_ram_gb || 24))} GB of unified memory, so it can't run on this Mac. The rest of Phosphene is unaffected.</p>`;
+    html = `<p class="mi-lead">YuE2 needs about ${escapeHtml(String(music.min_ram_gb || 12))} GB of unified memory, so it can't run on this Mac. The rest of Phosphene is unaffected.</p>`;
   } else if (inst.active) {
     const pct = inst.percent || 1;
     const step = `Step ${(inst.step_index || 0) + 1} of ${inst.steps || 6} · ${escapeHtml(inst.step_label || '')}`;
@@ -456,7 +456,7 @@ function musicInstallRender(el, where) {
       ${failed ? `<p class="mi-error">${escapeHtml(inst.error)}</p>` : ''}
       ${stopped ? '<p class="mi-sub">Install stopped. Click again to resume where it left off.</p>' : ''}
       <div class="mi-actions"><button type="button" class="primary" onclick="musicInstallStart(${repair ? "'repair'" : ''})">${escapeHtml(failed || stopped ? (repair ? 'Try the repair again' : 'Resume install (YuE2, ~11 GB)') : label)}</button></div>
-      <p class="mi-note">Needs ${escapeHtml(String(music.min_ram_gb || 24))} GB unified memory and 14 GB free disk. Also available from the Phosphene sidebar in Pinokio.</p>`;
+      <p class="mi-note">Needs ${escapeHtml(String(music.min_ram_gb || 12))} GB unified memory and 14 GB free disk. Supports Apple Silicon Macs (16 GB+).</p>`;
   }
   el.innerHTML = html;
 }

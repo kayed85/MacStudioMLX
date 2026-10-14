@@ -8,7 +8,7 @@ module.exports = {
   requires: { bundle: "ai" },
   run: [
     { method: "notify", params: {
-      html: "<b>Installing YuE2 (the music engine, ~11 GB).</b><br>Writes a full song — vocals, arrangement and all — from lyrics and a style description, and sits beside LTX and Hailuo H3 as a peer. Needs a 24 GB+ Apple Silicon Mac. Resumable if interrupted."
+      html: "<b>Installing YuE2 (the music engine, ~11 GB).</b><br>Writes a full song — vocals, arrangement and all — from lyrics and a style description, and sits beside LTX and Hailuo H3 as a peer. Supports 16 GB+ Apple Silicon Macs (4-bit/8-bit MLX). Resumable if interrupted."
     } },
     { method: "shell.run", params: { message: "bash scripts/pinokio/music_preflight.sh" } },
     { method: "shell.run", params: { message: "bash scripts/pinokio/music_clone.sh" } },
