@@ -271,6 +271,9 @@ def get_image_engine_status(h, parsed) -> None:
         ENGINES = [
             ("dt_qwen2_turbo",            None,                         0.0,  15.0,  10.0),
             ("dt_krea2_turbo",            None,                         0.0,  12.0,  10.0),
+            ("dt_krea2_radiance",         None,                         0.0,  12.0,  10.0),
+            ("dt_krea2_ideokrea",         None,                         0.0,  12.0,  10.0),
+            ("dt_flux2_klein",            None,                         0.0,  10.0,  10.0),
             ("qwen2_turbo_inline",         "Qwen/Qwen-Image-2.1",        18.0,  30.0,  45.0),
             # Qwen-Image-Edit-2511 — three-tier ladder. ~24 GB
             # download (one-time) shared across all three tiers.
@@ -315,7 +318,12 @@ def get_image_engine_status(h, parsed) -> None:
             partial = None
             if engine.startswith("dt_"):
                 import drawthings_bridge
-                m_file = "qwen_image_2.1_i8x.ckpt" if "qwen" in engine else "krea_2_turbo_i8x.ckpt"
+                if "qwen" in engine:
+                    m_file = "qwen_image_2.1_i8x.ckpt"
+                elif "flux" in engine:
+                    m_file = "flux_2_klein_4b_i8x.ckpt"
+                else:
+                    m_file = "krea_2_turbo_i8x.ckpt"
                 cached = (drawthings_bridge.DRAWTHINGS_MODELS_DIR / m_file).is_file() or drawthings_bridge.is_server_running()
             elif engine in ("hidream_inline", "hidream_fast_inline", "hidream_quality_inline"):
                 # HiDream lives outside the HF cache (lab venv path).

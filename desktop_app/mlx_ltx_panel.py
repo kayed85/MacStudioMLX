@@ -14548,9 +14548,14 @@ def _lora_is_h3_lane(path_str) -> bool:
     except (OSError, ValueError):
         return False
     try:
-        return rp.is_relative_to(base)
-    except ValueError:
-        return False
+        if rp.is_relative_to(base):
+            return True
+        import drawthings_bridge
+        if rp.is_relative_to(drawthings_bridge.DRAWTHINGS_MODELS_DIR.resolve()):
+            return any(k in rp.name.lower() for k in ("h3", "minimax", "relim"))
+    except Exception:
+        pass
+    return False
 
 
 def _safetensors_header(path: Path) -> tuple[dict, int]:
@@ -32957,10 +32962,15 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             except (OSError, ValueError):
                 return "ltx"
             try:
-                return "h3" if rp.is_relative_to(_h3_lora_root) else "ltx"
-            except ValueError:
-                return "ltx"
-        _want_lane = "h3" if job["params"].get("engine") == "h3" else "ltx"
+                if rp.is_relative_to(_h3_lora_root):
+                    return "h3"
+                import drawthings_bridge
+                if rp.is_relative_to(drawthings_bridge.DRAWTHINGS_MODELS_DIR.resolve()):
+                    return "h3" if any(k in rp.name.lower() for k in ("h3", "minimax", "relim")) else "image"
+            except Exception:
+                pass
+            return "ltx"
+        _want_lane = "h3" if job["params"].get("engine") in ("h3", "dt_h3", "drawthings") else "ltx"
         _all_loras = list(job["params"].get("loras") or [])
         _kept = [e for e in _all_loras if _lora_lane(e) == _want_lane]
         if len(_kept) != len(_all_loras):
@@ -33122,6 +33132,9 @@ _IMAGE_ENGINE_LABELS = {
     "auto": "the Auto engine",
     "dt_qwen2_turbo": "Qwen 2.1 Turbo (Draw Things)",
     "dt_krea2_turbo": "Krea 2 Turbo (Draw Things)",
+    "dt_krea2_radiance": "Krea 2 Radiance (Draw Things)",
+    "dt_krea2_ideokrea": "Krea 2 IdeoKrea (Draw Things)",
+    "dt_flux2_klein": "FLUX.2 Klein 4B (Draw Things)",
     "qwen2_turbo_inline": "Qwen 2.1 + Turbo LoRA",
     "krea2_inline": "Krea 2 Turbo",
     "qwen_edit_lightning_inline": "Reference Edit — Fast",
@@ -35347,7 +35360,29 @@ def run_dt_h3_job_inner(job: dict) -> None:
             init_p = (UPLOADS / init_img_str).resolve()
         init_img = str(init_p) if init_p.is_file() else None
 
-    push(f"[dt_h3] Starting MiniMax H3 Turbo ({frames} frames, {width}x{height}, {steps} steps)...")
+    # Resolve LoRA (default to 3-step Turbo)
+    lora_file = "minimax_h3_3step_lora_f16.ckpt"
+    lora_weight = 1.0
+    user_loras = p.get("loras") or []
+    if user_loras:
+        first_lora = user_loras[0]
+        raw_path = str(first_lora.get("path") or first_lora.get("filename") or "")
+        f_name = Path(raw_path).name
+        if f_name in drawthings_bridge.DRAWTHINGS_LORA_TRIGGERS:
+            lora_file = f_name
+            try:
+                lora_weight = float(first_lora.get("strength") or first_lora.get("weight") or 1.0)
+            except (ValueError, TypeError):
+                lora_weight = 1.0
+            if "turbo_v4" in f_name:
+                steps = max(steps, 4)
+    elif p.get("h3_lora"):
+        raw_path = str(p.get("h3_lora"))
+        f_name = Path(raw_path).name
+        if f_name in drawthings_bridge.DRAWTHINGS_LORA_TRIGGERS:
+            lora_file = f_name
+
+    push(f"[dt_h3] Starting MiniMax H3 ({frames} frames, {width}x{height}, {steps} steps, lora={lora_file})...")
     _raise_if_cancelled(job, "the H3 render")
 
     t0 = time.time()
@@ -35371,6 +35406,8 @@ def run_dt_h3_job_inner(job: dict) -> None:
                 prompt=prompt,
                 negative_prompt=p.get("negative_prompt") or "",
                 model="minimax_h3_ref2va_i8x.ckpt" if init_img else "minimax_h3_fl2va_q8p.ckpt",
+                lora_file=lora_file,
+                lora_weight=lora_weight,
                 steps=steps,
                 width=width,
                 height=height,
@@ -40988,6 +41025,27 @@ def _build_image_engine_config(
             mflux_model="krea_2_turbo_i8x.ckpt",
             mflux_steps=4,
             mflux_lora_paths=["krea2_turbo_4step_lora_f16.ckpt"],
+        )
+    if engine_override == "dt_krea2_radiance":
+        return agent_image_engine.ImageEngineConfig(
+            kind="drawthings",
+            mflux_model="krea_2_turbo_i8x.ckpt",
+            mflux_steps=4,
+            mflux_lora_paths=["krea2turbo_radiance_lora_f16.ckpt"],
+        )
+    if engine_override == "dt_krea2_ideokrea":
+        return agent_image_engine.ImageEngineConfig(
+            kind="drawthings",
+            mflux_model="krea_2_turbo_i8x.ckpt",
+            mflux_steps=4,
+            mflux_lora_paths=["ideokrea_v1_lora_f16.ckpt"],
+        )
+    if engine_override == "dt_flux2_klein":
+        return agent_image_engine.ImageEngineConfig(
+            kind="drawthings",
+            mflux_model="flux_2_klein_4b_i8x.ckpt",
+            mflux_steps=4,
+            mflux_lora_paths=[],
         )
     if engine_override == "qwen_edit_lightning_inline":
         # Qwen FAST — 4-step Lightning distillation LoRA, Q6. The

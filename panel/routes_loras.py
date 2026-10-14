@@ -127,7 +127,12 @@ def get_loras(h, parsed) -> None:
         h3_user_loras = P.list_h3_user_loras()
     except Exception:
         h3_user_loras = []
-    user_loras = P.list_user_loras() + h3_user_loras
+    try:
+        import drawthings_bridge
+        dt_loras = drawthings_bridge.list_drawthings_loras()
+    except Exception:
+        dt_loras = []
+    user_loras = P.list_user_loras() + h3_user_loras + dt_loras
     if mode_filter:
         # The lane is checked BEFORE compatible_modes, and the
         # "unknown" wildcard is deliberately NOT honoured across lanes.

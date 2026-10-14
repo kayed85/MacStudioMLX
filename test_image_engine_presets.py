@@ -151,5 +151,24 @@ class FBCacheStepGate(unittest.TestCase):
                       src)
 
 
+class DrawThingsPresetContracts(unittest.TestCase):
+    def test_drawthings_presets_build_expected_configs(self):
+        presets = [
+            ("dt_qwen2_turbo", "qwen_image_2.1_i8x.ckpt", "qwen_image_2.16step_lora_f16.ckpt"),
+            ("dt_krea2_turbo", "krea_2_turbo_i8x.ckpt", "krea2_turbo_4step_lora_f16.ckpt"),
+            ("dt_krea2_radiance", "krea_2_turbo_i8x.ckpt", "krea2turbo_radiance_lora_f16.ckpt"),
+            ("dt_krea2_ideokrea", "krea_2_turbo_i8x.ckpt", "ideokrea_v1_lora_f16.ckpt"),
+            ("dt_flux2_klein", "flux_2_klein_4b_i8x.ckpt", None),
+        ]
+        for override, expected_model, expected_lora in presets:
+            cfg = _cfg(override)
+            self.assertEqual(cfg.kind, "drawthings")
+            self.assertEqual(cfg.mflux_model, expected_model)
+            if expected_lora:
+                self.assertIn(expected_lora, cfg.mflux_lora_paths)
+            else:
+                self.assertEqual(cfg.mflux_lora_paths, [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -35,6 +35,54 @@ CLI_SERVER_PATH = Path("/Users/mk/MacStudioMLX/bin/gRPCServerCLI-macOS")
 _SERVER_PROC: Optional[subprocess.Popen] = None
 _ACTIVE_MODEL_VERSION: str = "qwen"
 
+DRAWTHINGS_LORA_TRIGGERS: Dict[str, str] = {
+    "minimax_h3_3step_lora_f16.ckpt": "h3_3steps",
+    "minimax_h3_turbo_v4_lora_f16.ckpt": "h3tturbo",
+    "h3_photoreal_lora_f16.ckpt": "h3image",
+    "relim_v2_lora_500__1__lora_f16.ckpt": "h3relim",
+    "qwen_image_2.16step_lora_f16.ckpt": "qwenturbo",
+    "krea2_turbo_4step_lora_f16.ckpt": "krea2rurbo",
+    "krea2turbo_radiance_lora_f16.ckpt": "kreaditals",
+    "ideokrea_v1_lora_f16.ckpt": "ideokrea",
+}
+
+
+def list_drawthings_loras() -> List[Dict[str, Any]]:
+    """Enumerate all LoRAs available in Draw Things models directory."""
+    out: List[Dict[str, Any]] = []
+    if not DRAWTHINGS_MODELS_DIR.is_dir():
+        return out
+
+    descriptions = {
+        "minimax_h3_3step_lora_f16.ckpt": "MiniMax H3 3-step Turbo (lightning fast 3-step video)",
+        "minimax_h3_turbo_v4_lora_f16.ckpt": "MiniMax H3 Turbo v4 (high quality 4-step video)",
+        "h3_photoreal_lora_f16.ckpt": "MiniMax H3 Photorealism (natural skin tones & cinematic lighting)",
+        "relim_v2_lora_500__1__lora_f16.ckpt": "MiniMax H3 Relim v2 (moody atmospheric lighting)",
+        "qwen_image_2.16step_lora_f16.ckpt": "Qwen 2.1 Turbo 6-step (high-speed photorealism)",
+        "krea2_turbo_4step_lora_f16.ckpt": "Krea 2 Turbo 4-step (ultra-fast diffusion)",
+        "krea2turbo_radiance_lora_f16.ckpt": "Krea 2 Radiance (vivid lighting & high dynamic range)",
+        "ideokrea_v1_lora_f16.ckpt": "IdeoKrea v1 (graphic design & typography on Krea)",
+    }
+
+    for f in sorted(DRAWTHINGS_MODELS_DIR.glob("*lora*.ckpt")):
+        name = f.stem
+        trigger = DRAWTHINGS_LORA_TRIGGERS.get(f.name, "")
+        is_h3 = any(k in f.name.lower() for k in ("h3", "minimax", "relim"))
+        lane = "h3" if is_h3 else "image"
+        out.append({
+            "id": f"dt:{f.name}",
+            "name": name.replace("_lora_f16", "").replace("_", " ").title(),
+            "description": descriptions.get(f.name, f"Draw Things LoRA (trigger: {trigger})"),
+            "path": str(f),
+            "filename": f.name,
+            "lane": lane,
+            "trigger": trigger,
+            "compatible_modes": ["video:h3"] if is_h3 else ["image"],
+            "size_mb": round(f.stat().st_size / (1024 * 1024), 1),
+            "drawthings": True,
+        })
+    return out
+
 
 def is_server_running(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> bool:
     """Check if Draw Things gRPC service is listening on port."""
@@ -194,10 +242,9 @@ async def generate_dt_image(
 
     # Auto prefix trigger
     prompt_text = prompt.strip()
-    if lora_file and "qwen" in lora_file.lower() and not prompt_text.startswith("qwenturbo"):
-        prompt_text = f"qwenturbo {prompt_text}"
-    elif lora_file and "krea" in lora_file.lower() and not prompt_text.startswith("krea2rurbo"):
-        prompt_text = f"krea2rurbo {prompt_text}"
+    trigger = DRAWTHINGS_LORA_TRIGGERS.get(lora_file or "", "")
+    if trigger and not prompt_text.startswith(trigger):
+        prompt_text = f"{trigger} {prompt_text}"
 
     config = Configs.create()
     config["model"] = model
@@ -306,12 +353,9 @@ async def generate_dt_video(
 
     # Auto prefix trigger
     prompt_text = prompt.strip()
-    if lora_file and "3step" in lora_file.lower():
-        if not prompt_text.startswith("h3_3steps"):
-            prompt_text = f"h3_3steps {prompt_text}"
-    elif lora_file and "turbo" in lora_file.lower():
-        if not prompt_text.startswith("h3tturbo"):
-            prompt_text = f"h3tturbo {prompt_text}"
+    trigger = DRAWTHINGS_LORA_TRIGGERS.get(lora_file or "", "")
+    if trigger and not prompt_text.startswith(trigger):
+        prompt_text = f"{trigger} {prompt_text}"
 
     config = Configs.create()
     config["model"] = model
@@ -405,15 +449,48 @@ async def generate_dt_video(
         item.to_file(str(frame_path))
         saved_frames.append(frame_path)
 
+    # Save audio if present
+    wav_path = None
+    if hasattr(results, "audio") and results.audio is not None and output_mp4:
+        try:
+            wav_path = output_mp4.with_suffix(".wav")
+            results.audio.to_file(str(wav_path))
+            if on_log:
+                on_log(f"Synchronized audio saved to {wav_path.name}")
+        except Exception as e:
+            if on_log:
+                on_log(f"Audio save note: {e}")
+            wav_path = None
+
     # Stitch into MP4 if output_mp4 specified
     final_video: Optional[Path] = None
     if output_mp4 and len(saved_frames) > 0:
         import imageio.v2 as iio
         output_mp4.parent.mkdir(parents=True, exist_ok=True)
-        writer = iio.get_writer(str(output_mp4), fps=fps, codec="libx264")
+        raw_video = output_mp4 if not wav_path else (output_mp4.parent / f"raw_{output_mp4.name}")
+        writer = iio.get_writer(str(raw_video), fps=fps, codec="libx264")
         for f in saved_frames:
             writer.append_data(iio.imread(str(f)))
         writer.close()
+
+        if wav_path and wav_path.is_file():
+            try:
+                mux_cmd = [
+                    "ffmpeg", "-y",
+                    "-i", str(raw_video),
+                    "-i", str(wav_path),
+                    "-c:v", "copy",
+                    "-c:a", "aac",
+                    "-shortest",
+                    str(output_mp4),
+                ]
+                subprocess.run(mux_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                if raw_video != output_mp4 and raw_video.is_file():
+                    raw_video.unlink()
+            except Exception:
+                if raw_video != output_mp4 and raw_video.is_file():
+                    raw_video.replace(output_mp4)
+
         final_video = output_mp4
 
     return final_video, saved_frames
