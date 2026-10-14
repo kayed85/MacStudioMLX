@@ -113,10 +113,28 @@ LOW_MEMORY = os.environ.get("LTX_LOW_MEMORY", "true").lower() in ("true", "1", "
 # runtime branch and skip streaming (the streamer cannot carry per-block
 # adapters; the library refuses rather than silently fusing on a quantized
 # pack), so the flag is applied per pipeline, not blindly.
-LOW_RAM_STREAM = os.environ.get("LTX_LOW_RAM_STREAM", "0").lower() in ("true", "1", "yes")
+def _detect_system_ram_gb() -> float:
+    try:
+        import os
+        return float(os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')) / (1024 ** 3)
+    except Exception:
+        return 16.0
+
+_env_stream = os.environ.get("LTX_LOW_RAM_STREAM")
+if _env_stream is not None and _env_stream.strip():
+    LOW_RAM_STREAM = _env_stream.strip().lower() in ("true", "1", "yes", "on")
+else:
+    # Auto-enable on Macs with <= 24 GB Unified Memory (e.g. 16 GB M1 Pro)
+    LOW_RAM_STREAM = _detect_system_ram_gb() <= 24.0
 
 
 def _stream_for(loras) -> bool:
+    if not LOW_RAM_STREAM:
+        return False
+    # If LTX_STREAM_LORA is enabled, stream even with LoRAs using BlockLoraSource
+    # bind-time fusion so 16 GB Macs avoid Metal OutOfMemory crashes.
+    if loras and os.environ.get("LTX_STREAM_LORA", "").lower() in ("1", "true", "yes"):
+        return True
     return bool(LOW_RAM_STREAM) and not loras
 MODEL_UPSCALE_ENABLED = os.environ.get("LTX_ENABLE_MODEL_UPSCALE", "").lower() in ("1", "true", "yes", "on")
 
@@ -338,6 +356,10 @@ def _apply_vae_streaming_decision(num_frames: int) -> None:
     decoder's auto-mode cutoff in patch_ltx_codec.py)."""
     if _USER_VAE_STREAMING_OVERRIDE is not None:
         return  # respect explicit override
+    if LOW_RAM_STREAM:
+        # On <=24 GB Macs, always stream VAE decode to keep peak memory below 2 GB
+        os.environ.pop("LTX_VAE_STREAMING", None)
+        return
     threshold = int(os.environ.get("LTX_VAE_STREAMING_AUTO_MAX_FRAMES", "121"))
     if num_frames <= threshold:
         os.environ["LTX_VAE_STREAMING"] = "0"
@@ -1122,6 +1144,8 @@ def _install_lora_fusion_patches() -> None:
 
     def _make_wrapper(orig_load):
         def patched_load(self):
+            if getattr(self, "low_ram_streaming", False):
+                return orig_load(self)
             pending = getattr(self, "_pending_loras", None)
             if pending and self.dit is None and not getattr(self, "_loaded", False):
                 tx_path = _resolve_tx_path(self)
@@ -1152,6 +1176,8 @@ def _install_lora_fusion_patches() -> None:
     # self.dit, so the inner call short-circuits in `if self.dit is None`.
     def _make_dev_loader_wrapper(orig):
         def patched_load_dev(self):
+            if getattr(self, "low_ram_streaming", False):
+                return orig(self)
             pending = getattr(self, "_pending_loras", None)
             # FIX 2026-05-14: removed the `_phosphene_dit_fused` flag guard.
             # That flag latched True after the first job in a batch and
@@ -1660,8 +1686,10 @@ def get_hq_pipe(model_dir: str, loras: list[dict] | None = None,
                 hq_kwargs["dev_transformer"] = dev_transformer
             if distilled_lora:
                 hq_kwargs["distilled_lora"] = distilled_lora
-            _hq_pipe = TwoStageHQPipeline(
+            _hq_pipe = _construct_pipeline(
+                TwoStageHQPipeline,
                 model_dir=model_dir, gemma_model_id=GEMMA_PATH, low_memory=LOW_MEMORY,
+                low_ram_streaming=_stream_for(loras),
                 **hq_kwargs,
             )
             _attach_loras(_hq_pipe, loras)
@@ -1712,10 +1740,12 @@ def get_kf_pipe(model_dir: str, dev_transformer: str | None = None,
         release_pipelines(keep_kind="keyframe")
         if _kf_pipe is None or _kf_model_dir != model_dir or _kf_weight_key != weight_key:
             emit({"event": "log", "line": f"Loading Keyframe pipeline (Q8 dev model — {model_dir})..."})
-            _kf_pipe = KeyframeInterpolationPipeline(
+            _kf_pipe = _construct_pipeline(
+                KeyframeInterpolationPipeline,
                 model_dir=model_dir,
                 gemma_model_id=GEMMA_PATH,
                 low_memory=LOW_MEMORY,
+                low_ram_streaming=_stream_for(None),
                 dev_transformer=dev_name,
                 distilled_lora=lora_name,
                 distilled_lora_strength=1.0,
@@ -1781,10 +1811,12 @@ def get_a2v_pipe(model_dir: str, loras: list[dict] | None = None,
                 _ac()
             emit({"event": "log",
                   "line": f"Loading A2V pipeline (Q8 dev + distilled LoRA — {model_dir})..."})
-            _a2v_pipe = A2VidPipelineTwoStage(
+            _a2v_pipe = _construct_pipeline(
+                A2VidPipelineTwoStage,
                 model_dir=model_dir,
                 gemma_model_id=GEMMA_PATH,
                 low_memory=LOW_MEMORY,
+                low_ram_streaming=_stream_for(loras),
                 dev_transformer=dev_name,
                 distilled_lora=lora_name,
                 distilled_lora_strength=1.0,
@@ -1825,10 +1857,12 @@ def get_a2v_distilled_pipe(model_dir: str):
                 _ac()
             emit({"event": "log",
                   "line": f"Loading A2V distilled pipeline (Q4 — {model_dir})..."})
-            _a2v_distilled_pipe = A2VidDistilledPipeline(
+            _a2v_distilled_pipe = _construct_pipeline(
+                A2VidDistilledPipeline,
                 model_dir=model_dir,
                 gemma_model_id=GEMMA_PATH,
                 low_memory=LOW_MEMORY,
+                low_ram_streaming=bool(LOW_RAM_STREAM),
             )
             _a2v_distilled_model_dir = model_dir
         return _a2v_distilled_pipe

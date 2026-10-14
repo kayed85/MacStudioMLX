@@ -131,6 +131,8 @@ function startPythonServerIfNeeded(onReady) {
       DYLD_LIBRARY_PATH: getDyldLibraryPath(),
       PYTHONUNBUFFERED: '1',
       LTX_TIER_OVERRIDE: 'base',
+      LTX_LOW_RAM_STREAM: '1',
+      LTX_STREAM_LORA: '1',
       LTX_MODEL: path.join(defaultModelsDir, 'ltx-2.3-mlx-q4'),
       LTX_MODEL_HQ: path.join(defaultModelsDir, 'ltx-2.3-mlx-q8'),
       LTX_GEMMA: path.join(defaultModelsDir, 'gemma-3-12b-it-4bit'),

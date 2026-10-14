@@ -14863,6 +14863,7 @@ class WarmHelper:
             env["LTX_IDLE_TIMEOUT"] = str(HELPER_IDLE_TIMEOUT)
             env["LTX_LOW_MEMORY"] = HELPER_LOW_MEMORY
             env["LTX_LOW_RAM_STREAM"] = "1" if low_ram_streaming_enabled() else "0"
+            env["LTX_STREAM_LORA"] = "1" if low_ram_streaming_enabled() else "0"
             env["LTX_ENABLE_MODEL_UPSCALE"] = "1" if MODEL_UPSCALE_ENABLED else "0"
             # Output codec env vars sourced from panel settings. The patched
             # ffmpeg call inside ltx_core_mlx reads these at job time, so

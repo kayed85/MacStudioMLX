@@ -55,11 +55,25 @@ class EveryPipelineGetsTheFlag(unittest.TestCase):
             self.assertIsNotNone(m, ctor)
             self.assertIn("low_ram_streaming=_stream_for(loras)", SRC[m.start():m.start() + 400], ctor)
 
+    def test_lora_streaming_when_forced_for_low_ram_macs(self):
+        import os
+        from unittest.mock import patch
+        with patch.dict(os.environ, {"LTX_STREAM_LORA": "1"}):
+            on = _funcs({"_stream_for"}, True)
+            self.assertTrue(on["_stream_for"]([{"path": "/x/a.safetensors", "strength": 1.0}]))
+
     def test_cache_policy_keeps_the_cache_off_while_streaming(self):
         i = SRC.index("def apply_mlx_cache_policy")
         body = SRC[i:i + 2500]
         self.assertIn("if LOW_RAM_STREAM:", body)
         self.assertIn("mx.set_cache_limit(0)", body)
+
+    def test_hq_and_a2v_constructors_pass_low_ram_streaming(self):
+        import re
+        for ctor in ("TwoStageHQPipeline", "A2VidPipelineTwoStage"):
+            m = re.search(r"_construct_pipeline\(\s*" + ctor + ",", SRC)
+            self.assertIsNotNone(m, ctor)
+            self.assertIn("low_ram_streaming=_stream_for(loras)", SRC[m.start():m.start() + 400], ctor)
 
 
 if __name__ == "__main__":
