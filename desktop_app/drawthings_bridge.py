@@ -47,6 +47,17 @@ DRAWTHINGS_LORA_TRIGGERS: Dict[str, str] = {
 }
 
 
+def align_dim_64(val: Any, default: int = 512) -> int:
+    """Ensure dimension is a positive integer multiple of 64, minimum 256."""
+    try:
+        n = int(val or default)
+        if n <= 0:
+            n = default
+        return max(256, int(round(n / 64.0)) * 64)
+    except (TypeError, ValueError):
+        return default
+
+
 def list_drawthings_loras() -> List[Dict[str, Any]]:
     """Enumerate all LoRAs available in Draw Things models directory."""
     out: List[Dict[str, Any]] = []
@@ -245,11 +256,8 @@ async def generate_dt_image(
     if trigger and not prompt_text.startswith(trigger):
         prompt_text = f"{trigger} {prompt_text}"
 
-    try:
-        safe_w = max(256, (int(width or 512) // 64) * 64)
-        safe_h = max(256, (int(height or 512) // 64) * 64)
-    except (TypeError, ValueError):
-        safe_w, safe_h = 512, 512
+    safe_w = align_dim_64(width, 512)
+    safe_h = align_dim_64(height, 512)
 
     config = Configs.create()
     config["model"] = model
@@ -362,11 +370,8 @@ async def generate_dt_video(
     if trigger and not prompt_text.startswith(trigger):
         prompt_text = f"{trigger} {prompt_text}"
 
-    try:
-        safe_w = max(256, (int(width or 512) // 64) * 64)
-        safe_h = max(256, (int(height or 512) // 64) * 64)
-    except (TypeError, ValueError):
-        safe_w, safe_h = 512, 512
+    safe_w = align_dim_64(width, 512)
+    safe_h = align_dim_64(height, 512)
 
     config = Configs.create()
     config["model"] = model

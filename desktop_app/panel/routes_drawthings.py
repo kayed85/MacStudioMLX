@@ -77,8 +77,8 @@ def post_drawthings_auto_animate(h, path, qs, ctype) -> None:
         "steps": steps,
         "frames": frames,
         "fps": 12,
-        "width": int(_get_val(form, "width", "512") or 512),
-        "height": int(_get_val(form, "height", "512") or 512),
+        "width": drawthings_catalog.drawthings_bridge.align_dim_64(_get_val(form, "width", "512"), 512),
+        "height": drawthings_catalog.drawthings_bridge.align_dim_64(_get_val(form, "height", "512"), 512),
     }
 
     try:

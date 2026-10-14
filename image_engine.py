@@ -449,25 +449,31 @@ class ImageEngineConfig:
         return d
 
 
-# Aspect ratios → (width, height). Picks favor larger dimensions because
-# Qwen-Image-Edit-2509 is documented to be best at 1024² and 1280×720;
-# the previous 1024×576 default for 16:9 was a Flux-era artifact and
-# visibly degrades qwen_edit output. Flux2 / Z-Image fine here too — they
-# scale gracefully past 1024.
+def align_dim_64(val: Any, default: int = 512) -> int:
+    """Ensure dimension is a positive integer multiple of 64, minimum 256."""
+    try:
+        n = int(val or default)
+        if n <= 0:
+            n = default
+        return max(256, int(round(n / 64.0)) * 64)
+    except (TypeError, ValueError):
+        return default
+
+
+# Aspect ratios → (width, height) — strictly aligned to 64-pixel stride for all
+# diffusion/DiT models (Draw Things, Qwen-Image 2.1, Krea 2 Turbo, Flux.2, MiniMax H3, HiDream, SDXL).
+# Multiples of 64 prevent latent tensor shape assertion crashes (SIGTRAP).
 ASPECT_DIMS = {
-    "16:9":  (1280, 720),
+    "16:9":  (1280, 704),
     "4:3":   (1024, 768),
     "1:1":   (1024, 1024),
-    "9:16":  (720, 1280),
+    "9:16":  (704, 1280),
     "3:4":   (768, 1024),
-    "21:9":  (1280, 544),
-    # Small variants (value suffixed "s") — ~1/3–1/4 the pixels so weaker
-    # Apple GPUs render fast and stay under the Metal watchdog. The client
-    # CSS ratio uses parseFloat, which reads "9s" as 9, so the stage still
-    # shows the right shape. Requested by cocktailpeanut.
-    "16:9s": (768, 432),
+    "21:9":  (1344, 576),
+    # Small variants (value suffixed "s") — fast preview, low RAM (multiples of 64):
+    "16:9s": (768, 448),
     "1:1s":  (512, 512),
-    "9:16s": (432, 768),
+    "9:16s": (448, 768),
 }
 
 
@@ -509,7 +515,9 @@ def generate(*, prompt: str, n: int, output_dir: Path,
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    width, height = ASPECT_DIMS.get(aspect, ASPECT_DIMS["16:9"])
+    raw_w, raw_h = ASPECT_DIMS.get(aspect, ASPECT_DIMS["16:9"])
+    width = align_dim_64(raw_w, 1280)
+    height = align_dim_64(raw_h, 704)
 
     refs = list(refs or [])
     # Validate ref paths up-front so we fail fast — Qwen-Edit-2509 supports
@@ -969,6 +977,9 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
     import random
     import subprocess
     import sys  # sys.executable used by the TeaCache wrap fallback below
+
+    width = align_dim_64(width, 1280)
+    height = align_dim_64(height, 704)
 
     bin_path = _resolve_mflux_bin(config)
     fam = _resolve_mflux_family(config)
@@ -2161,8 +2172,8 @@ def _generate_drawthings(prompt: str, n: int, width: int, height: int,
     steps = config.mflux_steps or (6 if "qwen" in model.lower() else 4)
     ref_img = refs[0] if refs and len(refs) > 0 else None
 
-    aligned_w = max(256, (int(width or 512) // 64) * 64)
-    aligned_h = max(256, (int(height or 512) // 64) * 64)
+    aligned_w = align_dim_64(width, 1280)
+    aligned_h = align_dim_64(height, 704)
 
     results: list[dict] = []
     for i in range(n):

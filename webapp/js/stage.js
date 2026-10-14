@@ -1808,11 +1808,11 @@ async function imgStudioGenerate() {
     const aspect = body.aspect || '16:9';
     fd.set('aspect', aspect);
     const aspectDims = {
-      '16:9': [1280, 720], '4:3': [1024, 768], '1:1': [1024, 1024],
-      '9:16': [720, 1280], '3:4': [768, 1024], '21:9': [1280, 544],
-      '16:9s': [768, 432], '1:1s': [512, 512], '9:16s': [432, 768]
+      '16:9': [1280, 704], '4:3': [1024, 768], '1:1': [1024, 1024],
+      '9:16': [704, 1280], '3:4': [768, 1024], '21:9': [1344, 576],
+      '16:9s': [768, 448], '1:1s': [512, 512], '9:16s': [448, 768]
     };
-    const dims = aspectDims[aspect] || [1280, 720];
+    const dims = aspectDims[aspect] || [1280, 704];
     fd.set('width', String(body.width || dims[0]));
     fd.set('height', String(body.height || dims[1]));
     fd.set('n', String(body.n || 1));

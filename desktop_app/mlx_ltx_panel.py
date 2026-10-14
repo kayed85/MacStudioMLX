@@ -31864,9 +31864,12 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         except (TypeError, ValueError):
             custom_w, custom_h = 0, 0
         if custom_w > 0 and custom_h > 0:
-            img_w, img_h = custom_w, custom_h
+            img_w = agent_image_engine.align_dim_64(custom_w, 1280)
+            img_h = agent_image_engine.align_dim_64(custom_h, 704)
         else:
-            img_w, img_h = agent_image_engine.ASPECT_DIMS.get(aspect, (1024, 576))
+            w, h = agent_image_engine.ASPECT_DIMS.get(aspect, (1280, 704))
+            img_w = agent_image_engine.align_dim_64(w, 1280)
+            img_h = agent_image_engine.align_dim_64(h, 704)
 
         # refs comes as a JSON-encoded list (e.g. '["panel_uploads/foo.png"]').
         # Plain form fields can't carry a list cleanly; the panel JS already
