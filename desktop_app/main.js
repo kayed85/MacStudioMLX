@@ -93,8 +93,21 @@ function checkServerReady(cb, retries = 180) {
   });
 }
 
+function checkServerProbe(cb) {
+  const req = http.get('http://127.0.0.1:8198', (res) => {
+    cb(true);
+  });
+  req.on('error', () => {
+    cb(false);
+  });
+  req.setTimeout(500, () => {
+    req.destroy();
+    cb(false);
+  });
+}
+
 function startPythonServerIfNeeded(onReady) {
-  checkServerReady((alreadyRunning) => {
+  checkServerProbe((alreadyRunning) => {
     if (alreadyRunning) {
       console.log('MacStudioMLX server is already running on port 8198.');
       onReady();

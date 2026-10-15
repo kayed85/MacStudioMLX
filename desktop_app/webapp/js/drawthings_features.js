@@ -315,7 +315,7 @@ async function applyDtPromptStyle(styleName) {
 
 // ⚡ Auto-Animate: Image to Video with Qwen Vision + MiniMax H3
 async function runDtAutoAnimate() {
-  const initImgInput = document.getElementById('init_image') || document.querySelector('input[name="init_image"]');
+  const initImgInput = document.getElementById('image') || document.getElementById('init_image') || document.querySelector('input[name="image"]') || document.querySelector('input[name="init_image"]');
   const imgPath = initImgInput ? initImgInput.value : '';
 
   if (!imgPath) {

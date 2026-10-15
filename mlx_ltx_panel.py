@@ -35344,6 +35344,9 @@ def _h3_drop_runner_wavs(out_path: Path, since: float, *, keep_main: bool = Fals
                 removed.append(w.name)
         except OSError:
             continue
+    return removed
+
+
 def run_dt_h3_job_inner(job: dict) -> None:
     """Render MiniMax H3 video via Draw Things gRPC service with 3-step Turbo.
 
