@@ -2209,9 +2209,9 @@ def _generate_drawthings(prompt: str, n: int, width: int, height: int,
             "png_path": str(cand_path),
             "seed": seed,
             "engine": f"drawthings:{model}",
-            "width": width,
-            "height": height,
-            "aspect": f"{width}:{height}",
+            "width": aligned_w,
+            "height": aligned_h,
+            "aspect": f"{aligned_w}:{aligned_h}",
         })
 
     return results

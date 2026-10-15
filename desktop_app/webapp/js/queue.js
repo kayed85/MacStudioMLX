@@ -3853,6 +3853,11 @@ async function poll() {
     // visible until the next job runs, with no way to acknowledge it.
     // _dismissedFailureId remembers which job id the user chose to
     // dismiss so we don't keep nagging. Clears on next job (id changes).
+    try {
+      if (!window._dismissedFailureId && typeof localStorage !== 'undefined') {
+        window._dismissedFailureId = localStorage.getItem('phos_dismissed_failure_id') || '';
+      }
+    } catch (e) {}
     const showFailure = last && last.status === 'failed' && !s.queue.length
                         && last.id !== window._dismissedFailureId;
     const actionsEl = document.getElementById('nowCardActions');
@@ -3875,9 +3880,13 @@ async function poll() {
       // the H3 install card's own "Details for troubleshooting" (queue.js
       // _h3InstallCardContent). `details` is a fixed string we compose
       // ourselves (never user/engine-supplied), so it's safe unescaped.
+      const dimLabel = (last.params.width && last.params.height)
+        ? `${last.params.width}×${last.params.height}`
+        : (last.params.aspect ? `${last.params.aspect}` : '');
+      const modeAndDim = [last.params.mode, dimLabel].filter(Boolean).join(' · ');
       nowCard.querySelector('.meta').innerHTML =
         `<span style="color: var(--muted)">${escapeHtml(snippet(last.params.label || last.params.prompt, 80))}</span>` +
-        ` <span style="color: var(--muted)">· ${escapeHtml(last.params.mode)} · ${last.params.width}×${last.params.height}</span>` +
+        (modeAndDim ? ` <span style="color: var(--muted)">· ${escapeHtml(modeAndDim)}</span>` : '') +
         `<br><span style="color: var(--text)">${escapeHtml(hint)}</span>` +
         // SYS-33: errors rarely linked to Docs even where a section already
         // existed. docsAnchor names one of troubleshooting.md's own anchors.

@@ -19,8 +19,13 @@ import os
 import socket
 import subprocess
 import time
+import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+_FALLBACK_SITE = Path("/Users/mk/.gemini/antigravity/scratch/marketing_design_skill/venv/lib/python3.14/site-packages")
+if _FALLBACK_SITE.is_dir() and str(_FALLBACK_SITE) not in sys.path:
+    sys.path.append(str(_FALLBACK_SITE))
 
 import numpy as np
 
@@ -227,9 +232,9 @@ async def generate_dt_image(
     prompt: str,
     negative_prompt: str = "",
     model: str = "qwen_image_2.1_i8x.ckpt",
-    autoencoder: Optional[str] = "qwen_image_2.1_vae_f16.ckpt",
-    text_encoder: Optional[str] = "qwen_3_vl_8b_instruct_i8x.ckpt",
-    lora_file: Optional[str] = "qwen_image_2.16step_lora_f16.ckpt",
+    autoencoder: Optional[str] = None,
+    text_encoder: Optional[str] = None,
+    lora_file: Optional[str] = None,
     lora_weight: float = 1.0,
     steps: int = 6,
     guidance_scale: float = 1.0,
@@ -335,8 +340,8 @@ async def generate_dt_video(
     prompt: str,
     negative_prompt: str = "",
     model: str = "minimax_h3_fl2va_q8p.ckpt",
-    autoencoder: Optional[str] = "minimax_h3_vae_f16.ckpt",
-    text_encoder: Optional[str] = "qwen_3_vl_32b_50_i8x.ckpt",
+    autoencoder: Optional[str] = None,
+    text_encoder: Optional[str] = None,
     lora_file: Optional[str] = "minimax_h3_3step_lora_f16.ckpt",
     lora_weight: float = 1.0,
     steps: int = 4,

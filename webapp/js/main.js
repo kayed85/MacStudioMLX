@@ -95,6 +95,7 @@ document.addEventListener('click', (e) => {
     if (typeof retryJob === 'function') retryJob(id, { smaller: true });
   } else {
     window._dismissedFailureId = id;
+    try { localStorage.setItem('phos_dismissed_failure_id', id); } catch (e) {}
     if (typeof poll === 'function') poll();
   }
 });

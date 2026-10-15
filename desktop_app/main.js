@@ -44,7 +44,10 @@ function getPythonBin() {
     path.join(projectRoot, 'ltx-2-mlx/env/bin/python3'),
     path.join(projectRoot, 'ltx-2-mlx/env/bin/python3.14'),
     path.join(projectRoot, 'ltx-2-mlx/env/bin/python3.11'),
-    path.join(projectRoot, 'env/bin/python3')
+    path.join(projectRoot, 'env/bin/python3'),
+    '/opt/homebrew/bin/python3.14',
+    '/opt/homebrew/bin/python3',
+    '/usr/local/bin/python3'
   ];
   for (const cand of envCandidates) {
     if (fs.existsSync(cand)) {
