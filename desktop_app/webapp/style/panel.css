@@ -11716,6 +11716,55 @@ body[data-workflow="oneshot"] #audioSectionTab { display: none !important; }
       body > header .docs-btn .docs-btn-word { display: none; }
     }
 
+    /* ---- Language Toggle Button ---- */
+    body > header .lang-btn {
+      width: auto; padding: 0 10px; gap: 6px;
+      font-size: var(--fs-sm); font-weight: 600; color: var(--muted);
+      cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
+      height: 32px; border-radius: var(--radius); border: 1px solid var(--border);
+      background: var(--panel); transition: var(--t-fast);
+    }
+    body > header .lang-btn:hover {
+      color: var(--text); background: var(--accent-dim); border-color: var(--accent-bright);
+    }
+    body > header .lang-btn .lang-globe {
+      font-size: 13px; line-height: 1;
+    }
+
+    /* ---- RTL (Arabic) Direction & Layout ---- */
+    html[dir="rtl"] {
+      direction: rtl;
+    }
+    html[dir="rtl"] body {
+      direction: rtl;
+      text-align: right;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Cairo", "Geeza Pro", "SF Pro Arabic", system-ui, sans-serif;
+    }
+    html[dir="rtl"] .workflow-tabs,
+    html[dir="rtl"] .mode-bar,
+    html[dir="rtl"] .tabs {
+      direction: rtl;
+    }
+    html[dir="rtl"] .creator-link .x-icon svg {
+      margin-right: 0 !important;
+      margin-left: 3px !important;
+    }
+    html[dir="rtl"] textarea,
+    html[dir="rtl"] input[type="text"],
+    html[dir="rtl"] input[type="search"],
+    html[dir="rtl"] select {
+      text-align: right;
+    }
+    html[dir="rtl"] .ghost-btn svg.ph,
+    html[dir="rtl"] .primary-btn svg.ph {
+      margin-right: 0 !important;
+      margin-left: 6px !important;
+    }
+    html[dir="rtl"] .modal-head,
+    html[dir="rtl"] .models-head {
+      flex-direction: row-reverse;
+    }
+
     .docs-view.show { display: flex; }
     .docs-view { z-index: 140; padding: 20px; align-items: stretch; justify-content: center; }
     .docs-shell {

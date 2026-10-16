@@ -16,6 +16,15 @@
        used to do when the CSS was embedded here). New styles go in that file,
        never in this string. See docs/ARCHITECTURE.md. -->
   <link rel="stylesheet" href="/webapp/style/panel.css">
+  <script>
+    (function() {
+      try {
+        var l = localStorage.getItem('phos_ui_lang') || 'en';
+        document.documentElement.lang = l;
+        document.documentElement.setAttribute('dir', l === 'ar' ? 'rtl' : 'ltr');
+      } catch(e) {}
+    })();
+  </script>
 </head>
 <!-- data-cap-tier is set at request time by page() from _resolve_cap_tier() —
      the FEATURE tier: this Mac's RAM, folded down to what the active
@@ -271,7 +280,11 @@
        screen used their words). ? opens it too, on the shortcuts page. -->
   <button id="docsBtn" type="button" class="icon-btn docs-btn" onclick="openDocs()"
           data-shortcut="docs.open" title="Docs — how every tool works, and every shortcut">
-    <svg class="ph" aria-hidden="true"><use href="#ph-book-open"/></svg><span class="docs-btn-word">Docs</span>
+    <svg class="ph" aria-hidden="true"><use href="#ph-book-open"/></svg><span class="docs-btn-word" data-i18n="docs">Docs</span>
+  </button>
+  <button id="langToggleBtn" type="button" class="icon-btn lang-btn lang-toggle-btn" onclick="toggleLanguage()"
+          title="Switch to Arabic / التبديل إلى العربية" aria-label="Switch Language">
+    <span class="lang-globe">🌐</span><span id="langWord" class="lang-word">عربي</span>
   </button>
   <button id="stopComfyBtn" class="ghost-btn" style="display:none" onclick="api('/stop_comfy', 'POST').then(poll)">Stop Comfy</button>
   <!-- Official Phosphene account on X (2026-05-18). Sits next to the
@@ -310,25 +323,25 @@
          tab was active, or how many there were. workflowSwitch()
          (editor.js) keeps aria-selected in sync with .active. -->
     <nav class="workflow-tabs" id="workflowTabs" role="tablist" aria-label="Workflow">
-      <button data-workflow="manual" class="active" role="tab" aria-selected="true"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-film-strip"/></svg>Video</button>
+      <button data-workflow="manual" class="active" role="tab" aria-selected="true"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-film-strip"/></svg><span data-i18n="tab_video">Video</span></button>
       <!-- One Shot is its own door (2026-09-08): one continuous shot of 30 s – 2 min,
            with its own composer and its own API (POST /oneshot). It was a mode chip
            on the video form; a shot that never cuts is a different thing to make
            than a clip, and it gets the tab. -->
-      <button data-workflow="oneshot" role="tab" aria-selected="false"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-target"/></svg>One Shot</button>
-      <button data-workflow="studio" role="tab" aria-selected="false"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-image"/></svg>Images</button>
+      <button data-workflow="oneshot" role="tab" aria-selected="false"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-target"/></svg><span data-i18n="tab_oneshot">One Shot</span></button>
+      <button data-workflow="studio" role="tab" aria-selected="false"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-image"/></svg><span data-i18n="tab_images">Images</span></button>
       <!-- Storyboard sits next to the video surfaces; Audio and Train are the
            two "go elsewhere and come back" tabs. No NEW badge on purpose —
            with no film in progress the panel must look exactly as it did
            yesterday, plus one calm word. The count span is filled only while
            a storyboard render is actually in flight. -->
-      <button data-workflow="storyboard" role="tab" aria-selected="false"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-film-slate"/></svg>Storyboard<span class="new-badge sb-live" id="sbTabCount" hidden></span></button>
+      <button data-workflow="storyboard" role="tab" aria-selected="false"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-film-slate"/></svg><span data-i18n="tab_storyboard">Storyboard</span><span class="new-badge sb-live" id="sbTabCount" hidden></span></button>
       <!-- The Editor is a PLACE, not a room inside the Storyboard. It opens
            with no board, on clips from any engine, and it stays open while
            you go and look at something else. -->
-      <button data-workflow="editor" role="tab" aria-selected="false"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-scissors"/></svg>Editor</button>
-      <button data-workflow="audio" role="tab" aria-selected="false"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-music-notes"/></svg>Audio<span class="new-badge">NEW</span></button>
-      <button data-workflow="train" role="tab" aria-selected="false"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-user-plus"/></svg>Train Character</button>
+      <button data-workflow="editor" role="tab" aria-selected="false"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-scissors"/></svg><span data-i18n="tab_editor">Editor</span></button>
+      <button data-workflow="audio" role="tab" aria-selected="false"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-music-notes"/></svg><span data-i18n="tab_audio">Audio</span><span class="new-badge">NEW</span></button>
+      <button data-workflow="train" role="tab" aria-selected="false"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-user-plus"/></svg><span data-i18n="tab_train">Train Character</span></button>
     </nav>
     <!-- The original manual form is unchanged; it sits below in the DOM
          and is shown/hidden by JS as the workflow tab toggles. -->
@@ -384,24 +397,24 @@
          aria-selected stay correct no matter which call site changes
          .active, with zero changes to that shared toggle logic. -->
     <div class="mode-bar pill-group" id="modeGroup" role="tablist" aria-label="Mode">
-      <button type="button" class="mode-chip pill-btn" data-mode="t2v">Text<span class="mc-sub sub">prompt → video</span></button>
+      <button type="button" class="mode-chip pill-btn" data-mode="t2v"><span data-i18n="mode_text">Text</span><span class="mc-sub sub" data-i18n="mode_text_sub">prompt → video</span></button>
       <!-- Character intent — Codex C+ 2026-05-17. Promoted from a chip
            strip inside T2V to a first-class mode pill so the cascade
            (character selected → quality flips to Q8, LoRAs auto-stack,
            audio LoRA fuses) is visible in the mode picker, not a hidden
            toggle inside another mode. Q8-only — hidden on cap_tier="q4". -->
-      <button type="button" class="mode-chip pill-btn" data-mode="character">Character<span class="mc-sub sub">trained face + voice</span></button>
-      <button type="button" class="mode-chip pill-btn" data-mode="i2v">Image<span class="mc-sub sub">image + prompt</span></button>
+      <button type="button" class="mode-chip pill-btn" data-mode="character"><span data-i18n="mode_character">Character</span><span class="mc-sub sub" data-i18n="mode_character_sub">trained face + voice</span></button>
+      <button type="button" class="mode-chip pill-btn" data-mode="i2v"><span data-i18n="mode_image">Image</span><span class="mc-sub sub" data-i18n="mode_image_sub">image + prompt</span></button>
       <!-- VA-33: renamed from "FFLF" — creator words, and distinct from the
            in-form "FFLF / Multi-Keyframe" toggle these chips duplicate
            (that toggle stays: it's the only way to change the keyframe
            COUNT once inside the section, not just enter it). -->
-      <button type="button" class="mode-chip pill-btn" data-mode="keyframe" title="First-frame / last-frame interpolation (FFLF)">Start &amp; end frame<span class="mc-sub sub">first + last</span></button>
+      <button type="button" class="mode-chip pill-btn" data-mode="keyframe" title="First-frame / last-frame interpolation (FFLF)"><span data-i18n="mode_keyframe">Start &amp; end frame</span><span class="mc-sub sub" data-i18n="mode_keyframe_sub">first + last</span></button>
       <!-- Multi-keyframe shares backend mode="keyframe"; the form dropdown
            chooses any total anchor count from 3–8. -->
-      <button type="button" class="mode-chip pill-btn" data-mode="keyframe" data-kf-default="multi">Keyframes<span class="mc-sub sub">3–8 frames</span></button>
-      <button type="button" class="mode-chip pill-btn" data-mode="extend">Extend<span class="mc-sub sub">continue a clip</span></button>
-      <button type="button" class="mode-chip pill-btn" data-mode="v2a" data-h3-only title="Hailuo H3 — give a silent (or any) clip new sound made for its picture. The picture is kept exactly.">Add sound<span class="mc-sub sub">your clip → its sound</span></button>
+      <button type="button" class="mode-chip pill-btn" data-mode="keyframe" data-kf-default="multi"><span data-i18n="mode_keyframes">Keyframes</span><span class="mc-sub sub" data-i18n="mode_keyframes_sub">3–8 frames</span></button>
+      <button type="button" class="mode-chip pill-btn" data-mode="extend"><span data-i18n="mode_extend">Extend</span><span class="mc-sub sub" data-i18n="mode_extend_sub">continue a clip</span></button>
+      <button type="button" class="mode-chip pill-btn" data-mode="v2a" data-h3-only title="Hailuo H3 — give a silent (or any) clip new sound made for its picture. The picture is kept exactly."><span data-i18n="mode_add_sound">Add sound</span><span class="mc-sub sub" data-i18n="mode_add_sound_sub">your clip → its sound</span></button>
       <!-- VA-01: lip-sync's only entrance used to be Audio tab → Music video
            → a folded "One shot (audio → video)" row that shared its name
            with the unrelated One Shot tab — nothing on the Video mode bar
@@ -410,7 +423,7 @@
            delegate below special-cases data-lipsync and calls
            openLipSyncEntry(), which jumps to the Audio tab's one-shot form
            (its own submit path — audioStudioGenerate, mode=a2v). -->
-      <button type="button" class="mode-chip pill-btn" data-lipsync="1" title="Audio → Video — a picture (optional) and a stretch of audio become one clip whose mouth follows the track.">Lip-sync<span class="mc-sub sub">picture + your audio → it talks / sings</span></button>
+      <button type="button" class="mode-chip pill-btn" data-lipsync="1" title="Audio → Video — a picture (optional) and a stretch of audio become one clip whose mouth follows the track."><span data-i18n="mode_lipsync">Lip-sync</span><span class="mc-sub sub" data-i18n="mode_lipsync_sub">picture + your audio → it talks / sings</span></button>
       <!-- Remix — the IC-LoRA reference tools (Ingredients / Control / Colorize)
            grouped under ONE pill so the mode bar stays uncluttered. All three
            run on Q4 distilled (unlike FFLF/Extend/Character, which are Q8-only
@@ -427,7 +440,7 @@
            "would love to see IC-LoRA support … exposed in the UI"). This is
            the only Remix copy visible without a click, so it carries the
            searchable words. -->
-      <button type="button" class="mode-chip pill-btn" data-mode="remix">Remix<span class="mc-sub sub">motion control · refs · color</span></button>
+      <button type="button" class="mode-chip pill-btn" data-mode="remix"><span data-i18n="mode_remix">Remix</span><span class="mc-sub sub" data-i18n="mode_remix_sub">motion control · refs · color</span></button>
       <!-- "Train" used to live here as a mode chip; promoted 2026-05-15 to
            a workflow tier (top tab strip). "Studio" (image generation) also
            lived here until 2026-05-17 — Mr Bizarro flagged that mixing image gen
@@ -443,15 +456,15 @@
          stays lit. Inline styles use var(--x, fallback) so they're safe whether
          or not the theme defines those vars. -->
     <div id="remixSubGroup" style="display:none;margin:-2px 0 12px;padding:9px 11px;border:1px solid var(--line,#262a33);border-left:3px solid var(--accent,#8b7bff);border-radius:11px;background:var(--accent-wash,rgba(139,123,255,.06))">
-      <div style="font-size:11px;letter-spacing:.13em;text-transform:uppercase;color:var(--dim,#7a8194);margin-bottom:7px">Remix tool · bring your own media · IC-LoRA</div>
+      <div style="font-size:11px;letter-spacing:.13em;text-transform:uppercase;color:var(--dim,#7a8194);margin-bottom:7px" data-i18n="remix_header">Remix tool · bring your own media · IC-LoRA</div>
       <div class="mode-bar pill-group">
-        <button type="button" class="mode-chip pill-btn" data-remix="ingredients" title="Ingredients IC-LoRA — 2–8 reference images (a face, a prop, a location) composed into one new clip.">Ingredients<span class="mc-sub sub">2–8 refs → one clip</span></button>
+        <button type="button" class="mode-chip pill-btn" data-remix="ingredients" title="Ingredients IC-LoRA — 2–8 reference images (a face, a prop, a location) composed into one new clip."><span data-i18n="remix_ingredients">Ingredients</span><span class="mc-sub sub" data-i18n="remix_ingredients_sub">2–8 refs → one clip</span></button>
         <!-- "Control" said nothing about what it controls. The name people
              actually search for is Motion Control / Union Control, and the
              title carries the adapter's real name so a user who read about
              LTX IC-LoRAs elsewhere recognises it here. -->
-        <button type="button" class="mode-chip pill-btn" data-remix="control" title="Union Control IC-LoRA — the render copies the motion, camera move, composition and pose of a clip you supply, while the prompt repaints the subject and scene. Feed it an ordinary video, or a pose / depth / canny sequence you already have.">Motion Control<span class="mc-sub sub">its motion → your scene</span></button>
-        <button type="button" class="mode-chip pill-btn" data-remix="restore" title="Colorize IC-LoRA — adds natural color to a black-and-white or desaturated clip.">Colorize<span class="mc-sub sub">B&amp;W clip → color</span></button>
+        <button type="button" class="mode-chip pill-btn" data-remix="control" title="Union Control IC-LoRA — the render copies the motion, camera move, composition and pose of a clip you supply, while the prompt repaints the subject and scene. Feed it an ordinary video, or a pose / depth / canny sequence you already have."><span data-i18n="remix_control">Motion Control</span><span class="mc-sub sub" data-i18n="remix_control_sub">its motion → your scene</span></button>
+        <button type="button" class="mode-chip pill-btn" data-remix="restore" title="Colorize IC-LoRA — adds natural color to a black-and-white or desaturated clip."><span data-i18n="remix_colorize">Colorize</span><span class="mc-sub sub" data-i18n="remix_colorize_sub">B&amp;W clip → color</span></button>
         <!-- Upscale & Face Fix (was "Upscale ×2" / "LTX Upscale"; mode stays
              `upscale`) — the LTX-2.5 Pixel Spatial Upscaler IC-LoRA. A
              generative 2× enlarge: the source clip rides the reference
@@ -459,7 +472,7 @@
              canvas (up to this Mac's i2v cap). The natural partner of an H3
              draft: H3 does the story and the sound at a small canvas, LTX
              2.5 does the pixels. Works on any clip in Outputs. -->
-        <button type="button" class="mode-chip pill-btn" data-remix="upscale" title="Upscale &amp; Face Fix — LTX-2.5 Pixel Spatial Upscaler IC-LoRA. Re-renders a clip at twice its size with real generated detail (not a filter) and keeps the face and the sound. Made for H3 drafts, works on any clip. One click from any clip: the Upscale &amp; Face Fix button under the player.">Upscale &amp; Face Fix<span class="mc-sub sub">any clip → 2× sharper · face kept</span></button>
+        <button type="button" class="mode-chip pill-btn" data-remix="upscale" title="Upscale &amp; Face Fix — LTX-2.5 Pixel Spatial Upscaler IC-LoRA. Re-renders a clip at twice its size with real generated detail (not a filter) and keeps the face and the sound. Made for H3 drafts, works on any clip. One click from any clip: the Upscale &amp; Face Fix button under the player."><span data-i18n="remix_upscale">Upscale &amp; Face Fix</span><span class="mc-sub sub" data-i18n="remix_upscale_sub">any clip → 2× sharper · face kept</span></button>
       </div>
     </div>
 
@@ -2237,8 +2250,8 @@ The same wizard walks out of frame. Audio: footsteps on leaves."></textarea>
           </div>
         </div>
         <div class="actions">
-          <button type="submit" class="primary" id="genBtn">Generate</button>
-          <button type="button" class="danger js-stop-btn" disabled data-role="stop-btn" onclick="requestStop()" title="Stop the current render">Stop</button>
+          <button type="submit" class="primary" id="genBtn" data-i18n="generate">Generate</button>
+          <button type="button" class="danger js-stop-btn" disabled data-role="stop-btn" onclick="requestStop()" title="Stop the current render" data-i18n="stop" data-i18n-title="stop_title">Stop</button>
         </div>
       </div>
     </form>
@@ -6422,6 +6435,16 @@ The last line"></textarea>
       </div>
     </div>
 
+    <!-- Language. English (default) or Arabic with RTL. -->
+    <div class="settings-section">
+      <h3 data-i18n="language">Language</h3>
+      <div class="hint" style="margin-bottom:10px">Interface language and text direction. Saved in this browser only.</div>
+      <div class="pill-group cols-2" id="languageGroup">
+        <button type="button" class="pill-btn active" data-lang-opt="en" onclick="setLanguage('en')">English</button>
+        <button type="button" class="pill-btn" data-lang-opt="ar" onclick="setLanguage('ar')">العربية (Arabic)</button>
+      </div>
+    </div>
+
     <!-- Completion alerts. A chime in the tab when a render finishes or
          fails, and a browser notification when the tab is in the
          background — once the person has allowed them. Same row shape as
@@ -6665,10 +6688,10 @@ The last line"></textarea>
        click handlers downstream keep working. -->
   <nav class="tabs">
     <span class="bp-live-dot" id="bpLiveDot" title="Idle"></span>
-    <button data-tab="now" class="active">Now</button>
-    <button data-tab="queue">Queue <span class="badge" id="queueBadge" style="display:none">0</span></button>
-    <button data-tab="recent">Recent</button>
-    <button data-tab="logs">Logs</button>
+    <button data-tab="now" class="active"><span data-i18n="now">Now</span></button>
+    <button data-tab="queue"><span data-i18n="queue">Queue</span> <span class="badge" id="queueBadge" style="display:none">0</span></button>
+    <button data-tab="recent"><span data-i18n="recent">Recent</span></button>
+    <button data-tab="logs"><span data-i18n="logs">Logs</span></button>
     <span class="spacer"></span>
     <a class="model-credit" id="modelTag" href="https://github.com/dgrauet/ltx-2-mlx" target="_blank" rel="noopener" title="MLX port by @dgrauet"></a>
     <!-- (Collapse-this-panel button removed 2026-05-12 — Mr Bizarro flagged
@@ -6859,6 +6882,7 @@ const BOOT = __BOOTSTRAP__;</script>
      webapp/vendor/abcjs/) so a score renders with the network off. Classic
      script on purpose: it publishes `ABCJS` as a global for the studio module. -->
 <script src="/webapp/vendor/abcjs/abcjs-basic-min.min.js"></script>
+<script src="/webapp/js/i18n.js"></script>
 <script type="module" src="/webapp/js/boot.js"></script>
 <script type="module" src="/webapp/js/music.js"></script>
 <script type="module" src="/webapp/js/shortcuts.js"></script>
