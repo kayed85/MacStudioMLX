@@ -533,7 +533,8 @@ function renderH3Turbo() {
     const cellOnlyBest = tri.available && cell && cell.tristep_min == null;
     fastBtn.classList.toggle('cell-only-best', cellOnlyBest);
     fastBtn.title = !tri.supported
-      ? 'Fast needs a newer H3 runner — run "Update Hailuo H3 runner" in the Pinokio sidebar (weights stay).'
+      ? distText('Fast needs a newer H3 runner — run "Update Hailuo H3 runner" in the Pinokio sidebar (weights stay).',
+                 'Fast needs a newer Hailuo H3 runner. Updating the runner isn\u2019t available in the Mac app yet.')
       : !tri.downloaded
         ? '3 steps — about 4× faster, great for drafts and most shots. One click installs the '
           + '180 MB adapter (' + (tri.license || 'MiniMax H3 Community License') + ').'
@@ -658,8 +659,9 @@ async function h3SpeedClick(which) {
   if (tri.available) { setH3Speed('fast'); return; }
   const toast = (m, kind) => { if (typeof phosToast === 'function') phosToast(m, { kind }); };
   if (!tri.supported) {
-    toast('Fast needs a newer Hailuo H3 runner. Run "Update Hailuo H3 runner" in the Pinokio '
-          + 'sidebar — your weights stay.', 'danger');
+    toast(distText('Fast needs a newer Hailuo H3 runner. Run "Update Hailuo H3 runner" in the Pinokio '
+          + 'sidebar — your weights stay.',
+          'Fast needs a newer Hailuo H3 runner. Updating the runner isn\u2019t available in the Mac app yet.'), 'danger');
     return;
   }
   if (tri.installing) { toast('The Fast adapter is already installing — watch the log.', 'ok'); return; }
@@ -1092,7 +1094,8 @@ async function switchLtxGeneration(id) {
       if (v.ok) { location.reload(); return true; }
     } catch (e) { /* still down */ }
   }
-  say('Panel did not come back within 60s - start it from Pinokio.', 'danger');
+  say(distText('Panel did not come back within 60s - start it from Pinokio.',
+               'The studio did not come back within 60s - use Studio \u2192 Restart Engine.'), 'danger');
   return false;
 }
 

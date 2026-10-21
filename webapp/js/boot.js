@@ -15,6 +15,17 @@ globalThis.PIPERSR_UPSCALE_ENABLED = !!BOOT.pipersr_upscale_enabled;
 // (useful for low-RAM-user testing on Mr Bizarro's M4 Max).
 window.PHOSPHENE_CAP_TIER = (BOOT.cap_tier || 'q8');
 
+// Where this panel runs (distribution.py, BOOT.distribution): Pinokio, or the
+// Phosphene Mac app, which has no Pinokio sidebar, no Stop/Start and no git -
+// it updates the studio itself (Phosphene -> Check for Updates...). Every
+// sentence that names Pinokio goes through distText(pinokio, macApp), so
+// Pinokio (BOOT.distribution 'pinokio') reads exactly what it always did.
+function isMacApp() { return BOOT.distribution === 'mac-app'; }
+function distText(pinokio, macApp) { return isMacApp() ? macApp : pinokio; }
+// The edition label ('free' / 'pro' from the Mac app, '' under Pinokio). A
+// label only: body[data-edition] and this are the hooks, nothing paid.
+function phEdition() { return BOOT.edition || ''; }
+
 // Apply tier-aware time estimates to the Quality pill subtitles.
 function applyTierTimes() {
   // NO-OP for the LTX strip since v4.0, deliberately, and kept as a named
@@ -1002,4 +1013,5 @@ Object.assign(globalThis, {
   outputsLoadAll, outputsCacheMutated, _updateMainFilterChips, _maybeAutoLoadAllForEmptyFilter, setMainOutputsFilter,
   updateModelCredit, toggleAvoidRow, syncAvoidRowFromValue, ingredientsServed,
   _paintControlGenNote, defaultRemixMode, setMode, _portalLoraPicker,
+  isMacApp, distText, phEdition,
 });

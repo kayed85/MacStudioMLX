@@ -58,9 +58,9 @@ one home: styles in `webapp/style/panel.css`, markup in `webapp/index.html`,
 JS in the one `webapp/js/` module that owns that screen (startup calls in
 `main.js`, which loads last on purpose), and every HTTP endpoint as a
 registered handler in `panel/routes_*.py` — never an if-arm in
-`do_GET`/`do_POST`. These aren't conventions, they're enforced:
-`test_routes.py`, `test_no_duplicate_defs.py`, `test_panel_assets.py` and
-`node scripts/lint_webapp.mjs` fail the build on a violation. A patch that
+`do_GET`/`do_POST`. These aren't conventions, they're enforced: the
+maintainers' test suite and `node scripts/lint_webapp.mjs` fail the build on a
+violation. A patch that
 puts code in the right home reviews in minutes; one that reopens the old
 monolith gets sent back with a link to the map.
 
@@ -75,7 +75,8 @@ you write the adapter.
 ## Things that will get pushed back on
 
 - **A dependency added without a reason in the commit message.** Every pin in
-  this repo is a paid lesson and they are documented as such in `CLAUDE.md`.
+  this repo is a paid lesson; `docs/DEPENDENCY_PINS.md` and the comments next
+  to each pin say why it is there.
 - **A change to a render path with no evidence it is identical where it should
   be.** Byte-identical output at a fixed seed, or a measured difference — not
   "looks the same to me".
@@ -85,16 +86,27 @@ you write the adapter.
 
 ## Before you send
 
+The test suite is maintained privately, so the public repo stays small and
+readable. You don't need it to contribute.
+
+In your PR, **say how you tested**: your Mac and macOS version, what you ran or
+clicked, and what you saw (a log line, a screenshot, a render's settings). For
+a render change, say whether the output is byte-identical at a fixed seed or
+how it differs.
+
+These checks run on any clone and catch the most common breakage:
+
 ```bash
-bash scripts/release_gates.sh          # the whole battery in one command
+npm install                              # once: the frontend lint needs eslint
+node scripts/lint_webapp.mjs             # frontend: module-scope mistakes
+node scripts/check_pinokio_scripts.js    # launcher scripts: line length, stop words
+python3 -m py_compile mlx_ltx_panel.py mlx_warm_helper.py panel/*.py
 ```
 
-That runs the pin checks, the launcher payload gate, the codec check, the
-frontend lint and every panel test suite, and prints a PASS/FAIL table. It
-must exit 0. (`--fast` skips the two slowest gates while iterating.)
-
-Tests are not a formality here. Several of them exist because a thing shipped
-broken in a way that looked fine — they encode the failure, not the feature.
+Before anything ships, the maintainers run the full suite and the release
+gates on your change. Several of those tests exist because something shipped
+broken in a way that looked fine, so if one fails we will tell you what it
+caught.
 
 ## Licence
 

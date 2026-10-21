@@ -298,6 +298,11 @@ def get_status(h, parsed) -> None:
     # 4.20: what install.js left for after Start, and where the background
     # fetcher is with it (empty and idle on every install it never queued).
     payload["deferred_downloads"] = P.deferred_status()
+    # Mac app only: the app's own model download (app_models.json). The
+    # "Base models needed" card names it instead of offering a second fetch.
+    _app = P.app_models_state()
+    if _app is not None:
+        payload["app_models"] = _app
     payload["hf_available"] = P.HF_BIN is not None
     # Settings snapshot — only needs the public-safe view (booleans
     # for token presence, no secret values). The UI reads

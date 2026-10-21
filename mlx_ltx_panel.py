@@ -84,6 +84,10 @@ import install_plan
 # serializer (ideoBuildCaption / ideoSynthDesc / ideoRectToBbox).
 import ideogram_caption
 import model_licences
+# Pinokio or the Phosphene Mac app (PHOSPHENE_DISTRIBUTION / _EDITION). Every
+# user-facing sentence that names Pinokio picks its Mac-app variant through
+# distribution.say(); unset (Pinokio) keeps every sentence as it was.
+import distribution as _dist
 
 # Storyboard — the layer ABOVE the video modes: one concept in, a film's worth
 # of shots out. `storyboard` is the spine (schema, validation, scheduling,
@@ -114,6 +118,7 @@ import h3_prompt_guards
 ROOT = Path(os.environ.get("LTX_STUDIO_ROOT", str(Path(__file__).resolve().parent)))
 MLX = Path(os.environ.get("LTX_MLX_PATH", str(ROOT / "ltx-2-mlx")))
 MODELS_DIR = Path(os.environ.get("LTX_MODELS_DIR", str(ROOT / "mlx_models")))
+_DEFAULT_MODELS_DIR = ROOT / "mlx_models"     # the layout repo_dir() keeps verbatim
 GEMMA = Path(os.environ.get("LTX_GEMMA_PATH", str(MODELS_DIR / "gemma-3-12b-it-4bit")))
 OUTPUT = Path(os.environ.get("LTX_OUTPUT_DIR", str(ROOT / "mlx_outputs")))
 UPLOADS = Path(os.environ.get("LTX_UPLOADS_DIR", str(ROOT / "panel_uploads")))
@@ -328,6 +333,12 @@ ENGINE_ENV_REPAIR = (
     "\"Repair Phosphene engine (models kept)\". Renders cannot run until it "
     "is repaired."
 )
+#: The same, inside the Mac app (no Pinokio sidebar there).
+ENGINE_ENV_REPAIR_MAC = (
+    "Press Repair engine in the bar at the top of the studio - it re-installs "
+    "only the engine's Python packages into the venv (a few minutes, every "
+    "model kept). Renders cannot run until it is repaired."
+)
 
 # --- One-click engine repair (4.17.4 fleet fix) -----------------------------
 # `venv_broken` on fresh installs: 18 installs in 30 days, nearly all at the
@@ -481,8 +492,11 @@ def engine_env_repair_start() -> tuple[int, dict]:
     if not engine_env_fault():
         return 200, {"ok": True, "nothing_to_do": True}
     if _engine_install_running():
-        return 409, {"error": "Pinokio is still installing the engine. This "
-                              "clears itself when that install finishes.",
+        return 409, {"error": _dist.say(
+                         "Pinokio is still installing the engine. This "
+                         "clears itself when that install finishes.",
+                         "Phosphene is still setting up the engine. This "
+                         "clears itself when setup finishes."),
                      "installing": True}
     with ENGINE_REPAIR_LOCK:
         if ENGINE_REPAIR.get("active"):
@@ -557,7 +571,8 @@ if not HELPER_PYTHON.is_file():
 else:
     _env_fault = engine_env_fault()
     if _env_fault:
-        sys.stderr.write(f"WARN: {_env_fault}.\n      {ENGINE_ENV_REPAIR}\n")
+        sys.stderr.write(f"WARN: {_env_fault}.\n      "
+                         f"{_dist.say(ENGINE_ENV_REPAIR, ENGINE_ENV_REPAIR_MAC)}\n")
 def _pinokio_bin_dirs() -> list:
     """Pinokio's own tool folders, newest layout first.
 
@@ -668,8 +683,11 @@ def _resolve_ffmpeg() -> Path:
     if skipped:
         FFMPEG_NOTE = (f"no ffmpeg with the libx264 encoder was found (checked "
                        f"{', '.join(map(str, skipped))}); exports will fail with "
-                       f"\"Unknown encoder 'libx264'\". Fix: in Pinokio, run "
-                       f"Update, or export LTX_FFMPEG=/path/to/an/ffmpeg that has it.")
+                       f"\"Unknown encoder 'libx264'\". " + _dist.say(
+                           "Fix: in Pinokio, run Update, or export "
+                           "LTX_FFMPEG=/path/to/an/ffmpeg that has it.",
+                           "Fix: quit Phosphene and open it again so setup "
+                           "can find a working video encoder."))
         return skipped[0]
     return _resolve_tool("ffmpeg", "LTX_FFMPEG")
 
@@ -722,7 +740,7 @@ MODEL_ID = os.environ.get(
 )
 MODEL_ID_HQ = os.environ.get("LTX_MODEL_HQ", "dgrauet/ltx-2.3-mlx-q8")
 # Q8 model is detected on disk so the High quality tier can be conditionally enabled.
-Q8_LOCAL_PATH = Path(os.environ.get("LTX_Q8_LOCAL", str(ROOT / "mlx_models/ltx-2.3-mlx-q8")))
+Q8_LOCAL_PATH = Path(os.environ.get("LTX_Q8_LOCAL", str(MODELS_DIR / "ltx-2.3-mlx-q8")))
 COMFY_PATTERN = os.environ.get("LTX_COMFY_PATTERN", "pinokio/api/comfy.git.*main\\.py")
 # State files (queue + hidden + settings) live in <ROOT>/state/, which
 # Pinokio's fs.link maps to a virtual drive that survives Reset. The
@@ -2170,7 +2188,8 @@ def update_settings(patch: dict) -> tuple[dict, str | None]:
 #    preview thumbnail, source). The CivitAI browser writes these sidecars
 #    automatically when it downloads a LoRA.
 
-LORAS_DIR = ROOT / "mlx_models" / "loras"
+# Under MODELS_DIR like every other weight (== ROOT/mlx_models under Pinokio).
+LORAS_DIR = MODELS_DIR / "loras"
 
 # Curated Lightricks LoRAs. Keyed by short id; the UI exposes these next to
 # user-installed LoRAs in the picker, with `is_curated: true` so the front
@@ -3802,10 +3821,13 @@ def _h3_install_turbo(push_log, download_fn=None, embedder_fn=None) -> dict:
                          + "; ".join(paths["missing"])}
     if not h3_supports_lora():
         return {"ok": False,
-                "error": "This Hailuo H3 checkout predates Turbo (no --lora "
-                         "support in its runner). Re-run 'Install Hailuo H3' "
-                         "from the Phosphene sidebar in Pinokio to update the "
-                         "clone — it keeps every weight already on disk."}
+                "error": _dist.say(
+                    "This Hailuo H3 checkout predates Turbo (no --lora "
+                    "support in its runner). Re-run 'Install Hailuo H3' "
+                    "from the Phosphene sidebar in Pinokio to update the "
+                    "clone — it keeps every weight already on disk.",
+                    "This Hailuo H3 runner predates Turbo. Updating the "
+                    "runner isn't available in the Mac app yet.")}
     target = _h3_turbo_dir()
     if any((target / f).is_file() for f, _v, _fb in H3_TURBO_LORA_CANDIDATES):
         # The adapter is here; an install from before the adaLN companion came
@@ -4894,6 +4916,46 @@ def _read_local_version() -> str | None:
         return None
 
 
+#: The commit a release TARBALL was built from. The tracked file holds the
+#: literal git placeholder; `git archive` (GitHub's tarballs and the Pro bundle
+#: builder alike) substitutes the real SHA through `.gitattributes`
+#: export-subst. A git checkout keeps the placeholder and reads git instead.
+BUNDLE_COMMIT_FILE = ".phosphene_commit"
+
+
+def _read_bundle_commit() -> str | None:
+    """The 40-hex SHA of the code a release tarball holds, or None.
+
+    The Mac app sets PHOSPHENE_PANEL_COMMIT (the tag it unpacked) and that
+    wins under mac-app; otherwise BUNDLE_COMMIT_FILE. The Mac app installs the
+    panel from a tarball: no .git, so the version pill used to read
+    "4.19.6 · (unknown)". The placeholder a checkout carries (`$Format:%H$`)
+    and anything else that is not a SHA read as None."""
+    if _dist.is_mac_app():
+        env_sha = (os.environ.get("PHOSPHENE_PANEL_COMMIT") or "").strip().lower()
+        if re.fullmatch(r"[0-9a-f]{40}", env_sha):
+            return env_sha
+    try:
+        raw = (ROOT / BUNDLE_COMMIT_FILE).read_text(encoding="utf-8",
+                                                     errors="replace").strip()
+    except OSError:
+        return None
+    raw = raw.lower()
+    return raw if re.fullmatch(r"[0-9a-f]{40}", raw) else None
+
+
+def _root_is_checkout() -> bool:
+    """True when the panel's own folder is a git checkout (a .git dir, or the
+    .git FILE of a worktree). A tarball install is not one - and `git
+    rev-parse` run there would walk UP and answer for whatever repo happens
+    to contain the folder, naming a build this panel is not (a sandbox under
+    the app's repo showed "4.19.8 · alpha/0.3"). Inside the Mac app the app
+    names the commit (PHOSPHENE_PANEL_COMMIT), so git is not asked at all."""
+    if _dist.is_mac_app() and _read_bundle_commit():
+        return False
+    return (ROOT / ".git").exists()
+
+
 def _fetch_raw_text(url: str, timeout: int = 10) -> str | None:
     """GET a public URL and return its body as a stripped string, or None
     on any error. Used for the raw VERSION-file fetch from origin/main on
@@ -4966,9 +5028,13 @@ def _capture_boot_head() -> None:
         _BOOT_VERSION = _read_local_version()
     if _BOOT_HEAD_SHA is not None:
         return
-    sha = _git_capture(["rev-parse", "HEAD"])
+    sha = _git_capture(["rev-parse", "HEAD"]) if _root_is_checkout() else None
     if not sha:
-        return                      # not a checkout — the SHA fields stay None
+        # A release tarball (the Mac app's install): no git, but the commit it
+        # was cut from is in BUNDLE_COMMIT_FILE. No branch, no date - the pill
+        # names the version and the short SHA, which is the whole answer.
+        _BOOT_HEAD_SHA = _read_bundle_commit()
+        return                      # not a checkout — branch/date stay None
     _BOOT_HEAD_SHA = sha
     _BOOT_BRANCH = _git_capture(["rev-parse", "--abbrev-ref", "HEAD"])
     _BOOT_COMMIT_DATE = _git_capture(
@@ -5024,8 +5090,10 @@ def _detect_local_install_state() -> None:
     doesn't change while the panel is running (no auto-pull on the user's
     behalf). Pinokio's Update step kills + restarts the panel, so a fresh
     detect runs after every Update."""
-    sha = _git_capture(["rev-parse", "HEAD"])
-    branch = _git_capture(["rev-parse", "--abbrev-ref", "HEAD"]) or "(unknown)"
+    checkout = _root_is_checkout()
+    sha = _git_capture(["rev-parse", "HEAD"]) if checkout else None
+    branch = (_git_capture(["rev-parse", "--abbrev-ref", "HEAD"]) if checkout
+              else None) or "(unknown)"
     # `git status --porcelain -uno` empty = no MODIFIED TRACKED files.
     #
     # -uno (untracked-files=no) is load-bearing, not a tidy-up. Plain
@@ -5043,7 +5111,7 @@ def _detect_local_install_state() -> None:
     # one case where an untracked file DOES matter — an incoming commit
     # adding a file at the same path — git refuses on its own, and that
     # error is surfaced verbatim by the /version/pull handler.
-    porcelain = _git_capture(["status", "--porcelain", "-uno"])
+    porcelain = _git_capture(["status", "--porcelain", "-uno"]) if checkout else None
     dirty = bool(porcelain and porcelain.strip())
     local_version = _read_local_version()
     # 2026-05-21 — capture HEAD commit date so the dev pill can show
@@ -5053,8 +5121,13 @@ def _detect_local_install_state() -> None:
     # had pulled fresh code. Showing the commit date alongside the
     # short SHA lets us tell them concretely "you're on the May 18
     # build — please pull again, latest is May 21."
-    local_commit_date = _git_capture(["log", "-1", "--format=%cd",
-                                       "--date=format:%Y-%m-%d"])
+    local_commit_date = (_git_capture(["log", "-1", "--format=%cd",
+                                        "--date=format:%Y-%m-%d"])
+                         if checkout else None)
+    if not sha:
+        sha = _read_bundle_commit()     # a release tarball names its commit
+        if sha:
+            branch = None
     with _VERSION_LOCK:
         _VERSION_STATE["local_sha"] = sha
         _VERSION_STATE["local_short"] = sha[:7] if sha else None
@@ -5064,8 +5137,14 @@ def _detect_local_install_state() -> None:
         _VERSION_STATE["local_dirty"] = dirty
         # Suppress remote checks when the user is clearly running their own
         # variant — we'd be wrong to nag them about being "behind."
-        if not VERSION_CHECK_ENABLED:
+        if _dist.is_mac_app():
+            # The Mac app updates the studio itself (Sparkle + a new tarball);
+            # there is no checkout to pull and nothing to poll GitHub for.
+            _VERSION_STATE["suppress_reason"] = "updates come from the Phosphene app"
+        elif not VERSION_CHECK_ENABLED:
             _VERSION_STATE["suppress_reason"] = "disabled by PHOSPHENE_DISABLE_VERSION_CHECK"
+        elif not checkout:
+            _VERSION_STATE["suppress_reason"] = "not a git checkout"
         elif not sha:
             _VERSION_STATE["suppress_reason"] = "not a git checkout"
         elif branch != "main":
@@ -5289,7 +5368,8 @@ def get_version_state() -> dict:
     with _VERSION_LOCK:
         snap = dict(_VERSION_STATE)
     boot = boot_build_stamp()
-    disk_sha = _git_capture(["rev-parse", "HEAD"])
+    disk_sha = (_git_capture(["rev-parse", "HEAD"]) if _root_is_checkout()
+                else _read_bundle_commit())
     # The header stamp answers exactly one question — what code is this
     # process running — so it is answered from the boot snapshot or not at
     # all. Never snap["local_*"]: that agrees with disk within one poll.
@@ -5308,6 +5388,9 @@ def get_version_state() -> dict:
     snap["stale_process"] = bool(
         disk_sha and boot["sha"] and disk_sha != boot["sha"])
     snap["post_update"] = post_update_status()
+    # Where this panel runs: the page's pill defers to the app's own updater
+    # under the Mac app (app_updates) and shows the edition label.
+    snap.update(_dist.info())
     return snap
 
 
@@ -5546,11 +5629,94 @@ def _repos() -> list[dict]:
     return list(_REQUIRED.get("repos", []))
 
 
+def repo_dir(repo: dict) -> Path:
+    """Where one required_files.json repo lives on disk.
+
+    The manifest says `mlx_models/<dir>` (relative to the install), and every
+    panel path for weights hangs off MODELS_DIR (LTX_MODELS_DIR). Those two
+    agree under Pinokio, whose start.js sets LTX_MODELS_DIR to
+    `<install>/mlx_models`. The Mac app keeps its models OUTSIDE the
+    versioned code folder (so an update unpacks new code next to the same
+    data) - and a check that walked ROOT/<local_dir> reported "Base models
+    needed ... (5 files left)" over a working install, and downloaded into
+    a folder the renders never read. One resolver, used by the check, the
+    downloader, Repair and the Storage view alike."""
+    local = str(repo.get("local_dir") or "")
+    parts = Path(local).parts
+    if (parts and parts[0] == "mlx_models" and not Path(local).is_absolute()
+            and MODELS_DIR != _DEFAULT_MODELS_DIR):
+        return MODELS_DIR.joinpath(*parts[1:])
+    # The default layout (Pinokio: LTX_MODELS_DIR is <install>/mlx_models):
+    # exactly the path this has always been.
+    return ROOT / local
+
+
+# ---- The Mac app's own model download (CONTRACTS.md, "models later") ------
+# The app opens the studio with the engine only and fetches the draft set in
+# the background with scripts/fetch_pack_release.py, writing its progress to
+# <LTX_STATE_DIR>/app_models.json (every <= 5 s while downloading). Two
+# fetchers writing one pack folder is not safe, so while the app holds a pack
+# the panel offers no Download for it, refuses one, and its own background
+# fetcher skips it. Pinokio never writes the file and never reads it.
+APP_MODELS_FILE = "app_models.json"
+APP_MODELS_ACTIVE = ("downloading", "paused")
+#: A "downloading" file this much older than its last rewrite is a crashed
+#: app, not a download: the panel's own buttons come back.
+APP_MODELS_STALE_SEC = 120
+
+
+def app_models_state() -> dict | None:
+    """The app's download state, mac-app only; None when there is none."""
+    if not _dist.is_mac_app():
+        return None
+    path = STATE_DIR / APP_MODELS_FILE
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        age = time.time() - path.stat().st_mtime
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    state = str(raw.get("state") or "idle")
+    packs = [str(x) for x in (raw.get("packs") or []) if isinstance(x, str)]
+    def _n(v):
+        try:
+            return max(0, int(v))
+        except (TypeError, ValueError):
+            return 0
+    active = state in APP_MODELS_ACTIVE and not (
+        state == "downloading" and age > APP_MODELS_STALE_SEC)
+    return {"state": state, "packs": packs, "active": active,
+            "done_bytes": _n(raw.get("done_bytes")),
+            "total_bytes": _n(raw.get("total_bytes"))}
+
+
+def app_models_owns(repo: dict | None, st: dict | None = None) -> bool:
+    """True while the Mac app is downloading (or has paused) this pack."""
+    if not repo:
+        return False
+    st = st if st is not None else app_models_state()
+    if not st or not st["active"]:
+        return False
+    return repo_dir(repo).name in st["packs"] or Path(
+        str(repo.get("local_dir") or "")).name in st["packs"]
+
+
+def _plan_repo(repo: dict | None) -> dict:
+    """The repo with an ABSOLUTE local_dir, for install_plan's root-relative
+    helpers (install_plan also runs under install.js, where ROOT is right)."""
+    if not repo:
+        return {}
+    out = dict(repo)
+    out["local_dir"] = str(repo_dir(repo))
+    return out
+
+
 def _repo_missing(repo: dict) -> list[str]:
     """Files missing or zero-byte for one repo, expressed as bare filenames
     (relative to the repo's local_dir). Bare names are friendlier in the UI
     than full paths."""
-    base = ROOT / repo["local_dir"]
+    base = repo_dir(repo)
     missing = []
     for fname in repo.get("files", []):
         p = base / fname
@@ -6448,7 +6614,7 @@ def storage_rows() -> list[dict]:
     # rather than delete it and file a bug.
     gemma3 = next((r for r in _repos() if r.get("key") == "gemma"), None)
     if gemma3:
-        base = ROOT / gemma3["local_dir"]
+        base = repo_dir(gemma3)
         nbytes = _dir_size_bytes(base)
         if nbytes:
             rows.append({
@@ -6645,7 +6811,7 @@ def _placement_dirs() -> list[tuple[dict, Path]]:
     exists on disk. Honors the LTX_Q8_LOCAL override the rest of the panel uses."""
     out = []
     for r in _repos():
-        base = Q8_LOCAL_PATH if r.get("key") == "q8" else (ROOT / r["local_dir"])
+        base = Q8_LOCAL_PATH if r.get("key") == "q8" else repo_dir(r)
         try:
             if base.is_dir():
                 out.append((r, base))
@@ -6873,7 +7039,7 @@ def _model_integrity(force: bool = False) -> dict:
     for r in snap:
         if not r.get("complete"):
             continue  # a missing model is the download flow's job, not integrity's
-        base = Path(r.get("location") or (ROOT / r["local_dir"]))
+        base = Path(r.get("location") or repo_dir(r))
         for fname in defs.get(r["key"], {}).get("files", []):
             if not fname.endswith(".safetensors"):
                 continue
@@ -7002,8 +7168,10 @@ def _output_codec_report() -> dict:
         _OUTPUT_CODEC_CACHE["warned_key"] = key
         push("[codec-audit] OUTPUT CODEC MISMATCH on "
              f"{report['file']}: {'; '.join(report['problems'])} - the codec "
-             "patch may not be applied (the v3.8.1 class). Click Update in "
-             "Pinokio; if it persists, reinstall.")
+             "patch may not be applied (the v3.8.1 class). "
+             + _dist.say("Click Update in Pinokio; if it persists, reinstall.",
+                         "Use Phosphene \u2192 Check for Updates\u2026; if it "
+                         "persists, use Help \u2192 Report a Bug\u2026"))
     _OUTPUT_CODEC_CACHE["key"] = key
     _OUTPUT_CODEC_CACHE["report"] = report
     return report
@@ -7156,7 +7324,7 @@ def _deep_verify_thread() -> None:
                 continue
             repo_def = defs.get(r["key"], {})
             repo_id = repo_def.get("repo_id", "")
-            base = Path(r.get("location") or (ROOT / r["local_dir"]))
+            base = Path(r.get("location") or repo_dir(r))
             # Expected hashes come from whichever source the registry
             # declares for this pack: HuggingFace LFS metadata (every 2.3
             # pack, unchanged) or the pack's own manifest (a mirrored pack
@@ -7202,7 +7370,7 @@ def _deep_verify_thread() -> None:
         for r in _repos():
             repo_id = r.get("repo_id", "")
             _q = _quant_for_repo_key(r.get("key"))
-            base = pack_path(_q) if _q else (ROOT / r["local_dir"])
+            base = pack_path(_q) if _q else repo_dir(r)
             if not any(_placed_size(base / f) for f in r.get("files", [])):
                 continue                # not installed here — don't ask upstream
             for fname, m in _expected_meta(r.get("key"), repo_id, base).items():
@@ -7333,7 +7501,7 @@ def _download_thread(repo: dict) -> str:
     cancel-by-killing-the-process-group are all shared, because the alternative
     is a second downloader that drifts from this one."""
     repo_id = repo["repo_id"]
-    target = ROOT / repo["local_dir"]
+    target = repo_dir(repo)
     target.mkdir(parents=True, exist_ok=True)
     mirror = repo.get("mirror") or {}
     is_release_mirror = mirror.get("kind") == "github-release"
@@ -7577,7 +7745,7 @@ def deferred_pack_state(key: str) -> str:
             return "downloading"
     if key in deferred_pending_keys():
         free = install_plan.free_bytes(ROOT)
-        left = (install_plan.remaining_bytes(ROOT, repo or {}, _MIN_FILE_BYTES)
+        left = (install_plan.remaining_bytes(ROOT, _plan_repo(repo), _MIN_FILE_BYTES)
                 + install_plan.peak_overhead(repo or {}))
         if free is not None and free < left + _deferred_floor_bytes():
             return "waiting_disk"
@@ -7590,7 +7758,7 @@ def deferred_status() -> dict:
     rows = []
     for k in deferred_pending_keys():
         repo = _deferred_repo(k) or {}
-        left = install_plan.remaining_bytes(ROOT, repo, _MIN_FILE_BYTES)
+        left = install_plan.remaining_bytes(ROOT, _plan_repo(repo), _MIN_FILE_BYTES)
         rows.append({"key": k, "name": repo.get("name") or k,
                      "size_gb": round(install_plan.expected_bytes(repo) / 1e9, 2),
                      "left_gb": round(left / 1e9, 2)})
@@ -7607,6 +7775,7 @@ def deferred_fetch_step() -> float | None:
     next pass, or None when there is nothing left to do this boot."""
     keys = deferred_marker_keys()
     live = []
+    app_st = app_models_state()
     for k in keys:
         repo = _deferred_repo(k)
         if repo is not None and _deferred_missing(repo):
@@ -7614,6 +7783,9 @@ def deferred_fetch_step() -> float | None:
         else:
             # Landed (or got there another way - a click, an Update): done.
             install_plan.drop_from_marker(STATE_DIR, k)
+    if live and all(app_models_owns(_deferred_repo(k), app_st) for k in live):
+        return 30.0                 # the Mac app is fetching them: wait it out
+    live = [k for k in live if not app_models_owns(_deferred_repo(k), app_st)]
     if not live:
         _deferred_set(state="done" if keys else "idle", key=None, message="")
         return None
@@ -7638,14 +7810,14 @@ def deferred_fetch_step() -> float | None:
     # nearly full 256 GB Mac) must not hold back the small ones behind it.
     key = None
     for k in ready_now:
-        left = install_plan.remaining_bytes(ROOT, _deferred_repo(k), _MIN_FILE_BYTES)
+        left = install_plan.remaining_bytes(ROOT, _plan_repo(_deferred_repo(k)), _MIN_FILE_BYTES)
         left += install_plan.peak_overhead(_deferred_repo(k))
         if free is None or free >= left + floor:
             key = k
             break
     if key is None:
         first = _deferred_repo(ready_now[0])
-        left = install_plan.remaining_bytes(ROOT, first, _MIN_FILE_BYTES)
+        left = install_plan.remaining_bytes(ROOT, _plan_repo(first), _MIN_FILE_BYTES)
         _deferred_set(state="waiting_disk", key=ready_now[0], message=(
             f"Paused: {first.get('name') or ready_now[0]} needs {install_plan.fmt_gb(left)} and "
             f"Phosphene keeps {install_plan.fmt_gb(floor)} free for your renders - this "
@@ -7653,13 +7825,16 @@ def deferred_fetch_step() -> float | None:
             f"{install_plan.fmt_gb(left + floor - free)} and it carries on by itself."))
         return DEFERRED_DISK_RECHECK_SEC
     repo = _deferred_repo(key)
-    left = install_plan.remaining_bytes(ROOT, repo, _MIN_FILE_BYTES)
+    left = install_plan.remaining_bytes(ROOT, _plan_repo(repo), _MIN_FILE_BYTES)
     is_mirror = ((repo.get("mirror") or {}).get("kind") == "github-release")
     if HF_BIN is None and not is_mirror:
         with DEFERRED_LOCK:
             DEFERRED["failures"][key] = DEFERRED_MAX_FAILURES
         _deferred_set(state="failed", key=key,
-                      message="The hf downloader is missing - click Update in Pinokio.")
+                      message=_dist.say(
+                          "The hf downloader is missing - click Update in Pinokio.",
+                          "The hf downloader is missing - quit Phosphene and "
+                          "open it again to rerun setup."))
         return 1.0
     with DOWNLOAD_LOCK:
         if DOWNLOAD["active"]:
@@ -7741,7 +7916,7 @@ def pack_needed_payload(key: str, feature: str, what: str) -> dict:
     elif state == "waiting_disk":
         free = install_plan.free_bytes(ROOT) or 0
         floor = _deferred_floor_bytes()
-        left = (install_plan.remaining_bytes(ROOT, repo, _MIN_FILE_BYTES)
+        left = (install_plan.remaining_bytes(ROOT, _plan_repo(repo), _MIN_FILE_BYTES)
                 + install_plan.peak_overhead(repo))
         msg = (f"{feature} needs {what} ({size}). Its background download is paused: "
                f"Phosphene keeps {install_plan.fmt_gb(floor)} free for your renders and this "
@@ -7763,7 +7938,7 @@ def _gemma3_missing_at(path: Path) -> bool:
     config.json, which every mlx-lm model folder has."""
     try:
         repo = _deferred_repo("gemma")
-        if repo is not None and Path(path).resolve() == (ROOT / repo["local_dir"]).resolve():
+        if repo is not None and Path(path).resolve() == repo_dir(repo).resolve():
             return _deferred_missing(repo)
         return not (Path(path) / "config.json").is_file()
     except OSError:
@@ -7788,7 +7963,7 @@ def gemma3_refusal(feature: str, what: str, path) -> dict:
     into the default folder would not help - say which setting points where."""
     repo = _deferred_repo("gemma")
     try:
-        default = repo is not None and Path(path).resolve() == (ROOT / repo["local_dir"]).resolve()
+        default = repo is not None and Path(path).resolve() == repo_dir(repo).resolve()
     except OSError:
         default = False
     if default:
@@ -9006,9 +9181,12 @@ H3_TIER_CHAIN_NOTE = ("Every 5 s window is asked for the same prompt, so a "
 H3_TIER_CHAIN_NOTE_LEGACY = ("Scripted dialogue repeats once per 5 s window — "
                              "put dialogue cues late in the prompt. Per-window "
                              "prompts need `--chain-prompts` on the installed "
-                             "H3 runner; re-run 'Install Hailuo H3' from the "
-                             "Phosphene sidebar to update the clone (weights "
-                             "stay).")
+                             "H3 runner; " + _dist.say(
+                                 "re-run 'Install Hailuo H3' from the "
+                                 "Phosphene sidebar to update the clone (weights "
+                                 "stay).",
+                                 "updating that runner isn't available in the "
+                                 "Mac app yet."))
 # The `?` copy for the per-window prompts control. Server-side because the panel
 # already keeps every honest sentence in Python — one place to edit, and the UI
 # can never disagree with the mechanism it is describing.
@@ -10891,9 +11069,10 @@ def h3_cell_gate(cell: dict) -> tuple[bool, str]:
         return (False,
                 f"{cell['length_label']} renders as "
                 f"{cell['chain_windows']} chained 5 s windows, which needs "
-                f"`--chain-windows` on the installed H3 runner. Re-run "
-                f"'Install Hailuo H3' from the Phosphene sidebar to update the "
-                f"clone — your weights stay.")
+                f"`--chain-windows` on the installed H3 runner. " + _dist.say(
+                    "Re-run 'Install Hailuo H3' from the Phosphene sidebar to "
+                    "update the clone — your weights stay.",
+                    "Updating the Hailuo H3 runner isn't available in the Mac app yet."))
     if cell.get("fast_hd"):
         if cell.get("dense"):
             return (False, "Fast HD is built from 5 s windows; pick 3s, 5s, 10s or 15s.")
@@ -12768,6 +12947,13 @@ H3_MLX_REPAIR = (
 #: venv with old packages reads as ready, so the menu showed "Update Hailuo H3
 #: runner" instead and the sentence sent people looking for a missing button.
 H3_ENV_REPAIR = H3_MLX_REPAIR
+#: The same, inside the Mac app (no Pinokio sidebar there).
+H3_ENV_REPAIR_MAC = (
+    "Press Repair Hailuo H3 on this card - it re-installs only that venv's "
+    "Python packages, at the set this release was tested with (about a "
+    "minute, every weight kept). LTX renders are unaffected — the two "
+    "engines keep separate venvs for this exact reason."
+)
 
 
 # --- THE H3 VENV'S KNOWN-GOOD SET (4.19.5) ----------------------------------
@@ -12984,8 +13170,10 @@ def h3_env_repair_start() -> tuple[int, dict]:
     subprocess), so this is safe with the panel up - but not under a running
     H3 render, which has that venv's packages open."""
     if _h3_python() is None:
-        return 409, {"error": "Hailuo H3 is not installed here - install it "
-                              "from the Pinokio sidebar first."}
+        return 409, {"error": _dist.say(
+            "Hailuo H3 is not installed here - install it "
+            "from the Pinokio sidebar first.",
+            "Hailuo H3 isn't available in the Mac app yet.")}
     if _h3_deps_running():
         return 409, {"error": "H3's packages are already being installed "
                               "(Install, Update or a repair) - this clears "
@@ -13295,6 +13483,14 @@ def h3_size_note() -> str:
             f"bf16 engine) · MiniMax H3 Community License (not valid in the EU, UK, South Korea or US)")
 
 
+def _h3_q8_lane_mac(ram: str) -> str:
+    """h3_ram_verdict's Q8-lane sentence inside the Mac app: it can run here,
+    but the app cannot install, repair or build H3 yet."""
+    return (f"Hailuo H3 can run on this Mac on its reduced-RAM lane (the "
+            f"compact Q8 engine needs {H3_MIN_RAM_GB_Q8:.0f} GB; {ram}), but "
+            f"it isn't available in the Mac app yet. Render on LTX.")
+
+
 def h3_ram_verdict() -> dict:
     """What this Mac's memory says about H3 — and, when it says no, WHY and
     WHAT TO DO. Three bands, and only one of them is a dead end.
@@ -13354,20 +13550,20 @@ def h3_ram_verdict() -> dict:
             return {
                 "lane": "q8", "blocked": True, "needs_q8_dit": True,
                 "floor_gb": H3_MIN_RAM_GB_Q8,
-                "message": (
+                "message": _dist.say((
                     f"Hailuo H3 runs on this Mac — on its reduced-RAM lane, "
                     f"the compact Q8 engine, which needs "
                     f"{H3_MIN_RAM_GB_Q8:.0f} GB ({ram}). Its weights are on "
                     f"disk but the engine needs repair: in Pinokio, open "
                     f"Phosphene in the sidebar and click "
                     f"'{H3_REPAIR_MENU_TEXT}'. That also builds the compact "
-                    f"engine (about 5 minutes). Render on LTX until then."),
+                    f"engine (about 5 minutes). Render on LTX until then."), _h3_q8_lane_mac(ram)),
             }
         if _p["missing"]:
             return {
                 "lane": "q8", "blocked": True, "needs_q8_dit": True,
                 "floor_gb": H3_MIN_RAM_GB_Q8,
-                "message": (
+                "message": _dist.say((
                     f"Hailuo H3 runs on this Mac — on its reduced-RAM lane, "
                     f"the compact Q8 engine, which needs "
                     f"{H3_MIN_RAM_GB_Q8:.0f} GB ({ram}). It is not installed "
@@ -13375,12 +13571,12 @@ def h3_ram_verdict() -> dict:
                     f"'{H3_INSTALL_MENU_TEXT}'. The install downloads what "
                     f"is missing of ~75 GB and builds the compact engine at "
                     f"the end (about 5 more minutes). Render on LTX until "
-                    f"then."),
+                    f"then."), _h3_q8_lane_mac(ram)),
             }
         return {
             "lane": "q8", "blocked": True, "needs_q8_dit": True,
             "floor_gb": H3_MIN_RAM_GB_Q8,
-            "message": (
+            "message": _dist.say((
                 f"Hailuo H3 runs on this Mac — on its reduced-RAM lane. The "
                 f"bf16 engine needs {H3_MIN_RAM_GB:.0f} GB and "
                 f"{ram}, but the Q8 engine's floor is "
@@ -13388,7 +13584,7 @@ def h3_ram_verdict() -> dict:
                 f"In Pinokio, open Phosphene in the sidebar and click "
                 f"'{H3_BUILD_MENU_TEXT}' — it builds that engine locally "
                 f"(~5 minutes, ~22 GB on disk, no extra download) and skips "
-                f"everything already present. Render on LTX until then."),
+                f"everything already present. Render on LTX until then."), _h3_q8_lane_mac(ram)),
         }
     return {
         "lane": None, "blocked": True, "needs_q8_dit": False,
@@ -13419,7 +13615,7 @@ def h3_reference_image_error(src: Path) -> str:
     except ImportError as exc:
         return (f"The engine venv is not usable: it cannot load Pillow "
                 f"({exc.__class__.__name__}), so no image can be read. "
-                + ENGINE_ENV_REPAIR)
+                + _dist.say(ENGINE_ENV_REPAIR, ENGINE_ENV_REPAIR_MAC))
     try:
         with _PilImg.open(src):
             pass
@@ -13499,9 +13695,10 @@ def _h3_runner_behind(flag: str, runner: str | Path, remedy: str = "") -> str:
     """The message for a render that needs a runner flag this clone lacks."""
     tail = f" {remedy}" if remedy else ""
     return (
-        f"{H3_RUNNER_BEHIND}: it has no `{flag}` ({runner}). Re-run "
-        f"'Install Hailuo H3' from the Phosphene sidebar to update the clone "
-        f"— every weight already on disk is kept.{tail}"
+        f"{H3_RUNNER_BEHIND}: it has no `{flag}` ({runner}). " + _dist.say(
+            "Re-run 'Install Hailuo H3' from the Phosphene sidebar to update "
+            "the clone — every weight already on disk is kept.",
+            "Updating the Hailuo H3 runner isn't available in the Mac app yet.") + tail
     )
 
 
@@ -14005,10 +14202,13 @@ def _h3_install_tristep(push_log, download_fn=None) -> dict:
                          + "; ".join(paths["missing"])}
     if not h3_supports_sigma_subset():
         return {"ok": False,
-                "error": "This Hailuo H3 runner predates Fast (3 steps) "
-                         "(no --sigma-subset). Run 'Update Hailuo H3 runner' "
-                         "from the Phosphene sidebar in Pinokio — your weights "
-                         "stay."}
+                "error": _dist.say(
+                    "This Hailuo H3 runner predates Fast (3 steps) "
+                    "(no --sigma-subset). Run 'Update Hailuo H3 runner' "
+                    "from the Phosphene sidebar in Pinokio — your weights "
+                    "stay.",
+                    "This Hailuo H3 runner predates Fast (3 steps). Updating "
+                    "the runner isn't available in the Mac app yet.")}
     resolved = h3_tristep_paths()
     target = resolved["dir"]
     if resolved["files_ok"]:
@@ -15867,10 +16067,14 @@ def h3_status() -> dict:
                 else "missing_decoder"),
             "note": (
                 "" if (available and h3_live_preview_ready())
-                else ("This Hailuo H3 pack predates the live preview. "
-                      "Run \'Update Hailuo H3 runner\' from the Phosphene "
-                      "sidebar in Pinokio — your weights stay. Renders are "
-                      "unaffected meanwhile.")
+                else _dist.say(
+                    "This Hailuo H3 pack predates the live preview. "
+                    "Run \'Update Hailuo H3 runner\' from the Phosphene "
+                    "sidebar in Pinokio — your weights stay. Renders are "
+                    "unaffected meanwhile.",
+                    "This Hailuo H3 pack predates the live preview. Updating "
+                    "the runner isn't available in the Mac app yet. Renders "
+                    "are unaffected.")
                 if (available and not h3_supports_live_preview()) else ""),
         },
         # Turbo — the 4-step distill LoRA. A separate block rather than a bare
@@ -16490,7 +16694,8 @@ def music_install_start(kind: str = "install") -> tuple[int, dict]:
                               "error": None, "pgid": None,
                               "log": collections.deque(maxlen=60)})
     threading.Thread(target=_music_install_thread, daemon=True, name="music-install").start()
-    push("[music-install] started from the panel (same steps as the Pinokio sidebar entry)")
+    push(_dist.say("[music-install] started from the panel (same steps as the Pinokio sidebar entry)",
+                   "[music-install] started from the studio"))
     return 202, {"ok": True, "started": True}
 
 
@@ -16573,8 +16778,11 @@ def _music_install_thread() -> None:
             if key == "clone" or key == "sync" or key == "venv":
                 missing_tool = next((t for t in ("uv", "git") if shutil.which(t, path=env["PATH"]) is None), None)
                 if missing_tool:
-                    error = (f"'{missing_tool}' was not found, so the panel cannot run this step. "
-                             "Use “Install the music engine” in the Phosphene sidebar in Pinokio instead.")
+                    error = _dist.say(
+                        f"'{missing_tool}' was not found, so the panel cannot run this step. "
+                        "Use “Install the music engine” in the Phosphene sidebar in Pinokio instead.",
+                        f"'{missing_tool}' was not found, so Phosphene can't run this step. "
+                        "Quit Phosphene and open it again to rerun setup, then try again.")
                     break
             reason = next((l for l in reversed(tail) if not l.startswith(("+", "Traceback"))), "")
             # The scripts end a failure with "FATAL error: <reason + next click>"
@@ -16963,8 +17171,8 @@ def run_music_job_inner(job: dict) -> None:
     if paths["missing"]:
         missing = "; ".join(paths["missing"])
         if paths["repairable"]:
-            raise RuntimeError(f"The YuE2 weights are on disk but the engine needs repair — missing: {missing}. Open Audio → Compose and click 'Repair music engine' (or use the Phosphene sidebar in Pinokio) — it is idempotent and skips every weight already on disk, so this is a couple of minutes, NOT an 11 GB download.")
-        raise RuntimeError(f"The music engine isn't installed — missing: {missing}. Open Audio → Compose and click 'Install music engine' (or use the Phosphene sidebar in Pinokio) — ~11 GB, resumable.")
+            raise RuntimeError(f"The YuE2 weights are on disk but the engine needs repair — missing: {missing}. Open Audio → Compose and click 'Repair music engine'" + _dist.say(" (or use the Phosphene sidebar in Pinokio)", "") + " — it is idempotent and skips every weight already on disk, so this is a couple of minutes, NOT an 11 GB download.")
+        raise RuntimeError(f"The music engine isn't installed — missing: {missing}. Open Audio → Compose and click 'Install music engine'" + _dist.say(" (or use the Phosphene sidebar in Pinokio)", "") + " — ~11 GB, resumable.")
     if (not p["music_style"] and not p["music_lyrics"] and not p["music_instrumental"]
             and p["music_variation"] not in ("take", "sound", "score")):
         raise RenderRefused("music_input", "Give it something to work with — lyrics, a style description, or both.")
@@ -21350,7 +21558,7 @@ class WarmHelper:
             fault = engine_env_fault()
             if fault:
                 raise RuntimeError(f"engine venv is not usable: {fault}. "
-                                   f"{ENGINE_ENV_REPAIR}")
+                                   f"{_dist.say(ENGINE_ENV_REPAIR, ENGINE_ENV_REPAIR_MAC)}")
             busy = engine_env_busy()
             if busy:
                 raise RuntimeError(f"Not started: {busy}. Press Retry then.")
@@ -30644,9 +30852,13 @@ def _helper_start_failure(ready: dict | None, tail) -> str:
     msg = f"helper failed to start: {what}"
     if cause:
         msg += f" — last line: {cause[:220]}"
-    msg += (". This is nearly always the install, not the render: click Update "
-            "in Pinokio (or reinstall Phosphene) so the ltx-2-mlx folder and "
-            "its Python environment are rebuilt. The whole trace is in Logs.")
+    msg += _dist.say(
+        ". This is nearly always the install, not the render: click Update "
+        "in Pinokio (or reinstall Phosphene) so the ltx-2-mlx folder and "
+        "its Python environment are rebuilt. The whole trace is in Logs.",
+        ". This is nearly always the install, not the render: quit Phosphene "
+        "and open it again so setup can check and rebuild the engine. The "
+        "whole trace is in Logs.")
     return msg
 
 
@@ -32094,9 +32306,13 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             # A mode the INSTALLED runner predates: render it on LTX with a
             # sentence rather than queue an argparse failure. (Add sound has no
             # LTX lane; the worker refuses it with the update sentence.)
-            push(f"Hailuo H3 can render {H3_MODE_LABELS.get(mode_in, mode_in)} once "
-                 "its runner is updated (Update in Pinokio, or 'Update Hailuo H3 "
-                 "runner') — rendering this one on LTX.")
+            push(_dist.say(
+                f"Hailuo H3 can render {H3_MODE_LABELS.get(mode_in, mode_in)} once "
+                "its runner is updated (Update in Pinokio, or 'Update Hailuo H3 "
+                "runner') — rendering this one on LTX.",
+                f"Hailuo H3 needs a newer runner to render "
+                f"{H3_MODE_LABELS.get(mode_in, mode_in)}. Updating the runner "
+                "isn't available in the Mac app yet — rendering this one on LTX."))
             _engine = "ltx"
         elif not h3_capable():
             # Same verdict the refusal raises: the floor depends on the lane,
@@ -32183,9 +32399,10 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             # dropped with a sentence, not queued into an argparse failure.
             push("Per-window prompts need `--chain-prompts` on the installed "
                  "H3 runner, which this checkout doesn't have — rendering "
-                 "every window with the main prompt. Re-run 'Install Hailuo "
-                 "H3' from the Phosphene sidebar to update the clone; your "
-                 "weights stay.")
+                 "every window with the main prompt. " + _dist.say(
+                     "Re-run 'Install Hailuo H3' from the Phosphene sidebar to "
+                     "update the clone; your weights stay.",
+                     "Updating the Hailuo H3 runner isn't available in the Mac app yet."))
             _h3_chain_prompts = []
         # Orientation: flip the resolved cell's canvas for vertical work.
         _h3_orientation = (f("h3_orientation", H3_ORIENTATION_DEFAULT)
@@ -35186,10 +35403,12 @@ def run_h3_job_inner(job: dict) -> None:
     # after the whole denoise with "ffmpeg not found on PATH; use save_frames()
     # instead" (fleet, 4.11.1). Say it before spending the minutes.
     if not Path(FFMPEG).is_file():
-        raise RuntimeError(
+        raise RuntimeError(_dist.say(
             f"ffmpeg is not installed where Phosphene looks for it ({FFMPEG}). Pinokio "
             "ships it at ~/pinokio/bin/ffmpeg-env/bin/ffmpeg — reinstall Phosphene from "
-            "the Pinokio sidebar, or set LTX_FFMPEG to your ffmpeg binary.")
+            "the Pinokio sidebar, or set LTX_FFMPEG to your ffmpeg binary.",
+            f"ffmpeg isn't where Phosphene looks for it ({FFMPEG}). Quit Phosphene "
+            "and open it again so setup can find a working video encoder."))
 
     p = job["params"]
     mode = (p.get("mode") or "t2v").strip().lower()
@@ -35209,13 +35428,16 @@ def run_h3_job_inner(job: dict) -> None:
              if paths["repairable"] else
              "The Hailuo H3 pack isn't installed — ")
             + "missing: " + "; ".join(paths["missing"])
-            + (". Click 'Install Hailuo H3' in the Phosphene sidebar in "
-               "Pinokio — it is idempotent and skips every weight already on "
-               "disk, so this is a couple of minutes, NOT a 75 GB download."
-               if paths["repairable"] else
-               ". Install it from the Phosphene sidebar in Pinokio "
-               "('Install Hailuo H3'), or point LTX_H3_ROOT / LTX_H3_MODELS at "
-               "an existing checkout."))
+            + (_dist.say(
+                ". Click 'Install Hailuo H3' in the Phosphene sidebar in "
+                "Pinokio — it is idempotent and skips every weight already on "
+                "disk, so this is a couple of minutes, NOT a 75 GB download.",
+                ". Repairing Hailuo H3 isn't available in the Mac app yet.")
+               if paths["repairable"] else _dist.say(
+                ". Install it from the Phosphene sidebar in Pinokio "
+                "('Install Hailuo H3'), or point LTX_H3_ROOT / LTX_H3_MODELS at "
+                "an existing checkout.",
+                ". Hailuo H3 isn't available in the Mac app yet.")))
     if mode not in H3_MODES:
         raise RenderRefused(
             "h3_mode",
@@ -35298,9 +35520,10 @@ def run_h3_job_inner(job: dict) -> None:
                     push("[h3] per-window prompts need `--chain-prompts` on "
                          f"the installed runner ({paths['runner']}) — "
                          "rendering every window with the main prompt "
-                         "instead. Re-run 'Install Hailuo H3' from the "
-                         "Phosphene sidebar to update the clone; your weights "
-                         "stay.")
+                         "instead. " + _dist.say(
+                             "Re-run 'Install Hailuo H3' from the Phosphene "
+                             "sidebar to update the clone; your weights stay.",
+                             "Updating the Hailuo H3 runner isn't available in the Mac app yet."))
 
     # ---- user LoRA -------------------------------------------------------
     # Resolved BEFORE Turbo, deliberately: the two compete for the runner's one
@@ -35644,7 +35867,8 @@ def run_h3_job_inner(job: dict) -> None:
         raise RuntimeError(f"H3 cannot start: {_h3_busy}.")
     _h3_env = h3_env_fault()
     if _h3_env:
-        raise RuntimeError(f"H3 cannot start: {_h3_env}. {H3_ENV_REPAIR}")
+        raise RuntimeError(f"H3 cannot start: {_h3_env}. "
+                           f"{_dist.say(H3_ENV_REPAIR, H3_ENV_REPAIR_MAC)}")
 
     # ---- memory safety: the warm helper cannot coexist with H3 -----------
     if HELPER.is_alive():
@@ -35849,10 +36073,14 @@ def run_h3_job_inner(job: dict) -> None:
             p["h3_vae_dtype"] = "float16"
             _vae_fp16 = True
         else:
-            push("[h3] This H3 runner predates the faster FP16 video decode — "
-                 "decoding in float32 (same picture, a little slower). Press "
-                 "Update in Pinokio, or \"Update Hailuo H3 runner\" in the "
-                 "sidebar, to get it.")
+            push(_dist.say(
+                "[h3] This H3 runner predates the faster FP16 video decode — "
+                "decoding in float32 (same picture, a little slower). Press "
+                "Update in Pinokio, or \"Update Hailuo H3 runner\" in the "
+                "sidebar, to get it.",
+                "[h3] This H3 runner predates the faster FP16 video decode — "
+                "decoding in float32 (same picture, a little slower). Updating "
+                "the runner isn't available in the Mac app yet."))
 
     push(f"[h3] {tier['label']} · {width}×{height} · {frames}f · "
          f"{steps} sigma points ({steps - 1} forwards) · seed {seed}"
@@ -40114,6 +40342,12 @@ def post_update_start(trigger: str = "update_now") -> tuple[int, dict]:
     """Run post_update.sh in the background once the GPU is free."""
     if not (ROOT / POST_UPDATE_SCRIPT).is_file():
         return 200, {"ok": True, "nothing_to_do": True}
+    if _dist.is_mac_app():
+        # Inside the Mac app the app installs each update as a whole new
+        # tarball and builds its environment itself; post_update.sh is the
+        # Pinokio Update's step and must not touch the app's venv.
+        return 409, {"ok": False, "app_updates": True,
+                     "error": _dist.MAC_APP_UPDATES}
     if not hostinfo.IS_MAC:
         # #94 (Codex 4.19.2): post_update.sh is the Mac step - it pins
         # mlx-metal and runs env/bin/python3.11 - and a Linux install's venv is
@@ -44838,6 +45072,10 @@ def page(theme: str = "") -> str:
     is light — the module that applies Appearance runs after parse."""
     cap_tier = _resolve_cap_tier()
     bootstrap = json.dumps({
+        # Pinokio or the Mac app, and the edition label (distribution.py).
+        # The page picks its Mac-app wording and defers updates to the app
+        # from these; Pinokio reads {"distribution": "pinokio", "edition": ""}.
+        "distribution": _dist.distribution(), "edition": _dist.edition(),
         "presets": PRESETS, "aspects": aspect_presets_for_this_mac(),
         "default_image": str(REFERENCE),
         "default_audio": str(AUDIO_DEFAULT),
@@ -44939,6 +45177,11 @@ def page(theme: str = "") -> str:
     # different panel: a STATE_DIR outside the install root is by definition
     # not the install's own films. Loud badge, and the tab title changes too —
     # a background tab is a title and a favicon and nothing else.
+    # The edition label (PHOSPHENE_EDITION=pro, set by the Mac app). A label
+    # and a CSS hook (body[data-edition]) - no paid code rides on it.
+    if _dist.is_pro():
+        profile_badge += ('<span class="profile-badge edition-badge" '
+                          'title="Phosphene Pro">Pro</span>')
     is_test = not _state_dir_is_native()
     if is_test:
         profile_badge = (
@@ -44972,7 +45215,21 @@ def page(theme: str = "") -> str:
                      html.escape(boot_build_stamp()["version"]
                                  or _read_local_version() or "dev"))
             .replace("__ENGINE_RULES__", _engine_css())
-            .replace("__CAP_TIER__", cap_tier))
+            .replace("__CAP_TIER__", cap_tier)
+            # Mac app only: the distribution/edition hooks on <body>. Pinokio
+            # serves the tag exactly as before.
+            .replace('<body data-cap-tier="' + cap_tier + '"',
+                     '<body data-cap-tier="' + cap_tier + '"' + _dist_body_attrs()))
+
+
+def _dist_body_attrs() -> str:
+    """` data-distribution="mac-app" data-edition="pro"` - only what is set."""
+    out = ""
+    if _dist.is_mac_app():
+        out += ' data-distribution="mac-app"'
+    if _dist.edition():
+        out += f' data-edition="{_dist.edition()}"'
+    return out
 
 
 # The page template lives on disk at webapp/index.html (slice 2 of the
@@ -45014,9 +45271,12 @@ def _diagnose_port_busy(port: int) -> str:
         with _urlreq.urlopen(f"http://127.0.0.1:{port}/version", timeout=1.5) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         v = data.get("local_version") or data.get("local_short") or "?"
-        return (f"another phosphene panel is already running on port {port} "
-                f"(version {v}). Open it at http://127.0.0.1:{port}, or click "
-                f"Stop in Pinokio before clicking Start.")
+        return _dist.say(
+            f"another phosphene panel is already running on port {port} "
+            f"(version {v}). Open it at http://127.0.0.1:{port}, or click "
+            f"Stop in Pinokio before clicking Start.",
+            f"another Phosphene studio is already running on port {port} "
+            f"(version {v}). Quit Phosphene and open it again.")
     except Exception:
         pass
     # Step 2: try lsof to identify whatever process IS listening.
@@ -45094,9 +45354,10 @@ if __name__ == "__main__":
     # separator install already running, not refuse (4.17.4).
     a2v_separator_boot()
     threading.Thread(target=worker_loop, daemon=True).start()
-    if VERSION_CHECK_ENABLED:
+    if VERSION_CHECK_ENABLED and not _dist.is_mac_app():
         threading.Thread(target=version_check_loop, daemon=True).start()
     else:
+        # The Mac app updates the studio itself: no GitHub poll, ever.
         _detect_local_install_state()
     # Repo-stats fetcher — maintainer-only, OPT-IN (PHOSPHENE_STATS_FETCH=1;
     # issue #106: it used to start on every install and borrow the user's
@@ -45183,7 +45444,10 @@ if __name__ == "__main__":
             print(f"  was requested - {_codec.get('file')}: "
                   f"{'; '.join(_codec.get('problems') or [])}", flush=True)
             print("  The codec patch may not be applied (v3.8.1 shipped exactly this,", flush=True)
-            print("  silently). Click Update in Pinokio; if it persists, reinstall.", flush=True)
+            print("  silently). " + _dist.say(
+                "Click Update in Pinokio; if it persists, reinstall.",
+                "Use Phosphene \u2192 Check for Updates\u2026; if it persists, "
+                "use Help \u2192 Report a Bug\u2026"), flush=True)
             print("-" * 64, flush=True)
     except Exception as _ie:  # noqa: BLE001 — never block boot on the scan
         print(f"model integrity scan skipped: {_ie}", flush=True)

@@ -33,6 +33,11 @@ def post_models_download(h, path, qs, ctype) -> None:
     # A GitHub-release-mirrored pack does not go through `hf` at all
     # (scripts/fetch_pack_release.py is stdlib-only), so a missing hf
     # binary must not block the one lane that never needed it.
+    # Mac app: the app is fetching this pack itself (app_models.json). Two
+    # fetchers writing (or a repair deleting) one folder is not safe - refuse.
+    if P.app_models_owns(repo):
+        h._json({"error": "This model is already downloading in the background.",
+                 "app_downloading": True}, 409); return
     if P.HF_BIN is None and (repo.get("mirror") or {}).get("kind") != "github-release":
         h._json({"error": "hf binary not found. Reinstall Phosphene "
                              "or install huggingface_hub>=1.0 in the venv."}, 500); return
@@ -154,7 +159,7 @@ def post_models_remove(h, path, qs, ctype) -> None:
             # three. When the directory is shared, delete exactly this
             # repo's own declared files — the same rule the HQ add-on
             # branch above follows, and for the same reason.
-            p = P.ROOT / repo["local_dir"]
+            p = P.repo_dir(repo)
             shared = sum(1 for o in P._repos()
                          if str(o.get("local_dir")) == str(repo.get("local_dir"))) > 1
             if shared:
@@ -250,6 +255,11 @@ def post_models_repair(h, path, qs, ctype) -> None:
     if not bad:
         h._json({"ok": True, "nothing_to_repair": True,
                     "note": f"no corrupt files detected for {key!r}"}); return
+    # Mac app: the app is fetching this pack itself (app_models.json). Two
+    # fetchers writing (or a repair deleting) one folder is not safe - refuse.
+    if P.app_models_owns(repo):
+        h._json({"error": "This model is already downloading in the background.",
+                 "app_downloading": True}, 409); return
     if P.HF_BIN is None and (repo.get("mirror") or {}).get("kind") != "github-release":
         h._json({"error": "hf binary not found. Reinstall Phosphene."}, 500); return
     # CLAIM THE SLOT FIRST, delete second. This deleted the files and only
@@ -272,10 +282,10 @@ def post_models_repair(h, path, qs, ctype) -> None:
         _dv = P._DEEP_VERIFY.get("result")
         if isinstance(_dv, dict) and _dv.get("bad"):
             _dv["bad"] = [b for b in _dv["bad"] if b.get("repo") != key]
-    target = P.Q8_LOCAL_PATH if key == "q8" else (P.ROOT / repo["local_dir"])
+    target = P.Q8_LOCAL_PATH if key == "q8" else P.repo_dir(repo)
     deleted = []
     for fname in bad:
-        for cand in {P.Path(target) / fname, P.ROOT / repo["local_dir"] / fname}:
+        for cand in {P.Path(target) / fname, P.repo_dir(repo) / fname}:
             try:
                 if cand.exists():
                     cand.unlink()

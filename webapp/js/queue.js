@@ -726,7 +726,8 @@ function setEngine(engine, opts) {
       // 4.19 modes ride on runner flags an older H3 pack does not have.
       target = fallback.id;
       reason = 'This ' + e.label + ' runner predates ' + (H3_MODE_LABEL[currentMode] || currentMode)
-             + ' — press Update in Pinokio (your weights stay). Back on '
+             + distText(' — press Update in Pinokio (your weights stay). Back on ',
+                        '. Updating it isn\u2019t available in the Mac app yet. Back on ')
              + fallback.label + ' for now.';
     }
   }
@@ -1063,11 +1064,12 @@ function openH3InstallCard(source) {
         ${_missing.length ? 'Missing: ' + _missing.map(escapeHtml).join(' · ') : ''}
       </p>
       <p style="margin:0 0 10px">
-        Fix it from Pinokio: open the <b>Phosphene</b> entry in the Pinokio
+        ${distText(`Fix it from Pinokio: open the <b>Phosphene</b> entry in the Pinokio
         sidebar and click <b>“${escapeHtml(fixMenuText)}”</b> (it appears in
         place of the install entry). The step is idempotent — it skips every
         weight already on disk. The panel picks the engine back up within a
-        couple of seconds, no restart.
+        couple of seconds, no restart.`,
+        `Repairing or building Hailuo H3 isn\u2019t available in the Mac app yet. LTX keeps working.`)}
       </p>` : `
       <p style="margin:0 0 10px">
         <b>Hailuo H3 is Phosphene's second video engine</b>, a peer of LTX
@@ -1080,12 +1082,15 @@ function openH3InstallCard(source) {
       <p style="margin:0 0 10px;color:var(--muted)">
         ${escapeHtml(H3.size_note || '')}
       </p>
-      ${H3.ram_lane === 'q8' ? `<p style="margin:0 0 10px">
+      ${H3.ram_lane === 'q8' && !isMacApp() ? `<p style="margin:0 0 10px">
         <b>This Mac runs it.</b> With ${escapeHtml(String(Math.round(H3.ram_gb || 0)))} GB
         of memory, H3 uses its compact Q8 engine, which the install builds by
         itself at the end (about 5 more minutes, nothing extra to download).
       </p>` : ''}
-      <p style="margin:0 0 10px" class="h3-licence-step">
+      ${isMacApp() ? `<p style="margin:0 0 10px">
+        <b>Not in the Mac app yet.</b> Installing Hailuo H3 isn\u2019t available
+        in the Mac app yet. Everything else in Phosphene works without it.
+      </p>` : `<p style="margin:0 0 10px" class="h3-licence-step">
         <b>1. Accept the MiniMax H3 licence.</b> H3's licence does not cover the
         European Union, the United Kingdom, South Korea or the United States,
         and it comes with use restrictions.
@@ -1098,7 +1103,7 @@ function openH3InstallCard(source) {
         <b>“Install Hailuo H3 (second video engine, ~75 GB)”</b>. It is there
         while the panel is running, too. The installer stops until step 1 is
         done. The panel picks H3 up within a couple of seconds — no restart.
-      </p>`;
+      </p>`}`;
     // THE DIAGNOSTIC DUMP GOES BEHIND A DISCLOSURE. `missing` is a list of raw
     // absolute paths — indispensable when an install half-lands, and pure
     // noise the other 99% of the time. Printing it under a two-sentence pitch
@@ -1157,7 +1162,8 @@ function _h3NudgeEngineOffer() {
   // first draft, and it clipped exactly where the instruction lived.
   // H3-39: same "· 75 GB" default the modal title had, wrong whenever this is
   // a build-only or repair nudge — nothing downloads in either case.
-  const nudgeMsg = (H3.reason === 'missing_q8_dit')
+  const nudgeMsg = isMacApp() ? 'Hailuo H3 · not available in the Mac app yet.'
+    : (H3.reason === 'missing_q8_dit')
     ? 'Hailuo H3 · build the compact engine, no download — from the Pinokio sidebar.'
     : H3.repairable
       ? 'Hailuo H3 · repair, no download — from the Pinokio sidebar.'
@@ -2689,11 +2695,13 @@ function _applyOfflineGate(offline) {
   if (!genBtn) return;
   if (offline) {
     genBtn.disabled = true;
-    genBtn.title = "Phosphene can't reach its own server right now — restart it from Pinokio.";
+    genBtn.title = distText("Phosphene can't reach its own server right now — restart it from Pinokio.",
+                            "Phosphene can't reach its own server right now — use Studio \u2192 Restart Engine.");
     genBtn.dataset.offlineBlocked = '1';
     if (note) {
       note.innerHTML = escapeHtml(
-        "Phosphene is offline — restart it from Pinokio before rendering.");
+        distText("Phosphene is offline — restart it from Pinokio before rendering.",
+                 "Phosphene is offline — use Studio \u2192 Restart Engine before rendering."));
       note.hidden = false;
       note.dataset.offlineNote = '1';
     }
@@ -2727,13 +2735,13 @@ function _setOfflineBanner(visible, msg) {
         '<span class="icon"><svg class="ph" aria-hidden="true"><use href="#ph-warning-fill"/></svg></span>' +
         '<span class="label">Phosphene offline</span>' +
         '<span class="text"></span>' +
-        '<span class="hint">restart from Pinokio</span>';
+        '<span class="hint"></span>';
       document.body.appendChild(bar);
     }
     bar.classList.remove('reconnected');
     bar.querySelector('.label').textContent = 'Phosphene offline';
     bar.querySelector('.text').textContent = text;
-    bar.querySelector('.hint').textContent = 'restart from Pinokio';
+    bar.querySelector('.hint').textContent = distText('restart from Pinokio', 'Studio \u2192 Restart Engine');
     const entry = `${new Date().toLocaleTimeString()} offline · ${text}`;
     window._panelBannerLog.push(entry);
     if (window._panelBannerLog.length > 8) window._panelBannerLog.shift();
@@ -2874,9 +2882,12 @@ function renderIntegrityBanner(integ) {
     + (codecBad.length
         ? '<span style="opacity:.92;flex-basis:100%">'
           + codecBad.map(b => escapeHtml(b.file + ' — ' + b.reason)).join('<br>')
-          + '. The codec patch may not be applied — click Update in Pinokio '
+          + distText('. The codec patch may not be applied — click Update in Pinokio '
           + '(if it persists, reinstall). Clips rendered like this carry '
-          + 'avoidable compression on faces.</span>'
+          + 'avoidable compression on faces.',
+          '. The codec patch may not be applied — use Phosphene \u2192 Check for Updates\u2026 '
+          + '(if it persists, Help \u2192 Report a Bug\u2026). Clips rendered like this carry '
+          + 'avoidable compression on faces.') + '</span>'
         : '')
     + '<span style="margin-left:auto;display:flex;gap:8px">'
     + repos.map(k => '<button class="btn btn-primary" onclick="repairModel(\'' + escapeHtml(k)
@@ -2920,7 +2931,8 @@ function engineEnvBannerHtml(st) {
     timeout: 'The last install timed out downloading packages - check the connection.',
     disk: 'The last install ran out of disk space - free some space first.',
     uv_error: 'The last install could not resolve or build a package.',
-    python_missing: 'The engine Python stopped working - run Install from Pinokio to rebuild it (models kept).',
+    python_missing: distText('The engine Python stopped working - run Install from Pinokio to rebuild it (models kept).',
+                             'The engine Python stopped working - quit Phosphene and open it again so setup can rebuild it (models kept).'),
   };
   if (!st || st.ok) return '';
   const rep = st.repair || {};
@@ -2930,7 +2942,8 @@ function engineEnvBannerHtml(st) {
       + '<span style="opacity:.92">' + escapeHtml(_redactLocalPaths(last) || 'Installing its Python packages')
       + ' \u2014 renders can start when it finishes. Models are not touched.</span>';
   }
-  const pinokio = '<span style="opacity:.85;flex-basis:100%">Or from Pinokio: Stop Phosphene, then '
+  // The Mac app has no sidebar: the in-studio Repair button is the only one.
+  const pinokio = isMacApp() ? '' : '<span style="opacity:.85;flex-basis:100%">Or from Pinokio: Stop Phosphene, then '
     + 'click \u201cRepair Phosphene engine (models kept)\u201d.</span>';
   if (rep.state === 'failed') {
     return '<span style="font-weight:700">The engine repair did not finish:</span>'
@@ -3173,7 +3186,8 @@ function friendlyJobError(raw, engine) {
   }
   if (/music engine isn't installed|YuE2 needs about|YuE2 weights.*repair/i.test(raw)) {
     return { friendly: 'Stopped before generating — the music engine is not ready.',
-      hint: 'Install or repair it from the Phosphene sidebar in Pinokio. Everything else in the panel is unaffected.' };
+      hint: distText('Install or repair it from the Phosphene sidebar in Pinokio. Everything else in the panel is unaffected.',
+                     'Use Install music engine or Repair music engine in Audio \u2192 Compose. Everything else in the studio is unaffected.') };
   }
   const rawLower = String(raw).toLowerCase();
   // SYS-07: these two are the #1 and #3 fleet failures (54 + 23 installs in
@@ -6283,7 +6297,8 @@ function useAsAddSoundSource(path) {
   path = path || activePath;
   if (!path) { phosToast('Pick a clip first.', { kind: 'warn' }); return; }
   if (typeof h3CanServe !== 'function' || !h3CanServe('v2a')) {
-    phosToast('Add sound needs Hailuo H3 with an up-to-date runner — press Update in Pinokio.', { kind: 'warn', duration: 6000 });
+    phosToast(distText('Add sound needs Hailuo H3 with an up-to-date runner — press Update in Pinokio.',
+                       'Add sound needs Hailuo H3 with an up-to-date runner, which isn\u2019t available in the Mac app yet.'), { kind: 'warn', duration: 6000 });
     return;
   }
   if (typeof workflowSwitch === 'function') { try { workflowSwitch('manual'); } catch (e) {} }

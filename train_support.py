@@ -293,9 +293,9 @@ def _train_required_models() -> list[dict]:
     Gemma + the rest of the Q4 stack (vae, audio, etc.) are already required
     for inference so they should already be present, but we check anyway.
     """
-    q4_local_dir = P.ROOT / "mlx_models" / "ltx-2.3-mlx-q4"
-    q8_local_dir = P.ROOT / "mlx_models" / "ltx-2.3-mlx-q8"
-    gemma_local_dir = P.ROOT / "mlx_models" / "gemma-3-12b-it-4bit"
+    q4_local_dir = P.MODELS_DIR / "ltx-2.3-mlx-q4"
+    q8_local_dir = P.MODELS_DIR / "ltx-2.3-mlx-q8"
+    gemma_local_dir = P.MODELS_DIR / "gemma-3-12b-it-4bit"
     gemma_repo_id = "mlx-community/gemma-3-12b-it-4bit"
 
     def _file_present(local_dir: Path, repo_id: str, filename: str,
@@ -431,7 +431,7 @@ def _train_install_dev_transformer(push_log) -> dict:
                          f"({P.DOWNLOAD.get('repo_id', '?')})."}
 
     repo_id = "dgrauet/ltx-2.3-mlx-q8"
-    local_dir = P.ROOT / "mlx_models" / "ltx-2.3-mlx-q8"
+    local_dir = P.MODELS_DIR / "ltx-2.3-mlx-q8"
     local_dir.mkdir(parents=True, exist_ok=True)
 
     hf_bin = P.HF_BIN if P.HF_BIN is not None else P._resolve_hf()

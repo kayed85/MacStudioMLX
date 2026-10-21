@@ -1,0 +1,4 @@
+# A release tarball (GitHub's tarballs, `git archive`) carries the commit it
+# was cut from: git substitutes the placeholder in this one file on export.
+# The panel's version pill reads it when there is no .git (the Mac app).
+.phosphene_commit export-subst

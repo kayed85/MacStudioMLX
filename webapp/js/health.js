@@ -56,6 +56,10 @@ async function refreshVersionPill() {
   try { _maybeShowBroadcastModal(_versionState); } catch (e) {}
 }
 
+function _phEsc(t) {
+  return String(t).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+
 function _versionDisplayLabel(s) {
   // Prefer the human Y1.NNN VERSION file label. Fall back to the short
   // SHA for older checkouts that predate the VERSION file. Last-resort
@@ -82,8 +86,22 @@ function renderVersionPill() {
   const local = _versionDisplayLabel(s);
   const remote = _versionRemoteLabel(s);
   // Reset every state class; exactly one is added below.
-  pill.classList.remove('pill-update','pill-current','pill-dev','pill-checking','pill-restart','pill-busy');
+  pill.classList.remove('pill-update','pill-current','pill-dev','pill-checking','pill-restart','pill-busy','pill-app');
   pill.style.display = '';
+
+  // The Mac app updates the studio itself (Phosphene -> Check for Updates...)
+  // and installs it from a release tarball: no git, nothing to pull, no
+  // GitHub poll. The pill names the build - version and the commit the
+  // tarball shipped - and a click copies it for a bug report.
+  if (isMacApp() || s.app_updates) {
+    pill.classList.add('pill-app');
+    const sha = s.local_short || '';
+    pill.innerHTML = _phEsc(local) + (sha ? `<span class="vp-detail"> · ${_phEsc(sha)}</span>` : '');
+    pill.title = `Phosphene ${_versionBuildLabel(s.local_version, s.local_short)}. `
+      + 'To update, use Phosphene \u2192 Check for Updates\u2026'
+      + '\nClick to copy your build details for a bug report.';
+    return;
+  }
 
   // Pill text leads with the MEANING of the state, not the version code.
   // Earlier build showed bare "Y1.005" which read as a label rather than
@@ -268,6 +286,7 @@ function armFirstUseReport() {
 function _maybeShowUpdateModal(st) {
   if (window._updModalShownThisLoad || window._phModalOpen) return;
   if (!st || st.error || st.suppress_reason || !st.checked_ts) return;
+  if (isMacApp() || st.app_updates) return;     // the app owns updates
   if ((st.behind_by | 0) <= 0 || _versionRestartPending) return;
   const remote = st.remote_version || st.remote_short || 'a new version';
   const local = st.local_version || st.local_short || 'your build';
@@ -334,7 +353,9 @@ window._ubStarSettings = null;
 function _ubRender(s) {
   const el = document.getElementById('updateBanner');
   if (!el) return;
-  const behind = (s && !s.error && s.checked_ts && (s.behind_by | 0) > 0);
+  // Never under the Mac app: its own updater (Sparkle) owns updates.
+  const behind = !isMacApp() && !(s && s.app_updates)
+    && (s && !s.error && s.checked_ts && (s.behind_by | 0) > 0);
   const remote = (s && (s.remote_version || s.remote_short)) || '';
   // A pull already happened this session — the banner's job is done, the
   // restart pill takes over from here.
@@ -656,11 +677,26 @@ async function panelRestart() {
       if (r.ok) { location.reload(); return true; }
     } catch (e) { /* still down */ }
   }
-  phosToast('Panel did not come back within 60s — start it from Pinokio.', 'error');
+  phosToast(distText('Panel did not come back within 60s — start it from Pinokio.',
+                     'The studio did not come back within 60s — use Studio \u2192 Restart Engine.'), 'error');
   return false;
 }
 
+// The pill's click inside the Mac app: never a git pull. Name the build (for a
+// bug report) and point at the app's own updater.
+async function _appVersionPillClick() {
+  const s = _versionState || {};
+  const debug = `Phosphene ${s.local_version || '?'} · mac-app`
+    + (phEdition() ? ` · ${phEdition()}` : '')
+    + ` · ${s.local_short || 'sha?'}`;
+  let copied = false;
+  try { await navigator.clipboard.writeText(debug); copied = true; } catch (e) {}
+  phosToast((copied ? `Copied "${debug}". ` : `${debug}. `)
+    + 'To update, use Phosphene \u2192 Check for Updates\u2026', 'info');
+}
+
 async function versionPillClick() {
+  if (isMacApp() || (_versionState || {}).app_updates) return _appVersionPillClick();
   if (_versionRestartPending) {
     const s = _versionState || {};
     const _pu = s.post_update || {};
@@ -757,6 +793,10 @@ async function versionDoRefresh() {
 
 async function versionDoPull(opts) {
   opts = opts || {};
+  if (isMacApp()) {               // the server refuses it too (409 app_updates)
+    phosToast('To update Phosphene, use Phosphene \u2192 Check for Updates\u2026', 'info');
+    return;
+  }
   const s = _versionState || {};
   const target = _versionRemoteLabel(s);
   const local = _versionDisplayLabel(s);

@@ -1,6 +1,11 @@
 # Troubleshooting
 
+[[pinokio]]
 When Phosphene refuses a render, it says why and what to do. These are the messages people actually see. For problems during **Install** or **Update** (a `FATAL error:` line in Pinokio, not enough disk space), see [Install, update and disk space](#docs/install/fatal).
+[[/pinokio]]
+[[mac-app]]
+When Phosphene refuses a render, it says why and what to do. These are the messages people actually see. For problems during setup or an update, including **Setup paused** or not enough disk space, see [Install, update and disk space](#docs/install/fatal).
+[[/mac-app]]
 
 ## Memory and this Mac's tier {#memory}
 
@@ -14,12 +19,18 @@ The health chip in the header shows memory at a glance; click it for the **Tier*
 
 H3's full engine needs 60 GB. From 36 GB it runs on its compact Q8 engine, which is built on your Mac once:
 
+[[pinokio]]
 - **H3 not installed yet:** in Pinokio, open **Phosphene** in the sidebar and click **Install Hailuo H3 (second video engine, ~75 GB)**. The install builds the compact engine at the end by itself (about 5 more minutes).
 - **H3 installed, compact engine missing** — *"Hailuo H3 runs on this Mac — on its reduced-RAM lane … it is not built here yet"*: click **Build Hailuo H3 compact engine** in the same sidebar (~5 minutes, no download).
 
 Both entries are in the sidebar while the panel is running.
 
 Do that, then choose Settings → **Hailuo H3 model** → Automatic or Compact. Below 36 GB, H3 is not available: render on LTX, which serves every mode.
+[[/pinokio]]
+[[mac-app]]
+- Hailuo H3 is not available in the Mac app yet.
+- Render on LTX.
+[[/mac-app]]
 
 ## A model or add-on is not downloaded {#missing}
 
@@ -28,19 +39,28 @@ Do that, then choose Settings → **Hailuo H3 model** → Automatic or Compact. 
 - *"Upscale & Face Fix needs the LTX-2.5 Pixel Spatial Upscaler adapter"* — download it from the Models window, then render again.
 - *"Stopped before rendering — the model weights are incomplete"* — a download was interrupted. Open the Models window and resume it. Settings → **Verify model files** checks every file and offers a re-download of any that are damaged.
 
+[[pinokio]]
 ## Update stops right away {#update-stops}
 
 On some Macs, Pinokio's **Update** in versions before 4.19.7 stopped in its first second: Pinokio's terminal read the words "error:" in Update's own command text as a failure (#114). Pinokio runs the Update script of the version you already have, so the fix can only take over after one update.
 
 Update once from inside Phosphene instead: click **Update now** in its update banner (or the version pill in the header), wait until it says the update is done, then restart. Or open a terminal in the Phosphene folder (`~/pinokio/api/<your Phosphene folder>`), run `git pull`, and press **Update** in Pinokio again - it then runs the new, fixed script. After that the button works.
+[[/pinokio]]
 
 ## "Click Update" — an engine older than the panel {#stale-engine}
 
 *"This install's vendored engine predates LTX-2.5's text encoder … Click Update — and if the first click only moves the panel, click it once more."*
 
+[[pinokio]]
 The panel was updated but the engine underneath was not. Click **Update** in Pinokio's Phosphene sidebar. If nothing seems to change, click it a second time: an update started by an old version updates itself first. For H3, *"the installed Hailuo H3 runner is behind this panel"* means: re-run **Install Hailuo H3** — every weight already on disk is kept.
 
 If you updated and the panel still behaves like the old version, it is still running the old code. The version pill in the header then reads **Restart Phosphene** — click it, or click **Stop**, then **Start**, in Pinokio.
+[[/pinokio]]
+[[mac-app]]
+The engine underneath is older than the studio. Quit Phosphene and open it again so the setup check rebuilds the engine, or use **Phosphene → Check for Updates…**.
+
+If the studio still behaves like the old version, choose **Studio → Restart Engine**.
+[[/mac-app]]
 
 ## The GPU watchdog {#gpu-watchdog}
 
@@ -52,7 +72,12 @@ If you updated and the panel still behaves like the old version, it is still run
 
 ## The panel says it's offline {#offline}
 
+[[pinokio]]
 *"Phosphene offline"*, and pressing **Generate** does nothing — the panel process isn't answering. Nothing you were typing is lost: the prompt stays as you left it, and the page reconnects and picks the queue back up on its own once the panel is running again. Start it from Pinokio's Phosphene sidebar if it doesn't come back within a few seconds.
+[[/pinokio]]
+[[mac-app]]
+*"Phosphene offline"*, and pressing **Generate** does nothing — the studio isn't answering. Your prompt stays as you left it, and the studio reconnects and picks the queue back up once the engine is running again. If it doesn't come back within a few seconds, choose **Studio → Restart Engine**. If it stays offline, quit Phosphene and open it again.
+[[/mac-app]]
 
 ## The queue paused itself {#queue-paused}
 
@@ -64,7 +89,12 @@ Restarting the panel resumes the queue: a queue that was paused when the panel s
 
 ## Reading the log {#logs}
 
+[[pinokio]]
 The **Logs** tab in the bottom panel shows the render log. When a render dies, the last line that starts with `step:` names the stage it reached — that line is the most useful thing to include in a report. Pinokio's **Terminal** shows the same output.
+[[/pinokio]]
+[[mac-app]]
+The **Logs** tab in the bottom panel shows the render log. When a render dies, the last line that starts with `step:` names the stage it reached — that line is the most useful thing to include in a report. Use **Help → Open Logs Folder** to open the log files folder.
+[[/mac-app]]
 
 ## Reporting an issue {#report}
 

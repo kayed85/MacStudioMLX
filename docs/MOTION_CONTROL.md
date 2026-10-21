@@ -189,5 +189,5 @@ Play each pair side by side. The frame-by-frame correspondence is the point.
 ## Related
 
 * `docs/H3_ENGINE.md` — the other video engine.
-* `README.md` → Features → Video → Remix.
+* The Remix guide: `webapp/docs/remix.md` (the panel's Docs tab, and https://phosphene.video/docs/remix/).
 * `required_files.json` → `ic_union_control`, `ic_ingredients`, `ic_colorize`.

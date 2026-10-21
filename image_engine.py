@@ -68,6 +68,8 @@ import urllib.request
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+import distribution as _dist   # Pinokio vs the Mac app wording
+
 
 # Active-subprocess registry — every image engine that spawns a Popen
 # registers it here so the panel's /stop endpoint can terminate the
@@ -820,9 +822,12 @@ def mflux_env_fault(bin_path) -> str:
                 return (f"The image engine cannot start: its venv has {key.capitalize()} "
                         f"{ver}, and mflux works only with {key.capitalize()} {spec} "
                         f"(it stops with \"cannot import name '_IntegralLike'\"). "
-                        f"Press Update in Pinokio, then restart - Update puts it back "
-                        f"in about a minute and keeps every model. Video renders are "
-                        f"not affected.")
+                        + _dist.say(
+                            "Press Update in Pinokio, then restart - Update puts it back "
+                            "in about a minute and keeps every model. Video renders are "
+                            "not affected.",
+                            "Report it with Help \u2192 Report a Bug\u2026 Video renders "
+                            "are not affected."))
     except Exception:                                          # noqa: BLE001
         return ""
     return ""

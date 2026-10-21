@@ -9,7 +9,12 @@ The music engine is a separate download of about **11 GB**.
 - **What it needs:** an Apple Silicon Mac with **24 GB of memory or more**, and **14 GB free** on the drive where you store models.
 - **How:** open **Audio → Compose**. The form stays greyed out until installation finishes. Click **Install music engine (YuE2, ~11 GB)** on the card, or click **Compose**, to start the download. The card shows your progress.
 - **Licence:** YuE2 shows a licence screen before download or first use; accept once per Mac unless the licence changes. The weights use CC BY-NC 4.0 (non-commercial use only), with permission for individual creators to sell songs they make; companies need a licence for the weights.
+[[pinokio]]
 - To pause installation, click **Stop**. Start the install again to resume it. You can also install through **Install the music engine** in Pinokio's sidebar or **Settings → Models**.
+[[/pinokio]]
+[[mac-app]]
+- To pause installation, click **Stop**. Start the install again to resume it. You can also install from **Settings → Models**.
+[[/mac-app]]
 - You can use the form as soon as installation finishes. You do not need to restart anything.
 
 Two optional extras download when you first need them:
@@ -17,7 +22,12 @@ Two optional extras download when you first need them:
 - **The music LoRA pack** (about 300 MB) improves music without vocals. It also adds voice and style add-ons to the **Voice & style LoRA** list. The form offers the pack when it would help.
 - **The cover models** (2.8 GB) are needed for **Cover a song** and **Get the score**.
 
+[[pinokio]]
 If the engine stops working after an update, click **Repair the music engine** in Pinokio's sidebar. Your downloaded model files are kept.
+[[/pinokio]]
+[[mac-app]]
+If the engine stops working after an update, open **Audio → Compose** and click **Repair music engine**. Your downloaded model files are kept.
+[[/mac-app]]
 
 ## Choose Simple or Custom {#simple-custom}
 
@@ -111,6 +121,11 @@ Click **Plan the video**. Planning is instant and free. It reads the beat, creat
 |---|---|
 | Compose stays greyed out | Installation is missing or unfinished. Click **Install music engine** on the card to start or resume it |
 | The install stops with a `FATAL error:` line | It names the cause: not enough memory (24 GB), not enough disk (14 GB free) or no connection to GitHub. See [When an install stops](#docs/install/fatal) |
+[[pinokio]]
 | The engine says it's unavailable, but the model files are downloaded | Click **Repair the music engine** in Pinokio's sidebar. You do not need to download the model files again |
+[[/pinokio]]
+[[mac-app]]
+| The engine says it's unavailable, but the model files are downloaded | Open **Audio → Compose** and click **Repair music engine**. You do not need to download the model files again |
+[[/mac-app]]
 | A song waits with *Waiting for the GPU* | Another task is using your Mac's graphics processor. Your song starts when that task finishes. Click **Stop** to cancel the wait |
 | A song was stopped | No partial song is saved. Click **Compose** to queue it again |

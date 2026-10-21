@@ -634,7 +634,8 @@ function sbEnginePickerHtml(active) {
     const style = e ? `--eng-accent:${escapeHtml(e.accent)};--eng-dim:${escapeHtml(e.accent_dim)};--eng-soft:${escapeHtml(e.accent_soft)}` : '';
     const title = o.key === 'auto'
         ? 'The plan decides per shot: a shot with one of your trained characters goes to LTX, everything else to Hailuo H3.'
-      : offer ? 'Hailuo H3 isn’t installed yet — install it from the Phosphene sidebar in Pinokio.'
+      : offer ? distText('Hailuo H3 isn’t installed yet — install it from the Phosphene sidebar in Pinokio.',
+                         'Hailuo H3 isn’t available in the Mac app yet.')
       : blocked ? 'This Mac can’t run Hailuo H3.'
       : o.key === 'h3' ? 'Every shot on Hailuo H3 — it renders dialogue, voices and sound with the picture. No trained characters.'
       : 'Every shot on LTX — the built-in engine, and the only one that loads a trained character.';
@@ -649,7 +650,8 @@ function sbEnginePickerNote(active) {
   const h3 = sbH3Installed();
   if (!h3.available) {
     return h3.capable
-      ? 'Hailuo H3 isn’t installed — <b>Install Hailuo H3</b> in the Phosphene sidebar in Pinokio, and this film can use it. Until then every shot renders on LTX.'
+      ? distText('Hailuo H3 isn’t installed — <b>Install Hailuo H3</b> in the Phosphene sidebar in Pinokio, and this film can use it. Until then every shot renders on LTX.',
+                 'Hailuo H3 isn’t available in the Mac app yet, so every shot renders on LTX.')
       : 'This Mac can’t run Hailuo H3, so every shot renders on LTX.';
   }
   if (active === 'h3') return 'Every shot on Hailuo H3 — dialogue, voices and sound rendered with the picture. <b>A trained character can’t come along</b>: H3 loads no LoRAs.';
@@ -673,7 +675,8 @@ function sbSetEngineMode(key, persist) {
     // this opens the SAME card the header switcher opens.
     const card = ((ENGINES || []).find(x => x.id === 'h3') || {}).install_card;
     if (h3.capable && card && typeof window[card] === 'function') { try { window[card](); } catch (e) {} }
-    else if (h3.capable) phosToast('Install Hailuo H3 from the Phosphene sidebar in Pinokio.', {duration: 6000});
+    else if (h3.capable) phosToast(distText('Install Hailuo H3 from the Phosphene sidebar in Pinokio.',
+                                            'Hailuo H3 isn’t available in the Mac app yet.'), {duration: 6000});
     return;
   }
   if (key === 'h3' && _sbCastId) {

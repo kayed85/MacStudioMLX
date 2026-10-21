@@ -105,6 +105,24 @@ function updateModelsCard(s) {
     card.classList.add('state-missing');
     icon.innerHTML = '<svg class="ph" aria-hidden="true"><use href="#ph-warning-fill"/></svg>';
     title.textContent = 'Base models needed before you can render';
+    // Mac app: the app is fetching the base set itself (app_models.json).
+    // Say so and offer no second Download - two fetchers on one pack is not
+    // safe, and the server refuses it anyway. Absent under Pinokio.
+    const appDl = s.app_models;
+    if (appDl && appDl.active) {
+      const gb = (b) => (Number(b || 0) / 1e9).toFixed(1);
+      const amount = appDl.total_bytes ? `${gb(appDl.done_bytes)} of ${gb(appDl.total_bytes)} GB` : '';
+      sub.textContent = appDl.state === 'paused'
+        ? 'Download paused'
+        : `Base models are downloading${amount ? ` (${amount})` : ''}. You can render when they\u2019re ready.`;
+      if (appDl.total_bytes) {
+        progress.style.display = '';
+        fill.style.width = `${Math.min(100, Math.round(100 * appDl.done_bytes / appDl.total_bytes))}%`;
+        last.textContent = '';
+      }
+      actions.innerHTML = '';
+      return;
+    }
     const missingList = s.base_missing || [];
     const missing = missingList.length;
     // REGISTRY-DRIVEN, for the ACTIVE generation. `base_missing` is already
@@ -135,7 +153,7 @@ function updateModelsCard(s) {
     const baseNeedsHf = pBase ? (pBase.needs_hf !== false) : true;
     actions.innerHTML = ((s.hf_available ?? true) || !baseNeedsHf)
       ? `<button onclick="startDownload('${escapeHtml(pBase ? pBase.key : 'q4')}')">Download ${escapeHtml(pBase ? pBase.name : 'base')} (${escapeHtml(pBase ? pBase.size : '?')})</button>`
-      : `<button disabled title="hf binary not found — reinstall via Pinokio">hf missing</button>`;
+      : `<button disabled title="${escapeHtml(distText('hf binary not found — reinstall via Pinokio', 'hf not found — quit Phosphene and open it again to rerun setup'))}">hf missing</button>`;
     return;
   }
 
@@ -476,7 +494,9 @@ function openTierModal() {
     // Replace the loading state with a visible error so the modal doesn't
     // look "broken" with empty content.
     document.getElementById('tierModalBlurb').innerHTML =
-      '<div style="color: var(--danger, #f85149)">Could not load tier info — the panel server may have stopped responding. Check the Pinokio terminal and restart the panel if needed.</div>';
+      '<div style="color: var(--danger, #f85149)">' + distText(
+        'Could not load tier info — the panel server may have stopped responding. Check the Pinokio terminal and restart the panel if needed.',
+        'Could not load tier info — the studio server may have stopped responding. Check the logs with Help \u2192 Open Logs Folder and use Studio \u2192 Restart Engine if needed.') + '</div>';
     document.getElementById('tierCapsList').innerHTML = '';
     console.error('tier modal fetch failed:', err);
   });

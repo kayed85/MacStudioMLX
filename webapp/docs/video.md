@@ -127,7 +127,12 @@ Image mode works on H3 — the picture is the first frame. The **Orientation** r
 | Longest clip | 20s (Quick), 10s otherwise | 15s, chained windows |
 | Memory | the Tier dialog (health chip → Tier) shows which qualities this Mac runs | 36 GB or more (see below) |
 
+[[pinokio]]
 **H3 and memory.** The full H3 engine needs 60 GB. From 36 GB up, H3 runs on its compact Q8 engine, which **Install Hailuo H3** in Pinokio's Phosphene sidebar builds locally (about 5 minutes, ~22 GB, no extra download). Settings → **Hailuo H3 model** chooses between Automatic, Full and Compact. Below 36 GB, H3 is not offered — render on LTX. See [Install H3](#docs/hailuo-h3/install) and [Troubleshooting](#docs/troubleshooting/memory).
+[[/pinokio]]
+[[mac-app]]
+**H3 and memory.** Hailuo H3 is not available in the Mac app yet. Render on LTX. See [Install H3](#docs/hailuo-h3/install) and [Troubleshooting](#docs/troubleshooting/memory).
+[[/mac-app]]
 
 ## Upscale and export {#upscale}
 

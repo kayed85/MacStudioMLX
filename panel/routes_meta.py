@@ -288,6 +288,13 @@ def get_models(h, parsed) -> None:
         )
     # 4.20: packs a fresh install queued for the background (empty otherwise).
     payload["deferred_pending"] = P.deferred_pending_keys()
+    # Mac app: the packs the app itself is fetching (absent under Pinokio).
+    _app = P.app_models_state()
+    if _app is not None:
+        payload["app_models"] = _app
+        for row in payload["repos"]:
+            _r = next((x for x in P._repos() if x.get("key") == row.get("key")), None)
+            row["app_owned"] = P.app_models_owns(_r, _app)
     h._json(payload)
 
 
@@ -335,6 +342,9 @@ def post_star_click(h, path, qs, ctype) -> None:
 def post_version_finish(h, path, qs, ctype) -> None:
     # Re-run post_update.sh after a failed in-panel finish (the banner's
     # "Try again"). Same background run, same refusals.
+    if P._dist.is_mac_app():
+        h._json({"ok": False, "app_updates": True,
+                 "error": P._dist.MAC_APP_UPDATES}, 409); return
     code, payload = P.post_update_start("retry")
     h._json(payload, code); return
 
@@ -599,6 +609,14 @@ def post_version_pull(h, path, qs, ctype) -> None:
     # unless the local repo is clean + on main + with no local
     # commits ahead, but a malicious POST could otherwise bypass
     # that and silently trigger `reset --hard`. Re-validate here.
+    #
+    # Inside the Mac app there is no checkout to pull, and `git` run in its
+    # folder could act on whatever repo encloses it. The app updates the
+    # studio (Phosphene -> Check for Updates...); this route never runs git.
+    if P._dist.is_mac_app():
+        h._json({"ok": False, "app_updates": True,
+                 "error": P._dist.MAC_APP_UPDATES}, 409)
+        return
     cur_branch = (P._git_capture(
         ["rev-parse", "--abbrev-ref", "HEAD"]) or "").strip()
     if cur_branch != "main":
@@ -912,6 +930,9 @@ def post_stop_comfy(h, path, qs, ctype) -> None:
 
 @post("/open_pinokio")
 def post_open_pinokio(h, path, qs, ctype) -> None:
+    if P._dist.is_mac_app():
+        h._json({"ok": False, "error": "Pinokio is not part of the Mac app."}, 409)
+        return
     P.open_pinokio()
     h._json({"ok": True}); return
 

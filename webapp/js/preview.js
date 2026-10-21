@@ -1855,7 +1855,10 @@ async function refreshModelsModal({ silent = false } = {}) {
   const active = data.active_download;
   hint.innerHTML = data.hf_available
     ? `Each row shows what's on disk. Click <b>Download</b> to fetch the missing files; progress streams to the log at the bottom of the page. Everything is resumable and checksum-verified.`
-    : `<span style="color:var(--warning,#d29922)"><svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-warning-fill"/></svg><code>hf</code> not found</span> — this Pinokio install doesn't have <code>huggingface_hub&gt;=1.0</code> in the venv. Run Update from Pinokio, then come back. The LTX-2.5 rows do not need it — they download from a GitHub release.`;
+    : `<span style="color:var(--warning,#d29922)"><svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-warning-fill"/></svg><code>hf</code> not found</span> — ` + distText(
+        `this Pinokio install doesn't have <code>huggingface_hub&gt;=1.0</code> in the venv. Run Update from Pinokio, then come back.`,
+        `this install doesn't have <code>huggingface_hub&gt;=1.0</code> in the venv. Quit Phosphene and open it again to rerun setup, then come back.`)
+      + ` The LTX-2.5 rows do not need it — they download from a GitHub release.`;
   // A row whose HOST pack is missing cannot usefully be downloaded: the add-on
   // lands INSIDE that pack's directory and loads from there by name, so
   // fetching it alone produces a folder holding two files and nothing else. The
@@ -1875,7 +1878,15 @@ async function refreshModelsModal({ silent = false } = {}) {
     // ahead. `needs_hf` is derived from the registry's mirror block.
     const hfOk = (data.hf_available ?? true) || (r.needs_hf === false);
     const hostMissing = r.host_key && !completeByKey[r.host_key];
-    if (active && active.key === r.key) {
+    if (r.app_owned) {
+      // Mac app: the app is fetching this pack itself (app_models.json) - no
+      // second Download here; the server refuses one too.
+      cls = 'downloading';
+      icon = '<svg class="ph" aria-hidden="true"><use href="#ph-arrow-clockwise-bold"/></svg>';
+      statusText = (data.app_models && data.app_models.state === 'paused')
+        ? 'Download paused' : 'Downloading in the background';
+      btnHtml = '';
+    } else if (active && active.key === r.key) {
       cls = 'downloading';
       icon = '<svg class="ph" aria-hidden="true"><use href="#ph-arrow-clockwise-bold"/></svg>';
       const elapsed = Math.max(0, Math.round((Date.now()/1000) - (active.started_ts || 0)));
@@ -1963,10 +1974,11 @@ async function refreshModelsModal({ silent = false } = {}) {
         : '<svg class="ph" aria-hidden="true"><use href="#ph-x-circle"/></svg>';
       const statusText = ready
         ? `Ready · engine picker unlocked · ${escapeHtml(h3.root || '')}`
-        : 'Available to install · one click in the Pinokio sidebar';
+        : distText('Available to install · one click in the Pinokio sidebar',
+                   'Not available in the Mac app yet');
       const btn = ready
         ? `<button class="ghost" disabled>Installed</button>`
-        : `<button onclick="openH3InstallCard()">How to install</button>`;
+        : `<button onclick="openH3InstallCard()">${distText('How to install', 'About H3')}</button>`;
       h3Row = `
         <li class="${cls}">
           <span class="icon">${icon}</span>

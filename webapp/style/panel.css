@@ -164,6 +164,15 @@
       letter-spacing: 0.12em;
       cursor: help;
     }
+    /* Edition label (PHOSPHENE_EDITION=pro, set by the Mac app): the brand
+       violet, quieter than DEV/TEST - it states what this is, it does not
+       warn. A label only; body[data-edition] is the hook for anything more. */
+    .profile-badge.edition-badge {
+      background: rgba(139,92,246,0.16);
+      color: #b69cff;
+      border-color: rgba(139,92,246,0.5);
+      cursor: default;
+    }
     /* Phosphene 2.0 release badge — sits next to the wordmark logo so
        users immediately know they're on the major version bump. Brand
        violet vs the DEV badge's amber so they don't visually clash when
@@ -473,6 +482,13 @@
       border-color: var(--border);
     }
     .pill-dev:hover { color: var(--text); }
+    /* Mac app — the app updates the studio, so the pill only names the
+       build (version · commit). Quiet, like dev: it is a label, not a CTA. */
+    .pill-app {
+      color: var(--muted);
+      border-color: var(--border);
+    }
+    .pill-app:hover { color: var(--text); }
     /* Checking — first /version poll hasn't completed yet. Same look as
        dev (muted) so the pill doesn't flash colours in the first 30s of
        boot before the GitHub fetch lands. */

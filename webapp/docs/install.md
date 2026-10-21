@@ -1,7 +1,13 @@
 # Install, update and disk space
 
+[[pinokio]]
 Phosphene runs on Apple Silicon Macs (M1 or newer) through Pinokio. This page explains how to install and update it, how much disk space you need, and what to do if a step fails.
+[[/pinokio]]
+[[mac-app]]
+Phosphene runs on Apple Silicon Macs (M1 or newer). This page explains how to install and update the Mac app, how much disk space you need, and what to do if a step fails.
+[[/mac-app]]
 
+[[pinokio]]
 ## Install with Pinokio {#pinokio}
 
 1. Install [Pinokio](https://pinokio.computer).
@@ -12,9 +18,26 @@ Phosphene runs on Apple Silicon Macs (M1 or newer) through Pinokio. This page ex
 You can start creating as soon as the panel opens. A few extras keep downloading while you work, as listed below.
 
 > **Note** Pinokio cannot install Phosphene on an Intel Mac or on Windows. Linux support on Apple Silicon is a separate community project that Pinokio does not install. See [Linux (community)](https://github.com/mrbizarro/phosphene/blob/main/docs/LINUX.md).
+[[/pinokio]]
+[[mac-app]]
+## Install the Mac app {#mac-app}
+
+1. Download Phosphene from [phosphene.video](https://phosphene.video) and open it.
+2. Review the setup plan before anything downloads. It shows every item and its size, the space needed and your free space.
+3. If the studio fits but the models don't, you can set up the studio now and download models later from inside it.
+4. Follow the progress for each step under **Getting your studio ready**. Use **Pause setup** and **Resume setup** as needed. You can quit safely; setup picks up where it left off next time.
+5. Once the studio opens, use **Studio → Show Setup Details** whenever you want to see setup again.
+
+You can start creating as soon as the studio opens, once the models you need are downloaded. Extras download when a feature first needs them, as listed below.
+
+If you installed Phosphene through Pinokio on this Mac, the app reuses its models: **Reuse from Pinokio · no download**.
+
+You need an Apple Silicon Mac (M1 or newer).
+[[/mac-app]]
 
 ## What gets downloaded, and how much space you need {#disk}
 
+[[pinokio]]
 | Part | Download | When |
 |---|---|---|
 | **Base install**: LTX-2.5 video engine and its files for reading prompts and showing live previews | 27.5 GB | Before you can click **Start**. You need about **32.5 GB free** to begin |
@@ -24,6 +47,18 @@ You can start creating as soon as the panel opens. A few extras keep downloading
 | **Hailuo H3**, the second video engine | about 75 GB | optional, from the Pinokio sidebar. See [Hailuo H3](#docs/hailuo-h3/install) |
 | **Music engine (YuE2)** | about 11 GB | optional, from the Audio tab or the Pinokio sidebar. See [Music Studio](#docs/music/install) |
 | **LTX-2.3**, needed only to *train* a character | about 20 GB, plus about 21 GB for the trainer | offered when you open **Train Character** |
+[[/pinokio]]
+[[mac-app]]
+| Part | Download | When |
+|---|---|---|
+| **Base install**: LTX-2.5 video engine and its files for reading prompts and showing live previews | about 28 GB | During setup, or later from inside the studio if you chose to download models later. The setup plan shows the space it needs |
+| **Background extras**: Gemma 3 (for **Enhance** and the Storyboard planner) and four small add-ons (LoRAs) for Upscale & Face Fix, Motion Control, Ingredients and Colorize | 10.7 GB | When a feature first needs one: it says so and offers **Download now**. Also from the Models window |
+| **LTX-2.5 Q8 weights**, for trained characters and voices | 30.02 GB | Optional, from **Settings → Models** |
+| **High add-on**, for High quality, Keyframes and Extend on LTX | 29.50 GB | Optional, from the Models window (click the health chip, then **Models**) |
+| **Hailuo H3**, the second video engine | about 75 GB | Not available in the Mac app yet. Render on LTX. See [Hailuo H3](#docs/hailuo-h3/install) |
+| **Music engine (YuE2)** | about 11 GB | Optional, from **Audio → Compose**. Click **Install music engine**. See [Music Studio](#docs/music/install) |
+| **LTX-2.3**, needed only to *train* a character | about 20 GB, plus about 21 GB for the trainer | Offered when you open **Train Character** |
+[[/mac-app]]
 
 At a connection speed of 100 Mbps, the base install takes about 37 minutes to download. At 300 Mbps, it takes about 12 minutes; at 1 Gbps, about 4 minutes. Setting up the software adds a few minutes. If a download stops, it resumes where it left off.
 
@@ -45,6 +80,7 @@ Your Mac's memory determines which quality settings and engines you can use. Pho
 
 Before a long render, close apps that use a lot of memory, such as browsers with many tabs, Slack or the iOS Simulator. A render is the process of creating your video or audio. If your Mac runs out of memory, it stops the render. See [Troubleshooting](#docs/troubleshooting/memory).
 
+[[pinokio]]
 ## The Pinokio sidebar {#sidebar}
 
 Select Phosphene in Pinokio to see these actions in the left sidebar. The available actions depend on what is installed and whether the panel is running.
@@ -57,9 +93,30 @@ Select Phosphene in Pinokio to see these actions in the left sidebar. The availa
 - **Build Hailuo H3 compact engine**: appears on a 36–59 GB Mac when the model files are downloaded but the compact engine is not ready. It takes about 5 minutes and downloads nothing.
 - **Install the music engine (YuE2, ~11 GB)**: after installation, this becomes **Repair the music engine**, which keeps the downloaded model files.
 - **Reset engine (keeps models & outputs)**: rebuild the LTX engine and the software it needs. This keeps your models and finished work. It does not affect Hailuo H3; to repair H3, use **Repair Hailuo H3**.
+[[/pinokio]]
+[[mac-app]]
+## The Phosphene menus {#menus}
+
+Use the menus at the top of the screen to manage Phosphene.
+
+- **Phosphene → Check for Updates…** updates the studio. Your projects, models and renders stay where they are.
+- **Phosphene → About Phosphene** shows app details.
+- **Phosphene → Licence…** shows your Phosphene licence (Free or Pro).
+- **Studio → Reload Studio** reloads the studio.
+- **Studio → Restart Engine** restarts the studio's engine.
+- **Studio → Open Outputs Folder** opens your renders folder.
+- **Studio → Show Setup Details** shows the setup screen again.
+- **Help → Phosphene Help** opens help.
+- **Help → Report a Bug…** lets you report a problem.
+- **Help → Open Logs Folder** opens the log files folder.
+- **Quit Phosphene** (⌘Q) quits the app.
+
+Optional model packs are in **Settings → Models**. Install or repair the music engine in **Audio → Compose**. Hailuo H3 and the image-engine pack are not available in the Mac app yet.
+[[/mac-app]]
 
 ## Update Phosphene {#update}
 
+[[pinokio]]
 - The version pill in the header shows **Up to date**, or **Update to** followed by a newer version. When an update is available, click **Update now** in the banner to install it, or **Later** to wait.
 - Click **Update** in the Pinokio sidebar to update everything, including the supporting software. Your queue, settings, models and finished work are kept.
 - After an in-app update, the banner reads *"Updated to … — restart to finish"*. Click **Stop**, then **Start**, in Pinokio.
@@ -67,7 +124,15 @@ Select Phosphene in Pinokio to see these actions in the left sidebar. The availa
 - If Pinokio's **Update** stops in its first second (versions 4.19.6 and older can do this), click **Update now** in Phosphene's own banner or version pill instead, then restart. See [Update stops right away](#docs/troubleshooting/update-stops).
 - If the panel still behaves like the old version, it needs a restart. The version pill then reads **Restart Phosphene**. Click it, or click **Stop** and then **Start** in Pinokio.
 - Hailuo H3 and the music engine have separate supporting software. If the panel says either needs an update, click that engine's **Update** or **Repair** entry in Pinokio's sidebar. Your downloaded model files are kept.
+[[/pinokio]]
+[[mac-app]]
+- The version pill shows your version and commit. Click it to copy your build details for a bug report.
+- Updates come only from **Phosphene → Check for Updates…**. Your queue, settings, models and finished work are kept.
+- To repair the music engine, open **Audio → Compose** and click **Repair music engine**. Your downloaded model files are kept.
+- Hailuo H3 is not available in the Mac app yet.
+[[/mac-app]]
 
+[[pinokio]]
 ## If an install or update stops with an error {#fatal}
 
 If a required step fails, Pinokio stops and shows a line beginning with `FATAL error:`. Scroll up in the log Pinokio shows for that install or update to find it. The line explains the problem and what to click next. In almost every case, **nothing was deleted**. After fixing the problem, click **Install** or **Update** again to continue.
@@ -93,11 +158,36 @@ Use the table below to match the text after `FATAL error:`:
 | *the Update safety check did not pass - not updating* | Nothing was changed. Click **Update** again. If it repeats, report the line |
 
 If your error is not listed, follow the instructions in its `FATAL error:` line. To report an error, copy that line and the few lines above it into a bug report. See [Reporting an issue](#docs/troubleshooting/report).
+[[/pinokio]]
+[[mac-app]]
+## If setup stops with an error {#fatal}
+
+The setup screen shows **Setup paused** and the reason. Click **Resume setup** to continue. Nothing already downloaded is lost.
+
+Open the full log with **Open logs folder** on the setup screen or **Help → Open Logs Folder**.
+
+| Cause | What to do |
+|---|---|
+| Not enough disk space | Free some space, then click **Resume setup** |
+| No connection, or a VPN or proxy blocks GitHub | Restore your connection to GitHub, then click **Resume setup** |
+| Music engine installation stops with a `FATAL error:` line on the **Audio → Compose** card | The card names the cause: the music engine needs **24 GB memory**, **14 GB free disk space** and a connection to GitHub |
+
+To report a problem, use **Help → Report a Bug…** and include the last lines of the log. See [Reporting an issue](#docs/troubleshooting/report).
+[[/mac-app]]
 
 ## Starting over without losing your work {#start-over}
 
+[[pinokio]]
 - Click **Reset engine** in Pinokio to rebuild the LTX engine. Your models, finished work and settings are kept.
 - To find your finished work, click **Outputs** in Pinokio's sidebar. This opens `mlx_outputs` inside the Phosphene folder.
 - To find your downloaded models, click **Models** in the sidebar. This opens `mlx_models`. Don't delete this folder unless you want to download everything again.
+[[/pinokio]]
+[[mac-app]]
+- Quit Phosphene and open it again to re-run the setup check. It checks Python, the engine and the video encoder, and repairs what it can.
+- Click **Repair engine** in the bar at the top of the studio to repair the engine's Python packages.
+- **Studio → Open Outputs Folder** opens your renders in `~/Library/Application Support/Phosphene/outputs`.
+- Your models are in `~/Library/Application Support/Phosphene/models`. Keep this folder to avoid downloading them again.
+- Everything is stored in `~/Library/Application Support/Phosphene`, including `models`, `outputs`, `state` and `logs`. Moving the whole folder to the Trash removes the studio and all its data.
+[[/mac-app]]
 
 If Phosphene opens but a task fails, models are missing or your queue pauses, see [Troubleshooting](#docs/troubleshooting).

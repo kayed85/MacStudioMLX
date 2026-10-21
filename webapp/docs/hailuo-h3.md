@@ -6,12 +6,19 @@ Hailuo H3 is Phosphene's second video engine. It creates video, dialogue and sou
 
 You install H3 separately because it needs a large download.
 
+[[pinokio]]
 - **What it needs:** an Apple Silicon Mac with **36 GB of memory or more**, and about **97 GB free** on the drive where you store models. This covers the 75 GB download and the 22 GB compact engine built during installation.
 - **How:** first, in the panel, click the **Hailuo H3** side of the engine switch, choose **Read the licence** and tick **I accept**. Then select Phosphene in Pinokio and click **Install Hailuo H3 (second video engine, ~75 GB)** in the sidebar; until you accept, the installer stops with a `FATAL` line.
 - **On a 36–59 GB Mac**, installation ends by preparing H3's compact engine, which uses less memory. This takes about 5 more minutes and downloads nothing. If you already have the downloaded model files but not the compact engine, click **Build Hailuo H3 compact engine** in the sidebar.
+[[/pinokio]]
+[[mac-app]]
+- Hailuo H3 is not available in the Mac app yet. Everything else works without it. Render on LTX.
+[[/mac-app]]
 - **Licence:** H3 uses the MiniMax H3 Community License, which does not cover the European Union, the United Kingdom, South Korea or the United States. The licence screen asks you to accept once per Mac; your acceptance is saved, and you are asked again only if the licence changes. If H3 is already installed, it keeps working and asks once before your next H3 render. Phosphene shows the notice for you to confirm; it does not check your location. While H3 is selected, the panel shows **MiniMax H3** with **Licence** and **Report misuse** links; reports go through a GitHub issue.
 
+[[pinokio]]
 After installation, the sidebar entry becomes **Repair Hailuo H3** or **Update Hailuo H3 runner**. These repair or update H3's supporting software and keep your downloaded model files. You do not need to download those files again. If installation stops, look for the `FATAL error:` line in Pinokio's terminal. See [When an install stops](#docs/install/fatal).
+[[/pinokio]]
 
 ### Full or compact engine {#engine-size}
 
@@ -144,10 +151,18 @@ Open **After the render → Upscale** to choose the export size: **Native**, **7
 | What you see | What to do |
 |---|---|
 | No engine switch in the header | Your Mac has less than 36 GB of memory. H3 cannot run on it. Use LTX |
+[[pinokio]]
 | *"Hailuo H3 runs on this Mac … it is not built here yet"* | Click **Build Hailuo H3 compact engine** in the Pinokio sidebar (about 5 minutes, no download) |
 | A mode or length is missing on H3, or a mode switches back to LTX | H3's supporting software needs an update. Click **Update Hailuo H3 runner** in Pinokio's sidebar. Your downloaded model files are kept |
 | *"the installed Hailuo H3 runner is behind this panel"* | Click **Install Hailuo H3** again in Pinokio's sidebar. Your downloaded model files are kept |
 | A render is refused with a **Repair** button | H3's supporting software has incompatible versions. Click **Repair**, or **Repair Hailuo H3** in Pinokio's sidebar |
+[[/pinokio]]
+[[mac-app]]
+| *"Hailuo H3 runs on this Mac … it is not built here yet"* | Hailuo H3 is not available in the Mac app yet. Render on LTX |
+| A mode or length is missing on H3, or a mode switches back to LTX | Hailuo H3 is not available in the Mac app yet. Render on LTX |
+| *"the installed Hailuo H3 runner is behind this panel"* | Hailuo H3 is not available in the Mac app yet. Render on LTX |
+| A render is refused with a **Repair** button | Click **Repair** |
+[[/mac-app]]
 | The render is killed for lack of memory | Quit other apps, pick a shorter length or a smaller size, or set **Settings → Hailuo H3 model** to **Compact** |
 
 More: [Troubleshooting](#docs/troubleshooting/h3-compact).

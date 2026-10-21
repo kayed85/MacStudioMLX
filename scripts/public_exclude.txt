@@ -1,11 +1,14 @@
 # Paths that must NEVER be present in a public-main snapshot commit.
 #
 # One repo-relative path per line, exactly as `git ls-tree -r --name-only`
-# prints it. Blank lines and lines starting with # are ignored. No globs —
-# list every path explicitly, so an accidental typo fails closed (an
-# unmatched exclude line is silently a no-op, which is why a new promote
-# should always diff `origin/main` and eyeball what actually changed, not
-# just trust this file ran).
+# prints it. Blank lines and lines starting with # are ignored. A line may
+# be a glob (`*` or `?`; brackets are refused) ONLY for a family of files that grows on its
+# own (the test suites); it means what a git pathspec means (`*` crosses
+# `/`, anchored at the repo root), which is exactly how both the promote's
+# `git rm --cached -- "<line>"` and public_leak_check.py read it. Everything
+# else is listed explicitly. An unmatched line is silently a no-op, which is
+# why a new promote should always diff `origin/main` and eyeball what
+# actually changed, not just trust this file ran.
 #
 # scripts/public_leak_check.py reads this file and fails if any listed path
 # exists in the tree-ish it is given. The promote recipe in
@@ -33,3 +36,34 @@ docs/STATE.md
 # check when this file is missing (fails closed) rather than silently
 # skipping it.
 scripts/public_leak_patterns.txt
+#
+# --- 2026-10-21: a tidy public repo (owner: "keep the tests private") ---
+#
+# The test suites and their pytest config. They stay in the private
+# branches, so the gates (scripts/release_gates.sh, also private) keep
+# running on every release line; the public tree carries the app.
+# Nothing at runtime imports them (a gate checks the snapshot boots).
+conftest.py
+test_*.py
+scripts/test_*.py
+scripts/release_gates.sh
+#
+# Maintainer-only material: the release checklist, research notes, launch
+# threads, the old history dump, the stale roadmap (README carries the
+# current one), the maintainer stats job, and the agent manual with its
+# per-tool symlinks (internal paths and process, not contributor docs).
+docs/RELEASE_CHECKLIST.md
+docs/HISTORY.md
+docs/PERF_RESEARCH_2026-05-05.md
+docs/IMAGE_GEN_RESEARCH_2026-05.md
+docs/launch_thread_3.0.md
+launch/*
+ROADMAP.md
+scripts/STATS_DASHBOARD.md
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+QWEN.md
+.clinerules
+.cursorrules
+.windsurfrules

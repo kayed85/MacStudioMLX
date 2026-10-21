@@ -14,7 +14,8 @@ tree actually contains*. This does.
 Two independent checks, both must pass:
 
 1. PATH check — nothing on `scripts/public_exclude.txt` may exist in the
-   tree. That file is the single source of truth for "must never ship";
+   tree. An entry is an exact path, or a glob (`test_*.py`) matched the way
+   git matches a pathspec (2026-10-21: the test suites stay private). That file is the single source of truth for "must never ship";
    the promote recipe's `git rm --cached` step (docs/RELEASE_CHECKLIST.md,
    "Promoting — a curated SNAPSHOT", step 1) reads the same file, so the
    removal list and the verification list cannot drift apart.
@@ -59,6 +60,7 @@ neither counts as a leak verdict, but neither counts as a PASS either.
 """
 from __future__ import annotations
 
+import fnmatch
 import re
 import subprocess
 import sys
@@ -95,6 +97,13 @@ def load_exclude_list() -> list[str]:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
+        if "[" in line or "]" in line:
+            # fnmatch and git disagree on bracket classes (`[^0-9]` is a
+            # negation in git and a literal `^` in fnmatch), so a bracket line
+            # could pass here while git removes something else. Refuse it.
+            sys.stderr.write(f"FAIL setup: {EXCLUDE_FILE}: bracket patterns are not "
+                             f"supported, use * or ?: {line}\n")
+            raise SystemExit(2)
         paths.append(line)
     if not paths:
         sys.stderr.write(f"FAIL setup: {EXCLUDE_FILE} has no active entries\n")
@@ -144,10 +153,32 @@ def load_patterns() -> list[tuple[str, str, str]]:
     return patterns
 
 
+def is_glob(entry: str) -> bool:
+    return any(c in entry for c in "*?")
+
+
+def matches_exclude(path: str, entry: str) -> bool:
+    """One exclude-list entry against one tree path. A plain entry is an
+    exact path. An entry with `*` or `?` is a glob with git's default
+    pathspec semantics (fnmatch, `*` also crosses `/`), which is what the
+    promote recipe's `git rm --cached -- "<entry>"` applies to the same line,
+    so the removal and this verification still read one list one way."""
+    if is_glob(entry):
+        return fnmatch.fnmatchcase(path, entry)
+    return path == entry
+
+
 def check_excluded_paths(tree_ish: str, excluded: list[str]) -> list[str]:
     listing = _git("ls-tree", "-r", "--name-only", tree_ish)
-    present = set(listing.splitlines())
-    return [p for p in excluded if p in present]
+    present = listing.splitlines()
+    hits: list[str] = []
+    for entry in excluded:
+        if is_glob(entry):
+            hits += [f"{p}  (matches {entry})" for p in present
+                     if matches_exclude(p, entry)]
+        elif entry in present:
+            hits.append(entry)
+    return hits
 
 
 def check_pattern_file_absent(tree_ish: str) -> bool:

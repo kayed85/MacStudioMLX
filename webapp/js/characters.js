@@ -456,7 +456,7 @@ function musicInstallRender(el, where) {
       ${failed ? `<p class="mi-error">${escapeHtml(inst.error)}</p>` : ''}
       ${stopped ? '<p class="mi-sub">Install stopped. Click again to resume where it left off.</p>' : ''}
       <div class="mi-actions"><button type="button" class="primary" onclick="musicInstallStart(${repair ? "'repair'" : ''})">${escapeHtml(failed || stopped ? (repair ? 'Try the repair again' : 'Resume install (YuE2, ~11 GB)') : label)}</button></div>
-      <p class="mi-note">Needs ${escapeHtml(String(music.min_ram_gb || 24))} GB unified memory and 14 GB free disk. Also available from the Phosphene sidebar in Pinokio.</p>`;
+      <p class="mi-note">Needs ${escapeHtml(String(music.min_ram_gb || 24))} GB unified memory and 14 GB free disk.${distText(' Also available from the Phosphene sidebar in Pinokio.', '')}</p>`;
   }
   el.innerHTML = html;
 }
