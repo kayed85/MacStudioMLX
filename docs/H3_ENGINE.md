@@ -192,14 +192,16 @@ composite keys for a sidecar written before the split — **HQ → Standard**,
 they are not choices in the UI, and this table should not have kept reading
 as if they were.
 
-| Quality | Length | Geometry | Aspect | Windows | Sigma points | Wall time |
+| Quality | Length | Geometry | Aspect | Windows | Sigma points | Fleet median, M4 Max (Fast · Best) |
 |---|---|---|---|---|---|---|
-| Draft | 3s | 640×384 · 73f | 5:3 | 1 | 9 (8 forwards) | ~3 min |
-| Standard | 3s | 768×448 · 73f | 12:7 | 1 | 9 (8 forwards) | ~4-5 min |
-| Standard | 5s | 768×448 · 124f | 12:7 | 1 | 9 (8 forwards) | ~8 min |
-| **High** | **5s** | **1024×576 · 124f** | **16:9** | 1 | **16 (15 forwards)** since 2026-09-16 | **~34 min** (was ~19 at 8 forwards) |
-| Standard | 10s | 768×448 · 243f | 12:7 | **2 × 124f chained** | 9 (8 forwards) | ~17 min |
-| Standard | 15s | 768×448 · 362f | 12:7 | **3 × 124f chained** | 9 (8 forwards) | ~27 min · batch |
+| Draft | 3s | 640×384 · 73f | 5:3 | 1 | 9 (8 forwards) | 3:15 · 4:35 |
+| Standard | 3s | 768×448 · 73f | 12:7 | 1 | 9 (8 forwards) | 4:10 · 6:00 |
+| Standard | 5s | 768×448 · 124f | 12:7 | 1 | 9 (8 forwards) | 5:10 · 13:00 |
+| **High** | **5s** | **1024×576 · 124f** | **16:9** | 1 | **16 (15 forwards)** since 2026-09-16 | 12:00 · no fleet data (lab ~34 min) |
+| Standard | 10s | 768×448 · 243f | 12:7 | **2 × 124f chained** | 9 (8 forwards) | 12:40 · 24:00 |
+| Standard | 15s | 768×448 · 362f | 12:7 | **3 × 124f chained** | 9 (8 forwards) | too few fleet renders (lab ~27 min Best) |
+
+The last column is the median wall time of real renders on M4 Max Macs (any memory size), 2026-08-10 to 2026-10-20, from the anonymous `render_completed` counts — the same numbers as https://phosphene.video/benchmarks/ and the user guide (`webapp/docs/hailuo-h3.md`). The earlier single-Mac lab figures in this column (Draft 3 s ~3 min, Standard 5 s ~8 min) were faster than what users get: the fleet puts them at 3–4.5 min and 13 min.
 
 Legacy composite key → current two-axis key, for reading an old sidecar:
 
@@ -228,7 +230,7 @@ axes (the runner errors otherwise), so exact 16:9 means width `512k`, height
 
 `wide_5s` is measured, not extrapolated (the quality loop's R1 run, on the same
 M4 Max): 22,923 packed rows, 126.0 s/step, 90.5 s VAE decode, 10.71 GiB decode
-peak, **18.8 min**; the same probe put 768×448 at 9.1 min against this table's
+peak, **18.8 min**; the same probe put 768×448 at 9.1 min against the old lab table's
 ~8 min, hence the ~17-19 band. Denoise stayed at 37.6 GiB — identical to
 768×448, because the DiT weights dominate. **The retired ckpt500-EMA Turbo
 adapter measured 8.5 min on the same canvas** (3 forwards at 128.0 / 127.4 /
@@ -283,15 +285,21 @@ alpha/rank factor is external to the checkpoint; loading it at scale 1.0
 renders coloured noise. Resolution therefore uses explicit filenames, not a
 glob.
 
-The Apache-2.0 v1.0 source is
+The v1.0 source is
 [`lightx2v/Minimax-h3-Turbo`](https://huggingface.co/lightx2v/Minimax-h3-Turbo)'s
 `minimax_h3_fl2v_turbo_4step_v1.0_768p_bf16.safetensors`
 (SHA-256
 `1bdabc2e9fce20b1db563b96bcf6e46adcad4c1964f423676436bf266cc7416c`).
-It still needs the runner-layout repack. `install_h3.js` deliberately contains
-no raw-file fetch: it records the exact release-asset publication TODO and must
-gain a digest-checked fetch only after the repacked asset and its output digest
-exist.
+It is a MiniMax H3 Model Derivative, so the MiniMax H3 Community License
+applies to it. Phosphene does not host it. Since 4.19.8,
+`scripts/fetch_h3_turbo.py` (run by `install_h3.js`) fetches that file from
+LightX2V's repo at a pinned commit, verifies its digest, re-lays it out on your
+Mac into the runner layout (pure byte moves: q/k/v fused block-diagonally, the
+fc1 halves swapped, alpha/rank = 1 so nothing is rescaled) and installs it only
+when the result matches SHA-256
+`d51d626fe0845da7e5845a47c323cf3f29086d44d24cb1a4b980882488746197` - the same
+bytes as the file earlier versions downloaded. An install that already has the
+file keeps it.
 
 ### Speed: ⚡ Fast | ✦ Best — TaoMate's 3-step adapter (2026-09-17)
 

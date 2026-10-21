@@ -20,12 +20,15 @@
 
 const DOCS_SECTIONS = [
   { id: 'getting-started', title: 'Getting started', group: 'Start', file: 'getting-started.md' },
+  { id: 'install', title: 'Install, update and disk space', group: 'Start', file: 'install.md' },
   { id: 'video', title: 'Video', group: 'Make', file: 'video.md' },
+  { id: 'hailuo-h3', title: 'Hailuo H3 video engine', group: 'Make', file: 'hailuo-h3.md' },
   { id: 'one-shot', title: 'One Shot', group: 'Make', file: 'one-shot.md' },
   { id: 'remix', title: 'Remix', group: 'Make', file: 'remix.md' },
   { id: 'images', title: 'Images', group: 'Make', file: 'images.md' },
   { id: 'storyboard', title: 'Storyboard', group: 'Make', file: 'storyboard.md' },
   { id: 'audio', title: 'Audio', group: 'Make', file: 'audio.md' },
+  { id: 'music', title: 'Music Studio', group: 'Make', file: 'music.md' },
   { id: 'editor', title: 'Editor', group: 'Cut', file: 'editor.md' },
   { id: 'train-character', title: 'Train Character', group: 'Characters', file: 'train-character.md' },
   { id: 'loras', title: 'LoRAs', group: 'Characters', file: 'loras.md' },

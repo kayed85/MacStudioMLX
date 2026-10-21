@@ -1,6 +1,8 @@
 # Getting started
 
-Phosphene makes video, images and sound on your Mac — nothing is uploaded, nothing is rented. You describe a shot, it goes into a queue, and the finished file lands in Outputs.
+Phosphene makes video, images, songs and sound on your Mac — nothing is uploaded, nothing is rented. You describe a shot, it goes into a queue, and the finished file lands in Outputs.
+
+Not installed yet, or short on disk space? See [Install, update and disk space](#docs/install).
 
 ## The tabs {#tabs}
 
@@ -13,7 +15,7 @@ The row of tabs at the top of the left column is where you choose what to make. 
 | **Images** | Stills: edit a reference image, or put words on a picture with Ideogram 4. See [Images](#docs/images). |
 | **Storyboard** | Plan a whole film from one idea, render every shot, grade them, cut them. See [Storyboard](#docs/storyboard). |
 | **Editor** | A timeline: trim, split, move sound, add titles and music, render the film. See [Editor](#docs/editor). |
-| **Audio** | A video driven by a sound file you bring — a voice, a song. See [Audio](#docs/audio). |
+| **Audio** | **Compose** writes songs with vocals or instrumentals ([Music Studio](#docs/music)). **Music video** plans a film from a song and your pictures. **Lip-sync** makes a face talk or sing to a sound file you bring ([Audio](#docs/audio)). |
 | **Train Character** | Teach Phosphene a face (and a voice) from your photos. See [Train Character](#docs/train-character). |
 
 ## The engine {#engine}
@@ -21,7 +23,7 @@ The row of tabs at the top of the left column is where you choose what to make. 
 The engine switch in the header chooses which model renders: **LTX** or **Hailuo H3**. They are two different engines with different strengths, not a good one and a spare:
 
 - **LTX** — every Video mode, LoRAs and trained characters.
-- **Hailuo H3** — joint video, dialogue and sound. Text and Image modes.
+- **Hailuo H3** — joint video, dialogue and sound: Text, Image, Start & end frame, Keyframes, Extend, Add sound and Lip-sync. It is a separate install of about 75 GB and needs 36 GB of memory. See [Hailuo H3](#docs/hailuo-h3).
 
 The form changes with the engine: controls one engine does not use are hidden, and the Quality and Length chips show that engine's own sizes. The switch only appears when this Mac can run more than one engine. [How they compare](#docs/video/engines).
 
@@ -71,7 +73,7 @@ Updating an existing install downloads and removes nothing.
 ## Updating {#update}
 
 - The version pill in the header says where you stand: **Up to date**, or **Update to** a newer version. When one is out, a banner offers **Update now** / **Later**.
-- In Pinokio, the **Update** item in the Phosphene sidebar updates everything, including Python dependencies. Updating keeps your queue, settings and models.
+- In Pinokio, the **Update** item in the Phosphene sidebar updates everything, including Python dependencies. Updating keeps your queue, settings and models. If an update stops, see [When an install stops](#docs/install/fatal).
 - After an in-app update the banner reads *"Updated to … — restart to finish"*: click **Stop**, then **Start** in Pinokio. If the update touched dependencies, it tells you to use Pinokio's **Update** instead.
 - If an update started from a very old version only seems to move the panel, click **Update** once more — an old version updates its updater first.
 - If Pinokio's **Update** stops in its first second (it can on 4.19.6 and older), use **Update now** in Phosphene's own banner or version pill instead, then restart. From 4.19.7 on, Pinokio's button works again. See [troubleshooting](#docs/troubleshooting/update-stops).

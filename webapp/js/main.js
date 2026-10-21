@@ -29,6 +29,9 @@ function _wireModeGroupTabSemantics() {
 }
 
 // ====== Init ======
+// Licence screens (4.19.8): wrap fetch() first, so a 451 licence_required
+// from any later call opens the model's licence instead of a bare error.
+installLicenceGate();
 musicInit();
 _wireModeGroupTabSemantics();
 // VC-34: the Tier quick-link next to the Quality label. Tier is fixed at

@@ -481,6 +481,9 @@ def post_queue_retry(h, path, qs, ctype) -> None:
     refusal = P.job_input_refusal(new_job["params"])
     if refusal:
         h._json({"error": refusal, "code": "input_missing"}, 400); return
+    _lic = P.job_licence_refusal(new_job["params"])
+    if _lic:
+        h._json(_lic, 451); return
     with P.QUEUE_COND:
         P.STATE["queue"].append(new_job)
         P.QUEUE_COND.notify_all()
@@ -527,6 +530,10 @@ def post_queue_batch(h, path, qs, ctype) -> None:
         refusal = P.job_input_refusal(job.get("params") or {})
         if refusal:
             h._json({"error": refusal, "code": "input_missing"}, 400); return
+    for job in built[:1]:            # the form is shared; one licence screen
+        _lic = P.job_licence_refusal(job.get("params") or {})
+        if _lic:
+            h._json(_lic, 451); return
     for job in built[:1]:            # the form is shared; one install offer
         refusal = P.a2v_stem_refusal(job["params"])
         if refusal:
@@ -824,6 +831,12 @@ def post_run(h, path, qs, ctype) -> None:
     refusal = P.job_input_refusal(job.get("params") or {})
     if refusal:
         h._json({"error": refusal, "code": "input_missing"}, 400); return
+    # 4.19.8: a model whose licence asks for an explicit "I accept" (H3, the
+    # non-commercial models) is refused with 451 until it is accepted; the
+    # panel's licences.js shows the screen and re-sends this request.
+    _lic = P.job_licence_refusal(job.get("params") or {})
+    if _lic:
+        h._json(_lic, 451); return
     # 4.17 Codex EST-10: a follow-up that can never queue is refused NOW,
     # not discovered in the log after a long Extend render.
     refusal = P.extend_face_fix_refusal(job["params"])
@@ -1291,6 +1304,10 @@ def post_queue_newtake(h, path, qs, ctype) -> None:
         "started_at": None, "finished_at": None, "elapsed_sec": None,
         "params": new_params, "raw_path": None, "output_path": None, "error": None,
     }
+    # 4.19.8: a model whose licence asks for an "I accept" (model_licences.py).
+    _lic = P.job_licence_refusal(new_job.get("params") or {})
+    if _lic:
+        h._json(_lic, 451); return
     with P.QUEUE_COND:
         P.STATE["queue"].append(new_job)
         P.QUEUE_COND.notify_all()
@@ -1421,6 +1438,10 @@ def post_take_resume(h, path, qs, ctype) -> None:
         "started_at": None, "finished_at": None, "elapsed_sec": None,
         "params": base_params, "raw_path": None, "output_path": None, "error": None,
     }
+    # 4.19.8: a model whose licence asks for an "I accept" (model_licences.py).
+    _lic = P.job_licence_refusal(new_job.get("params") or {})
+    if _lic:
+        h._json(_lic, 451); return
     with P.QUEUE_COND:
         P.STATE["queue"].append(new_job)
         P.QUEUE_COND.notify_all()

@@ -31,6 +31,25 @@ async function refreshVersionPill() {
   } catch (e) {
     return;             // network blip; don't blow away last good state
   }
+  // Reconcile the client-only restart flag against the server's authoritative
+  // state. _versionRestartPending is set after a pull that moved the tree
+  // (~line 791) and lives purely in this page's memory: nothing ever cleared
+  // it, and Pinokio reuses the same webview across an app Stop -> Start, so
+  // the flag — and the "Restart Phosphene" pill — outlived the restart that
+  // was supposed to satisfy it. Users could only escape it by quitting
+  // Pinokio entirely (the page finally torn down and reloaded), reported on
+  // the back of issue #114. Once a pull has moved the tree the running
+  // process reports stale_process=true until it restarts, so the flag can
+  // only coexist with a healthy, current process AFTER the restart actually
+  // happened — either this same page now polling the new process, or a fresh
+  // server that no longer remembers the pull. Clear it then. We only touch
+  // the client PULL flag; the server's own stale_process pill (a promote
+  // landing under a long-lived panel) is untouched and still shows.
+  if (_versionRestartPending && _versionState
+      && !_versionState.stale_process
+      && !(((_versionState.behind_by) | 0) > 0)) {
+    _versionRestartPending = false;
+  }
   renderVersionPill();
   try { _ubRender(_versionState); } catch (e) {}
   try { _maybeShowUpdateModal(_versionState); } catch (e) {}

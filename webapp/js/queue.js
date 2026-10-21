@@ -1085,12 +1085,19 @@ function openH3InstallCard(source) {
         of memory, H3 uses its compact Q8 engine, which the install builds by
         itself at the end (about 5 more minutes, nothing extra to download).
       </p>` : ''}
+      <p style="margin:0 0 10px" class="h3-licence-step">
+        <b>1. Accept the MiniMax H3 licence.</b> H3's licence does not cover the
+        European Union, the United Kingdom, South Korea or the United States,
+        and it comes with use restrictions.
+        <button type="button" class="ghost-btn" onclick="openLicence('h3', {force: false}).then(licenceStatusRefresh)">Read the licence</button>
+        <span data-licence-status="h3"></span>
+      </p>
       <p style="margin:0 0 10px">
-        Install it from Pinokio, not from here: open the <b>Phosphene</b> entry
+        <b>2. Install it from Pinokio</b>, not from here: open the <b>Phosphene</b> entry
         in the Pinokio sidebar and click
         <b>“Install Hailuo H3 (second video engine, ~75 GB)”</b>. It is there
-        while the panel is running, too. The panel picks it up within a couple
-        of seconds — no restart.
+        while the panel is running, too. The installer stops until step 1 is
+        done. The panel picks H3 up within a couple of seconds — no restart.
       </p>`;
     // THE DIAGNOSTIC DUMP GOES BEHIND A DISCLOSURE. `missing` is a list of raw
     // absolute paths — indispensable when an install half-lands, and pure
@@ -1113,6 +1120,7 @@ function openH3InstallCard(source) {
   }
   if (m) m.style.display = 'flex';
   _h3CardSeen = true;
+  if (typeof licencesLoad === 'function') licencesLoad(true).then(licenceStatusRefresh);
 }
 function closeH3InstallCard() {
   const m = document.getElementById('h3InstallModal');

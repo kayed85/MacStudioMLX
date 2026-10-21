@@ -12765,3 +12765,37 @@ body[data-engine="h3"][data-vmode="v2a"] #h3LengthLabel { display: none !importa
 #bugModal .bug-what-hint { font-size: 11.5px; line-height: 1.4; color: var(--muted); }
 #bugModal .bug-what.is-invalid textarea { border-color: var(--danger, #f85149); }
 #bugModal .bug-what.is-invalid .bug-what-hint { color: var(--danger, #f85149); }
+
+/* Per-model licence screen (4.19.8, webapp/js/licences.js). Layered on the
+   .models-modal scaffold; the body text is the user's to read, so it is
+   full-size here, not the scaffold's muted hint size. */
+.licence-card { width: min(600px, 92vw); }
+.licence-body { font-size: 13px; color: var(--fg, #d8e0ee); line-height: 1.5; }
+.licence-head { display: flex; align-items: center; gap: 10px; margin: 4px 0 8px; flex-wrap: wrap; }
+.licence-model { font-weight: 600; }
+.licence-badge {
+  font-size: 11px; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--border, #2a3140); color: var(--muted);
+}
+.licence-badge.nc { border-color: rgba(210,153,34,0.55); color: #e3b341; }
+.licence-summary { margin: 0 0 8px; }
+.licence-territory {
+  margin: 0 0 8px; padding: 8px 10px; border-radius: 8px;
+  background: rgba(210,153,34,0.08); border: 1px solid rgba(210,153,34,0.35);
+}
+.licence-terms { margin: 0 0 10px; padding-left: 18px; }
+.licence-terms li { margin: 2px 0; }
+.licence-meta { font-size: 12px; color: var(--muted); margin: 0 0 6px; }
+.licence-meta a, .engine-credit a { color: var(--accent-bright); }
+.licence-accepted { font-size: 12px; color: rgba(63,185,80,0.9); margin: 6px 0; }
+.licence-check {
+  display: flex; gap: 8px; align-items: flex-start; justify-content: flex-start;
+  text-align: left; margin: 12px 0 10px; cursor: pointer;
+}
+.licence-check input[type="checkbox"] { flex: 0 0 auto; width: auto; margin: 3px 0 0; }
+.licence-check span { flex: 1 1 auto; }
+.licence-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.licence-error { color: #f0817a; font-size: 12px; margin: 8px 0 0; }
+.engine-credit { display: block; margin-top: 6px; font-size: 11px; color: var(--muted); }
+[data-licence-status] { color: var(--muted); }
+[data-licence-status].ok { color: rgba(63,185,80,0.9); }

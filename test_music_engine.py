@@ -921,7 +921,7 @@ def _install_js_messages():
 
 def test_panel_install_runs_exactly_the_sidebar_steps():
     assert [cmd for *_, cmd in P.MUSIC_INSTALL_STEPS] == _install_js_messages()
-    assert len(P.MUSIC_INSTALL_STEPS) == 6
+    assert len(P.MUSIC_INSTALL_STEPS) == 7
 
 
 FAKE_GIT = '''#!/bin/sh
@@ -976,7 +976,7 @@ def install_env(pack, tmp_path, monkeypatch):
     app = tmp_path / "app"
     (app / "scripts/pinokio").mkdir(parents=True)
     (app / "scripts/music").mkdir(parents=True)
-    for name in ("music_preflight.sh", "music_clone.sh", "music_checkout.sh", "music_venv.sh", "music_sync.sh"):
+    for name in ("music_licence_gate.sh", "music_preflight.sh", "music_clone.sh", "music_checkout.sh", "music_venv.sh", "music_sync.sh"):
         shutil.copy(ROOT / "scripts/pinokio" / name, app / "scripts/pinokio" / name)
     shutil.copy(ROOT / "scripts/music/engine_pin.txt", app / "scripts/music/engine_pin.txt")
     (app / "scripts/pinokio/music_fetch.py").write_text(FAKE_FETCH)
@@ -996,8 +996,13 @@ def install_env(pack, tmp_path, monkeypatch):
     for k, v in {"PATH": f"{fakebin}:/usr/bin:/bin:/usr/sbin:/sbin", "LTX_MUSIC_ROOT": str(new_engine),
                  "LTX_MUSIC_MODELS": str(new_models), "FAKE_PY": sys.executable,
                  "FAKE_PIN_FILE": str(app / "scripts/music/engine_pin.txt"),
-                 "FAKE_PACK_SRC": str(src), "FAKE_FETCH_HOLD": str(hold)}.items():
+                 "FAKE_PACK_SRC": str(src), "FAKE_FETCH_HOLD": str(hold),
+                 # 4.19.8: the install's first step is the YuE2 licence gate;
+                 # give it a state dir of its own with the licence accepted
+                 # (another suite may have pointed LTX_STATE_DIR elsewhere).
+                 "LTX_STATE_DIR": str(tmp_path / "state")}.items():
         monkeypatch.setenv(k, v)
+    P.model_licences.accept(tmp_path / "state", "yue2", "test")
     monkeypatch.setattr(P, "MUSIC_INSTALL", {"state": "idle", "active": False})
     monkeypatch.setattr(P, "push", lambda line: None)
     P._MUSIC_INSTALL_BYTES.update(ts=0.0, bytes=0)
@@ -1026,7 +1031,7 @@ def test_install_from_the_panel_end_to_end_with_stop_and_resume(install_env):
                  and "Fetch generator" in (P.music_install_status().get("last_line") or ""))
     P._MUSIC_INSTALL_BYTES["ts"] = 0.0
     s = P.music_install_status()
-    assert s["active"] and s["step_index"] == 5 and s["steps"] == 6
+    assert s["active"] and s["step_index"] == 6 and s["steps"] == 7
     assert s["bytes_done"] >= 1_000_000 and s["bytes_total"] > 10e9
     assert 20 <= s["percent"] <= 99
     guard = json.loads((env.hold.parent / "mi.json").read_text())

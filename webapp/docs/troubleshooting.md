@@ -1,6 +1,6 @@
 # Troubleshooting
 
-When Phosphene refuses a render, it says why and what to do. These are the messages people actually see.
+When Phosphene refuses a render, it says why and what to do. These are the messages people actually see. For problems during **Install** or **Update** (a `FATAL error:` line in Pinokio, not enough disk space), see [Install, update and disk space](#docs/install/fatal).
 
 ## Memory and this Mac's tier {#memory}
 

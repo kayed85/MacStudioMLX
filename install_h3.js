@@ -74,7 +74,23 @@ module.exports = {
         // engine the default everywhere and dropped the real floor to 36 GB.
         // The preflight two steps down enforces 36; this sentence was turning
         // away 36-48 GB Macs the installer would have happily served.
-        html: "<b>Installing Hailuo H3 (second video engine, ~75 GB).</b><br>Generates picture, dialogue and sound together, and sits beside LTX in the engine switcher. Needs an Apple Silicon Mac with 36 GB+ of memory (the compact Q8 engine, built at the end of this install); 60 GB+ additionally unlocks the full bf16 quality engine. MiniMax Community License — territory restrictions apply. Resumable if interrupted."
+        html: "<b>Installing Hailuo H3 (second video engine, ~75 GB).</b><br>Generates picture, dialogue and sound together, and sits beside LTX in the engine switcher. Needs an Apple Silicon Mac with 36 GB+ of memory (the compact Q8 engine, built at the end of this install); 60 GB+ additionally unlocks the full bf16 quality engine. MiniMax H3 Community License: accept it in Phosphene first (click Hailuo H3 in the engine switcher); it does not cover the EU, the UK, South Korea or the US. Resumable if interrupted."
+      }
+    },
+
+    // ---- Licence first (4.19.8) --------------------------------------------
+    // The MiniMax H3 Community License covers only its Applicable Territory
+    // (worldwide except the EU, the UK, South Korea and the US) and asks a
+    // product to bind each user to its use restrictions before giving access
+    // (s. V.2). The panel's licence screen records the acceptance; this step
+    // stops a NEW install until it exists (an install that already has the
+    // weights continues - the panel asks before the next H3 render instead).
+    {
+      method: "shell.run",
+      params: {
+        message: [
+          "bash scripts/pinokio/h3_licence_gate.sh"
+        ]
       }
     },
 
@@ -261,13 +277,19 @@ module.exports = {
       }
     },
 
-    // ---- Turbo v1.0 release asset (digest-checked fetch) -------------------
-    // Target: lightx2v_v1.0_768p_ourlayout.safetensors — the runner-layout
-    // repack, published as a release asset on the weights-ltx25-v1 lane,
-    // digest-pinned. Provenance: repacked from
-    // lightx2v/Minimax-h3-Turbo (Apache-2.0),
-    // minimax_h3_fl2v_turbo_4step_v1.0_768p_bf16.safetensors (source SHA-256
-    // 1bdabc2e9fce20b1db563b96bcf6e46adcad4c1964f423676436bf266cc7416c).
+    // ---- Turbo v1.0: fetched from UPSTREAM, re-laid out on this Mac --------
+    // Target: lightx2v_v1.0_768p_ourlayout.safetensors - the runner-layout
+    // repack (SHA-256 d51d626fe0845da7e5845a47c323cf3f29086d44d24cb1a4b980882488746197).
+    // 4.19.8: Phosphene no longer hosts this file. It is a MiniMax H3 Model
+    // Derivative, and the H3 licence only allows distribution inside its
+    // Applicable Territory, so scripts/fetch_h3_turbo.py fetches the ORIGINAL
+    // from lightx2v/Minimax-h3-Turbo
+    // (minimax_h3_fl2v_turbo_4step_v1.0_768p_bf16.safetensors, pinned commit,
+    // source SHA-256 1bdabc2e9fce20b1db563b96bcf6e46adcad4c1964f423676436bf266cc7416c),
+    // re-lays it out locally (pure byte moves, no maths) and installs it only
+    // when the result matches the digest above - byte-identical to the file
+    // installs used to download, so Turbo behaves exactly as before. An
+    // install that already has the file is left alone.
     // Do not substitute the raw v0.1 file
     // `minimax_h3_fl2v_turbo_4step_v0.1.safetensors`: its alpha/rank scale
     // lives OUTSIDE the checkpoint and at `--lora ...:1.0` it renders
@@ -275,13 +297,12 @@ module.exports = {
     // `lightx2v_v0.1_ourlayout_alpha8.safetensors`.
     //
     // BEST-EFFORT ON PURPOSE: the panel's /h3/turbo/install endpoint fetches
-    // this same asset on demand with the same digest check, so a transient
-    // network failure here must not fail a 75 GB install that is otherwise
-    // complete. scripts/fetch_h3_turbo.py resumes partials, verifies
-    // SHA-256 d51d626fe0845da7e5845a47c323cf3f29086d44d24cb1a4b980882488746197
-    // and renames into place only after the check — a corrupt transfer is
-    // deleted, never installed. (One short line per command: Pinokio 8.0.x
-    // wedges its shell on ~350+ character lines.)
+    // the managed Turbo adapter on demand, so a transient network failure here
+    // must not fail a 75 GB install that is otherwise complete. The script
+    // resumes partials, verifies both digests and renames into place only
+    // after the check - a corrupt transfer is deleted, never installed. (One
+    // short line per command: Pinokio 8.0.x wedges its shell on ~350+
+    // character lines.)
     {
       method: "shell.run",
       params: {

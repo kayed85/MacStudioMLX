@@ -22,7 +22,7 @@ Then set **Aspect** (16:9 1280×720 by default, down to smaller, faster sizes), 
 
 ## Ideogram 4 — words on the picture {#ideogram}
 
-The first render downloads Ideogram 4 (about 28 GB, once). Commercial use needs a license from Ideogram.
+The first render shows Ideogram 4's licence screen (non-commercial use only). After you accept, it downloads about 28 GB, once.
 
 - **Simple** — a plain prompt. **Layout** — the visual canvas (below).
 - **Render**: **Design** (illustration, graphic) or **Photographic** (camera realism).

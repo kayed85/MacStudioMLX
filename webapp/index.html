@@ -1319,6 +1319,16 @@
               Dialogue + sound are generated jointly — write them into the prompt.
               Length is chosen here, before the render: 10 s and 15 s chain 5 s
               windows at render time, so there is no Extend afterwards.
+              <!-- MiniMax H3 licence s. IV.2 / V.5: "MiniMax H3" shown where H3
+                   is used, the licence one click away, and a way to report
+                   suspected misuse. Lives in the H3 hint, which shows exactly
+                   while H3 is the selected engine. -->
+              <span class="engine-credit" id="h3Credit">
+                <b>MiniMax H3</b> &middot;
+                <a href="#" onclick="event.preventDefault(); openLicence('h3', {readOnly: true})">Licence</a>
+                &middot;
+                <a href="https://github.com/mrbizarro/Phosphene/issues/new?title=Misuse%20report%3A%20" target="_blank" rel="noopener">Report misuse</a>
+              </span>
             </div>
             <!-- H3 SPEED — one switch above the Quality cards: ⚡ Fast (TaoMate's
                  3-step adapter, the default once installed) | ✦ Best (the shape's
@@ -6438,6 +6448,20 @@ The last line"></textarea>
   </div>
 </div>
 
+<!-- Per-model licence screen (4.19.8). Filled by webapp/js/licences.js from
+     GET /licences; opened when the server answers 451 licence_required, from
+     the H3 install card, and from the H3 credit line. -->
+<div id="licenceModal" class="models-modal" style="display:none"
+     role="dialog" aria-modal="true" aria-labelledby="licenceTitle">
+  <div class="models-card licence-card">
+    <div class="models-head">
+      <h2 id="licenceTitle">Model licence</h2>
+      <button class="ghost-btn" onclick="closeLicence()">Close</button>
+    </div>
+    <div class="models-hint licence-body" id="licenceBody"></div>
+  </div>
+</div>
+
 <!-- ============== MODELS MODAL ============== -->
 <!-- Opened by the "models" pill in the header. Shows per-repo download
      status from /models, with a Download button per row. Active downloads
@@ -6797,6 +6821,7 @@ const BOOT = __BOOTSTRAP__;</script>
      webapp/vendor/abcjs/) so a score renders with the network off. Classic
      script on purpose: it publishes `ABCJS` as a global for the studio module. -->
 <script src="/webapp/vendor/abcjs/abcjs-basic-min.min.js"></script>
+<script type="module" src="/webapp/js/licences.js"></script>
 <script type="module" src="/webapp/js/boot.js"></script>
 <script type="module" src="/webapp/js/music.js"></script>
 <script type="module" src="/webapp/js/shortcuts.js"></script>

@@ -834,9 +834,15 @@ class H3InstallStopsAtTheFirstRefusal(Base):
         super().setUp()
         self.sb.install("scripts/pinokio/h3_preflight.sh", "scripts/pinokio/h3_roots.sh",
                         "scripts/pinokio/h3_checkout.sh", "scripts/pinokio/h3_venv.sh",
-                        "scripts/pinokio/h3_deps.sh", "scripts/pinokio/h3_build_q8.sh")
+                        "scripts/pinokio/h3_deps.sh", "scripts/pinokio/h3_build_q8.sh",
+                        "scripts/pinokio/h3_licence_gate.sh")
         self.calls = self.sb.base / "calls.log"
         self.dispatches = lane("install_h3.js")
+        # 4.19.8: dispatch 0 is the licence gate. These cases are about the
+        # steps after it, so the licence is accepted the way the panel does.
+        sys.path.insert(0, str(ROOT))
+        import model_licences
+        model_licences.accept(self.sb.app / "state", "h3")
 
     def _emulate(self, env=None):
         """-> (index of the dispatch that stopped the run or None, [outputs])"""
@@ -855,8 +861,20 @@ class H3InstallStopsAtTheFirstRefusal(Base):
         self.sb.stub("sysctl", "echo 17179869184\n")
         self.sb.stub("git", 'echo "git $*" >> "$CALLS"\nexit 0\n')
         stopped, outs = self._emulate()
+        self.assertEqual(stopped, 1, outs)            # 0 = the licence gate, passed
+        self.assertIn("h3_licence_gate.sh", self.dispatches[0]["d"])
+        self.assertIn("FATAL error: Hailuo H3 needs", outs[1])
+        self.assertFalse(self.calls.exists(), "something ran after the refusal")
+
+    def test_an_unaccepted_licence_ends_a_new_install_before_anything_runs(self):
+        for f in (self.sb.app / "state").glob("*"):
+            f.unlink()
+        self.sb.stub("sysctl", "echo 68719476736\n")
+        self.sb.stub("git", 'echo "git $*" >> "$CALLS"\nexit 0\n')
+        stopped, outs = self._emulate()
         self.assertEqual(stopped, 0, outs)
-        self.assertIn("FATAL error: Hailuo H3 needs", outs[0])
+        self.assertTrue(outs[0].strip().startswith("FATAL error: "), outs[0])
+        self.assertIn("MiniMax H3 licence", outs[0])
         self.assertFalse(self.calls.exists(), "something ran after the refusal")
 
     def test_a_failed_clone_ends_the_install_at_the_checkout_step(self):

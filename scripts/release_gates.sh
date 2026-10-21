@@ -82,6 +82,10 @@ sandbox_env() {
     export LTX_STATE_DIR="$box/state"
     export LTX_OUTPUT_DIR="$box/mlx_outputs"
     export LTX_UPLOADS_DIR="$box/panel_uploads"
+    # Licence screens accepted, as conftest.py does for pytest (4.19.8): a
+    # suite that queues an H3 / music / Ideogram job tests that job, not the
+    # licence gate - the gate has its own suite on a fresh state dir.
+    "$VENV_PY" -c 'import sys; sys.path.insert(0, "."); import model_licences as m; [m.accept(sys.argv[1], k, "gate-sandbox") for k in m.LICENCES]' "$box/state"
 }
 pytest_env() {
     unset LTX_STATE_DIR LTX_OUTPUT_DIR LTX_UPLOADS_DIR

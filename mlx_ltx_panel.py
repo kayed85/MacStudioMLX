@@ -83,6 +83,7 @@ import install_plan
 # internal caption schema. Faithful Python port of the panel's JS canvas
 # serializer (ideoBuildCaption / ideoSynthDesc / ideoRectToBbox).
 import ideogram_caption
+import model_licences
 
 # Storyboard — the layer ABOVE the video modes: one concept in, a film's worth
 # of shots out. `storyboard` is the spine (schema, validation, scheduling,
@@ -3585,13 +3586,16 @@ def _set_h3_turbo_dl(**kw) -> None:
 
 
 def _h3_turbo_asset(key: str | None = None) -> dict:
-    """The managed adapter to fetch: v4-600 EMA from its author's repo by
-    default; the LightX2V release asset when asked for by key."""
+    """The managed adapter to fetch: v4-600 EMA from its author's repo.
+
+    Every managed download comes from the adapter author's own repo. The
+    LightX2V v1.0 repack used to be reachable here by key from a Phosphene
+    release asset; that asset is gone (4.19.8, licence), and the installer
+    builds the file locally from upstream instead (scripts/fetch_h3_turbo.py)."""
     key = key or H3_TURBO_DEFAULT_ASSET
-    if key in H3_TURBO_ASSETS:
-        return dict(H3_TURBO_ASSETS[key], key=key)
-    return {"key": "v1.0", "file": H3_TURBO_LORA_FILE, "url": H3_TURBO_ASSET_URL,
-            "sha256": H3_TURBO_ASSET_SHA256, "bytes": H3_TURBO_ASSET_BYTES}
+    if key not in H3_TURBO_ASSETS:
+        raise KeyError(f"no managed Turbo download named {key!r}")
+    return dict(H3_TURBO_ASSETS[key], key=key)
 
 
 # ONE companion fetch at a time, from any caller (the install button, the
@@ -3718,7 +3722,7 @@ def _h3_turbo_fetch_embedder(target_dir, push_log, runner=None, *,
 
 
 def _h3_turbo_download_bg(target_dir, push_log, asset: dict | None = None) -> None:
-    """Stream the digest-pinned v1.0 repack release asset into the H3 pack."""
+    """Stream the digest-pinned managed Turbo adapter into the H3 pack."""
     import urllib.request
     import hashlib
     asset = asset or _h3_turbo_asset()
@@ -3781,11 +3785,12 @@ def _h3_turbo_download_bg(target_dir, push_log, asset: dict | None = None) -> No
 
 
 def _h3_install_turbo(push_log, download_fn=None, embedder_fn=None) -> dict:
-    """Fetch the digest-pinned runner-layout Turbo adapter on demand.
+    """Fetch the digest-pinned Turbo adapter on demand (the v4-600 EMA
+    adapter, from its author's repo; see _h3_turbo_asset).
 
-    The v1.0 repack is a published release asset with a pinned SHA-256
-    (H3_TURBO_ASSET_SHA256, verified byte-identical against the repack the
-    adapter selection was graded on). The raw LightX2V v0.1 file is still
+    An install that already has the v1.0 repack (built locally from upstream
+    by scripts/fetch_h3_turbo.py, digest H3_TURBO_ASSET_SHA256) keeps using
+    it; the resolver order is H3_TURBO_LORA_CANDIDATES. The raw LightX2V v0.1 file is still
     refused by name in the resolver: its alpha/rank factor lives outside the
     checkpoint, and at scale 1.0 it renders coloured noise.
     """
@@ -8724,20 +8729,23 @@ H3_TURBO_LORA_CANDIDATES = (
     (H3_TURBO_FALLBACK_LORA_FILE, "v0.1", True),
     (H3_TURBO_CKPT500_FILE, "ckpt500-EMA", True),
 )
-# Exact upstream source for the v1.0 repack, kept for provenance.
+# Exact upstream source for the v1.0 repack. Since 4.19.8 Phosphene no longer
+# hosts the repack: it is a MiniMax H3 Model Derivative, and the H3 licence
+# only allows distribution inside its Applicable Territory. install_h3.js runs
+# scripts/fetch_h3_turbo.py, which fetches THIS file from LightX2V's own repo
+# (pinned commit + digest) and re-lays it out on the user's Mac. The pins below
+# must match that script (test_h3_turbo_adapter.py holds them together).
+H3_TURBO_SOURCE_REVISION = "30f485ed874aa44c8183348ad361c5eabad318da"
 H3_TURBO_SOURCE_FILE = "minimax_h3_fl2v_turbo_4step_v1.0_768p_bf16.safetensors"
+H3_TURBO_SOURCE_URL = ("https://huggingface.co/" + H3_TURBO_REPO + "/resolve/"
+                       + H3_TURBO_SOURCE_REVISION + "/" + H3_TURBO_SOURCE_FILE)
 H3_TURBO_SOURCE_SHA256 = (
     "1bdabc2e9fce20b1db563b96bcf6e46adcad4c1964f423676436bf266cc7416c"
 )
-# The runner-layout repack, published 2026-08-14 as a digest-pinned release
-# asset on the same lane as the LTX-2.5 packs. The digest below was verified
-# against the local repack that core_tan's testing and the owner's visual
-# review selected — byte-identical before the pin was written down.
-H3_TURBO_RELEASE_TAG = "weights-ltx25-v1"
-H3_TURBO_ASSET_URL = (
-    "https://github.com/mrbizarro/Phosphene/releases/download/"
-    + H3_TURBO_RELEASE_TAG + "/" + H3_TURBO_LORA_FILE
-)
+H3_TURBO_SOURCE_BYTES = 1383677808
+# The locally built runner-layout repack: byte-identical to the file
+# Phosphene used to host (verified 2026-10-21 against the old release
+# asset's digest), so Turbo on v1.0 renders exactly as before.
 H3_TURBO_ASSET_SHA256 = (
     "d51d626fe0845da7e5845a47c323cf3f29086d44d24cb1a4b980882488746197"
 )
@@ -8749,8 +8757,8 @@ H3_TURBO_STEPS = 4                       # the 4-step adapters (v1.0 / v0.1 / ck
 # Sigma points per adapter version; anything unlisted is a 4-step adapter.
 H3_TURBO_VERSION_STEPS = {"v4-600-EMA": H3_TURBO_V4_STEPS}
 # What the managed download fetches. The v4 adapter comes straight from its
-# author's repo (bare layout, digest-pinned); the LightX2V release asset stays
-# reachable by key for installs that cannot reach Hugging Face.
+# author's repo (bare layout, digest-pinned). The LightX2V v1.0 repack is not a
+# managed download any more: install_h3.js builds it locally from upstream.
 H3_TURBO_ASSETS = {
     "v4-600-EMA": {"file": H3_TURBO_V4_FILE, "url": H3_TURBO_V4_URL,
                    "sha256": H3_TURBO_V4_SHA256, "bytes": H3_TURBO_V4_BYTES},
@@ -13284,7 +13292,7 @@ def h3_size_note() -> str:
     up (X, 2026-09-24). The floors come from the constants the gates use."""
     return (f"~75 GB · needs {H3_MIN_RAM_GB_Q8:.0f} GB+ unified memory "
             f"(compact Q8 engine; {H3_MIN_RAM_GB:.0f} GB+ also unlocks the full "
-            f"bf16 engine) · MiniMax Community License (territory restrictions apply)")
+            f"bf16 engine) · MiniMax H3 Community License (not valid in the EU, UK, South Korea or US)")
 
 
 def h3_ram_verdict() -> dict:
@@ -13776,9 +13784,9 @@ def h3_turbo_status() -> dict:
         "adapter": str(paths["lora"]) if paths["lora"] else None,
         "adapter_version": paths["version"],
         "fallback": paths["fallback"],
-        # The v1.0 repack is a published, digest-pinned release asset, so the
-        # one-click install is live whenever the runner can take a LoRA at
-        # all. `installing` mirrors the in-flight download so /status never
+        # The managed adapter (v4-600 EMA) comes digest-pinned from its
+        # author's repo, so the one-click install is live whenever the runner
+        # can take a LoRA at all. `installing` mirrors the in-flight download so /status never
         # claims idle while a fetch is streaming.
         "install_available": bool(supported),
         "installing": _h3_turbo_dl_state.get("status") == "downloading",
@@ -16365,7 +16373,7 @@ def music_status() -> dict:
 
 # ---- In-panel music engine install -----------------------------------------
 # "It kicks in when you try to use it": Audio → Compose installs YuE2 from the
-# panel itself. The panel runs the SAME six steps as the Pinokio sidebar's
+# panel itself. The panel runs the SAME seven steps as the Pinokio sidebar's
 # install_music.js — the same command strings, from the app folder, so the
 # sidebar entry and this button can never drift apart (test_music_install.py
 # compares the two lists). Every step is idempotent, so Install again after a
@@ -16376,6 +16384,10 @@ def music_status() -> dict:
 # and is registered with the orphan reaper, so a panel that dies mid-install
 # does not leave a second downloader racing the next one.
 MUSIC_INSTALL_STEPS = (
+    # 4.19.8: the YuE2 licence (accepted in the panel; /music/install asks with
+    # HTTP 451 before it ever starts this list), checked again like the sidebar.
+    ("licence", "Checking the YuE2 licence", 1,
+     'bash scripts/pinokio/music_licence_gate.sh'),
     ("preflight", "Checking memory and disk space", 1,
      'bash scripts/pinokio/music_preflight.sh'),
     ("clone", "Downloading the engine code", 3,
@@ -18569,6 +18581,10 @@ _ANALYTICS_REFUSAL_REASONS = (
     # "Listen to the voice only" on an install whose vocal separator is
     # missing — an install prompt, not a fault (lip-sync quality, 4.17.x).
     ("vocal_separator", ("vocal separation is not installed",)),
+    # A model whose licence asks for an explicit "I accept" (model_licences.py)
+    # before it is downloaded or first run - a one-time prompt, not a fault
+    # (4.19.8). Every message model_licences.refusal() builds carries it.
+    ("licence_required", ("accept the licence once",)),
 )
 
 _ANALYTICS_REFUSAL_SLUGS = tuple(s for s, _ in _ANALYTICS_REFUSAL_REASONS)
@@ -31328,6 +31344,33 @@ INPUT_MISSING_AUDIO = ("Lip-sync needs a song or a voice recording — pick one 
                        "the Audio slot first.")
 
 
+def _licence_image_cfg(engine_override: str, params: dict):
+    """The image-engine config a job would run with (for the licence check)."""
+    return _build_image_engine_config(engine_override, params)
+
+
+def job_licence_refusal(params: dict) -> dict | None:
+    """The HTTP 451 payload when this job's model needs a licence the user
+    has not accepted on this Mac yet (model_licences.py), else None.
+
+    For /queue/add, /queue/retry and /queue/batch; the worker repeats the
+    check (run_job_inner, _preflight_image_job) for every other way a job
+    can arrive - storyboards, One Shot, the API."""
+    key = model_licences.licence_for_job(params or {}, _licence_image_cfg)
+    return model_licences.refusal(STATE_DIR, key)
+
+
+def licence_refusal_for(key: str | None) -> dict | None:
+    """The same 451 payload for a named model (install routes)."""
+    return model_licences.refusal(STATE_DIR, key)
+
+
+def _raise_if_licence_missing(key: str | None) -> None:
+    ref = model_licences.refusal(STATE_DIR, key)
+    if ref:
+        raise RenderRefused("licence_required", ref["error"])
+
+
 def job_input_refusal(params: dict) -> str | None:
     """Why this job can only fail for want of an input, or None.
 
@@ -33044,6 +33087,10 @@ def _preflight_image_job(cfg, *, engine_override: str = "auto") -> None:
     (pass or skip) so post-mortems can tell the difference between "preflight
     rejected this" and "preflight passed and the render still died".
     """
+    # Licence first (4.19.8): Ideogram 4, FLUX.1 Krea [dev] and Bria FIBO are
+    # non-commercial models whose screen must be accepted once. Not skippable
+    # by PHOSPHENE_SKIP_PREFLIGHT - that switch is about RAM and disk.
+    _raise_if_licence_missing(model_licences.licence_for_image_cfg(cfg))
     if (os.environ.get("PHOSPHENE_SKIP_PREFLIGHT") or "").strip() in ("1", "true", "yes"):
         push(f"[preflight] skipped via PHOSPHENE_SKIP_PREFLIGHT (engine={engine_override})")
         return
@@ -37475,6 +37522,11 @@ def run_sharp_export_job_inner(job: dict) -> None:
 def run_job_inner(job: dict) -> None:
     p = job["params"]
     mode = p["mode"]
+    # 4.19.8: a model whose licence asks for an explicit "I accept" never
+    # runs before it is given - whichever way the job arrived. Image jobs are
+    # checked again in _preflight_image_job with the config they really run.
+    _raise_if_licence_missing(
+        model_licences.licence_for_job(p, image_cfg_for=None))
     # Image jobs share the queue + worker but use a totally different
     # params shape (no width/height/frames, etc.). Dispatch to the
     # image path before any of the video-only validation runs.
@@ -41350,6 +41402,7 @@ def _unique_output_path(base: Path, stem: str, ext: str = ".mp4") -> Path:
 from panel import routes_characters as _routes_characters
 from panel import routes_files as _routes_files
 from panel import routes_image as _routes_image
+from panel import routes_licences as _routes_licences
 from panel import routes_loras as _routes_loras
 from panel import routes_meta as _routes_meta
 from panel import routes_oneshot as _routes_oneshot
@@ -41361,7 +41414,7 @@ from panel import routes_stats as _routes_stats
 from panel import routes_train as _routes_train
 
 for _routes_mod in (_routes_characters, _routes_files, _routes_image,
-                    _routes_loras, _routes_meta, _routes_models, _routes_music,
+                    _routes_licences, _routes_loras, _routes_meta, _routes_models, _routes_music,
                     _routes_oneshot, _routes_queue, _routes_stats, _routes_storyboard,
                     _routes_train, _civitai_client):
     _routes_mod.P = sys.modules[__name__]

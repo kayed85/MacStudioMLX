@@ -730,6 +730,9 @@ class TestEventSchemas(AnalyticsTestCase):
                           # v4.9.3: the Image Studio memory guard.
                           "image_ram",
                           "ingredients_generation",
+                          # 4.19.8: a model whose licence screen was not
+                          # accepted yet (model_licences.py).
+                          "licence_required",
                           # v4.9.3: High/Keyframes/Extend without the Q8 pack.
                           "pack_missing",
                           # v4.9: the stale-vendored-engine gate (a 2.5 render

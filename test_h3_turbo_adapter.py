@@ -65,8 +65,12 @@ class TestH3TurboResolver(unittest.TestCase):
         self.assertTrue(a["url"].startswith("https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora/resolve/main/"))
         self.assertEqual(a["sha256"], "5f3a626cd72c93a8b9318d6760c510bc5092d2ab13aaba1f932c5bab07a416d3")
         self.assertEqual(a["bytes"], 779849816)
-        # the LightX2V release asset stays reachable by key
-        self.assertEqual(P._h3_turbo_asset("v1.0")["url"], P.H3_TURBO_ASSET_URL)
+        # 4.19.8: the LightX2V v1.0 repack is no longer a managed download
+        # from a Phosphene-hosted asset (licence); the installer builds it
+        # locally from the upstream repo instead.
+        with self.assertRaises(KeyError):
+            P._h3_turbo_asset("v1.0")
+        self.assertFalse(hasattr(P, "H3_TURBO_ASSET_URL"))
 
     def test_v1_is_preferred_when_all_three_exist(self):
         primary = self.put(P.H3_TURBO_LORA_FILE)
@@ -401,9 +405,25 @@ class TestH3TurboPins(unittest.TestCase):
     def test_fetch_script_pins_match_the_panel(self):
         script = self._load_fetch_script()
         self.assertEqual(script.ASSET_NAME, P.H3_TURBO_LORA_FILE)
-        self.assertEqual(script.ASSET_URL, P.H3_TURBO_ASSET_URL)
         self.assertEqual(script.ASSET_SHA256, P.H3_TURBO_ASSET_SHA256)
         self.assertEqual(script.ASSET_BYTES, P.H3_TURBO_ASSET_BYTES)
+        self.assertEqual(script.SOURCE_URL, P.H3_TURBO_SOURCE_URL)
+        self.assertEqual(script.SOURCE_SHA256, P.H3_TURBO_SOURCE_SHA256)
+        self.assertEqual(script.SOURCE_BYTES, P.H3_TURBO_SOURCE_BYTES)
+        self.assertEqual(script.SOURCE_REPO, P.H3_TURBO_REPO)
+
+    def test_nothing_fetches_the_retired_hosted_adapter(self):
+        # 4.19.8 licence fix: the H3 derivative is never downloaded from a
+        # Phosphene-hosted release asset again - only from its upstream repo.
+        hosted = "releases/download/weights-ltx25-v1/" + P.H3_TURBO_LORA_FILE
+        for rel in ("scripts/fetch_h3_turbo.py", "install_h3.js",
+                    "mlx_ltx_panel.py", "scripts/linux/install_h3.sh"):
+            text = (ROOT / rel).read_text(encoding="utf-8")
+            self.assertNotIn(hosted, text, rel)
+        script = self._load_fetch_script()
+        self.assertTrue(script.SOURCE_URL.startswith(
+            "https://huggingface.co/lightx2v/Minimax-h3-Turbo/resolve/"))
+        self.assertNotIn("github.com", script.SOURCE_URL)
 
     def test_installer_runs_the_digest_checked_fetch(self):
         installer = (ROOT / "install_h3.js").read_text(encoding="utf-8")

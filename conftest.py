@@ -36,6 +36,19 @@ for _var, _sub in (("LTX_STATE_DIR", "state"),
         _dir.mkdir(parents=True, exist_ok=True)
         os.environ[_var] = str(_dir)
 
+# Model licences (4.19.8): the sandbox state starts with every licence screen
+# accepted, the way a user's Mac looks after the first click - otherwise every
+# suite that queues an H3, music or Ideogram job meets the 451 gate instead of
+# the behaviour it tests. The gate itself is tested on fresh state dirs of its
+# own (test_model_licences.py, test_fatal_install_paths.py).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import model_licences as _model_licences  # noqa: E402
+if Path(os.environ["LTX_STATE_DIR"]).resolve().is_relative_to(SANDBOX.resolve()):
+    # Only ever in OUR sandbox: a caller's own LTX_STATE_DIR may be somebody's
+    # real state, and accepting a licence there would be accepting it for them.
+    for _key in _model_licences.LICENCES:
+        _model_licences.accept(os.environ["LTX_STATE_DIR"], _key, "test-sandbox")
+
 # A test run also has no business reporting to PostHog or phoning home for a
 # version check; both were already set per-file, inconsistently.
 os.environ.setdefault("PHOSPHENE_ANALYTICS_DISABLED", "1")
@@ -92,6 +105,16 @@ def pytest_configure(config):
         "markers", "hf_network: this test may really download from Hugging Face")
     config.addinivalue_line(
         "markers", "network: this test may open connections off this machine")
+
+
+@pytest.fixture(autouse=True)
+def _licences_accepted(request, monkeypatch):
+    """Every licence screen counts as accepted in tests (4.19.8), including
+    tests that point STATE_DIR at a fresh tmp dir of their own; the gate's own
+    suite (test_model_licences) sees the real behaviour."""
+    if request.module.__name__ == "test_model_licences":
+        return
+    monkeypatch.setattr(_model_licences, "is_accepted", lambda state_dir, key: True)
 
 
 @pytest.fixture(autouse=True)

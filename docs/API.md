@@ -21,6 +21,15 @@ External agents (Claude Code, Codex, OSS, or anything that speaks HTTP) drive Ph
 
 - Every JSON response is `Content-Type: application/json`.
 - Errors return `{"error": "<message>"}` plus a non-2xx HTTP status.
+- **451 `licence_required` (4.19.8).** A request that would download or run a model whose licence asks
+  for an explicit "I accept" - Hailuo H3 (MiniMax H3 Community License) and the non-commercial models
+  Ideogram 4, YuE2, FLUX.1 Krea [dev] and Bria FIBO - answers **HTTP 451** with
+  `{"ok": false, "code": "licence_required", "licence": "<key>", "error": "...", "url": "<licence>"}`
+  until that licence is accepted once on this Mac. Applies to `/queue/add`, `/queue/retry`,
+  `/queue/batch`, `/image/generate`, `/h3/turbo/install`, `/h3/tristep/install`, `/music/install`,
+  `/music/cover/install` and `/music/lora/fetch`; a job that arrives any other way fails with the same
+  sentence. Read the terms with `GET /licences` and accept with `POST /licences/accept` (below), or once
+  in the panel, which shows the screen by itself.
 - The `/agent/*` namespace is reserved-and-removed: any path under `/agent/` except `/agent/image/config` returns **410 Gone** with `{"error": "agentic flows removed; see docs/API.md"}`. New endpoints should not be added under `/agent/`.
 
 ---
@@ -914,6 +923,25 @@ Hide/unhide outputs from the gallery without deleting the file.
 Opens the output's containing folder in Finder (Mac).
 
 ---
+
+## Model licences (4.19.8)
+
+### `GET /licences`
+
+Every licence the panel asks about, with this Mac's acceptance state:
+`{"licences": [{"key": "h3", "model": ..., "licence": ..., "licensor": ..., "version": ..., "url": ...,
+"non_commercial": false, "title": ..., "summary": ..., "terms": [...], "badge": ..., "accept_label": ...,
+"accepted": false, "accepted_at": null, ...}, ...], "ui": {...}}`. Keys: `h3`, `ideogram4`, `yue2`,
+`flux1_dev`, `fibo`. H3's entry also carries `territory_notice`, `excluded_territories`, `report_line`,
+`report_url` and `credit_line`.
+
+### `POST /licences/accept`
+
+Form fields `key=<licence key>` and `accept=1` (the box the user ticked). Records the acceptance for
+the licence's current `version` in `state/model_licences.json` (plus a marker file the H3 installer
+reads) and returns `{"ok": true, "key": ..., "record": {...}, "licence": {...}}`. A changed licence
+version asks again. Accepting on someone's behalf is accepting for them: an agent should show the
+user the terms from `GET /licences` first.
 
 ## Helper / system
 

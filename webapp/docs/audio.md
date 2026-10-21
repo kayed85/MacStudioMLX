@@ -1,6 +1,6 @@
 # Audio — lip-sync, talking photos, dubbing a song
 
-The Audio tab makes a **video driven by a sound file you bring** — a voice line, a song. The sound steers the picture while it is generated (it is not laid on afterwards), so a mouth moves to the words and motion follows the music. It does not make sound from text; for that, describe the sound in any Video prompt.
+This page covers the Audio tab's **Lip-sync**: a **video driven by a sound file you bring** — a voice line, a song. To write a song, see [Music Studio](#docs/music). The sound steers the picture while it is generated (it is not laid on afterwards), so a mouth moves to the words and motion follows the music. It does not make sound from text; for that, describe the sound in any Video prompt.
 
 This is Phosphene's lip-sync: a picture (optional) and a stretch of audio become one clip whose mouth follows the track — the same idea as a "talking photo" or dubbing a performance to a new soundtrack. There is also a **Lip-sync** chip on the Video tab's mode bar that jumps straight here.
 
@@ -17,4 +17,4 @@ This is Phosphene's lip-sync: a picture (optional) and a stretch of audio become
 
 **Continue the song** (on the finished clip's player): starts the next clip on THIS clip's most-closed-mouth frame near its end — not the literal last frame, which is usually mid-syllable — with Start at advanced to match. Chain a whole song this way without a jump cut at every join.
 
-Audio always renders on LTX: on the High (Q8) pipeline when it is installed, otherwise on the fast Q4 pipeline (also the lane used on Macs under 64 GB).
+**Engine.** With Hailuo H3 installed, an **Engine** row offers **LTX** (your audio drives the picture) or **Hailuo H3** (it performs the track — face, body and room — and keeps your audio exactly as it is). See [Lip-sync on H3](#docs/hailuo-h3/lip-sync). LTX renders on the High (Q8) pipeline when it is installed, otherwise on the fast Q4 pipeline (also the lane used on Macs under 64 GB).

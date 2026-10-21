@@ -73,6 +73,10 @@ def post_oneshot(h, path, qs, ctype) -> None:
     if not take:
         # make_job refused the take (it logs why) — say so instead of queueing a clip
         h._json({"ok": False, "error": "the request did not become a One Shot — check seconds and engine"}, 400); return
+    # 4.19.8: a model whose licence asks for an "I accept" (model_licences.py).
+    _lic = P.job_licence_refusal(job.get("params") or {})
+    if _lic:
+        h._json(_lic, 451); return
     with P.QUEUE_COND:
         P.STATE["queue"].append(job)
         P.QUEUE_COND.notify_all()

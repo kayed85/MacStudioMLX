@@ -301,6 +301,10 @@ def post_music_install(h, path, qs, ctype) -> None:
         return
     _body, form = _rb
     kind = "repair" if (form.get("kind", [""])[0] or "") == "repair" else "install"
+    # 4.19.8: YuE2's weights are CC BY-NC 4.0 - its licence screen first.
+    _lic = P.licence_refusal_for("yue2")
+    if _lic:
+        h._json(_lic, 451); return
     code, payload = P.music_install_start(kind)
     h._json(payload, code); return
 
@@ -354,6 +358,9 @@ def post_h3_repair(h, path, qs, ctype) -> None:
 def post_music_cover_install(h, path, qs, ctype) -> None:
     # The opt-in ~2.8 GB that lets YuE2 read a score off a real recording.
     # Separate from /music/install because the engine works without it.
+    _lic = P.licence_refusal_for("yue2")
+    if _lic:
+        h._json(_lic, 451); return
     code, payload = P.music_cover_fetch_start()
     h._json(payload, code); return
 
@@ -371,6 +378,9 @@ def post_music_lora_fetch(h, path, qs, ctype) -> None:
     # The opt-in ~210 MB that makes Instrumental a real adapter instead of a
     # prompt convention. Separate from /music/install: the engine writes songs
     # without it, and a user who never asks for one never pays for it.
+    _lic = P.licence_refusal_for("yue2")
+    if _lic:
+        h._json(_lic, 451); return
     code, payload = P.music_lora_fetch_start()
     h._json(payload, code); return
 
