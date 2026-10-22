@@ -727,6 +727,13 @@ for _ln in p.LTX_LENGTHS:
         eq(f"high_720p at {_ln} is modelled, not measured",
            p.LTX_TIERS[f"high_720p_{_ln}"]["eta_measured"], False)
 
+# Repo host relationships: only guest add-ons have a host, never independent LoRAs
+for _r in p._repos():
+    if _r.get("key", "").startswith("ic_"):
+        eq(f"IC-LoRA {_r['key']} has no host", p._repo_host_key(_r), None)
+    elif _r.get("key") == "hq_25":
+        eq("hq_25 host is q8_25", p._repo_host_key(_r), "q8_25")
+
 # =============================================================================
 print()
 for f in _failures:

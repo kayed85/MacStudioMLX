@@ -6843,7 +6843,7 @@ def _repo_host_key(repo: dict) -> str | None:
     if not key or not repo.get("publish_scope"):
         return None
     mine = str(repo.get("local_dir") or "")
-    if not mine:
+    if not mine or mine.startswith("mlx_models/loras") or key.startswith("ic_"):
         return None
     for other in _repos():
         if other.get("key") == key or other.get("publish_scope"):
