@@ -97,7 +97,8 @@ if "LTX2_GEMMA_EVAL_EVERY" not in os.environ:
 # because prompt rewriting needs Gemma 3's generative language-model head while
 # LTX-2.5 conditions renders with a non-generative Gemma 4 tower.
 _ROOT = Path(__file__).resolve().parent
-_Q4_LOCAL_PATH = _ROOT / "mlx_models" / "ltx-2.3-mlx-q4"
+MODELS_DIR = Path(os.environ.get("LTX_MODELS_DIR", str(_ROOT / "mlx_models")))
+_Q4_LOCAL_PATH = MODELS_DIR / "ltx-2.3-mlx-q4"
 MODEL_ID = os.environ.get(
     "LTX_MODEL",
     str(_Q4_LOCAL_PATH) if _Q4_LOCAL_PATH.is_dir() else "dgrauet/ltx-2.3-mlx-q4",
