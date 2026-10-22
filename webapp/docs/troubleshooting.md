@@ -12,7 +12,7 @@ When Phosphene refuses a render, it says why and what to do. These are the messa
 The health chip in the header shows memory at a glance; click it for the **Tier**, **Memory**, **Helper**, **Models**, **Queue** and **Render** rows. Click **Tier** to see what this Mac can run.
 
 - *"Helper killed by the OS — out of memory"* — macOS stopped the render. Close memory-heavy apps (browsers, Slack, the iOS Simulator) and try again, or switch Quality to **Quick**, which uses about half the memory.
-- *"Image pre-flight: … needs a N GB Mac"* — that image engine does not fit this Mac. Pick **Auto** or a lighter preset. *"… needs ~N GB free"* means it fits, but other apps are holding the memory right now.
+- *"Image pre-flight: … needs a N GB Mac"* — that image engine does not fit this Mac. On Macs with 16 GB or less, **Auto** uses FLUX.2 [klein] 4B when the Settings engine needs a bigger Mac, without changing Settings. This requires a render without reference images; remove the references to let Auto use Klein, or choose a lighter engine in Settings. *"… needs ~N GB free"* means the engine fits, but memory is currently in use; this check now accounts for memory macOS can free up and Auto's actual memory needs.
 - *"Training needs at least 24 GB of memory"* — character training cannot run on this Mac.
 
 ### Hailuo H3 on a 36–60 GB Mac {#h3-compact}

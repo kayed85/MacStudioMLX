@@ -1047,6 +1047,12 @@ def get_webapp_file(h, parsed) -> None:
         # registry stays single-source server-side.
         body = body.replace(b"__ENGINE_RULES__",
                             P._engine_css().encode("utf-8"))
+    elif ext == ".md" and P._dist.is_mac_app():
+        # Mac app: a Docs page's [[pinokio]] passages (Spicy mode) never leave
+        # the server (owner ruling 2026-10-22).
+        body = P.drop_pinokio_doc_blocks(body.decode("utf-8", "replace")).encode("utf-8")
+    elif ext == ".html" and P._dist.is_mac_app():
+        body = P._strip_pinokio_only(body.decode("utf-8", "replace")).encode("utf-8")
     elif ext in (".js", ".mjs"):
         # The editor's user-facing strings carry the __SEQ__ noun
         # seams. page() substitutes them in the page; module files

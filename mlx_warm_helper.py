@@ -1338,6 +1338,83 @@ def _install_video_decoder_patch() -> None:
     _VIDEO_DECODER_PATCH_INSTALLED = True
 
 
+_SPLIT_ENCODE_PATCH_INSTALLED = False
+
+
+def split_prompt_encode_wanted() -> bool:
+    """The low-memory prompt encode: on the streamed (low-RAM) path only.
+    Read at call time, so a helper's lanes and the tests see one answer."""
+    return bool(LOW_RAM_STREAM)
+
+
+def _install_split_prompt_encode_patch() -> None:
+    """4.19.10 - THE LOW-MEMORY PROMPT ENCODE (16 GB Macs).
+
+    The engine's PromptEncoder loads the text model AND the connector, then
+    encodes with both resident. On LTX-2.5 that is Gemma 4 (6.7 GB) plus the
+    connector (5.9 GB) at once - about 13 GiB, the whole render's peak once
+    the DiT streams from disk (the 2026-09-06 streaming measurement: 13.77 GiB
+    "denoise" peak with the DiT at ~0.6 GB was this phase). On a 16 GB Mac
+    that is past what is free, and the fleet's 16 GB memory failures sit in
+    exactly this phase ("encode": watchdog and jetsam, quick and balanced).
+
+    On the streamed path the encode runs in two halves instead: the text
+    model alone produces its hidden states, which are materialized, then the
+    text model is freed and the connector alone turns them into embeddings.
+    Same primitives on the same inputs in the same order, so the embeddings
+    are bit-identical (test + proof); the peak is the larger half, not the
+    sum. A second prompt (CFG lanes) loads the text model again - those lanes
+    are refused below 48 GB anyway. Off the streamed path nothing changes."""
+    global _SPLIT_ENCODE_PATCH_INSTALLED
+    if _SPLIT_ENCODE_PATCH_INSTALLED:
+        return
+    import ltx_pipelines_mlx.utils.blocks as _blocks
+    PE = _blocks.PromptEncoder
+    _orig_load, _orig_encode = PE.load, PE.encode
+
+    def _load_text_model(self):
+        if self._text_encoder is None:
+            self._text_encoder = _blocks.GemmaLanguageModel()
+            self._text_encoder.load(self.gemma_model_id)
+            _blocks.aggressive_cleanup()
+
+    def load(self):
+        if not split_prompt_encode_wanted():
+            return _orig_load(self)
+        # Text model only: the connector loads after it is gone (encode).
+        # Callers that read the tokenizer (Prompt Relay) still find it here.
+        _load_text_model(self)
+
+    def encode(self, prompt):
+        if not split_prompt_encode_wanted():
+            return _orig_encode(self, prompt)
+        import mlx.core as _mx
+        _materialize = getattr(_mx, "eval")      # MLX graph evaluation, not Python eval
+        max_length = int(os.environ.get("LTX2_GEMMA_MAX_LENGTH", "1024"))
+        self._feature_extractor = None           # never both resident
+        _load_text_model(self)
+        hidden, mask = self._text_encoder.encode_all_layers(prompt, max_length=max_length)
+        _materialize(hidden, mask)
+        self._text_encoder = None
+        _blocks.aggressive_cleanup()
+        fx = _blocks.GemmaFeaturesExtractorV2()
+        weights = _blocks.load_split_safetensors(self.model_dir / "connector.safetensors",
+                                                 prefix="connector.")
+        fx.connector.load_weights(list(weights.items()))
+        del weights
+        _blocks.aggressive_cleanup()
+        self._feature_extractor = fx
+        video, audio = fx(hidden, attention_mask=mask)
+        _materialize(video, audio)
+        del hidden, mask
+        self._feature_extractor = None
+        _blocks.aggressive_cleanup()
+        return video, audio
+
+    PE.load, PE.encode = load, encode
+    _SPLIT_ENCODE_PATCH_INSTALLED = True
+
+
 def _install_a2v_frame_rate_patch() -> None:
     """Make ``combined_image_conditionings`` tolerate the missing ``frame_rate``
     kwarg that ``a2vid_two_stage.py`` neglects to pass.
@@ -1903,6 +1980,7 @@ def get_pipe(kind: str, loras: list[dict] | None = None,
     # Repair the subclass-override-skips-fusion bug before any pipe is built.
     _install_lora_fusion_patches()
     _install_video_decoder_patch()  # fps/frame_rate kwarg shim
+    _install_split_prompt_encode_patch()  # 4.19.10 low-RAM encode
     _install_a2v_frame_rate_patch()  # A2V missing frame_rate= on combined_image_conditionings
 
     fp = _lora_fingerprint(loras)
@@ -2185,6 +2263,7 @@ def get_hq_pipe(model_dir: str, loras: list[dict] | None = None,
     # TI2VidTwoStagesHQPipeline.load() would still bypass _pending_loras.
     _install_lora_fusion_patches()
     _install_video_decoder_patch()  # fps/frame_rate kwarg shim
+    _install_split_prompt_encode_patch()  # 4.19.10 low-RAM encode
     _install_a2v_frame_rate_patch()  # A2V missing frame_rate= on combined_image_conditionings
 
     fp = _lora_fingerprint(loras)
@@ -2269,6 +2348,7 @@ def get_kf_pipe(model_dir: str, dev_transformer: str | None = None,
     # (reported by @oo2music in #9). The install funcs are all idempotent.
     _install_lora_fusion_patches()
     _install_video_decoder_patch()
+    _install_split_prompt_encode_patch()  # 4.19.10 low-RAM encode
     _install_a2v_frame_rate_patch()
 
     dev_name = dev_transformer or "transformer-dev.safetensors"
@@ -2330,6 +2410,7 @@ def get_a2v_pipe(model_dir: str, loras: list[dict] | None = None,
 
     _install_lora_fusion_patches()
     _install_video_decoder_patch()
+    _install_split_prompt_encode_patch()  # 4.19.10 low-RAM encode
     _install_a2v_frame_rate_patch()  # A2V missing frame_rate= on combined_image_conditionings
     fp = _lora_fingerprint(loras)
 
@@ -3499,6 +3580,14 @@ for line in sys.__stdin__:
         except Exception as _exc:                          # noqa: BLE001
             emit({"event": "log",
                   "line": f"vae-decode int32 guard NOT installed: {_exc}"})
+        # 4.19.10: the low-memory prompt encode, for every lane (the IC-LoRA
+        # lanes build their pipelines without get_pipe). Inert off the
+        # streamed path.
+        try:
+            _install_split_prompt_encode_patch()
+        except Exception as _exc:                          # noqa: BLE001
+            emit({"event": "log",
+                  "line": f"low-memory prompt encode NOT installed: {_exc}"})
 
     if action == "generate":
         job_id = msg.get("id", "?")

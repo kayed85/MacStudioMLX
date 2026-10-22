@@ -72,7 +72,7 @@ Your Mac's memory determines which quality settings and engines you can use. Pho
 
 | Feature | Memory it needs |
 |---|---|
-| LTX video and Images | Any Apple Silicon Mac. Below 48 GB, you get smaller video sizes. LTX's High quality, Start & end frame and Extend are hidden |
+| LTX video and Images | Any Apple Silicon Mac. Below 48 GB, you get smaller video sizes. LTX's High quality, Start & end frame and Extend are hidden. Macs with 24 GB or less automatically use a low-memory video path. |
 | Music Studio | 24 GB or more |
 | Training a character | 24 GB or more |
 | Hailuo H3 | 36 GB or more for the compact engine. With 60 GB or more, you can also choose the full engine |

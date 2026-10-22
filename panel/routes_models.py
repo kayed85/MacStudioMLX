@@ -138,6 +138,10 @@ def post_models_remove(h, path, qs, ctype) -> None:
         if busy_key == key:
             h._json({"error": "A download is using that folder — "
                                  "cancel it first."}, 409); return
+        if P.app_models_owns(repo):
+            h._json({"error": "This model is downloading in the background — "
+                              "try again when it finishes.",
+                     "app_downloading": True}, 409); return
         addon_key = P.model_version().get("hq_addon_repo_key")
         if key == addon_key:
             # The add-on has no directory of its own: delete exactly the
@@ -168,6 +172,31 @@ def post_models_remove(h, path, qs, ctype) -> None:
                 targets.append(p)
             label = repo.get("name") or key
 
+    # 4.19.10 (review): another process may be WRITING one of these folders
+    # (the Mac app's own download, a second studio). Take each folder's
+    # one-writer lock (scripts/fetch_pack_release.py) before deleting, and
+    # hold it until done, so no fetcher can be mid-write in what goes.
+    locks = []
+    for folder in dict.fromkeys(t if t.is_dir() else t.parent for t in targets):
+        fd = P.pack_folder_lock(folder)
+        if fd is None:
+            P.pack_folder_unlock(locks)
+            h._json({"error": "This model is downloading right now — try again "
+                              "when it finishes."}, 409); return
+        locks.append(fd)
+    try:
+        freed = _remove_targets(h, targets)
+    finally:
+        P.pack_folder_unlock(locks)
+    if freed is None:
+        return
+    P.push(f"[storage] removed {label} — {P._fmt_gb(freed)} freed")
+    h._json({"ok": True, "freed": freed, "freed_label": P._fmt_gb(freed),
+                "label": label}); return
+
+
+def _remove_targets(h, targets) -> int | None:
+    """Delete the resolved targets; None after answering a 500."""
     freed = 0
     for t in targets:
         try:
@@ -179,10 +208,8 @@ def post_models_remove(h, path, qs, ctype) -> None:
                 t.unlink()
         except OSError as exc:
             P.push(f"[storage] could not remove {t}: {exc}")
-            h._json({"error": f"could not remove {t.name}: {exc}"}, 500); return
-    P.push(f"[storage] removed {label} — {P._fmt_gb(freed)} freed")
-    h._json({"ok": True, "freed": freed, "freed_label": P._fmt_gb(freed),
-                "label": label}); return
+            h._json({"error": f"could not remove {t.name}: {exc}"}, 500); return None
+    return freed
 
 
 @post("/models/cancel")
@@ -274,6 +301,21 @@ def post_models_repair(h, path, qs, ctype) -> None:
         P.DOWNLOAD["repo_id"] = repo["repo_id"]
         P.DOWNLOAD["started_ts"] = P.time.time()
         P.DOWNLOAD["last_line"] = "repairing…"
+    # 4.19.10 (review): never delete files another process is writing (the
+    # Mac app's own download): take the pack folder's one-writer lock for the
+    # deletion, and give the slot back when it is held.
+    target = P.Q8_LOCAL_PATH if key == "q8" else P.repo_dir(repo)
+    locks = []
+    for folder in dict.fromkeys([P.Path(target), P.repo_dir(repo)]):
+        fd = P.pack_folder_lock(folder)
+        if fd is None:
+            P.pack_folder_unlock(locks)
+            with P.DOWNLOAD_LOCK:
+                P.DOWNLOAD.update({"active": False, "key": None, "repo_id": None,
+                                   "started_ts": None})
+            h._json({"error": "This model is downloading right now — try again "
+                              "when it finishes."}, 409); return
+        locks.append(fd)
     # The deep-check findings for this repo are CONSUMED by this repair. They
     # carry no file identity, so left in place a second Repair — after this
     # one had fetched good copies — would delete the now-valid files again.
@@ -282,17 +324,20 @@ def post_models_repair(h, path, qs, ctype) -> None:
         _dv = P._DEEP_VERIFY.get("result")
         if isinstance(_dv, dict) and _dv.get("bad"):
             _dv["bad"] = [b for b in _dv["bad"] if b.get("repo") != key]
-    target = P.Q8_LOCAL_PATH if key == "q8" else P.repo_dir(repo)
     deleted = []
-    for fname in bad:
-        for cand in {P.Path(target) / fname, P.repo_dir(repo) / fname}:
-            try:
-                if cand.exists():
-                    cand.unlink()
-                    if fname not in deleted:
-                        deleted.append(fname)
-            except OSError:
-                pass
+    try:
+        for fname in bad:
+            for cand in {P.Path(target) / fname, P.repo_dir(repo) / fname}:
+                try:
+                    if cand.exists():
+                        cand.unlink()
+                        if fname not in deleted:
+                            deleted.append(fname)
+                except OSError:
+                    pass
+    finally:
+        # Released before the download starts: its fetcher takes the same lock.
+        P.pack_folder_unlock(locks)
     with P._INTEGRITY_LOCK:           # bust the cache so the next scan re-checks
         P._INTEGRITY_CACHE["ts"] = 0.0
     P.push(f"[repair] {key}: deleted {len(deleted)} corrupt/partial file(s) "

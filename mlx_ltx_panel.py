@@ -881,6 +881,33 @@ HELPER_LOW_MEMORY = os.environ.get("LTX_HELPER_LOW_MEMORY", "true")
 # `LTX_LOW_RAM_STREAM=1|0` in the environment forces it either way (testing
 # on a big Mac, or opting out); otherwise it is decided by physical RAM.
 LOW_RAM_STREAM_RAM_GB = 24
+# 4.19.10: the LTX video-decode memory budget follows the Mac's memory. The
+# engine tiles the VAE decode over time once its estimate of ONE activation
+# (the block-3 bf16 tensor) passes LTX2_VAE_DECODE_BUDGET_GB, and that was
+# 8 GB on every Mac. Measured on this Mac (MLX GPU, a 16 GB Mac's ceiling,
+# LTX-2.5 decoder, 768x416 x 481 frames): the real decode peak is ~14x that
+# estimate - 16.97 GiB untiled at budget 8 or 3 (no tiling at all), 11.29 at
+# 0.5, 7.78 at 0.25. So a budget only means something on a small Mac when it
+# is a fraction of a GB: vae_decode_budget_gb() gives Macs of 32 GB or less
+# 0.022 x RAM (16 GB -> 0.35, 24 -> 0.53, 32 -> 0.7; floor 0.125), which tiles
+# long clips (a 20 s clip on 16 GB: ~9 GiB instead of ~17) and leaves a 5 s
+# Quick or Balanced clip in one piece, exactly as before (estimate 0.27-0.33).
+# Macs over 32 GB keep the engine's 8 GB. A value in the environment wins.
+VAE_DECODE_BUDGET_MAX_GB = 8.0
+VAE_DECODE_BUDGET_MIN_GB = 0.125
+VAE_DECODE_BUDGET_RAM_FRACTION = 0.022
+VAE_DECODE_BUDGET_SMALL_MAC_GB = 32.5
+
+
+def vae_decode_budget_gb(ram_gb: float | None = None) -> float:
+    """LTX2_VAE_DECODE_BUDGET_GB for this Mac (see the block above)."""
+    try:
+        ram = float(SYSTEM_RAM_GB if ram_gb is None else ram_gb)
+    except (TypeError, ValueError, NameError):
+        ram = 0.0
+    if ram <= 0 or ram > VAE_DECODE_BUDGET_SMALL_MAC_GB:
+        return VAE_DECODE_BUDGET_MAX_GB
+    return round(max(VAE_DECODE_BUDGET_MIN_GB, ram * VAE_DECODE_BUDGET_RAM_FRACTION), 3)
 # Enhance is an interactive HTTP request, unlike renders that may legitimately
 # run for tens of minutes. Bound its helper wait below the UI/curl client's
 # 120-second ceiling so a silent helper still produces a JSON error response.
@@ -1845,6 +1872,8 @@ def _validate_settings_patch(patch: dict) -> tuple[dict, str | None]:
         else:
             out["first_run_card_dismissed"] = str(v).strip().lower() in ("1", "true", "yes", "on")
 
+    if "spicy_mode" in patch and _dist.is_mac_app():
+        patch = {k: v for k, v in patch.items() if k != "spicy_mode"}   # no Spicy mode in the Mac app
     if "spicy_mode" in patch:
         # Same urlencoded-bool coercion as models_card_dismissed.
         v = patch["spicy_mode"]
@@ -2021,7 +2050,7 @@ def get_settings_public() -> dict:
         "has_hf_token": bool(s.get("hf_token", "").strip()),
         "models_card_dismissed": bool(s.get("models_card_dismissed", False)),
         "first_run_card_dismissed": bool(s.get("first_run_card_dismissed", False)),
-        "spicy_mode": bool(s.get("spicy_mode", False)),
+        "spicy_mode": bool(s.get("spicy_mode", False)) and not _dist.is_mac_app(),
         "live_preview": str(s.get("live_preview", "on")),
         "notify_done": bool(s.get("notify_done", True)),
         "room_tone_auto": bool(s.get("room_tone_auto", True)),
@@ -5663,20 +5692,126 @@ APP_MODELS_ACTIVE = ("downloading", "paused")
 #: A "downloading" file this much older than its last rewrite is a crashed
 #: app, not a download: the panel's own buttons come back.
 APP_MODELS_STALE_SEC = 120
+#: Exit code of scripts/fetch_pack_release.py when another fetcher holds the
+#: pack folder (its one-writer flock; EXIT_BUSY there).
+PACK_FETCH_BUSY_RC = 75
+#: The Mac app's model-download lock (bootstrap.sh `lock_acquire models`): a
+#: directory under <Phosphene home>/.locks holding the owner's PID.
+APP_MODELS_LOCK = Path(".locks") / "models.lock"
+
+
+def _app_home() -> Path:
+    """The Mac app's Phosphene home. The app puts LTX_STATE_DIR at
+    <home>/state; PHOSPHENE_HOME, when set, says it outright."""
+    explicit = (os.environ.get("PHOSPHENE_HOME") or "").strip()
+    return Path(explicit) if explicit else STATE_DIR.parent
+
+
+def app_models_lock_owner() -> int | None:
+    """PID of the live process holding the Mac app's model-download lock, or
+    None (no lock, unreadable, or its owner is gone - a stale lock the app
+    reaps itself). Mac app review #7: the studio respects this lock even when
+    app_models.json is missing or stale, because the lock, not the progress
+    file, is what says a download is writing right now."""
+    try:
+        pid = int((_app_home() / APP_MODELS_LOCK / "owner").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    if pid <= 1 or pid == os.getpid():
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return None
+    except PermissionError:
+        pass                         # alive, someone else's: still a holder
+    except OSError:
+        return None
+    # A PID the OS reused for something else is not the app's downloader: the
+    # owner must still be the app's setup script (its own lock_owner_ok rule).
+    return pid if _is_app_bootstrap(pid) else None
+
+
+_APP_OWNER_CACHE: dict[int, tuple[float, bool]] = {}
+
+
+def _is_app_bootstrap(pid: int) -> bool:
+    """Is `pid` running the Mac app's bootstrap.sh? Cached 10 s per PID
+    (/status asks on every poll)."""
+    now = time.time()
+    hit = _APP_OWNER_CACHE.get(pid)
+    if hit and now - hit[0] < 10.0:
+        return hit[1]
+    try:
+        cmd = subprocess.run(["ps", "-o", "command=", "-p", str(int(pid))],
+                             capture_output=True, text=True, errors="replace",
+                             timeout=2).stdout
+    except (OSError, subprocess.SubprocessError, ValueError):
+        cmd = ""
+    ok = "bootstrap.sh" in cmd
+    if len(_APP_OWNER_CACHE) > 32:
+        _APP_OWNER_CACHE.clear()
+    _APP_OWNER_CACHE[pid] = (now, ok)
+    return ok
+
+
+#: = scripts/fetch_pack_release.py PACK_LOCK_SUFFIX: every writer of a pack
+#: folder (that fetcher in any process, and Remove / Repair here) holds an
+#: exclusive flock on ".<folder>.fetchlock" beside the folder's real path.
+PACK_LOCK_SUFFIX = ".fetchlock"
+
+
+def pack_folder_lock(folder) -> int | None:
+    """Take the one-writer lock for a pack folder without waiting. Returns the
+    descriptor to close when done (-1: nothing to lock), or None when another
+    process is writing that folder right now."""
+    try:
+        import fcntl
+    except ImportError:
+        return -1
+    real = Path(os.path.realpath(str(folder)))
+    if not real.parent.is_dir():
+        return -1
+    try:
+        fd = os.open(str(real.parent / f".{real.name}{PACK_LOCK_SUFFIX}"),
+                     os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError:
+        return -1
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
+
+
+def pack_folder_unlock(fds) -> None:
+    for fd in fds or ():
+        if fd is not None and fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 def app_models_state() -> dict | None:
     """The app's download state, mac-app only; None when there is none."""
     if not _dist.is_mac_app():
         return None
+    lock_pid = app_models_lock_owner()
     path = STATE_DIR / APP_MODELS_FILE
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
         age = time.time() - path.stat().st_mtime
     except (OSError, ValueError):
-        return None
+        raw, age = None, 0.0
     if not isinstance(raw, dict):
-        return None
+        if lock_pid is None:
+            return None
+        # The app holds its download lock but wrote no (readable) progress
+        # file yet: a download is starting. Which packs is unknown, so it
+        # owns every pack until the file says otherwise (app_models_owns).
+        raw = {"state": "downloading"}
     state = str(raw.get("state") or "idle")
     packs = [str(x) for x in (raw.get("packs") or []) if isinstance(x, str)]
     def _n(v):
@@ -5686,7 +5821,13 @@ def app_models_state() -> dict | None:
             return 0
     active = state in APP_MODELS_ACTIVE and not (
         state == "downloading" and age > APP_MODELS_STALE_SEC)
+    if lock_pid is not None and state not in ("done", "failed"):
+        # A live lock holder is downloading whatever its file says - even a
+        # file the app has not rewritten for a while (it rewrites only on
+        # progress) or one that still says "idle" from before this run.
+        active = True
     return {"state": state, "packs": packs, "active": active,
+            "locked": lock_pid is not None,
             "done_bytes": _n(raw.get("done_bytes")),
             "total_bytes": _n(raw.get("total_bytes"))}
 
@@ -5698,6 +5839,8 @@ def app_models_owns(repo: dict | None, st: dict | None = None) -> bool:
     st = st if st is not None else app_models_state()
     if not st or not st["active"]:
         return False
+    if st.get("locked") and not st["packs"]:
+        return True                  # lock held, pack list not written yet
     return repo_dir(repo).name in st["packs"] or Path(
         str(repo.get("local_dir") or "")).name in st["packs"]
 
@@ -7560,7 +7703,8 @@ def _download_thread(repo: dict) -> str:
     max_attempts = 3
     backoff_sec = 5
     # 4.20: what happened, for the background fetcher: "ok" | "cancelled" |
-    # "failed". Thread callers ignore it, as before.
+    # "failed" | "busy" (4.19.10: another fetcher holds the pack folder).
+    # Thread callers ignore it, as before.
     outcome = "failed"
     try:
         for attempt in range(1, max_attempts + 1):
@@ -7611,6 +7755,15 @@ def _download_thread(repo: dict) -> str:
             if rc == 0:
                 push(f"[{dl_tag}] {dl_label} downloaded successfully.")
                 outcome = "ok"
+                break
+            if is_release_mirror and rc == PACK_FETCH_BUSY_RC:
+                # Mac app review #7: another fetcher (the Mac app's own model
+                # download, or a second studio) holds this pack folder. The
+                # fetcher stopped without writing; retrying would only bounce.
+                push(f"[{dl_tag}] {dl_label}: another download is already writing "
+                     f"this pack, so this one stopped without touching it. It "
+                     f"carries on when that one finishes.")
+                outcome = "busy"
                 break
             with DOWNLOAD_LOCK:
                 cancelled = DOWNLOAD["cancelled"] or not DOWNLOAD["active"]
@@ -7861,6 +8014,12 @@ def deferred_fetch_step() -> float | None:
             _INTEGRITY_CACHE["ts"] = 0.0
         push(f"[background] {repo.get('name') or key} is ready.")
         return 1.0
+    if outcome == "busy":
+        # Another fetcher (the Mac app) is writing this pack: not a failure,
+        # nothing to back off from - wait for it like any busy slot.
+        _deferred_set(state="waiting", key=key,
+                      message="Another download is writing this model; waiting for it.")
+        return DEFERRED_SLOT_WAIT_SEC
     if outcome == "cancelled":
         install_plan.drop_from_marker(STATE_DIR, key)
         push(f"[background] {repo.get('name') or key} skipped - Settings -> Models "
@@ -8027,7 +8186,15 @@ from civitai_client import (  # noqa: F401  (re-exported on purpose)
 
 
 def spicy_mode_enabled() -> bool:
-    """Return the single server-side authorization predicate for NSFW UI/data."""
+    """Return the single server-side authorization predicate for NSFW UI/data.
+
+    Owner ruling 2026-10-22: the installed Mac app (PHOSPHENE_DISTRIBUTION=
+    mac-app, and Pro inside it) has no Spicy mode - always OFF there, whatever
+    panel_settings.json says (a persisted true from a copied Pinokio state is
+    ignored), so its CivitAI browser always runs the spicy-off path (nsfw=false
+    upstream + the flagged-item filter). The Pinokio edition is unchanged."""
+    if _dist.is_mac_app():
+        return False
     return bool(get_settings().get("spicy_mode", False))
 
 
@@ -21587,6 +21754,10 @@ class WarmHelper:
             env["LTX_IDLE_TIMEOUT"] = str(HELPER_IDLE_TIMEOUT)
             env["LTX_LOW_MEMORY"] = HELPER_LOW_MEMORY
             env["LTX_LOW_RAM_STREAM"] = "1" if low_ram_streaming_enabled() else "0"
+            # 4.19.10: the VAE decode budget follows this Mac's memory (the
+            # engine reads it at decode time). The user's own value wins.
+            if not (os.environ.get("LTX2_VAE_DECODE_BUDGET_GB") or "").strip():
+                env["LTX2_VAE_DECODE_BUDGET_GB"] = f"{vae_decode_budget_gb():g}"
             env["LTX_ENABLE_MODEL_UPSCALE"] = "1" if MODEL_UPSCALE_ENABLED else "0"
             # Output codec env vars sourced from panel settings. The patched
             # ffmpeg call inside ltx_core_mlx reads these at job time, so
@@ -33169,7 +33340,11 @@ _PREFLIGHT_BASE_GB: dict[tuple[str, int], float] = {
     ("ideogram", 6): 24.0,
     ("ideogram", 8): 32.0,
     # FLUX.2 — distilled 4B and base 4B/9B variants
-    ("flux2", 4):      6.0,
+    # 4.19.10, measured: Klein 4B 4-bit at 1024x1024 peaks 11.5 GiB of MLX
+    # memory (mflux --low-ram changes nothing). 8 GB free is the admission
+    # line (what Auto has always been priced at): macOS compresses the rest,
+    # and 16 GB Macs complete these renders (fleet: 86 in 30 days).
+    ("flux2", 4):      8.0,
     ("flux2", 6):      8.0,
     ("flux2", 8):     12.0,
     ("flux2_edit", 4): 6.0,   # klein-edit distilled 4B
@@ -33188,6 +33363,65 @@ _PREFLIGHT_BASE_GB: dict[tuple[str, int], float] = {
 # family string is still "flux2" but the model carries `9b` in its name.
 # We surface the variant via a small heuristic on `mflux_model`.
 _PREFLIGHT_9B_GB = 36.0
+
+
+def _effective_image_quantize(cfg) -> int:
+    """The bit width mflux will really run at. A pre-quantized model
+    ("...-mflux-4bit") keeps its stored width whatever -q asks (mflux 0.18
+    QuantizationResolution: stored wins a conflict), so the default Klein
+    config, saved as -q 6, runs - and must be priced - at 4 bits."""
+    m = re.search(r"(?<![0-9])([3-8])-?bit", str(getattr(cfg, "mflux_model", "") or "").lower())
+    if m:
+        return int(m.group(1))
+    try:
+        return int(cfg.mflux_quantize or 6)
+    except (TypeError, ValueError):
+        return 6
+
+
+#: 4.19.10: Macs at or under this much memory render the "Auto" image engine
+#: on FLUX.2 [klein] 4B at 4-bit when the saved Auto engine cannot fit them
+#: (16 GB Macs report 16.0).
+LOW_RAM_IMAGE_GB = 16.5
+KLEIN_4B_Q4_MODEL = "Runpod/FLUX.2-klein-4B-mflux-4bit"
+
+
+def low_ram_auto_image_config(cfg, form: dict | None = None):
+    """"Auto" on a 16 GB (or smaller) Mac: FLUX.2 [klein] 4B at 4-bit.
+
+    Fleet (30 days to 2026-10-21): 170 image refusals on 26 installs with
+    16 GB. Auto is the user's saved Settings engine, and on a small Mac that
+    can be one it can never hold (Reference Edit is 18-24 GB) - the refusal
+    then told them to "pick Auto", the engine it had just refused. Here an
+    Auto engine that does not fit this Mac is replaced, for this render only
+    (the saved setting is untouched), by the 4B Klein at 4 bits (~6 GB).
+    A Klein config already fits and only has its -q set to what it runs at.
+    Reference images need an edit engine Klein is not, so a render WITH
+    references keeps the saved engine and its honest refusal."""
+    if not (0 < float(SYSTEM_RAM_GB or 0) <= LOW_RAM_IMAGE_GB):
+        return cfg
+    if getattr(cfg, "kind", "") not in ("mflux", "hidream"):
+        return cfg                       # cloud (bfl) / mock: no local memory
+    fam = (agent_image_engine._resolve_mflux_family(cfg)
+           if cfg.kind == "mflux" else "hidream")
+    model = str(getattr(cfg, "mflux_model", "") or "").lower()
+    if fam == "flux2" and "klein" in model and "9b" not in model:
+        if int(cfg.mflux_quantize or 6) != 4:
+            cfg = agent_image_engine.ImageEngineConfig(**{**cfg.__dict__, "mflux_quantize": 4})
+        return cfg
+    if _image_engine_fit(_preflight_estimate_ram_gb(cfg))[0]:
+        return cfg                       # a small engine the user chose (Z-Image Turbo)
+    if (form or {}).get("refs"):
+        return cfg
+    push(f"[image] Auto on this {SYSTEM_RAM_GB:.0f} GB Mac: FLUX.2 [klein] 4B at 4-bit "
+         f"(the saved Auto engine needs a bigger Mac; Settings keeps it)")
+    return agent_image_engine.ImageEngineConfig(**{
+        **cfg.__dict__, "kind": "mflux", "mflux_model": KLEIN_4B_Q4_MODEL,
+        "mflux_family": "flux2", "mflux_base_model": "", "mflux_quantize": 4,
+        "mflux_steps": 4, "mflux_guidance": 1.0, "mflux_preset": None,
+        "mflux_lora_paths": [], "mflux_lora_scales": [],
+        # A saved CLI override names the OLD family's executable (review).
+        "mflux_python_path": ""})
 
 
 def _preflight_estimate_ram_gb(cfg) -> float:
@@ -33212,8 +33446,11 @@ def _preflight_estimate_ram_gb(cfg) -> float:
     if cfg.kind != "mflux":
         # `mock` engine doesn't allocate; `bfl` is cloud-side.
         return 1.0
-    fam = (cfg.mflux_family or "auto").lower()
-    q = int(cfg.mflux_quantize or 6)
+    # 4.19.10: the family the engine will actually run. A config saved with
+    # family "auto" (the default Klein config, i.e. what "Auto" renders on
+    # most Macs) matched no row here and fell back to the 8 GB guess.
+    fam = agent_image_engine._resolve_mflux_family(cfg)
+    q = _effective_image_quantize(cfg)
     model = (getattr(cfg, "mflux_model", "") or "").lower()
     if fam == "flux2" and "9b" in model:
         return _PREFLIGHT_9B_GB
@@ -33293,6 +33530,26 @@ def _image_engine_fit(need_gb: float) -> tuple[bool, int]:
     return (float(SYSTEM_RAM_GB or 0) >= floor), mac_gb
 
 
+def _image_free_gb(mem: dict) -> float:
+    """Memory an image engine can have now, in GB: the kernel's available
+    memory (hostinfo.available_bytes), never less than total - used.
+
+    4.19.10 - THE WRONG "NOT ENOUGH FREE MEMORY" REFUSAL. This was
+    total - used, where "used" is active + wired + compressed pages. Active
+    pages include the file cache macOS gives back on demand, so an idle
+    16 GB Mac with a browser open read ~4 GB "free" and was refused an
+    engine that runs fine there (fleet: 170 refusals, 26 installs, 30 days).
+    The kernel's own figure is what jetsam acts on; use it."""
+    total_gb = float(mem.get("total_gb") or 0.0)
+    used_gb = float(mem.get("used_gb") or 0.0)
+    ratio_free = max(0.0, total_gb - used_gb)
+    try:
+        avail = hostinfo.available_bytes() / 1024**3
+    except Exception:                                              # noqa: BLE001
+        avail = 0.0
+    return max(ratio_free, min(avail, total_gb) if total_gb else avail)
+
+
 def _preflight_image_job(cfg, *, engine_override: str = "auto") -> None:
     """Raise RuntimeError if the host can't safely run this image cfg.
 
@@ -33331,7 +33588,7 @@ def _preflight_image_job(cfg, *, engine_override: str = "auto") -> None:
     mem = get_memory()
     total_gb = float(mem.get("total_gb") or 0.0)
     used_gb = float(mem.get("used_gb") or 0.0)
-    free_gb = max(0.0, total_gb - used_gb)
+    free_gb = _image_free_gb(mem)
     # Two different stories, both REFUSALS (deliberate guards, not faults —
     # review 2026-09-02: 15 of the 16 "unclassified" failures on 4.9.0 were
     # this branch, on 8 GB and 24 GB Macs that had been offered an engine
@@ -33342,12 +33599,18 @@ def _preflight_image_job(cfg, *, engine_override: str = "auto") -> None:
     fits_mac, mac_gb = _image_engine_fit(need_gb)
     label = _IMAGE_ENGINE_LABELS.get(engine_override, engine_override)
     if not fits_mac:
+        # 4.19.10: "Pick Auto" was the advice even when Auto WAS this engine
+        # (the saved Settings engine). Auto now drops to Klein on a small Mac
+        # unless the render has references - say that instead.
+        way_out = ("Remove the reference images and Auto renders on FLUX.2 "
+                   "[klein] 4B, which fits here, or pick a lighter engine in "
+                   "Settings." if engine_override == "auto" else
+                   "Pick Auto (the 4B FLUX engine, fits here) or a lighter preset.")
         raise RenderRefused(
             "image_ram",
             f"Image pre-flight: {label} holds ~{need_gb:.0f} GB of weights in "
             f"memory and needs a {mac_gb} GB Mac; this Mac has "
-            f"{total_gb:.0f} GB. Pick Auto (the 4B FLUX engine, fits here) "
-            f"or a lighter preset."
+            f"{SYSTEM_RAM_GB:.0f} GB. {way_out}"
         )
     if free_gb < need_gb and HELPER.is_alive():
         # The video helper keeps its pipelines warm between jobs; on a 32 GB
@@ -33364,7 +33627,7 @@ def _preflight_image_job(cfg, *, engine_override: str = "auto") -> None:
         mem = get_memory()
         total_gb = float(mem.get("total_gb") or total_gb)
         used_gb = float(mem.get("used_gb") or used_gb)
-        free_gb = max(0.0, total_gb - used_gb)
+        free_gb = _image_free_gb(mem)
         push(f"[preflight] {free_gb:.1f} GB free after releasing the helper")
     if free_gb < need_gb:
         raise RenderRefused(
@@ -40386,9 +40649,11 @@ def _post_update_thread() -> None:
     # packages being replaced. Waiting for the gate waits them out; holding
     # it refuses new ones ("busy") until the script is done.
     _GPU_LOCK.acquire()
+    gpu_gate_mark("update")
     try:
         _post_update_run()
     finally:
+        gpu_gate_unmark()
         _GPU_LOCK.release()
 
 
@@ -40711,6 +40976,40 @@ _IMG_STUDIO_LOCK = threading.Lock()
 # image is fine (the queue just waits); the inline path always releases in a
 # finally, so the worker can't deadlock.
 _GPU_LOCK = threading.Lock()
+# Mac app review #11: WHO holds _GPU_LOCK, for /status. The queue's job shows
+# in `current`; the users that take the gate OUTSIDE the queue (an inline
+# image render, a character sheet, Prompt Enhance, a lyrics request, the
+# post-update script) did not show anywhere, so the Mac app's update/restart
+# gate read "idle" while one of them was running and could stop it mid-render.
+# Each of them marks the gate right after acquiring it and clears the mark
+# right before releasing it; gpu_gate_status() is what /status reports.
+_GPU_HOLDER: dict = {}
+
+
+def gpu_gate_mark(kind: str) -> None:
+    """Record the out-of-queue holder of _GPU_LOCK (call right after acquire)."""
+    global _GPU_HOLDER
+    _GPU_HOLDER = {"kind": str(kind), "since": time.time()}
+
+
+def gpu_gate_unmark() -> None:
+    """Forget the holder (call right before release)."""
+    global _GPU_HOLDER
+    _GPU_HOLDER = {}
+
+
+def gpu_gate_status() -> dict:
+    """/status `gpu`: is the GPU gate held, by what, since when.
+
+    `busy` is the gate itself, so it is true for a queued job too (with
+    holder "queue"); `outside_queue` is the case `current` cannot show."""
+    busy = _GPU_LOCK.locked()
+    holder = dict(_GPU_HOLDER) if busy else {}
+    with LOCK:
+        queued = STATE.get("current") is not None
+    kind = holder.get("kind") or ("queue" if queued else ("other" if busy else None))
+    return {"busy": bool(busy), "holder": kind, "since": holder.get("since"),
+            "outside_queue": bool(busy and kind != "queue")}
 
 
 def _video_render_active() -> bool:
@@ -40941,7 +41240,7 @@ def _build_image_engine_config(
     engine_override = (engine_override or "auto").lower()
     form = form or {}
     if engine_override == "auto":
-        return _load_agent_image_config()
+        return low_ram_auto_image_config(_load_agent_image_config(), form)
     # ===== Ideogram 4 (fp8) — typography & layout, text-in-image ===========
     # 9.3B fp8 DiT + an 8B Qwen3-VL text encoder (~28 GB on disk, gated).
     # Text-to-image ONLY — NO reference images (mflux's ideogram4 CLI has no
@@ -41312,6 +41611,7 @@ def generate_character_sheet(character_id: str, *,
             "the GPU is busy with a render or training job — character "
             "sheet generation is paused until it finishes (they'd contend "
             "for GPU memory). Try again once it completes.")
+    gpu_gate_mark("character_sheet")
     t0 = time.time()
     try:
         # Preflight inside the gate: RAM/disk numbers measured while another
@@ -41368,6 +41668,7 @@ def generate_character_sheet(character_id: str, *,
                 "refs_ignored": bool(c.get("refs_ignored", False)),
             })
     finally:
+        gpu_gate_unmark()
         _GPU_LOCK.release()
 
     # Composite + atomic swap. sheet.png is served by URL and (below) named
@@ -45066,6 +45367,31 @@ def _resolve_cap_tier(version_id: str | None = None) -> str:
     return quant
 
 
+#: index.html marks markup only the Pinokio edition serves (Spicy mode and the
+#: CivitAI browser's "Show NSFW" pill) with these comments; in the Mac app the
+#: page leaves out everything between them (owner ruling 2026-10-22).
+_PINOKIO_ONLY_RX = re.compile(r"<!--pinokio-only-->.*?<!--/pinokio-only-->", re.S)
+_DOC_DIRECTIVE_RX = re.compile(r"^\[\[(/?)(pinokio|mac-app)\]\]$")
+
+
+def _strip_pinokio_only(markup: str) -> str:
+    return _PINOKIO_ONLY_RX.sub("", markup) if _dist.is_mac_app() else markup
+
+
+def drop_pinokio_doc_blocks(md: str) -> str:
+    """A Docs page without its [[pinokio]] ... [[/pinokio]] passages (the line
+    directives webapp/js/docs.js reads); [[mac-app]] blocks stay for the page."""
+    out, skip = [], False
+    for line in md.split("\n"):
+        m = _DOC_DIRECTIVE_RX.match(line.strip())
+        if m and m.group(2) == "pinokio":
+            skip = not m.group(1)
+            continue
+        if not skip:
+            out.append(line)
+    return "\n".join(out)
+
+
 def page(theme: str = "") -> str:
     """The served page. `theme` is the palette cookie the browser sent
     ("light" / "dark" / ""); "light" is stamped on <html> so the first paint
@@ -45189,7 +45515,7 @@ def page(theme: str = "") -> str:
             'Its ' + SEQ_NOUN_PL + ' live in ' + html.escape(str(STATE_DIR)) + ', not in this '
             'install — nothing you do here touches your own work.">TEST PANEL</span>'
             + profile_badge)
-    return (HTML
+    return (_strip_pinokio_only(HTML)
             .replace("__SEQCAP__", SEQ_NOUN_CAP)
             .replace("__SEQS__", SEQ_NOUN_PL)
             .replace("__SEQ__", SEQ_NOUN)

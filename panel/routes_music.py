@@ -55,9 +55,11 @@ def _helper_run(spec: dict, timeout: float):
     render when it is taken."""
     if not P._GPU_LOCK.acquire(timeout=3.0):
         raise RuntimeError("A render is using the GPU right now — try again when it finishes.")
+    P.gpu_gate_mark("lyrics")
     try:
         return P.HELPER.run(spec, timeout=timeout)
     finally:
+        P.gpu_gate_unmark()
         P._GPU_LOCK.release()
 
 P = None  # the running mlx_ltx_panel module; assigned at wiring time

@@ -94,6 +94,39 @@ def memory_usage() -> dict:
     return info
 
 
+def available_bytes() -> int:
+    """Memory a new process can have without the system running out, in bytes;
+    0 when unreadable.
+
+    macOS: the kernel's own answer, kern.memorystatus_level (the percentage
+    of memory available - what memory_pressure prints as "System-wide memory
+    free percentage" and what jetsam decides on). It counts the file cache
+    and purgeable memory the kernel hands back on demand, which the "used"
+    ratio in memory_usage() counts as taken: a 16 GB Mac with a browser open
+    reads ~4 GB "free" by that ratio while the kernel says ~9 GB is available.
+    Fallback: free + inactive + speculative + purgeable pages. Linux:
+    MemAvailable."""
+    total = total_ram_bytes()
+    if IS_MAC:
+        lvl = _sysctl("kern.memorystatus_level")
+        if lvl.isdigit() and total:
+            return total * min(100, int(lvl)) // 100
+        try:
+            vm = subprocess.run(["vm_stat"], capture_output=True, text=True, errors="replace", timeout=1).stdout
+            m = re.search(r"page size of (\d+)", vm)
+            page = int(m.group(1)) if m else 16384
+
+            def pages(name: str) -> int:
+                mm = re.search(rf"{re.escape(name)}:\s+(\d+)", vm)
+                return int(mm.group(1)) if mm else 0
+
+            return (pages("Pages free") + pages("Pages inactive") + pages("Pages speculative")
+                    + pages("Pages purgeable")) * page
+        except Exception:                                  # noqa: BLE001
+            return 0
+    return int(_meminfo().get("MemAvailable", 0))
+
+
 def pressure_level() -> int:
     """macOS memorystatus scale: 1 normal, 2 warning, 3 critical.
 

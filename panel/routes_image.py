@@ -813,6 +813,7 @@ def post_image_generate(h, path, qs, ctype) -> None:
                      "image generation is paused until it finishes (they'd "
                      "contend for GPU memory). Try again once it completes.",
         }, 429); return
+    P.gpu_gate_mark("image")
     t0 = P.time.time()
     try:
         try:
@@ -837,6 +838,7 @@ def post_image_generate(h, path, qs, ctype) -> None:
         except ValueError as e:
             h._json({"error": str(e)}, 400); return
     finally:
+        P.gpu_gate_unmark()
         P._GPU_LOCK.release()
     elapsed = round(P.time.time() - t0, 2)
 

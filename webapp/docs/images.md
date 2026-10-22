@@ -14,6 +14,8 @@ The Images tab makes stills. Two kinds of engine live here: **Reference Edit**, 
 
 The pill next to the menu says whether that engine is downloaded. An engine that needs more memory than this Mac has is greyed out and labelled *needs a N GB Mac*.
 
+On Macs with 16 GB of memory or less, **Auto** uses FLUX.2 [klein] 4B at 4-bit for a render without references if the engine chosen in Settings needs a bigger Mac; your Settings stay the same. Renders with reference images keep the Settings engine because Klein does not use references. If that engine cannot fit, remove the references so Auto can use Klein, or choose a lighter engine in Settings.
+
 ## Reference images {#references}
 
 Reference Edit needs at least one picture: drop it into **Primary**, and up to two more into the **Multi-ref** slots (or click one from *Recent uploads*). With two or more, name them in the prompt — *the jacket from reference 1 and the street from reference 2*.

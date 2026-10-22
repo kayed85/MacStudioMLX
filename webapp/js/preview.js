@@ -1252,6 +1252,7 @@ function civitaiSetFamily(family) {
 // One UI predicate serves both LTX and H3. The active engine only changes the
 // LoRA family; it never changes whether NSFW controls/data are authorized.
 function spicyModeEnabled() {
+  if (typeof isMacApp === 'function' && isMacApp()) return false;   // no Spicy mode in the Mac app
   return !!(_settingsCache && _settingsCache.settings &&
             _settingsCache.settings.spicy_mode === true);
 }
@@ -1505,7 +1506,7 @@ async function civitaiSearch() {
     if (data.has_more) loadMore.style.display = '';
     if ((data.items || []).length === 0) {
       const meta = _civitaiContextMeta(_civitaiContext, _civitaiFamily);
-      grid.innerHTML = `<div class="hint">${meta.empty} "${escapeHtml(q || '')}"${civitaiNsfwRequested() ? '' : ' (try Show NSFW for more)'}. Try one shorter word — CivitAI matches whole words in the title and tags — or switch the engine pill above.</div>`;
+      grid.innerHTML = `<div class="hint">${meta.empty} "${escapeHtml(q || '')}"${(civitaiNsfwRequested() || isMacApp()) ? '' : ' (try Show NSFW for more)'}. Try one shorter word — CivitAI matches whole words in the title and tags — or switch the engine pill above.</div>`;
     }
   } catch (e) {
     status.textContent = 'Network error: ' + (e.message || e);

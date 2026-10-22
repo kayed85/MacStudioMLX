@@ -1209,7 +1209,7 @@ function renderSpicyState(isOn) {
   const badge = document.getElementById('spicyStateBadge');
   const btn = document.getElementById('spicyToggleBtn');
   const hint = document.getElementById('spicyHint');
-  if (!badge || !btn) return;
+  if (!badge || !btn || !hint) return;      // not served in the Mac app
   badge.classList.remove('on', 'armed');
   if (_spicyArmed) {
     badge.textContent = 'ARMED';

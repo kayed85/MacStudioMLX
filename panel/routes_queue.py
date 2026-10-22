@@ -298,6 +298,12 @@ def get_status(h, parsed) -> None:
     # 4.20: what install.js left for after Start, and where the background
     # fetcher is with it (empty and idle on every install it never queued).
     payload["deferred_downloads"] = P.deferred_status()
+    # Mac app review #11: the process-wide GPU gate. `current` shows the queued
+    # job; an inline image render, a character sheet, Enhance, a lyrics request
+    # or the post-update script hold the GPU OUTSIDE the queue and showed
+    # nowhere, so a client deciding "is it safe to stop the studio" must read
+    # this too: {busy, holder, since, outside_queue}.
+    payload["gpu"] = P.gpu_gate_status()
     # Mac app only: the app's own model download (app_models.json). The
     # "Base models needed" card names it instead of offering a second fetch.
     _app = P.app_models_state()
@@ -747,6 +753,7 @@ def post_prompt_enhance(h, path, qs, ctype) -> None:
         reason = P.current_render_busy_reason()
         P.push(f"[enhance] skipped: {reason}")
         h._json({"error": f"{reason} Enhance works again when it finishes."}, 409); return
+    P.gpu_gate_mark("enhance")
     try:
         result = P.HELPER.run({
             "action": "enhance_prompt",
@@ -759,6 +766,7 @@ def post_prompt_enhance(h, path, qs, ctype) -> None:
         P.push(f"[enhance] failed: {exc}")
         h._json({"error": str(exc)}, 500); return
     finally:
+        P.gpu_gate_unmark()
         P._GPU_LOCK.release()
     # A malformed terminal helper event must still become JSON. Before
     # this guard, None/non-string values raised after the only try/except
