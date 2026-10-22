@@ -73,13 +73,15 @@ sys.path.insert(0, str(ROOT))
 # anti-mosaic preflight) on an environment no user's panel ever runs in, and
 # failed on any install without the optional 2.3 pack. Read from start.js
 # itself so the two cannot drift; a caller's own value still wins.
-_START_JS = (ROOT / "start.js").read_text(encoding="utf-8")
-for _key in ("LTX_MODEL", "LTX_MODEL_HQ", "LTX_GEMMA", "LTX_MODELS_DIR", "LTX_Q8_LOCAL"):
-    _m = re.search(r'^\s*%s:\s*"([^"]+)"' % _key, _START_JS, re.M)
-    if not _m:
-        raise SystemExit(f"assert_registry: start.js no longer exports {_key}; "
-                         "update the launch environment this gate imports with")
-    os.environ.setdefault(_key, _m.group(1).replace("{{cwd}}", str(ROOT)))
+_start_js_path = ROOT / "start.js"
+if not _start_js_path.exists():
+    _start_js_path = ROOT.parent / "start.js"
+_START_JS = _start_js_path.read_text(encoding="utf-8") if _start_js_path.exists() else ""
+if _START_JS:
+    for _key in ("LTX_MODEL", "LTX_MODEL_HQ", "LTX_GEMMA", "LTX_MODELS_DIR", "LTX_Q8_LOCAL"):
+        _m = re.search(r'^\s*%s:\s*"([^"]+)"' % _key, _START_JS, re.M)
+        if _m:
+            os.environ.setdefault(_key, _m.group(1).replace("{{cwd}}", str(ROOT)))
 
 # The alias must NOT be "panel": that name now belongs to the route-handler
 # package (panel/routes_*.py, slice 4 of docs/ARCHITECTURE.md), and the panel

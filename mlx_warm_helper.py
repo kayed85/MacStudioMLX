@@ -102,7 +102,26 @@ MODEL_ID = os.environ.get(
     "LTX_MODEL",
     str(_Q4_LOCAL_PATH) if _Q4_LOCAL_PATH.is_dir() else "dgrauet/ltx-2.3-mlx-q4",
 )
+def _is_valid_encoder_dir(dir_path: Path | str | None) -> bool:
+    if not dir_path:
+        return False
+    try:
+        dp = Path(dir_path)
+        return dp.is_dir() and (dp / "config.json").is_file() and any(dp.glob("*.safetensors"))
+    except Exception:
+        return False
+
 GEMMA_PATH = os.environ.get("LTX_GEMMA", "mlx-community/gemma-3-12b-it-4bit")
+if GEMMA_PATH.startswith("/") and not _is_valid_encoder_dir(GEMMA_PATH):
+    for cand in [
+        str(MODELS_DIR / "gemma-3-12b-it-4bit"),
+        str(MODELS_DIR.parent / "mlx_models" / "gemma-3-12b-it-4bit"),
+        os.environ.get("LTX_GEMMA_PATH", ""),
+    ]:
+        if cand and _is_valid_encoder_dir(cand):
+            GEMMA_PATH = cand
+            break
+
 ENHANCE_GEMMA_PATH = os.environ.get(
     "LTX_ENHANCE_GEMMA", "mlx-community/gemma-3-12b-it-4bit"
 )
@@ -2618,7 +2637,7 @@ def get_gemma_lm():
             ) from err
         emit({"event": "log", "line": "Loading Gemma language model for prompt enhancement (~10-15s)…"})
         target_path = ENHANCE_GEMMA_PATH
-        if target_path.startswith("/") and not os.path.exists(target_path):
+        if target_path.startswith("/") and not _is_valid_encoder_dir(target_path):
             candidates = [
                 os.environ.get("LTX_GEMMA"),
                 str(MODELS_DIR / "gemma-3-12b-it-4bit"),
@@ -2628,7 +2647,7 @@ def get_gemma_lm():
             ]
             found = False
             for cand in candidates:
-                if cand and os.path.exists(cand):
+                if cand and _is_valid_encoder_dir(cand):
                     target_path = cand
                     found = True
                     break

@@ -6299,17 +6299,25 @@ def base_model_dir(version_id: str | None = None) -> str:
     return str(pack_path("q4", wanted))
 
 
+def _is_valid_encoder_dir(dir_path: Path | str | None) -> bool:
+    """Return True if dir_path exists, has config.json, and contains at least one safetensors file."""
+    if not dir_path:
+        return False
+    try:
+        dp = Path(dir_path)
+        return dp.is_dir() and (dp / "config.json").is_file() and any(dp.glob("*.safetensors"))
+    except Exception:
+        return False
+
+
 def text_encoder_dir(version_id: str | None = None) -> str:
     te = model_version(version_id).get("text_encoder") or {}
-    p = te.get("path") or GEMMA
-    if not Path(p).is_dir() and Path(GEMMA).is_dir():
-        return str(GEMMA)
-    return str(p)
+    return str(te.get("path") or GEMMA)
 
 
 def text_encoder_missing_files(version_id: str | None = None) -> list[str]:
     edir = text_encoder_dir(version_id)
-    if Path(edir).is_dir() and len(list(Path(edir).glob("*.safetensors"))) > 0:
+    if _is_valid_encoder_dir(edir):
         return []
     te = model_version(version_id).get("text_encoder") or {}
     key = te.get("repo_key")
@@ -6322,7 +6330,7 @@ def text_encoder_missing_files(version_id: str | None = None) -> list[str]:
             break
     if not repo:
         return []
-    base = Path(text_encoder_dir(version_id))
+    base = Path(edir)
     return [f for f in (repo.get("files") or []) if not (base / f).exists()]
 
 
@@ -17108,7 +17116,10 @@ MUSIC_COVER_MODELS = ROOT / Path(
 # the owner drops in — a community or AI-Toolkit adapter needs no install step.
 MUSIC_LORAS = ROOT / Path(
     os.environ.get("LTX_MUSIC_LORAS", "mlx_models/yue2-loras")).expanduser()
-MUSIC_ENGINE_PIN = (ROOT / "scripts/music/engine_pin.txt").read_text().strip()
+_pin_file = ROOT / "scripts/music/engine_pin.txt"
+if not _pin_file.exists():
+    _pin_file = ROOT.parent / "scripts/music/engine_pin.txt"
+MUSIC_ENGINE_PIN = _pin_file.read_text().strip() if _pin_file.exists() else "9253ed133343406947bde7b67d43c7a63fb39d99"
 # Env vars the music runner must NEVER inherit — see music_child_env().
 MUSIC_ENV_STRIP = ("PYTORCH_ENABLE_MPS_FALLBACK", "PYTORCH_MPS_FAST_MATH")
 # Lock paths that command-line GPU jobs (the H3 lab's scripts) create while they
@@ -17160,7 +17171,17 @@ def music_capable() -> bool:
 
 
 def music_paths() -> dict:
-    from scripts.pinokio.music_fetch import pack_problems
+    try:
+        from scripts.pinokio.music_fetch import pack_problems
+    except ImportError:
+        try:
+            if str(ROOT) not in sys.path:
+                sys.path.insert(0, str(ROOT))
+            if str(ROOT.parent) not in sys.path:
+                sys.path.insert(0, str(ROOT.parent))
+            from scripts.pinokio.music_fetch import pack_problems
+        except ImportError:
+            pack_problems = lambda *_: ["music_fetch script missing"]
     missing = pack_problems(MUSIC_MODELS)
     weights_ok = not missing
     python = _music_python()
@@ -39240,6 +39261,17 @@ def run_job_inner(job: dict) -> None:
             "prompt encode. Click Update — and if the first click only moves "
             "the panel, click it once more: an update started by an old "
             "version updates itself first.")
+    # Text encoder preflight: check that either the active encoder or a valid fallback exists
+    active_te = text_encoder_dir(ACTIVE_MODEL_VERSION)
+    if not _is_valid_encoder_dir(active_te):
+        if not _is_valid_encoder_dir(GEMMA):
+            miss = text_encoder_missing_files(ACTIVE_MODEL_VERSION)
+            shown = ", ".join(miss[:3]) + (" …" if len(miss) > 3 else "")
+            raise RenderRefused(
+                "model_missing",
+                f"This render can't run: text encoder is incomplete in {active_te} ({shown}). "
+                f"Please download or link the model in Settings → Models."
+            )
     _apply_generation_profile_to_job(job)
     for note in p.get("generation_clamp_notes") or []:
         push(f"[generation] {p.get('generation_profile_label')}: {note}")
@@ -43337,7 +43369,7 @@ for _routes_mod in (_routes_characters, _routes_files, _routes_image,
                     _routes_licences, _routes_loras, _routes_meta, _routes_models, _routes_music,
                     _routes_oneshot, _routes_queue, _routes_stats, _routes_storyboard,
                     _routes_train, _routes_drawthings, _civitai_client):
-    _routes_mod.P = sys.modules[__name__]
+    _routes_mod.P = sys.modules.get(__name__, sys.modules.get("__main__"))
 
 
 class Handler(BaseHTTPRequestHandler):
