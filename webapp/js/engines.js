@@ -372,6 +372,28 @@ function h3TurboState() {
 function h3TriStepState() {
   return (H3 && H3.tristep) || { available: false, supported: false, downloaded: false };
 }
+// lightx2v v1.3: what Best renders on the High canvas once its adapter is
+// built (server: h3_cell_takes_v13 / make_job). Text and Image only; a pinned
+// Steps count keeps the full sampler.
+function h3V13State() {
+  return (H3 && H3.v13) || { available: false, supported: false, downloaded: false };
+}
+function _h3V13Mode() {
+  const m = (document.getElementById('mode') || {}).value || 't2v';
+  return m === 't2v' || m === 'i2v';
+}
+// Would THIS cell's Best render on v1.3, as things stand?
+function h3V13On(cell, opts) {
+  cell = cell || h3CurrentCell();
+  if (!cell || cell.v13_min == null) return false;
+  opts = opts || {};
+  const fast = (opts.fast != null) ? opts.fast : h3TriStepOn(cell);
+  if (fast) return false;
+  const ov = (opts.steps != null) ? String(opts.steps)
+    : ((document.getElementById('h3_steps') || {}).value || 'auto');
+  if (ov !== 'auto') return false;
+  return _h3V13Mode() && !!h3V13State().available;
+}
 function h3SpeedPref() {
   let v = null;
   try { v = localStorage.getItem('phos_h3_speed'); } catch (e) {}
@@ -420,6 +442,7 @@ function h3CellEtaMin(cell, opts) {
   const fast = (opts.fast != null) ? opts.fast : h3TriStepOn(cell);
   if (fast && cell.tristep_min != null) return _h3TriStepMin(cell);
   if (opts.turbo) return cell.turbo_min;
+  if (h3V13On(cell, { fast: false, steps: opts.steps })) return cell.v13_min;
   const ov = (opts.steps != null) ? String(opts.steps)
     : ((document.getElementById('h3_steps') || {}).value || 'auto');
   if (ov !== 'auto' && /^\d+$/.test(ov)) {
@@ -435,7 +458,9 @@ function h3CellEtaBasis(cell, opts) {
   if (!cell) return '';
   opts = opts || {};
   const fast = (opts.fast != null) ? opts.fast : h3TriStepOn(cell);
-  const fr = fast ? cell.fleet_range_fast : cell.fleet_range;
+  const fr = fast ? cell.fleet_range_fast
+    : (h3V13On(cell, { fast: false }) ? cell.fleet_range_v13 : cell.fleet_range);
+  if (!fr && !fast && h3V13On(cell, { fast: false }) && cell.v13_measured) return 'measured on an M4 Max';
   return fr ? fr.basis : 'estimated — few renders on this Mac class yet';
 }
 function h3FmtEtaMin(m) {
@@ -456,6 +481,9 @@ function h3CellEta(cell, opts) {
   if (opts.turbo) return cell.turbo_eta;
   const ov = (document.getElementById('h3_steps') || {}).value || 'auto';
   if (ov === 'auto' || !/^\d+$/.test(ov)) {
+    if (h3V13On(cell, { fast: false })) {
+      return (!_h3IsI2V() && cell.fleet_range_v13) ? cell.fleet_range_v13.eta_range : cell.v13_eta;
+    }
     // Owner ruling (2026-09-29): Best's own real fleet range, same idea as
     // Fast's above — never for i2v, which the server prices separately and
     // this fleet cell (mode "t2v") does not cover.
@@ -492,8 +520,11 @@ function _h3SyncSamplerTitles() {
   const pts = (cell && cell.steps) || 9;
   const fwd = Math.max(1, pts - 1);
   const best = document.querySelector('#h3SpeedGroup [data-h3-speed="best"]');
-  if (best) best.title = "Best: this shape's full sampler — " + fwd + ' steps per window. '
-    + 'The slower, most careful render.';
+  if (best) best.title = h3V13On(cell, { fast: false })
+    ? 'Best on High: ' + (h3V13State().name || 'lightx2v v1.3') + ', ' + (h3V13State().forwards || 6)
+      + ' steps per window. Takes about half the time. Choose a Steps count to use the old Best sampler.'
+    : "Best: this shape's full sampler — " + fwd + ' steps per window. '
+      + 'The slower, most careful render.';
   const auto = document.querySelector('#h3StepsGroup [data-h3-steps="auto"]');
   if (auto) auto.title = "This shape's tuned count — " + pts + ' sigma points ('
     + fwd + ' forwards per window) at this canvas.';
@@ -544,7 +575,75 @@ function renderH3Turbo() {
   }
   _h3SyncSamplerTitles();
   _h3ApplySpeed();
+  _h3RenderV13Note();
   _h3SyncFaceFixEta();
+}
+
+// The line under the switch for lightx2v v1.3 on High: what it is and who
+// made it once it is in, the one click that gets it before then.
+function _h3RenderV13Note() {
+  const box = document.getElementById('h3V13Note');
+  if (!box) return;
+  const cell = h3CurrentCell();
+  const v = h3V13State();
+  const text = document.getElementById('h3V13NoteText');
+  const btn = document.getElementById('h3V13Get');
+  const show = !!(cell && cell.v13_min != null && _h3V13Mode() && !h3TriStepOn(cell));
+  box.hidden = !show;
+  if (!show || !text) return;
+  const name = v.name || 'lightx2v v1.3';
+  const credit = 'By LightX2V (Apache-2.0 code; ' + (v.license || 'MiniMax H3 Community License') + ' weights).';
+  let msg = '';
+  let canGet = false;
+  if (!v.supported) {
+    msg = 'Best on High takes about half the time with ' + name + '. ' + distText(
+      'Update H3: click "Update Hailuo H3 runner" in the Pinokio sidebar. Your weights stay.',
+      'It needs a newer H3 runner, but the Mac app can\u2019t update the runner yet.');
+  } else if (v.installing) {
+    const d = v.download || {};
+    msg = d.status === 'building' ? 'Preparing ' + name + ' on your Mac…'
+      : 'Downloading ' + name + ': ' + (d.mb || 0) + ' / ' + (d.total_mb || 1320) + ' MB';
+  } else if (!v.downloaded) {
+    const e = (v.download || {}).error;
+    // "about half the time", not "down from <Best>": the Best half of the
+    // switch may show a fleet range, and two different "before" numbers on
+    // one screen would contradict each other.
+    msg = 'New: ' + name + ' runs Best on High in about ' + _h3EtaPlain(cell.v13_eta)
+      + ', about half the time. Richer detail in our side-by-side tests. ' + credit
+      + (e ? ' Last try failed: ' + e : '');
+    canGet = true;
+  } else if (h3V13On(cell, { fast: false })) {
+    msg = 'Best on High uses ' + name + ' (' + (v.forwards || 6) + ' steps). ' + credit
+      + ' Choose a Steps count to use the old Best sampler.';
+  } else {
+    msg = 'Steps set: Best uses the old sampler instead of ' + name + '.';
+  }
+  text.textContent = msg;
+  if (btn) {
+    btn.hidden = !canGet;
+    btn.textContent = 'Get it · ' + (v.download_gb || 1.4) + ' GB';
+  }
+}
+async function h3V13Install() {
+  const toast = (m, kind) => { if (typeof phosToast === 'function') phosToast(m, { kind }); };
+  const btn = document.getElementById('h3V13Get');
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch('/h3/v13/install', { method: 'POST' });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+    toast(j.already_installed ? 'lightx2v v1.3 is already installed.'
+      : "Downloading LightX2V's lightx2v v1.3 (1.4 GB), then preparing it on your Mac. "
+        + 'Best on High will use it automatically when ready.', 'ok');
+  } catch (e) {
+    toast('lightx2v v1.3: ' + (e.message || 'failed'), 'danger');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+{
+  const _v13Btn = document.getElementById('h3V13Get');
+  if (_v13Btn) _v13Btn.onclick = (ev) => { ev.preventDefault(); h3V13Install(); };
 }
 
 // ONE writer for what this render does: both hidden inputs, the lit half, the
@@ -602,7 +701,8 @@ function _h3ApplySpeed() {
         ? cell.tristep_forwards : (tri.steps ? tri.steps - 1 : 3);
     } else if (s && cell) {
       const ov = (stIn || {}).value || 'auto';
-      s.value = (ov !== 'auto' && /^\d+$/.test(ov)) ? parseInt(ov, 10) : cell.steps;
+      s.value = (ov !== 'auto' && /^\d+$/.test(ov)) ? parseInt(ov, 10)
+        : (h3V13On(cell, { fast: false }) ? cell.v13_steps : cell.steps);
     }
     // Steps is a Best control: it only shows while Best is what renders.
     const stepsRow = document.getElementById('h3StepsRow');
@@ -638,7 +738,8 @@ function h3SpeedOfParams(p) {
 // function so all three read the same label from the same field.
 function h3JobSpeedLabel(p) {
   if (!p || p.engine !== 'h3') return '';
-  return h3SpeedOfParams(p) === 'fast' ? 'Fast' : 'Best';
+  if (h3SpeedOfParams(p) === 'fast') return 'Fast';
+  return p.h3_v13 ? 'Best · lightx2v v1.3' : 'Best';
 }
 // "Hailuo H3 · Standard 10s" — the shape a submitted H3 job asked for,
 // looked up from its own h3_tier (never re-derived from the CURRENT form
@@ -2025,6 +2126,7 @@ Object.assign(globalThis, {
   engineById, defaultEngine, engineStatus, engineServesMode,
   h3ResolveTierKey, h3TierByKey, h3CellFor, h3CurrentCell,
   setH3Upscale, setH3FaceFixAfter, setH3Orientation, setH3Steps, h3TurboPillSub,
+  h3V13State, h3V13On,
   renderH3Turbo, setH3Turbo, syncModeStripToEngine, renderEngineSwitch,
   setH3Speed, h3SpeedOfParams, h3EstimateLine, setH3TriStep, h3TriStepOn, h3TriStepState,
   h3JobSpeedLabel, h3JobShapeLabel, ltxCellEtaBasis, h3CellEtaBasis,

@@ -312,6 +312,24 @@ module.exports = {
       }
     },
 
+    // ---- lightx2v v1.3 (Best on High): fetched from UPSTREAM, built here ----
+    // Target: lightx2v_v1.3_768p_phosphene.safetensors (SHA-256
+    // 45ee324a31beacef7a2fbef019b99e16b35d80586dc4e0d60fecf6ca679751d8),
+    // built by scripts/fetch_h3_v13.py from LightX2V's original
+    // minimax_h3_fl2v_turbo_4step_v1.3_768p_bf16.safetensors (pinned commit,
+    // source SHA-256 97b775707bb5732e01dba0cf3833d3fe2947c953859d4d05ea3bd74894c43d2b).
+    // Never hosted by Phosphene: an H3 Model Derivative (MiniMax H3 Community
+    // License; LightX2V's code is Apache-2.0). BEST-EFFORT, like Turbo: the
+    // Speed row's "Get it" button runs the same script on demand.
+    {
+      method: "shell.run",
+      params: {
+        message: [
+          RH3 + ".venv/bin/python \"$APP_ROOT/scripts/fetch_h3_v13.py\" --dir \"$H3_LAYOUT/turbo-lora\" --licence-state \"${LTX_STATE_DIR:-$APP_ROOT/state}\" || echo 'V13 FETCH FAILED - the Speed row offers a retry'"
+        ]
+      }
+    },
+
     // ---- TAE: the fast draft decoder (~23 MB) ------------------------------
     // H3's video decoder is a 36-layer ViT and it is the biggest FIXED cost in
     // a render — 88 s of a 501 s clip, 77% of everything that isn't denoising.

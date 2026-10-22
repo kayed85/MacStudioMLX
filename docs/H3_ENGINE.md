@@ -357,6 +357,83 @@ says so under itself when one of them is picked.
   sigma subset, decode; plus `h3.schedule` (the sigmas the runner ran) and
   `h3.lora_accounting`. The ⓘ modal prints a Speed row.
 
+### Speed adapters run a per-head copy (2026-10-22)
+
+H3's DiT stores the fused `attn.qkv_proj` rows **per head**, `(heads, 3,
+head_dim)`. Every speed adapter Phosphene resolves — Kijai's TaoMate r19, the
+official TaoMate r128, larryvrh's v4-600 EMA, the LightX2V v1.x repack — has
+its `lora_B` rows **contiguous**, `(3, heads, head_dim)`: the layout of the
+ComfyUI/diffusers definition it was trained or converted through. (One-way
+ANOVA on row norms, q/k/v as groups: base blocks.49 per-head F 5006 vs
+contiguous 43; the adapters' B·A deltas at blocks.49 read the other way,
+TaoMate 11 vs 1897, v4 0 vs 1038.) The runner only re-orders rows under
+`--lora-qkv-permute`, which has been OFF by default since 2026-08-15 and is
+global to a run, so it would also re-order a stacked user LoRA that lora-lab
+trained in the native layout.
+
+So the panel re-orders the speed adapter itself: `h3_bake_runner_layout()`
+writes `turbo-lora/runner-layout/<same name>` with each qkv `lora_B`'s 168
+blocks of 128 rows moved into per-head order. It is a byte move of whole rows
+(dtype-agnostic, no arithmetic), byte-identical to the runner's
+`_permute_qkv_rows` on all 52 modules of the real TaoMate file, stamped in the
+file's metadata with the source's size and mtime and re-made when either
+changes, and written through a `.partial` + rename. It runs right after a Fast
+or Turbo download and, for installs that already have the file, on the first
+render (0.25 s for the 182 MB TaoMate file on an M4 Max). The downloaded, digest-pinned file is never touched.
+A runner without `--lora-qkv-permute` predates 2026-08-15 and re-orders every
+`--lora` itself, so it is handed the source file. User LoRAs never go through
+this. Provenance: `h3.tristep` / `h3.turbo` carry `lora` (the file the runner
+read), `source` and `qkv_rows` (`per-head` or `runner`).
+
+### Best on High: lightx2v v1.3 (2026-10-22)
+
+LightX2V's v1.3 768p H3 adapter (`lightx2v/Minimax-h3-Turbo` @ `30f485ed`,
+`minimax_h3_fl2v_turbo_4step_v1.3_768p_bf16.safetensors`, released 2026-10-20)
+is what Best renders on High once it is built:
+
+| High 1024×576, 124 frames, M4 Max 64 GB | forwards | wall | process peak |
+|---|---:|---:|---:|
+| Best, full sampler (shift 12) | 15 | 1950 s | 28.9 GiB |
+| Best, lightx2v v1.3 (shift 6) | 6 | 870 s | 32.8 GiB |
+
+Runner argv: `--steps 7 --lora <adapter>:1.0`, plus `--video-shift 6` on a
+runner that takes it. Shift 6 is the shift LightX2V trained its 768p adapters
+at; `--video-shift` (a runner commit not pinned yet) moves the video schedule
+only. The pinned runner (3f6c75c, any stacking runner) has no such flag and
+renders v1.3 at the default shift 12, and logs it: on the two-person dialogue
+test, shift 12 and shift 6 gave matching faces, mouths and timing (931.8 vs
+937.6 s), so an install gets v1.3 from the panel Update alone. 4.19.11 ships on
+the 3f6c75c pin; shift 6 follows if a later release moves the pin. A forward costs ~3% more
+with the runtime adapter, which the cell prices carry (`H3_V13_FORWARD_COST`).
+
+Where it runs (`h3_cell_takes_v13`, `make_job`): Best on the High canvas, Text
+and Image, every 5 s-window length. Never with Fast or Turbo, never under a
+Steps pin (the pin is the way back to the full sampler), never on Draft,
+Standard, Native, the dense pass or the media modes, none of which were
+rendered on v1.3. `h3_v13=0` on the API keeps the full sampler.
+
+**The file.** Not hosted by Phosphene (an H3 Model Derivative; MiniMax H3
+Community License on the weights, Apache-2.0 on LightX2V's code).
+`scripts/fetch_h3_v13.py` (install_h3.js, best-effort; `POST /h3/v13/install`
+from the Speed row) downloads the pinned source (sha256 `97b77570…`,
+1,383,677,808 B), then builds `lightx2v_v1.3_768p_phosphene.safetensors`
+(sha256 `45ee324a…`, 1,956,165,376 B) with the standard library only:
+
+- q/k/v fused into one block-diagonal adapter whose B rows are written in the
+  DiT's own per-head order `(heads, 3, head_dim)`. LightX2V trained against the
+  contiguous `(3, heads, head_dim)` split (row-norm grouping of the delta), and
+  the base checkpoint is per-head (row-norm ANOVA on `qkv_proj`: F 1362 vs 84 on
+  block 0). Baking the move in keeps `--lora-qkv-permute` off, so a user LoRA
+  stacked after it is applied as trained. Tensor for tensor this equals the
+  file the validation renders loaded with `--lora-qkv-permute`.
+- `ff.net.0.proj` B halves swapped to `[gate; value]`.
+- alpha/rank = 8/128 = 2^-4 folded into B as an exponent shift (exact); a
+  value that would leave bf16's normal range is refused, not rounded.
+
+Both digests are checked; a corrupt or partial build is deleted, never
+renamed into place. `test_h3_v13.py` pins script↔panel parity, the re-layout
+against an independent reference, the job rules, the argv and the prices.
+
 ### Chained windows (v3.4.1)
 
 Window *N*'s **last decoded frame** becomes window *N+1*'s first-frame keyframe

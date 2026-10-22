@@ -409,9 +409,19 @@
        overflow:hidden — the compaction rule above still targeted the
        retired span.pill markup. Show the percentage alone; the full text
        stays in the title and the pop-over (review 2026-09-02). */
+    /* max-width: none (4.19.11): the 22ch cap above is measured in the
+       face's OWN font, and font-size 0 makes 22ch = 0 px, so the ::after
+       percentage was clipped to nothing and the chip showed a bare dot.
+       It landed (664f714) 45 minutes after the chip vanished behind its
+       stray `hidden` (048464f), so nobody ever saw it. The short text is
+       a few characters; it needs no cap.
+       font-variant-numeric: normal on the face: WebKit (Safari, the Mac
+       app) does not scale TABULAR digits by font-size 0, so the hidden
+       "49/64 GB · 77%" still took ~50 px and pushed the percentage right.
+       The ::after gets tabular-nums back for itself. */
     @media (max-width: 1400px) {
-      #healthChip .hc-face { font-size: 0; }
-      #healthChip .hc-face::after { content: attr(data-short); font-size: 11.5px; }
+      #healthChip .hc-face { font-size: 0; max-width: none; font-variant-numeric: normal; }
+      #healthChip .hc-face::after { content: attr(data-short); font-size: 11.5px; font-variant-numeric: tabular-nums; }
     }
     /* SYS-38: the branch + short SHA + commit date ("HEAD · 70665d3
        (2026-09-28)") is developer build detail — useful for self-
@@ -7279,9 +7289,11 @@
     .player-wrap .live-stage-image {
       position: absolute; inset: 0;
       width: 100%; height: 100%; object-fit: contain;
-      transition: opacity 180ms ease;
+      transition: opacity 180ms ease, filter .6s ease;
     }
     .player-wrap.live-stage.is-aborting .live-stage-image { opacity: .58; }
+    /* A rough estimate (before the server's `meaningful`): shown, softened. */
+    .player-wrap .live-stage-image.is-forming { filter: blur(6px) saturate(.85); opacity: .82; }
     .live-stage-warming {
       position: absolute; inset: 0;
       display: flex; flex-direction: column;
@@ -8458,6 +8470,7 @@
     }
     .now-thumb[hidden] { display: none; }
     .now-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .now-thumb.is-forming img { filter: blur(3px) saturate(.85); opacity: .82; }
     /* WARMING — the estimates so far are still essentially noise, so there is
        nothing worth showing and nothing worth judging. A placeholder that
        breathes, flattened by the global prefers-reduced-motion rule. */
@@ -10590,7 +10603,9 @@
       body > header #healthCluster > span.pill svg { width: 12px; height: 12px; }
     }
     body > header .brand img {
-      /* Phosphene brand mark — the rings + wordmark composed as ONE wide
+      /* (4.19.11: this img is now the WORDMARK only, 825x228; the rings are
+         .ph-mark below. The history of the banner it replaced:)
+         Phosphene brand mark — the rings + wordmark composed as ONE wide
          banner (1291×392, transparent bg). Replaces the previous setup
          where the small ring mark (`phosphene_brand.png`) was injected
          via `content: url()` and the wordmark text was added via
@@ -10610,6 +10625,119 @@
       filter:
         drop-shadow(0 0 14px rgba(255, 95, 168, 0.55))
         drop-shadow(0 0 6px rgba(79, 214, 255, 0.35));
+    }
+    /* THE MARK TURNS, SLOWLY (4.19.11) — phosphene.video's mark, in the app.
+       The banner PNG used to carry the rings; now the rings are six layered
+       <svg> boxes (index.html) and the img above is only the wordmark.
+       Each ring turns the opposite way from its neighbour (40-140 s a turn,
+       inner rings a little faster, so every rim moves at about the same
+       ~1.7 px/s), each breathes into a slight oval, the hue drifts, the
+       centre glows.
+
+       WHAT IT COSTS, MEASURED (Chrome 1600x900 @2x, CDP trace + ps, only
+       the mark animating; docs/STATE.md 2026-10-22 has the table):
+       - Only transform, opacity and one hue filter animate, all on HTML
+         boxes, so no frame repaints or re-lays-out anything: the trace's
+         Paint count is the page's own idle number. Do not animate anything
+         INSIDE the <svg>s, and put no filter/shadow on a ring: either turns
+         every frame into a repaint. The glow is a static gradient
+         (.ph-mark-halo) for the same reason.
+       - Even compositor-only, a 60 fps animation keeps Chrome's GPU and
+         browser processes at ~+9% of a core. The motion is so slow (a rim
+         moves ~0.17 px per 0.1 s) that 10 updates a second look identical,
+         so every animation is STEPPED on one shared 0.1 s grid: durations
+         are whole multiples of 0.1 s per keyframe segment, delays are whole
+         seconds, and steps(N) per segment = segment seconds x 10. Off-grid
+         values would make the six rings tick at different moments and
+         bring the frame rate back up. Cost: ~+3% of a core, no paint.
+       - It turns ALL the time, renders included (owner, 2026-10-22: the
+         mark must never look stopped). Do not add a pause-while-rendering
+         rule back: the step grid is what keeps it cheap.
+       - A hidden tab / hidden app window stops the animation on its own.
+       test_logo_mark_motion.py pins all of this. */
+    body > header .ph-mark {
+      position: relative;
+      display: block;
+      flex: none;
+      width: 78px;
+      height: 78px;
+      animation: ph-mk-hue 48s steps(120) infinite alternate;
+    }
+    .ph-mark > span { position: absolute; inset: 0; display: block; }
+    .ph-mark .ph-mark-halo {
+      inset: -12px;
+      border-radius: 50%;
+      background: radial-gradient(circle closest-side,
+        rgba(255, 95, 168, 0.13) 0%, rgba(177, 74, 255, 0.06) 55%,
+        rgba(79, 214, 255, 0.035) 80%, rgba(79, 214, 255, 0) 100%);
+    }
+    .ph-mk-spin {
+      display: block;
+      width: 100%;
+      height: 100%;
+      overflow: visible;
+      fill: none;
+      stroke-width: 2.1;
+      stroke-linecap: round;
+      animation: ph-mk-turn var(--t) steps(var(--n)) infinite var(--dir);
+    }
+    /* --n = --t x 10 (one step per 0.1 s). */
+    .ph-mk-s0 { --t: 40s;  --n: 400;  --dir: normal; }
+    .ph-mk-s1 { --t: 52s;  --n: 520;  --dir: reverse; }
+    .ph-mk-s2 { --t: 66s;  --n: 660;  --dir: normal; }
+    .ph-mk-s3 { --t: 84s;  --n: 840;  --dir: reverse; }
+    .ph-mk-s4 { --t: 108s; --n: 1080; --dir: normal; }
+    .ph-mk-s5 { --t: 140s; --n: 1400; --dir: reverse; }
+    /* Breathe: 4 equal segments, so --b is a multiple of 0.4 s and
+       --n = --b / 4 x 10 (steps per segment); --bd whole seconds. */
+    .ph-mk-morph { animation: ph-mk-breathe var(--b) steps(var(--n)) var(--bd) infinite alternate; }
+    .ph-mk-m0 { --b: 8.8s;  --n: 22; --bd: 0s; }
+    .ph-mk-m1 { --b: 10.8s; --n: 27; --bd: -3s; }
+    .ph-mk-m2 { --b: 12.8s; --n: 32; --bd: -7s; }
+    .ph-mk-m3 { --b: 10s;   --n: 25; --bd: -2s; }
+    .ph-mk-m4 { --b: 14s;   --n: 35; --bd: -9s; }
+    .ph-mk-m5 { --b: 12s;   --n: 30; --bd: -5s; }
+    .ph-mark .ph-mark-core {
+      inset: auto;
+      left: calc(50% - 4px);
+      top: calc(50% - 4px);
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: radial-gradient(circle closest-side,
+        #f8e24e 0%, #f8e24e 42%, rgba(248, 226, 78, 0.35) 62%, rgba(248, 226, 78, 0) 100%);
+      animation: ph-mk-glow 6s steps(15) infinite alternate;
+    }
+    @keyframes ph-mk-turn { to { transform: rotate(360deg); } }
+    /* The site's breathe (wide, then tall, then round), as 4 equal
+       segments; the glow and hue follow an eased (cosine) curve the same
+       way, since a stepped segment is linear. */
+    @keyframes ph-mk-breathe {
+      0%   { transform: scale(1, 1); }
+      25%  { transform: scale(1.03, 0.978) rotate(3.5deg); }
+      50%  { transform: scale(1.002, 1.004) rotate(0.5deg); }
+      75%  { transform: scale(0.976, 1.03) rotate(-3deg); }
+      100% { transform: scale(1.015, 1.015); }
+    }
+    @keyframes ph-mk-glow {
+      0%   { transform: scale(0.85);  opacity: 0.85; }
+      25%  { transform: scale(0.894); opacity: 0.872; }
+      50%  { transform: scale(1);     opacity: 0.925; }
+      75%  { transform: scale(1.106); opacity: 0.978; }
+      100% { transform: scale(1.15);  opacity: 1; }
+    }
+    @keyframes ph-mk-hue {
+      0%   { filter: hue-rotate(-14deg) saturate(1); }
+      25%  { filter: hue-rotate(-9.3deg) saturate(1.022); }
+      50%  { filter: hue-rotate(2deg) saturate(1.075); }
+      75%  { filter: hue-rotate(13.3deg) saturate(1.128); }
+      100% { filter: hue-rotate(18deg) saturate(1.15); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      body > header .ph-mark,
+      .ph-mark .ph-mk-morph,
+      .ph-mark .ph-mk-spin,
+      .ph-mark .ph-mark-core { animation: none !important; }
     }
     /* (previous `.brand::after { content: 'Phosphene' }` removed
        2026-05-19 — wordmark text is now baked into the banner PNG so
@@ -12815,3 +12943,8 @@ body[data-engine="h3"][data-vmode="v2a"] #h3LengthLabel { display: none !importa
 .engine-credit { display: block; margin-top: 6px; font-size: 11px; color: var(--muted); }
 [data-licence-status] { color: var(--muted); }
 [data-licence-status].ok { color: rgba(63,185,80,0.9); }
+
+/* lightx2v v1.3 note under the H3 Speed switch (engines.js _h3RenderV13Note). */
+.h3-speed .h3-v13-note { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.h3-speed .h3-v13-note .h3-v13-get { padding: 2px 10px; font-size: 12px; }
+.h3-speed .h3-v13-note .h3-v13-get[hidden] { display: none !important; }

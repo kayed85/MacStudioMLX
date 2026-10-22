@@ -118,9 +118,19 @@ def _sql_literal(s: str) -> str:
     return "'" + s.replace("'", "''") + "'"
 
 
+# lightx2v v1.3 on Best at High is its own lane, so its ~15 min renders never
+# pull the full sampler's Best range down. 4.19.11 renders say which sampler
+# ran (`h3_sampler`); `steps` cannot (7 points is v1.3, Turbo AND a Best
+# pinned to 7), so an event without it - every version before 4.19.11, none of
+# which ran v1.3 - falls back to the old rule: <= 5 points Fast, else Best.
+# Turbo gets a lane of its own that no price reads.
 _SPEED_EXPR = (
-    "multiIf(properties.engine = 'h3' AND toFloat64OrNull(toString(properties.steps)) <= 5, "
-    "'fast', properties.engine = 'h3', 'best', '')"
+    "multiIf(properties.engine != 'h3', '', "
+    "properties.h3_sampler = 'v13', 'v13', "
+    "properties.h3_sampler = 'fast', 'fast', "
+    "properties.h3_sampler = 'turbo', 'turbo', "
+    "properties.h3_sampler = 'best', 'best', "
+    "toFloat64OrNull(toString(properties.steps)) <= 5, 'fast', 'best')"
 )
 _MODE_LIST = "(" + ",".join(_sql_literal(m) for m in PRICED_MODES) + ")"
 

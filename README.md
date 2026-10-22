@@ -10,7 +10,7 @@ AI video with sound, songs and images, made locally on your Mac.
 
 [Website](https://phosphene.video) · [Docs](https://phosphene.video/docs/) · [Benchmarks](https://phosphene.video/benchmarks/) · [Changelog](https://phosphene.video/changelog/) · [@PhospheneAI](https://x.com/PhospheneAI)
 
-**Current release: v4.19.10.** See what's new in the [changelog](https://phosphene.video/changelog/).
+**Current release: v4.19.11.** See what's new in the [changelog](https://phosphene.video/changelog/).
 
 Phosphene is a free, open-source app for Apple Silicon Macs, built on Apple's MLX by Mr Bizarro.
 Renders run offline, and your prompts, pictures and videos stay on your Mac.
@@ -113,6 +113,7 @@ Contributors are credited in the [release notes](https://github.com/mrbizarro/ph
 
 - Lightricks for LTX-Video 2.x, and @dgrauet for ltx-2-mlx, the MLX port Phosphene builds on.
 - MiniMax for Hailuo H3, and Apple ML research for MLX.
+- LightX2V for lightx2v v1.3, the adapter for Best on High; TaoLive (TaoMate-H3) and @kijai for the 3-step Fast adapter.
 - @filipstrand for mflux; Multimodal Art Projection for YuE2 and @vanch007 for its MLX port.
 - mlx-community for Gemma on MLX, and @cocktailpeanut for Pinokio.
 

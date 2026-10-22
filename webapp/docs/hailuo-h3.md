@@ -98,6 +98,15 @@ Use the **Speed** switch above the quality options.
 
 Fast runs on Draft, Fast HD, Standard and High. Native and 10s single pass always render on Best.
 
+### Best on High: lightx2v v1.3 {#v13}
+
+On **High**, **Best** can use **lightx2v v1.3**, an adapter by LightX2V. In our test on an M4 Max with 64 GB of memory, a 5-second High clip took about 15 minutes, down from 33: 55% less time. In our side-by-side tests, it looks richer and more detailed.
+
+- **Get it:** click **Get it · 1.4 GB** under Speed. Phosphene downloads LightX2V's original file directly from Hugging Face, verifies it and prepares it on your Mac. You'll need about 5 GB free during setup, 2 GB when done. New H3 installs get it automatically.
+- **When it runs:** Best on High, in Text and Image modes, at any length. Draft, Standard, Native and Fast are unchanged.
+- **Use the old Best:** choose a **Steps** count under Best to use the full sampler.
+- **Credit and licence:** lightx2v v1.3 is by [LightX2V](https://huggingface.co/lightx2v/Minimax-h3-Turbo). Code: Apache-2.0. Weights: MiniMax H3 Community License, the same as H3.
+
 ## How long it takes {#times}
 
 Each quality and length option shows an estimated time for your Mac, based on completed videos from similar Macs. The table shows median times from Phosphene's anonymous usage counts: half finished sooner and half took longer. A dash means there are too few completed videos to give a time.

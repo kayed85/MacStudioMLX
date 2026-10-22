@@ -951,12 +951,17 @@ function updateH3Availability(s) {
                // Same for the Draft's fast 3-step adapter.
                || (((next.tristep || {}).available) !== ((H3.tristep || {}).available))
                || (((next.tristep || {}).supported) !== ((H3.tristep || {}).supported))
+               // And for lightx2v v1.3 (Best on High): built from inside the panel.
+               || (((next.v13 || {}).available) !== ((H3.v13 || {}).available))
+               || (((next.v13 || {}).supported) !== ((H3.v13 || {}).supported))
+               || (((next.v13 || {}).download || {}).status !== ((H3.v13 || {}).download || {}).status)
                || ((next.tiers || []).length !== (H3.tiers || []).length);
   // BOTH bindings, and they must stay the same object: the H3-specific code
   // reads `H3` on nearly every line, the registry reads the probe map. A
   // divergence here is a switcher showing "not installed" over a working
   // engine (or worse, the reverse).
-  const _triDl = !!((next.tristep || {}).installing || (H3.tristep || {}).installing);
+  const _triDl = !!((next.tristep || {}).installing || (H3.tristep || {}).installing
+                    || (next.v13 || {}).installing || (H3.v13 || {}).installing);
   H3 = next;
   window._ENGINE_PROBES.h3 = next;
   // A running 3-step download prints its progress on the pill.
@@ -7584,7 +7589,15 @@ async function loadParams(recipe) {
       try { setH3Speed(h3SpeedOfParams(p)); } catch (e) {}
     }
     if (typeof setH3Steps === 'function') {
-      try { setH3Steps(Number(p.h3_steps || 0) > 0 ? String(p.h3_steps) : 'auto'); } catch (e) {}
+      // A Best clip made on the full sampler, where Best would now run
+      // lightx2v v1.3 (High, Text/Image): pin the count it ran, so Load
+      // Params reproduces the same sampler instead of quietly switching it.
+      const _fullBestOnV13Cell = !p.h3_v13 && h3SpeedOfParams(p) === 'best'
+        && p.h3_quality === 'high' && (p.mode === 't2v' || p.mode === 'i2v')
+        && Number(p.steps || 0) > 0 && typeof h3V13State === 'function' && h3V13State().available;
+      const _pin = Number(p.h3_steps || 0) > 0 ? String(p.h3_steps)
+        : (_fullBestOnV13Cell ? String(p.steps) : 'auto');
+      try { setH3Steps(_pin); } catch (e) {}
     }
     // The render shape. Prefer the two axes when the sidecar carries them; fall
     // back to the composite key, which every sidecar has always carried and

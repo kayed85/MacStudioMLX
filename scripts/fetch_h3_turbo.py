@@ -9,8 +9,11 @@ LightX2V Hugging Face repo, pinned to a commit and its SHA-256, and re-lays it
 out locally into the layout the H3 runner's `--lora` loader reads:
 
   * the split diffusers q/k/v adapters become ONE block-diagonal adapter whose
-    output rows stay contiguous [q_all; k_all; v_all] (the loader interleaves
-    them into the checkpoint's own order exactly once);
+    output rows stay contiguous [q_all; k_all; v_all]. The checkpoint stores
+    them per head, and the runner stopped interleaving them by default on
+    2026-08-15, so the panel hands the runner a per-head copy
+    (`h3_bake_runner_layout` in mlx_ltx_panel.py); this file stays as built,
+    so its digest still matches ASSET_SHA256;
   * diffusers' `ff.net.0.proj` rows are [value; gate]; the runner's fc1 wants
     [gate; value], so the two halves of B swap;
   * PEFT's alpha/rank scale is folded into B. For this file alpha == rank

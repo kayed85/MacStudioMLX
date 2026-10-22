@@ -1478,8 +1478,13 @@ function sbShotGridTile(s) {
   const gradeDot = s.grade
     ? `<span class="sb-grid-grade sb-grid-grade-${escapeHtml(s.grade)}">${{ keep: 'K', reroll: 'R', cut: 'C' }[s.grade] || ''}</span>`
     : '';
+  // `#t=0.1` on every thumbnail <video preload="metadata">: WebKit (Safari and
+  // the Mac app's WKWebView) stops at the metadata and paints NOTHING until a
+  // frame is asked for; Chrome happens to decode the first one anyway. The
+  // Editor's media pool learned this first (edPoolPaint); these three tiles
+  // were the ones still blank in the app.
   const thumb = clip
-    ? `<video class="sb-grid-thumb" preload="metadata" muted playsinline src="/file?path=${encodeURIComponent(clip)}"></video>`
+    ? `<video class="sb-grid-thumb" preload="metadata" muted playsinline src="/file?path=${encodeURIComponent(clip)}#t=0.1"></video>`
     : `<div class="sb-grid-thumb sb-grid-thumb-empty" aria-hidden="true"></div>`;
   return `<li class="sb-grid-tile" data-n="${n}" onclick="sbGridTileOpen(${n})" role="button" tabindex="0"
       title="${escapeHtml((s.title || s.prompt || '').slice(0, 140))}">
@@ -1635,7 +1640,7 @@ function sbShotCard(s, r, errs) {
     <div class="sb-shot-out car-card is-stale">
       <div class="car-thumb-wrap" onclick="selectOutput('${escapeHtml(stale)}')">
         <video class="car-thumb" preload="metadata" muted playsinline
-               src="/file?path=${encodeURIComponent(stale)}"></video>
+               src="/file?path=${encodeURIComponent(stale)}#t=0.1"></video>
       </div>
       <div class="info"><span class="name">${escapeHtml(stale.split('/').pop())}</span>
         <span class="sub"><span class="sb-stale-tag">old take</span> · rewritten, not rendered yet</span></div>
@@ -1643,7 +1648,7 @@ function sbShotCard(s, r, errs) {
     <div class="sb-shot-out car-card">
       <div class="car-thumb-wrap" onclick="sbOpenShotClip(${n})">
         <video class="car-thumb" preload="metadata" muted playsinline
-               src="/file?path=${encodeURIComponent(clip)}"
+               src="/file?path=${encodeURIComponent(clip)}#t=0.1"
                onmouseenter="this.currentTime=0;this.playbackRate=0.6;this.play().catch(()=>{})"
                onmouseleave="this.pause();this.currentTime=2.5"></video>
       </div>
@@ -2553,7 +2558,7 @@ function sbBoardRowMenu(b, where) {
 // The FULL board-list screen's row: thumbnail, date, rename, duplicate.
 function sbBoardRow(b) {
   const thumb = b.thumb
-    ? `<video class="sb-board-thumb" preload="metadata" muted playsinline src="/file?path=${encodeURIComponent(b.thumb)}"></video>`
+    ? `<video class="sb-board-thumb" preload="metadata" muted playsinline src="/file?path=${encodeURIComponent(b.thumb)}#t=0.1"></video>`
     : `<span class="sb-board-thumb sb-board-thumb-empty" aria-hidden="true"></span>`;
   const when = sbFmtAgo(b.updated_at || b.created_at);
   return `

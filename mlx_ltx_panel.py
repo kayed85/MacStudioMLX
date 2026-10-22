@@ -3818,6 +3818,12 @@ def _h3_turbo_download_bg(target_dir, push_log, asset: dict | None = None) -> No
                                "please retry")
         tmp.replace(target)
         push_log(f"[h3:turbo] adapter installed → {target}")
+        try:
+            # Same as Fast's: the runner's per-head copy, retried by the
+            # first Turbo render if this fails.
+            h3_bake_runner_layout(target, push_log)
+        except Exception as e:  # noqa: BLE001
+            push_log(f"[h3:turbo] qkv re-order deferred to the first render: {e}")
         _h3_turbo_fetch_embedder(target_dir, push_log, force=True)
         _set_h3_turbo_dl(status="done", mb=total_mb, total_mb=total_mb,
                          error=None)
@@ -9223,6 +9229,59 @@ H3_TRISTEP_MEASURED_ETA: dict[tuple[str, str, str], tuple[float, str]] = {
     ("high", "5s", "i2v"): (9.0, "~9 min"),
     ("high", "5s", "t2v"): (8.4, "~8 min"),
 }
+
+# ---- lightx2v v1.3: Best at High on LightX2V's few-step adapter ---------------
+# LightX2V's v1.3 768p distillation of H3 (lightx2v/Minimax-h3-Turbo, released
+# 2026-10-20) at 7 sigma points = 6 forwards, video shift 6 (the shift its
+# author trained the 768p adapters on). Measured on the M4 Max 64 GB at High
+# 1024x576, 124 frames, same seed: today's Best 15 forwards 1950 s end to end,
+# v1.3 6 forwards 870 s (-55%); the owner's read of the side-by-side: the fast
+# clip looks better, richer, higher quality. More prompts (two-person
+# dialogue, fast body motion, typography) in the PM hub's speed/ folder.
+#
+# Where it runs: Best on the High canvas, Text and Image, every 5 s-window
+# length. A Steps pin keeps the full sampler (that is the opt-out), Fast and
+# Turbo never stack with it, Native / dense / the media modes keep their own
+# samplers. Free for everyone.
+#
+# THE FILE. Phosphene does not host it (an H3 Model Derivative, MiniMax H3
+# Community License; LightX2V's code is Apache-2.0). scripts/fetch_h3_v13.py
+# fetches the original from LightX2V's repo at a pinned commit + digest and
+# re-lays it out on this Mac, with the qkv rows already in the DiT's per-head
+# order (so no runner flag, and a user LoRA stacked on top is untouched) and
+# alpha/rank (8/128) folded into B exactly. The pins below MUST match that
+# script; test_h3_v13.py holds them together.
+H3_V13_REPO = "lightx2v/Minimax-h3-Turbo"
+H3_V13_SOURCE_REVISION = "30f485ed874aa44c8183348ad361c5eabad318da"
+H3_V13_SOURCE_FILE = "minimax_h3_fl2v_turbo_4step_v1.3_768p_bf16.safetensors"
+H3_V13_SOURCE_URL = ("https://huggingface.co/" + H3_V13_REPO + "/resolve/"
+                     + H3_V13_SOURCE_REVISION + "/" + H3_V13_SOURCE_FILE)
+H3_V13_SOURCE_SHA256 = "97b775707bb5732e01dba0cf3833d3fe2947c953859d4d05ea3bd74894c43d2b"
+H3_V13_SOURCE_BYTES = 1383677808
+H3_V13_FILE = "lightx2v_v1.3_768p_phosphene.safetensors"
+H3_V13_SHA256 = "45ee324a31beacef7a2fbef019b99e16b35d80586dc4e0d60fecf6ca679751d8"
+H3_V13_BYTES = 1956165376
+H3_V13_STEPS = 7                     # sigma POINTS -> 6 forwards
+H3_V13_FORWARDS = H3_V13_STEPS - 1
+H3_V13_VIDEO_SHIFT = "6"             # the runner's --video-shift (default 12)
+# A forward with the runtime adapter costs ~3% more (126.5 vs 122.6 s/forward).
+H3_V13_FORWARD_COST = 1.03
+H3_V13_QUALITIES = ("high",)
+H3_V13_MODES = ("t2v", "i2v")
+H3_V13_DOWNLOAD_GB = 1.4
+# Free disk the build needs: the 1.4 GB source plus the 2.0 GB result, while
+# both exist, plus a margin so a render's swap never meets a full disk.
+H3_V13_DISK_NEED_GB = 5.0
+H3_V13_LICENSE = "MiniMax H3 Community License"
+H3_V13_CODE_LICENSE = "Apache-2.0"
+H3_V13_NAME = "lightx2v v1.3"
+H3_V13_LABEL = "High: faster Best (lightx2v v1.3)"
+H3_V13_CREDIT = ("lightx2v v1.3 by LightX2V (ModelTC). Code: Apache-2.0; "
+                 "weights: MiniMax H3 Community License.")
+# End-to-end wall clocks, M4 Max 64 GB, keyed (quality, length, mode).
+H3_V13_MEASURED_ETA: dict[tuple[str, str, str], tuple[float, str]] = {
+    ("high", "5s", "t2v"): (14.5, "~15 min"),
+}
 # Upscale & Face Fix (1 refine step from the clip, ×2) after a 5 s render, by
 # source canvas. 640×384 → 1280×768 measured 2.5–2.8 min; 1024×576 measured
 # 8.2–9.9 min (panel history, 2026-09-16/17); 768×448 is interpolated between
@@ -9846,8 +9905,12 @@ def _job_fleet_baseline_min(job: dict) -> tuple[str, float] | None:
         if not cell or not cell.get("frames"):
             return None
         fast = bool(p.get("h3_tristep") or p.get("h3_turbo"))
+        # 4.19.11 review: a lightx2v v1.3 render is measured against the v1.3
+        # lane's own fleet median (none yet = no fleet sample), never against
+        # the full sampler's, or its ~2.3x speed would read as a fast Mac.
         hit = fleet_estimate_range("h3", "t2v", key, cell["frames"],
-                                   speed="fast" if fast else "best")
+                                   speed="fast" if fast else
+                                   "v13" if p.get("h3_v13") else "best")
     else:
         if str(p.get("schedule_preset") or "").strip().lower() == "fast":
             return None
@@ -11090,6 +11153,21 @@ def _build_h3_tiers() -> dict[str, dict]:
                     # recipe, so the cell's own price is Fast + the fix.
                     eta_min = tristep["tristep_min"] + tristep.get("facefix_min", 0.0)
                     eta, eta_measured = _fmt_eta(eta_min), False
+            # lightx2v v1.3 prices only the cells where Best runs it
+            # (h3_cell_takes_v13): 6 forwards at ~3% more per forward.
+            v13 = {}
+            if (q["key"] in H3_V13_QUALITIES and not ln["dense"]
+                    and not q.get("fast_hd")):
+                v_min = min(eta_min, h3_estimate_minutes(
+                    w, h, window_frames, windows, H3_V13_FORWARDS) * H3_V13_FORWARD_COST)
+                v_eta, v_meas = _fmt_eta(v_min), False
+                hit = H3_V13_MEASURED_ETA.get((q["key"], ln["key"], "t2v"))
+                if hit:
+                    v_min, v_meas = hit[0] * hw, True
+                    v_eta = hit[1] if hw == 1.0 else _fmt_eta(v_min)
+                v13 = {"v13_min": round(v_min, 2), "v13_eta": v_eta,
+                       "v13_measured": v_meas, "v13_steps": H3_V13_STEPS,
+                       "v13_forwards": windows * H3_V13_FORWARDS}
             spec = f"{w}×{h} · {frames}f"
             if windows > 1:
                 spec += f" · {windows}×5s"
@@ -11142,6 +11220,7 @@ def _build_h3_tiers() -> dict[str, dict]:
                 "dense": bool(ln["dense"]),
                 "offered": bool(q["offered"] and ln["offered"]),
                 **tristep,
+                **v13,
             }
             # Owner ruling (2026-09-29): real fleet ranges where there are
             # enough of them, one per speed this cell actually offers (H3's
@@ -11150,6 +11229,10 @@ def _build_h3_tiers() -> dict[str, dict]:
             fleet_best = fleet_calibrated_range("h3", "t2v", key, frames, speed="best")
             if fleet_best:
                 tiers[key]["fleet_range"] = fleet_best
+            if tiers[key].get("v13_min") is not None:
+                fleet_v13 = fleet_calibrated_range("h3", "t2v", key, frames, speed="v13")
+                if fleet_v13:
+                    tiers[key]["fleet_range_v13"] = fleet_v13
             if tiers[key].get("tristep_min") is not None:
                 fleet_fast = fleet_calibrated_range("h3", "t2v", key, frames, speed="fast")
                 if fleet_fast:
@@ -12520,6 +12603,10 @@ def job_recipe_minutes(params: dict, *, calibration: bool = False) -> tuple[str,
                        else cell.get("tristep_min"))
         elif p.get("h3_turbo"):
             minutes = cell.get("turbo_min")
+        elif p.get("h3_v13") and cell.get("v13_min") is not None:
+            # lightx2v v1.3 on Best at High: its own measured number, so a
+            # 15-minute recipe never calibrates against the 33-minute one.
+            minutes = cell.get("v13_min")
         elif pinned:
             if calibration:
                 return None        # a workload no cell prices (Codex H3-4)
@@ -14118,6 +14205,169 @@ def h3_turbo_argv(paths: dict | None = None) -> list[str]:
     return argv
 
 
+# ---- Speed adapters: fused qkv rows in THIS checkpoint's order -------------
+# H3's DiT stores `attn.qkv_proj` rows PER HEAD, (heads, 3, head_dim): a
+# one-way ANOVA on the Q8 DiT's row norms separates the q/k/v groups at
+# F 1362 (blocks.0) / 5006 (blocks.49) read that way, against 83 / 43 read
+# contiguously. Every speed adapter we resolve was trained or converted
+# through the ComfyUI/diffusers definition, whose rows are CONTIGUOUS,
+# (3, heads, head_dim): the same test on their B·A deltas reads contiguous at
+# blocks.49 for Kijai's TaoMate r19 (1897 vs 11), the official TaoMate r128
+# (1931 vs 10), larryvrh's v4-600 EMA (1038 vs 0) and LightX2V's v1.x
+# conversions (fetch_h3_turbo.py says so in its own docstring). The runner
+# re-orders those rows only under `--lora-qkv-permute`, OFF by default since
+# 2026-08-15 — so Fast and Turbo were writing the q update onto the first
+# 18.7 heads' q/k/v triplets, k onto the next, v onto the rest. That flag is
+# global to the run and would also hit a user LoRA stacked on top (one
+# lora-lab trains natively is already per-head), so the panel re-orders the
+# speed adapter's rows ITSELF, once, into a sibling file the runner reads
+# verbatim: `<adapter dir>/runner-layout/<same name>`. Pure byte moves of
+# whole rows — dtype-agnostic, no float maths, no new dependency — and the
+# source file (digest-pinned) is never touched.
+H3_RUNNER_LAYOUT_DIRNAME = "runner-layout"
+H3_QKV_HEADS = 56
+H3_QKV_HEAD_DIM = 128
+H3_QKV_LORA_B_SUFFIX = ".attn.qkv_proj.lora_B.weight"
+H3_RUNNER_LAYOUT_KEY = "phosphene_qkv_rows"
+H3_RUNNER_LAYOUT_VALUE = "per-head (heads, 3, head_dim), re-ordered from (3, heads, head_dim)"
+
+
+def _st_header(path: Path) -> tuple[int, dict]:
+    """A safetensors file's (header length, header) — the JSON only."""
+    with open(path, "rb") as fh:
+        size = int.from_bytes(fh.read(8), "little")
+        if not 0 < size <= 100 * 1024 * 1024:
+            raise ValueError(f"{path.name}: not a safetensors file")
+        header = json.loads(fh.read(size))
+    if not isinstance(header, dict):
+        raise ValueError(f"{path.name}: not a safetensors file")
+    return size, header
+
+
+def h3_runner_layout_file(src: Path | str) -> Path:
+    src = Path(src)
+    return src.parent / H3_RUNNER_LAYOUT_DIRNAME / src.name
+
+
+def _h3_runner_layout_current(src: Path, dst: Path) -> bool:
+    """The re-ordered copy exists and was made from THIS source file."""
+    try:
+        meta = _st_header(dst)[1].get("__metadata__") or {}
+        st = src.stat()
+    except (OSError, ValueError, UnicodeDecodeError):
+        return False
+    return (meta.get(H3_RUNNER_LAYOUT_KEY) == H3_RUNNER_LAYOUT_VALUE
+            and meta.get("phosphene_source_bytes") == str(st.st_size)
+            and meta.get("phosphene_source_mtime_ns") == str(st.st_mtime_ns))
+
+
+def _h3_qkv_rows_per_head(blob: bytes, rows: int) -> bytes:
+    """`lora_B` rows (3, heads, head_dim) -> (heads, 3, head_dim), as bytes.
+    Row-major storage keeps each row's bytes contiguous, so this moves 168
+    blocks of 128 rows and never reads a value."""
+    heads, head_dim = H3_QKV_HEADS, H3_QKV_HEAD_DIM
+    if rows != 3 * heads * head_dim or len(blob) % rows:
+        raise ValueError(f"qkv lora_B has {rows} rows, expected {3 * heads * head_dim}")
+    block = (len(blob) // rows) * head_dim
+    return b"".join(blob[(j * heads + h) * block:(j * heads + h + 1) * block]
+                    for h in range(heads) for j in range(3))
+
+
+_h3_bake_locks: dict[str, threading.Lock] = {}
+_h3_bake_locks_guard = threading.Lock()
+
+
+def h3_bake_runner_layout(src: Path | str, push=None) -> Path:
+    """Write (once) and return the per-head copy of a speed adapter.
+
+    Re-made whenever the source's size or mtime changes; written to a
+    `.partial` and renamed, so a killed bake never leaves a file the runner
+    would read. Raises with a plain reason (disk, unreadable file).
+
+    One bake per destination at a time (4.19.11 review): the Fast/Turbo
+    download thread and the first render can both reach a newly downloaded
+    adapter; without the lock both wrote the same `.partial` and the loser's
+    rename raised FileNotFoundError, failing that render. The second caller
+    now waits and finds the copy current."""
+    src = Path(src)
+    dst = h3_runner_layout_file(src)
+    if _h3_runner_layout_current(src, dst):
+        return dst
+    with _h3_bake_locks_guard:
+        lock = _h3_bake_locks.setdefault(str(dst), threading.Lock())
+    with lock:
+        if _h3_runner_layout_current(src, dst):
+            return dst
+        return _h3_bake_runner_layout_locked(src, dst, push)
+
+
+def _h3_bake_runner_layout_locked(src: Path, dst: Path, push=None) -> Path:
+    """h3_bake_runner_layout's body; the caller holds dst's lock."""
+    hlen, header = _st_header(src)
+    st = src.stat()
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    free = shutil.disk_usage(dst.parent).free
+    if free < st.st_size + 512 * 1024 * 1024:
+        raise RuntimeError(
+            f"not enough free disk to prepare {src.name} for H3 "
+            f"({st.st_size / 1e9:.1f} GB needed, {free / 1e9:.1f} GB free) — "
+            "free some space and render again")
+    meta = dict(header.get("__metadata__") or {})
+    meta.update({H3_RUNNER_LAYOUT_KEY: H3_RUNNER_LAYOUT_VALUE,
+                 "phosphene_source": src.name,
+                 "phosphene_source_bytes": str(st.st_size),
+                 "phosphene_source_mtime_ns": str(st.st_mtime_ns)})
+    out_header = {**header, "__metadata__": meta}
+    raw = json.dumps(out_header, separators=(",", ":")).encode("utf-8")
+    raw += b" " * (-len(raw) % 8)          # the format's 8-byte alignment pad
+    tensors = sorted(((k, v) for k, v in header.items() if k != "__metadata__"),
+                     key=lambda kv: kv[1]["data_offsets"][0])
+    moved = 0
+    tmp = dst.with_name(f"{dst.name}.{os.getpid()}.partial")
+    try:
+        with open(src, "rb") as fin, open(tmp, "wb") as fout:
+            fout.write(len(raw).to_bytes(8, "little"))
+            fout.write(raw)
+            pos = 0
+            for name, info in tensors:
+                start, end = info["data_offsets"]
+                if start != pos:
+                    raise ValueError(f"{src.name}: tensor data is not contiguous at {name}")
+                fin.seek(8 + hlen + start)
+                blob = fin.read(end - start)
+                if len(blob) != end - start:
+                    raise ValueError(f"{src.name}: truncated at {name}")
+                if name.endswith(H3_QKV_LORA_B_SUFFIX):
+                    blob = _h3_qkv_rows_per_head(blob, int(info["shape"][0]))
+                    moved += 1
+                fout.write(blob)
+                pos = end
+        if not moved:
+            raise ValueError(f"{src.name}: no attn.qkv_proj lora_B tensors found")
+        tmp.replace(dst)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    if push:
+        push(f"[h3] {src.name}: {moved} qkv row-blocks re-ordered to the "
+             f"checkpoint's per-head layout → {dst}")
+    return dst
+
+
+def h3_speed_adapter_for_runner(resolved: dict, push=None) -> dict:
+    """The resolved Fast/Turbo paths with `lora` pointing at the file the
+    runner should read; the downloaded file moves to `lora_source`.
+
+    A runner without `--lora-qkv-permute` predates 2026-08-15 and re-orders
+    the rows of every `--lora` itself, so it gets the source file as-is —
+    re-ordering twice would put the rows back in the wrong order."""
+    src = resolved.get("lora")
+    if src is None or not _h3_runner_has_flag("--lora-qkv-permute"):
+        return {**resolved, "lora_source": src, "qkv_rows": "runner"}
+    return {**resolved, "lora": h3_bake_runner_layout(src, push),
+            "lora_source": src, "qkv_rows": "per-head"}
+
+
 def h3_turbo_status() -> dict:
     """Turbo's own availability block for /status + the page bootstrap.
 
@@ -14350,6 +14600,12 @@ def _h3_tristep_download_bg(target_dir, push_log, asset: dict | None = None,
             raise RuntimeError("checksum mismatch (download corrupt) — please retry")
         tmp.replace(target)
         push_log(f"[h3:tristep] adapter installed → {target}")
+        try:
+            # The runner's per-head copy now, so the first Fast render does
+            # not pay for it; a failure here is retried by that render.
+            h3_bake_runner_layout(target, push_log)
+        except Exception as e:  # noqa: BLE001
+            push_log(f"[h3:tristep] qkv re-order deferred to the first render: {e}")
         _set_h3_tristep_dl(status="done", mb=total_mb, total_mb=total_mb,
                            error=None)
     except Exception as e:  # noqa: BLE001
@@ -14395,6 +14651,208 @@ def _h3_install_tristep(push_log, download_fn=None) -> dict:
     return {"ok": True, "started": True, "dir": str(target),
             "asset": H3_TRISTEP_URL, "sha256": H3_TRISTEP_SHA256,
             "bytes": H3_TRISTEP_BYTES, "license": H3_TRISTEP_LICENSE}
+
+
+# ---- lightx2v v1.3 (Best at High) — resolver, argv, status, fetch ------------
+def h3_supports_video_shift() -> bool:
+    """Whether the INSTALLED runner takes `--video-shift` (v1.3's own shift 6;
+    the runner's default is 12)."""
+    return h3_supports_lora_stack() and _h3_runner_has_flag("--video-shift")
+
+
+def h3_supports_v13() -> bool:
+    """v1.3 rides as one more `--lora` beside the user's: the stacking runner
+    is all it needs. A runner without `--video-shift` renders it at the
+    default shift 12 - side by side with shift 6 on the two-person dialogue
+    test the faces, mouths and timing matched (2026-10-22), so an install
+    gets v1.3 from the panel Update alone and shift 6 once its runner moves.
+
+    The built file's qkv rows are already per head, so the runner must NOT
+    re-order them: a runner without `--lora-qkv-permute` predates 2026-08-15
+    and re-orders every `--lora` itself (see h3_bake_runner_layout)."""
+    return h3_supports_lora_stack() and _h3_runner_has_flag("--lora-qkv-permute")
+
+
+def h3_cell_takes_v13(cell: dict) -> bool:
+    """Best on the High canvas at a 5 s-window length (single or chained).
+    Fast HD is the Fast pass by definition; the dense single pass and the
+    other canvases were never rendered on v1.3."""
+    return (cell.get("quality") in H3_V13_QUALITIES
+            and not bool(cell.get("dense")) and not bool(cell.get("fast_hd")))
+
+
+def h3_v13_paths() -> dict:
+    """The v1.3 adapter, if it is on disk at its exact size. No glob: the
+    upstream source file (whose alpha/rank is NOT folded) must never be read
+    as the adapter."""
+    directory = _h3_turbo_dir()
+    candidate = directory / H3_V13_FILE
+    try:
+        ok = candidate.is_file() and candidate.stat().st_size == H3_V13_BYTES
+    except OSError:
+        ok = False
+    if ok:
+        return {"dir": directory, "lora": candidate, "files_ok": True, "missing": []}
+    return {"dir": directory, "lora": None, "files_ok": False,
+            "missing": [f"adapter ({H3_V13_FILE}, built from a "
+                        f"~{H3_V13_DOWNLOAD_GB} GB download)"]}
+
+
+def h3_v13_argv(paths: dict | None = None, shift: bool | None = None) -> list[str]:
+    """The runner argv fragment: shift 6 where the runner takes it, and the
+    adapter at 1.0 (its alpha is folded in). `--steps` is stamped by the
+    caller (H3_V13_STEPS)."""
+    resolved = paths or h3_v13_paths()
+    if not resolved.get("files_ok") or resolved.get("lora") is None:
+        raise RuntimeError("the lightx2v v1.3 adapter is not available")
+    if shift is None:
+        shift = h3_supports_video_shift()
+    return ((["--video-shift", H3_V13_VIDEO_SHIFT] if shift else [])
+            + ["--lora", f"{resolved['lora']}:1.0"])
+
+
+_h3_v13_dl_lock = threading.Lock()
+_h3_v13_dl_state: dict = {"status": "idle", "mb": 0, "total_mb": 0, "error": None}
+
+
+def _set_h3_v13_dl(**kw) -> None:
+    with _h3_v13_dl_lock:
+        _h3_v13_dl_state.clear()
+        _h3_v13_dl_state.update(kw)
+
+
+def h3_v13_status() -> dict:
+    """/status + BOOT block for v1.3: can the runner take it, is the file here."""
+    supported = h3_supports_v13()
+    paths = h3_v13_paths()
+    downloaded = bool(paths["files_ok"])
+    return {
+        "available": bool(supported and downloaded),
+        "supported": supported,
+        "downloaded": downloaded,
+        "reason": ("runner_too_old" if not supported
+                   else "not_downloaded" if not downloaded else "ok"),
+        "steps": H3_V13_STEPS,
+        "forwards": H3_V13_FORWARDS,
+        "video_shift": float(H3_V13_VIDEO_SHIFT) if h3_supports_video_shift() else 12.0,
+        "qualities": list(H3_V13_QUALITIES),
+        "modes": list(H3_V13_MODES),
+        "download_gb": H3_V13_DOWNLOAD_GB,
+        "disk_need_gb": H3_V13_DISK_NEED_GB,
+        "repo": H3_V13_REPO,
+        "license": H3_V13_LICENSE,
+        "code_license": H3_V13_CODE_LICENSE,
+        "name": H3_V13_NAME,
+        "label": H3_V13_LABEL,
+        "credit": H3_V13_CREDIT,
+        "adapter": str(paths["lora"]) if paths["lora"] else None,
+        "install_available": bool(supported),
+        "installing": _h3_v13_dl_state.get("status") in ("downloading", "building"),
+        "download": dict(_h3_v13_dl_state),
+        "dir": str(paths["dir"]),
+        "missing": paths["missing"],
+    }
+
+
+def _h3_v13_fetch_bg(target_dir, push_log, runner=None) -> None:
+    """Run scripts/fetch_h3_v13.py (download from LightX2V's repo, verify,
+    re-lay out, verify, rename). The script owns every digest and the
+    resume; this only relays its progress. Standard library only, so the
+    panel's own interpreter runs it."""
+    total_mb = H3_V13_SOURCE_BYTES // (1 << 20)
+    cmd = [sys.executable, str(ROOT / "scripts" / "fetch_h3_v13.py"),
+           "--dir", str(target_dir)]
+    try:
+        push_log(f"[h3:v13] fetching {H3_V13_SOURCE_FILE} from {H3_V13_REPO} @ "
+                 f"{H3_V13_SOURCE_REVISION[:7]} (~{total_mb} MB, {H3_V13_LICENSE})")
+        proc = (runner or subprocess.Popen)(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            errors="replace", env=_h3_v13_fetch_env())
+        tail: list[str] = []
+        for line in proc.stdout:
+            line = line.rstrip()
+            if line.startswith("PROGRESS "):
+                try:
+                    done = int(line.split()[1])
+                except (IndexError, ValueError):
+                    continue
+                _set_h3_v13_dl(status="downloading", mb=done // (1 << 20),
+                               total_mb=total_mb, error=None)
+                continue
+            if line.startswith("building "):
+                _set_h3_v13_dl(status="building", mb=total_mb, total_mb=total_mb,
+                               error=None)
+            if line:
+                tail = (tail + [line])[-4:]
+                push_log(f"[h3:v13] {line}")
+        rc = proc.wait()
+        if rc != 0 or not h3_v13_paths()["files_ok"]:
+            raise RuntimeError(" / ".join(tail[-2:]) or f"exit {rc}")
+        push_log(f"[h3:v13] adapter installed -> {Path(target_dir) / H3_V13_FILE}")
+        _set_h3_v13_dl(status="done", mb=total_mb, total_mb=total_mb, error=None)
+    except Exception as e:  # noqa: BLE001
+        _set_h3_v13_dl(status="error", mb=0, total_mb=total_mb, error=str(e)[:200])
+        push_log(f"[h3:v13] FAILED: {e}")
+
+
+def _h3_v13_fetch_env() -> dict:
+    """The fetch is plain urllib: give it the certificate bundle Pinokio
+    strips (SSL_*), and nothing that changes Python's own behaviour."""
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP")}
+    env["PYTHONUNBUFFERED"] = "1"
+    try:
+        import certifi  # noqa: PLC0415
+        env.setdefault("SSL_CERT_FILE", certifi.where())
+    except Exception:  # noqa: BLE001
+        pass
+    return env
+
+
+def _h3_install_v13(push_log, fetch_fn=None) -> dict:
+    """On-demand fetch + local build of the v1.3 adapter (one at a time)."""
+    paths = h3_paths()
+    if paths["missing"]:
+        return {"ok": False,
+                "error": "lightx2v v1.3 is an add-on to the Hailuo H3 pack, and "
+                         "H3 isn't fully installed yet: " + "; ".join(paths["missing"])}
+    if not h3_supports_v13():
+        return {"ok": False,
+                "error": _dist.say(
+                    "This Hailuo H3 runner predates lightx2v v1.3 (it takes one "
+                    "adapter only). Run 'Update Hailuo H3 runner' from the "
+                    "Phosphene sidebar in Pinokio - your weights stay.",
+                    "This Hailuo H3 runner predates lightx2v v1.3. Updating "
+                    "the runner isn't available in the Mac app yet.")}
+    resolved = h3_v13_paths()
+    target = resolved["dir"]
+    if resolved["files_ok"]:
+        return {"ok": True, "started": False, "already_installed": True,
+                "dir": str(target)}
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        free_gb = shutil.disk_usage(target).free / 1e9
+    except OSError:
+        free_gb = None
+    if free_gb is not None and free_gb < H3_V13_DISK_NEED_GB:
+        return {"ok": False,
+                "error": f"lightx2v v1.3 needs about {H3_V13_DISK_NEED_GB:g} GB free "
+                         f"to prepare (1.4 GB download, 2 GB when ready). This "
+                         f"disk has {free_gb:.1f} GB free."}
+    with _h3_v13_dl_lock:
+        if _h3_v13_dl_state.get("status") in ("downloading", "building"):
+            return {"ok": False,
+                    "error": "a lightx2v v1.3 download is already active"}
+        _h3_v13_dl_state.clear()
+        _h3_v13_dl_state.update(status="downloading", mb=0,
+                                total_mb=H3_V13_SOURCE_BYTES // (1 << 20), error=None)
+    fn = fetch_fn or _h3_v13_fetch_bg
+    threading.Thread(target=fn, args=(target, push_log), daemon=True,
+                     name="h3-v13-fetch").start()
+    return {"ok": True, "started": True, "dir": str(target),
+            "source": H3_V13_SOURCE_URL, "sha256": H3_V13_SOURCE_SHA256,
+            "bytes": H3_V13_SOURCE_BYTES, "license": H3_V13_LICENSE,
+            "credit": H3_V13_CREDIT}
 
 
 # ============================================================================
@@ -16271,6 +16729,17 @@ def h3_status() -> dict:
                      "installing": False, "download": {}, "dir": str(_h3_turbo_dir()),
                      "missing": [], "note": H3_TRISTEP_NOTE,
                      "label": H3_TRISTEP_LABEL}),
+        # lightx2v v1.3 — Best at High. Same three-cause shape as Fast.
+        "v13": (h3_v13_status() if available else
+                {"available": False, "supported": False, "downloaded": False,
+                 "reason": "h3_" + paths["reason"], "steps": H3_V13_STEPS,
+                 "forwards": H3_V13_FORWARDS, "qualities": list(H3_V13_QUALITIES),
+                 "modes": list(H3_V13_MODES), "download_gb": H3_V13_DOWNLOAD_GB,
+                 "disk_need_gb": H3_V13_DISK_NEED_GB, "repo": H3_V13_REPO,
+                 "license": H3_V13_LICENSE, "code_license": H3_V13_CODE_LICENSE,
+                 "name": H3_V13_NAME, "label": H3_V13_LABEL, "credit": H3_V13_CREDIT,
+                 "adapter": None, "install_available": False, "installing": False,
+                 "download": {}, "dir": str(_h3_turbo_dir()), "missing": []}),
         # User LoRAs — the CivitAI lane. A separate block from `turbo` for the
         # same reason turbo is separate from `first_frame`: "you can't pick a
         # LoRA" has three unrelated causes (H3 absent / runner predates --lora
@@ -19291,6 +19760,13 @@ def _analytics_render_event(job: dict) -> None:
             "source": _analytics_source(p, job),
             "audio_mode": _analytics_audio_mode(p, engine, mode),
         }
+        # 4.19.11: which H3 sampler ran, so the fleet's timing lanes never
+        # infer it from `steps` (7 points is lightx2v v1.3, Turbo AND a Best
+        # pinned to 7). Closed vocabulary; H3 renders only.
+        if engine == "h3":
+            props["h3_sampler"] = ("fast" if p.get("h3_tristep") else
+                                   "turbo" if p.get("h3_turbo") else
+                                   "v13" if p.get("h3_v13") else "best")
         # 4.17.5: did this render run in short GPU steps (the Metal watchdog
         # path), and did a watchdog kill get re-run inside the same job?
         if job.get("gpu_steps") == "short":
@@ -24792,6 +25268,13 @@ def _sb_h3_cost(quality_key: str, length_key: str):
         except Exception:
             turbo = False
         minutes = cell.get("turbo_min") if turbo else cell.get("eta_min")
+        # Best on High renders lightx2v v1.3 once it is built (make_job).
+        if not turbo and cell.get("v13_min"):
+            try:
+                if h3_v13_status().get("available"):
+                    minutes = cell["v13_min"]
+            except Exception:
+                pass
         # A Draft/Standard/High cell renders Fast when it is installed
         # (make_job's default), whatever Turbo says.
         if cell.get("tristep_min") and cell.get("tristep_default"):  # Fast by default
@@ -32443,6 +32926,11 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                         else False if _h3_tristep_raw in ("0", "false", "off", "no")
                         else None)
     _h3_tristep = False
+    # lightx2v v1.3 on Best at High: on by default wherever it can run (the
+    # resolution is below, after Fast); "0" from the API keeps the full
+    # sampler, as a Steps pin does.
+    _h3_v13_off = (f("h3_v13", "") or "").strip().lower() in ("0", "false", "off", "no")
+    _h3_v13 = False
     # Which of the runner's ONE adapter slots this render spends. H3's
     # `--lora` is a single path (`default=None`, not `action="append"` — see
     # scripts/generate_staged.py), so a user LoRA and Turbo are mutually
@@ -32558,6 +33046,15 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             _h3_turbo = False
             _h3_steps = 0
             _h3_upscale = "ltx_x2"
+        # lightx2v v1.3: what Best renders on High (Text and Image) once its
+        # adapter is built. Never with Fast or Turbo, never under a Steps pin
+        # (the pin IS the way to ask for the full sampler), never where it
+        # was not validated (other canvases, the dense pass, media modes).
+        if (not _h3_v13_off and not _h3_tristep and not _h3_turbo and not _h3_steps
+                and mode_in in H3_V13_MODES and h3_available()
+                and h3_cell_takes_v13(H3_TIERS[_h3_tier])
+                and h3_v13_status()["available"]):
+            _h3_v13 = True
         # Per-window prompts, matched to the cell that will ACTUALLY render.
         # Normalising after the fallback above is the whole point: a 15 s
         # request that degraded to 5 s has one window, and three prompts on a
@@ -32693,6 +33190,9 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             # resolved above. SAME allowlist trap: leave it out and the switch
             # silently renders Best.
             "h3_tristep": _h3_tristep,
+            # lightx2v v1.3 on Best at High, resolved above. SAME allowlist
+            # trap: leave it out and Best silently renders the full sampler.
+            "h3_v13": _h3_v13,
             # Which of H3's ONE adapter slots this render spends: "turbo"
             # (default) or "user". SAME allowlist trap as every key in this
             # dict — leave `h3_lora_slot` out and the Turbo-vs-LoRA control
@@ -32989,6 +33489,7 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         # branches on WHY the count is what it is).
         job["params"]["steps"] = int(
             H3_TRISTEP_STEPS if _h3_tristep else
+            H3_V13_STEPS if _h3_v13 else
             h3_turbo_steps() if _h3_turbo else (_h3_steps or _tier_cfg["steps"]))
         job["params"]["h3_chain_windows"] = int(_tier_cfg.get("chain_windows") or 1)
         job["params"]["h3_window_frames"] = int(
@@ -35992,6 +36493,46 @@ def run_h3_job_inner(job: dict) -> None:
                 + f". Expected under {tristep_paths['dir']} — pick Best under "
                   f"Speed, or click Fast to install it (180 MB).")
         steps = H3_TRISTEP_STEPS
+    # Both speed adapters store their qkv rows in the ComfyUI order; the runner
+    # gets the per-head copy (h3_speed_adapter_for_runner). User LoRAs never
+    # pass through here.
+    if turbo:
+        turbo_paths = h3_speed_adapter_for_runner(turbo_paths, push)
+    if tristep:
+        tristep_paths = h3_speed_adapter_for_runner(tristep_paths, push)
+
+    # ---- Best at High: lightx2v v1.3 (6 forwards, video shift 6) ----------
+    # make_job resolved it; re-check here (a queued job outlives the file, a
+    # hand-edited queue entry can carry anything) and never stack it.
+    v13 = bool(p.get("h3_v13"))
+    v13_paths: dict = {}
+    if v13 and (tristep or turbo or not h3_cell_takes_v13(tier)
+                or mode not in H3_V13_MODES):
+        v13 = False
+        p["h3_v13"] = False
+        if not (tristep or turbo):
+            steps = int(p.get("h3_steps") or tier["steps"])
+        push(f"[h3] {H3_V13_NAME} runs on Best at High (Text and Image) - "
+             f"this render keeps its own sampler.")
+    v13_shift = False
+    if v13:
+        if not h3_supports_v13():
+            raise RuntimeError(
+                f"{H3_V13_NAME} needs a runner that stacks adapters: "
+                + _h3_runner_behind(H3_LORA_STACK_MARKER, paths["runner"],
+                                    "Or pin a Steps count under Best."))
+        v13_shift = h3_supports_video_shift()
+        if not v13_shift:
+            push(f"[h3] {H3_V13_NAME} at video shift 12 - this runner has no "
+                 f"--video-shift yet (shift {H3_V13_VIDEO_SHIFT} after an H3 runner update).")
+        v13_paths = h3_v13_paths()
+        if not v13_paths["files_ok"]:
+            raise RuntimeError(
+                f"The {H3_V13_NAME} adapter isn't on disk: "
+                + "; ".join(v13_paths["missing"])
+                + f". Expected under {v13_paths['dir']} - pin a Steps count "
+                  f"under Best, or get it from the Speed row.")
+        steps = H3_V13_STEPS
 
     # First-frame conditioning (Image mode). The flag landed on the runner
     # after the first public branch, so probe the INSTALLED script rather than
@@ -36307,6 +36848,11 @@ def run_h3_job_inner(job: dict) -> None:
         # delta on the same base layers (416 wrapped, 0 unaccounted measured
         # with a character + a style LoRA on top).
         cmd += h3_tristep_argv(tristep_paths)
+    if v13:
+        # Shift 6 + the adapter at 1.0 (alpha folded, qkv rows already in the
+        # DiT's order: no --lora-qkv-permute, so a user LoRA after it is
+        # applied exactly as trained).
+        cmd += h3_v13_argv(v13_paths, shift=v13_shift)
     if user_lora is not None and (not turbo or h3_supports_lora_stack()):
         # The SAME flag Turbo rides. On a stacking runner every `--lora` is one
         # more adapter on the same base layers, Turbo first; on the single-slot
@@ -36431,8 +36977,11 @@ def run_h3_job_inner(job: dict) -> None:
     # promised (Fast's tristep_min when this render is running Fast, else
     # the cell's own eta_min), so the number on screen before the first
     # denoise step matches the number the user picked the render on.
+    # 4.19.11 review: a lightx2v v1.3 render seeds from the cell's v13_min
+    # (the ~15 min the chip showed), not the full sampler's eta_min (~34).
     _load_eta_seed_min = (
         (tier.get("tristep_min") if tristep and tier.get("tristep_min") is not None
+         else tier.get("v13_min") if v13 and tier.get("v13_min") is not None
          else tier.get("eta_min")) or 0.0)
     _load_eta_seed = max(0.0, float(_load_eta_seed_min)) * 60.0
     # H3-04: what one denoise forward SHOULD cost on this Mac, at this
@@ -36930,6 +37479,8 @@ def run_h3_job_inner(job: dict) -> None:
             "h3_turbo": turbo,
             # Same rule for the fast 3-step sampler (False = the shape's own).
             "h3_tristep": tristep,
+            # And for lightx2v v1.3 on Best at High.
+            "h3_v13": v13,
             "width": width, "height": height, "frames": frames, "steps": steps,
             "seed_used": seed,
             # The user's OWN reference, not the canvas crop made from it: the
@@ -36984,6 +37535,8 @@ def run_h3_job_inner(job: dict) -> None:
             "first_frame_source": ((p.get("image") or "").strip() or None)
                                   if first_frame else None,
             "turbo": ({"lora": str(turbo_paths["lora"]),
+                       "source": str(turbo_paths.get("lora_source") or ""),
+                       "qkv_rows": turbo_paths.get("qkv_rows"),
                        "adapter_version": turbo_paths["version"],
                        "fallback": turbo_paths["fallback"],
                        "scale": 1.0,
@@ -36998,9 +37551,26 @@ def run_h3_job_inner(job: dict) -> None:
                        "accounting": (metrics.get("lora_accounting")
                                       or metrics.get("w1_lora_accounting"))}
                       if turbo else None),
+            # lightx2v v1.3's provenance: the file, its source and licence,
+            # and the schedule that ran.
+            "v13": ({"lora": str(v13_paths["lora"]),
+                     "name": H3_V13_NAME,
+                     "repo": H3_V13_REPO,
+                     "revision": H3_V13_SOURCE_REVISION,
+                     "source_file": H3_V13_SOURCE_FILE,
+                     "source_sha256": H3_V13_SOURCE_SHA256,
+                     "sha256": H3_V13_SHA256,
+                     "license": H3_V13_LICENSE,
+                     "code_license": H3_V13_CODE_LICENSE,
+                     "scale": 1.0, "steps": steps,
+                     "forwards": H3_V13_FORWARDS,
+                     "video_shift": float(H3_V13_VIDEO_SHIFT) if v13_shift else 12.0}
+                    if v13 else None),
             # The fast 3-step sampler's provenance: which file, where it came from,
             # under what license, and the schedule the runner actually ran.
             "tristep": ({"lora": str(tristep_paths["lora"]),
+                         "source": str(tristep_paths.get("lora_source") or ""),
+                         "qkv_rows": tristep_paths.get("qkv_rows"),
                          "adapter_version": tristep_paths["version"],
                          "repo": H3_TRISTEP_REPO,
                          "revision": H3_TRISTEP_REVISION,
@@ -42076,7 +42646,16 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     start = int(start_s) if start_s else 0
                     end = int(end_s) if end_s else size - 1
-                if start < 0 or end >= size or start > end:
+                    # RFC 7233 § 2.1: a last-byte-pos at or past the end means
+                    # "to the end", it is not an error. WebKit's media loader
+                    # (Safari, the Mac app's WKWebView) asks for whole chunks
+                    # and for the length it remembers from an earlier response,
+                    # so a clip that got shorter under the same URL, or a chunk
+                    # that runs past the tail, used to get 416 here and the
+                    # <video> stopped loading or seeking. Chrome happened not
+                    # to ask that way. A START past the end is still 416.
+                    end = min(end, size - 1)
+                if start < 0 or start >= size or start > end:
                     raise ValueError("range out of bounds")
             except (ValueError, IndexError):
                 # Malformed range header → 416 per RFC 7233.
@@ -44804,6 +45383,16 @@ def _parse_progress_signals(log_lines: list[str]) -> dict:
     """
     stage1_step = stage1_total = None  # latest seen for stage 1
     stage2_step = stage2_total = None  # latest seen for stage 2
+    # Unsuffixed bars, newest first, one (step, total) per bar. The HQ lane
+    # labels stage 1 "(res2s guided)", so there an unsuffixed bar IS stage 2.
+    # The distilled lane labels NEITHER stage: its stage 1 (8 steps) and stage
+    # 2 (2 steps) are both a bare "Denoising:" bar. Reading every bare bar as
+    # stage 2 made a Balanced render at stage-1 step 4/8 say "step 12 / 16"
+    # (8 + 4 of 8 + 8) and then drop to "step 2 / 4" in stage 2 - the counter
+    # claimed 75% while the live preview was honestly still two estimates
+    # from its first meaningful frame (owner report, 2026-10-22).
+    bare_bars: list[tuple[int, int]] = []
+    _bare_prev: tuple[int, int] | None = None
     image_step = image_total = None    # latest seen for an mflux image job
     download_seen = False               # a first-run model download is in flight
     download_files = download_total = None
@@ -44830,6 +45419,12 @@ def _parse_progress_signals(log_lines: list[str]) -> dict:
                         if pit:
                             last_per_it = float(pit.group(1))
             else:
+                # Walking newest -> oldest, a bar's steps only go DOWN; a step
+                # that goes up, or a different total, is the bar before it.
+                if (_bare_prev is None or total != _bare_prev[1]
+                        or step > _bare_prev[0]):
+                    bare_bars.append((step, total))
+                _bare_prev = (step, total)
                 if stage2_step is None:
                     stage2_step, stage2_total = step, total
                     if last_per_it is None:
@@ -44868,6 +45463,17 @@ def _parse_progress_signals(log_lines: list[str]) -> dict:
             upscale_done = True
         if not pipe_loaded and "step:get_pipe done" in ln:
             pipe_loaded = True
+
+    if stage1_step is None and bare_bars:
+        # No labelled stage 1 anywhere: the bare bars are the distilled lane's
+        # stages in order. One bar so far = stage 1 still running; two = the
+        # older one was stage 1, the newest is stage 2.
+        if len(bare_bars) == 1:
+            stage1_step, stage1_total = bare_bars[0]
+            stage2_step = stage2_total = None
+        else:
+            stage1_step, stage1_total = bare_bars[1][1], bare_bars[1][1]
+            stage2_step, stage2_total = bare_bars[0]
 
     # Combine stage 1 + stage 2 into a single monotonic denoise counter.
     # If we've seen stage 2 emit a step, stage 1 is implicitly complete
@@ -44985,6 +45591,20 @@ def _compute_progress(current: dict | None, log_lines: list[str]) -> dict | None
     elapsed = max(0.0, time.time() - started)
     eta = _bucket_eta(p)
     signals = _parse_progress_signals(log_lines[-200:] if log_lines else [])
+    # Distilled lane, still in stage 1: the bar only knows its own 8 steps, so
+    # the counter would jump 8 -> 10 when stage 2 starts. The live preview's
+    # status.json carries the whole denoise (one forward per step on this
+    # lane), so count to that from the start.
+    if (signals["denoise_step"] is not None and signals["stage2_step"] is None
+            and (LTX_QUALITIES.get(p.get("quality") or "") or {}).get("pipeline") == "distilled"):
+        try:
+            _st = json.loads((live_preview_dir(live_preview_job_id(current))
+                              / "status.json").read_text())
+            _tf = int(_st.get("total_forwards") or 0)
+        except (OSError, ValueError, TypeError):
+            _tf = 0
+        if _tf > (signals["denoise_total"] or 0):
+            signals["denoise_total"] = _tf
     weights = _phase_weights(p)
     download_frac = 0.0
 

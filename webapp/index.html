@@ -147,7 +147,28 @@
 </div>
 
 <header>
-  <a href="/" class="brand"><img src="/assets/phosphene_cycle_word_transparent.png" alt="Phosphene"></a>
+  <!-- THE MARK TURNS, SLOWLY (phosphene.video's header + footer mark). Six
+       rings of radial dashes, each its OWN <svg> so each ring is an HTML box
+       the browser can hand to the compositor: the spin and the breathe are
+       transform-only CSS animations on those boxes (panel.css, .ph-mark), so
+       a frame of the animation is a GPU re-composite of six textures, never a
+       repaint, a style recalc or main-thread work while a render runs. Drawn
+       inline (not an <img>) on purpose: one SVG with animated children would
+       be repainted on every frame. Geometry = the site's Footer.astro rings;
+       the wordmark is the old banner PNG's right-hand part. -->
+  <a href="/" class="brand">
+    <span class="ph-mark" aria-hidden="true">
+    <span class="ph-mark-halo"></span>
+    <span class="ph-mk-morph ph-mk-m0"><svg class="ph-mk-spin ph-mk-s0" viewBox="-114 -114 228 228"><path d="M19 0L29 0M18.4 4.9L28 7.5M16.5 9.5L25.1 14.5M13.4 13.4L20.5 20.5M9.5 16.5L14.5 25.1M4.9 18.4L7.5 28M0 19L0 29M-4.9 18.4L-7.5 28M-9.5 16.5L-14.5 25.1M-13.4 13.4L-20.5 20.5M-16.5 9.5L-25.1 14.5M-18.4 4.9L-28 7.5M-19 0L-29 0M-18.4 -4.9L-28 -7.5M-16.5 -9.5L-25.1 -14.5M-13.4 -13.4L-20.5 -20.5M-9.5 -16.5L-14.5 -25.1M-4.9 -18.4L-7.5 -28M0 -19L0 -29M4.9 -18.4L7.5 -28M9.5 -16.5L14.5 -25.1M13.4 -13.4L20.5 -20.5M16.5 -9.5L25.1 -14.5M18.4 -4.9L28 -7.5" stroke="#ff3d86"/></svg></span>
+    <span class="ph-mk-morph ph-mk-m1"><svg class="ph-mk-spin ph-mk-s1" viewBox="-114 -114 228 228"><path d="M36 0L46 0M35.5 6.3L45.3 8M33.8 12.3L43.2 15.7M31.2 18L39.8 23M27.6 23.1L35.2 29.6M23.1 27.6L29.6 35.2M18 31.2L23 39.8M12.3 33.8L15.7 43.2M6.3 35.5L8 45.3M0 36L0 46M-6.3 35.5L-8 45.3M-12.3 33.8L-15.7 43.2M-18 31.2L-23 39.8M-23.1 27.6L-29.6 35.2M-27.6 23.1L-35.2 29.6M-31.2 18L-39.8 23M-33.8 12.3L-43.2 15.7M-35.5 6.3L-45.3 8M-36 0L-46 0M-35.5 -6.3L-45.3 -8M-33.8 -12.3L-43.2 -15.7M-31.2 -18L-39.8 -23M-27.6 -23.1L-35.2 -29.6M-23.1 -27.6L-29.6 -35.2M-18 -31.2L-23 -39.8M-12.3 -33.8L-15.7 -43.2M-6.3 -35.5L-8 -45.3M0 -36L0 -46M6.3 -35.5L8 -45.3M12.3 -33.8L15.7 -43.2M18 -31.2L23 -39.8M23.1 -27.6L29.6 -35.2M27.6 -23.1L35.2 -29.6M31.2 -18L39.8 -23M33.8 -12.3L43.2 -15.7M35.5 -6.3L45.3 -8" stroke="#e2369a"/></svg></span>
+    <span class="ph-mk-morph ph-mk-m2"><svg class="ph-mk-spin ph-mk-s2" viewBox="-114 -114 228 228"><path d="M54 0L62 0M53.5 7.7L61.4 8.8M51.8 15.2L59.5 17.5M49.1 22.4L56.4 25.8M45.4 29.2L52.2 33.5M40.8 35.4L46.9 40.6M35.4 40.8L40.6 46.9M29.2 45.4L33.5 52.2M22.4 49.1L25.8 56.4M15.2 51.8L17.5 59.5M7.7 53.5L8.8 61.4M0 54L0 62M-7.7 53.5L-8.8 61.4M-15.2 51.8L-17.5 59.5M-22.4 49.1L-25.8 56.4M-29.2 45.4L-33.5 52.2M-35.4 40.8L-40.6 46.9M-40.8 35.4L-46.9 40.6M-45.4 29.2L-52.2 33.5M-49.1 22.4L-56.4 25.8M-51.8 15.2L-59.5 17.5M-53.5 7.7L-61.4 8.8M-54 0L-62 0M-53.5 -7.7L-61.4 -8.8M-51.8 -15.2L-59.5 -17.5M-49.1 -22.4L-56.4 -25.8M-45.4 -29.2L-52.2 -33.5M-40.8 -35.4L-46.9 -40.6M-35.4 -40.8L-40.6 -46.9M-29.2 -45.4L-33.5 -52.2M-22.4 -49.1L-25.8 -56.4M-15.2 -51.8L-17.5 -59.5M-7.7 -53.5L-8.8 -61.4M0 -54L0 -62M7.7 -53.5L8.8 -61.4M15.2 -51.8L17.5 -59.5M22.4 -49.1L25.8 -56.4M29.2 -45.4L33.5 -52.2M35.4 -40.8L40.6 -46.9M40.8 -35.4L46.9 -40.6M45.4 -29.2L52.2 -33.5M49.1 -22.4L56.4 -25.8M51.8 -15.2L59.5 -17.5M53.5 -7.7L61.4 -8.8" stroke="#ba5ce4"/></svg></span>
+    <span class="ph-mk-morph ph-mk-m3"><svg class="ph-mk-spin ph-mk-s3" viewBox="-114 -114 228 228"><path d="M71 0L80 0M70.6 7.9L79.5 9M69.2 15.8L78 17.8M67 23.4L75.5 26.4M64 30.8L72.1 34.7M60.1 37.8L67.7 42.6M55.5 44.3L62.5 49.9M50.2 50.2L56.6 56.6M44.3 55.5L49.9 62.5M37.8 60.1L42.6 67.7M30.8 64L34.7 72.1M23.4 67L26.4 75.5M15.8 69.2L17.8 78M7.9 70.6L9 79.5M0 71L0 80M-7.9 70.6L-9 79.5M-15.8 69.2L-17.8 78M-23.4 67L-26.4 75.5M-30.8 64L-34.7 72.1M-37.8 60.1L-42.6 67.7M-44.3 55.5L-49.9 62.5M-50.2 50.2L-56.6 56.6M-55.5 44.3L-62.5 49.9M-60.1 37.8L-67.7 42.6M-64 30.8L-72.1 34.7M-67 23.4L-75.5 26.4M-69.2 15.8L-78 17.8M-70.6 7.9L-79.5 9M-71 0L-80 0M-70.6 -7.9L-79.5 -9M-69.2 -15.8L-78 -17.8M-67 -23.4L-75.5 -26.4M-64 -30.8L-72.1 -34.7M-60.1 -37.8L-67.7 -42.6M-55.5 -44.3L-62.5 -49.9M-50.2 -50.2L-56.6 -56.6M-44.3 -55.5L-49.9 -62.5M-37.8 -60.1L-42.6 -67.7M-30.8 -64L-34.7 -72.1M-23.4 -67L-26.4 -75.5M-15.8 -69.2L-17.8 -78M-7.9 -70.6L-9 -79.5M0 -71L0 -80M7.9 -70.6L9 -79.5M15.8 -69.2L17.8 -78M23.4 -67L26.4 -75.5M30.8 -64L34.7 -72.1M37.8 -60.1L42.6 -67.7M44.3 -55.5L49.9 -62.5M50.2 -50.2L56.6 -56.6M55.5 -44.3L62.5 -49.9M60.1 -37.8L67.7 -42.6M64 -30.8L72.1 -34.7M67 -23.4L75.5 -26.4M69.2 -15.8L78 -17.8M70.6 -7.9L79.5 -9" stroke="#8e4ddf"/></svg></span>
+    <span class="ph-mk-morph ph-mk-m4"><svg class="ph-mk-spin ph-mk-s4" viewBox="-114 -114 228 228"><path d="M87 0L95 0M86.6 8.3L94.6 9M85.4 16.5L93.3 18M83.5 24.5L91.2 26.8M80.8 32.3L88.2 35.3M77.3 39.9L84.4 43.5M73.2 47L79.9 51.4M68.4 53.8L74.7 58.7M63 60L68.8 65.6M57 65.8L62.2 71.8M50.5 70.9L55.1 77.4M43.5 75.3L47.5 82.3M36.1 79.1L39.5 86.4M28.5 82.2L31.1 89.8M20.5 84.5L22.4 92.3M12.4 86.1L13.5 94M4.1 86.9L4.5 94.9M-4.1 86.9L-4.5 94.9M-12.4 86.1L-13.5 94M-20.5 84.5L-22.4 92.3M-28.5 82.2L-31.1 89.8M-36.1 79.1L-39.5 86.4M-43.5 75.3L-47.5 82.3M-50.5 70.9L-55.1 77.4M-57 65.8L-62.2 71.8M-63 60L-68.8 65.6M-68.4 53.8L-74.7 58.7M-73.2 47L-79.9 51.4M-77.3 39.9L-84.4 43.5M-80.8 32.3L-88.2 35.3M-83.5 24.5L-91.2 26.8M-85.4 16.5L-93.3 18M-86.6 8.3L-94.6 9M-87 0L-95 0M-86.6 -8.3L-94.6 -9M-85.4 -16.5L-93.3 -18M-83.5 -24.5L-91.2 -26.8M-80.8 -32.3L-88.2 -35.3M-77.3 -39.9L-84.4 -43.5M-73.2 -47L-79.9 -51.4M-68.4 -53.8L-74.7 -58.7M-63 -60L-68.8 -65.6M-57 -65.8L-62.2 -71.8M-50.5 -70.9L-55.1 -77.4M-43.5 -75.3L-47.5 -82.3M-36.1 -79.1L-39.5 -86.4M-28.5 -82.2L-31.1 -89.8M-20.5 -84.5L-22.4 -92.3M-12.4 -86.1L-13.5 -94M-4.1 -86.9L-4.5 -94.9M4.1 -86.9L4.5 -94.9M12.4 -86.1L13.5 -94M20.5 -84.5L22.4 -92.3M28.5 -82.2L31.1 -89.8M36.1 -79.1L39.5 -86.4M43.5 -75.3L47.5 -82.3M50.5 -70.9L55.1 -77.4M57 -65.8L62.2 -71.8M63 -60L68.8 -65.6M68.4 -53.8L74.7 -58.7M73.2 -47L79.9 -51.4M77.3 -39.9L84.4 -43.5M80.8 -32.3L88.2 -35.3M83.5 -24.5L91.2 -26.8M85.4 -16.5L93.3 -18M86.6 -8.3L94.6 -9" stroke="#6f7cf0"/></svg></span>
+    <span class="ph-mk-morph ph-mk-m5"><svg class="ph-mk-spin ph-mk-s5" viewBox="-114 -114 228 228"><path d="M103 0L111 0M102.7 8.1L110.7 8.7M101.7 16.1L109.6 17.4M100.2 24L107.9 25.9M98 31.8L105.6 34.3M95.2 39.4L102.6 42.5M91.8 46.8L98.9 50.4M87.8 53.8L94.6 58M83.3 60.5L89.8 65.2M78.3 66.9L84.4 72.1M72.8 72.8L78.5 78.5M66.9 78.3L72.1 84.4M60.5 83.3L65.2 89.8M53.8 87.8L58 94.6M46.8 91.8L50.4 98.9M39.4 95.2L42.5 102.6M31.8 98L34.3 105.6M24 100.2L25.9 107.9M16.1 101.7L17.4 109.6M8.1 102.7L8.7 110.7M0 103L0 111M-8.1 102.7L-8.7 110.7M-16.1 101.7L-17.4 109.6M-24 100.2L-25.9 107.9M-31.8 98L-34.3 105.6M-39.4 95.2L-42.5 102.6M-46.8 91.8L-50.4 98.9M-53.8 87.8L-58 94.6M-60.5 83.3L-65.2 89.8M-66.9 78.3L-72.1 84.4M-72.8 72.8L-78.5 78.5M-78.3 66.9L-84.4 72.1M-83.3 60.5L-89.8 65.2M-87.8 53.8L-94.6 58M-91.8 46.8L-98.9 50.4M-95.2 39.4L-102.6 42.5M-98 31.8L-105.6 34.3M-100.2 24L-107.9 25.9M-101.7 16.1L-109.6 17.4M-102.7 8.1L-110.7 8.7M-103 0L-111 0M-102.7 -8.1L-110.7 -8.7M-101.7 -16.1L-109.6 -17.4M-100.2 -24L-107.9 -25.9M-98 -31.8L-105.6 -34.3M-95.2 -39.4L-102.6 -42.5M-91.8 -46.8L-98.9 -50.4M-87.8 -53.8L-94.6 -58M-83.3 -60.5L-89.8 -65.2M-78.3 -66.9L-84.4 -72.1M-72.8 -72.8L-78.5 -78.5M-66.9 -78.3L-72.1 -84.4M-60.5 -83.3L-65.2 -89.8M-53.8 -87.8L-58 -94.6M-46.8 -91.8L-50.4 -98.9M-39.4 -95.2L-42.5 -102.6M-31.8 -98L-34.3 -105.6M-24 -100.2L-25.9 -107.9M-16.1 -101.7L-17.4 -109.6M-8.1 -102.7L-8.7 -110.7M0 -103L0 -111M8.1 -102.7L8.7 -110.7M16.1 -101.7L17.4 -109.6M24 -100.2L25.9 -107.9M31.8 -98L34.3 -105.6M39.4 -95.2L42.5 -102.6M46.8 -91.8L50.4 -98.9M53.8 -87.8L58 -94.6M60.5 -83.3L65.2 -89.8M66.9 -78.3L72.1 -84.4M72.8 -72.8L78.5 -78.5M78.3 -66.9L84.4 -72.1M83.3 -60.5L89.8 -65.2M87.8 -53.8L94.6 -58M91.8 -46.8L98.9 -50.4M95.2 -39.4L102.6 -42.5M98 -31.8L105.6 -34.3M100.2 -24L107.9 -25.9M101.7 -16.1L109.6 -17.4M102.7 -8.1L110.7 -8.7" stroke="#37cfe3"/></svg></span>
+    <span class="ph-mark-core"></span>
+    </span>
+    <img class="brand-word" src="/assets/phosphene_wordtext.png" alt="Phosphene">
+  </a>
   <!-- The standalone version badge is gone: #versionPill already carries the
        version in EVERY state it can be in — "Up to date · 4.2.0",
        "Update to 4.3.0", "Checking · 4.2.0", "4.2.0 · dev · <sha>",
@@ -184,8 +205,15 @@
        The chip SUMMARISES them: worst state wins the colour, and memory stays
        on the face because it is the one number worth a glance.
        PORTALED to <body>: <header> is overflow:hidden and would slice it —
-       the same clipping that once cut off the avatar. -->
-  <div id="healthCluster" role="group" aria-label="System health" hidden>
+       the same clipping that once cut off the avatar.
+       NO `hidden` on this div (4.19.11). It carried a stray one from the
+       duplicate v4.5.0 build (989aaf1f kept this markup, not that build's
+       intent), and nothing ever cleared it: the cluster only showed because
+       `body > header #healthCluster { display: flex }` outranked the UA's
+       [hidden] rule. When the global `[hidden] { display: none !important }`
+       landed (VC-07, v4.17.0) it won, and the memory chip vanished from every
+       install for five releases. test_health_chip_visible.py pins it. -->
+  <div id="healthCluster" role="group" aria-label="System health">
     <button type="button" id="healthChip" aria-haspopup="dialog"
             aria-expanded="false" aria-controls="healthPop"
             title="System health — click for detail">
@@ -1354,6 +1382,12 @@
                 </button>
               </div>
               <div class="h3-turbo-note" id="h3SpeedNote" hidden></div>
+              <!-- lightx2v v1.3 on Best at High: credit once it is in, the
+                   one click that gets it before then (_h3RenderV13Note). -->
+              <div class="h3-turbo-note h3-v13-note" id="h3V13Note" hidden>
+                <span id="h3V13NoteText"></span>
+                <button type="button" class="ghost-btn h3-v13-get" id="h3V13Get" hidden></button>
+              </div>
             </div>
             <!-- Speed — the LTX-2.5 distilled lane's REAL speed control
                  (v4.0.5), replacing the dead one above. "Fast draft" selects

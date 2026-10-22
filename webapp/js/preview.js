@@ -203,7 +203,15 @@ function _renderLiveStageFrame(s, preview) {
 
   const stopping = window._stopEarlyRequested === cur.id;
   wrap.classList.toggle('is-aborting', stopping);
-  if (!preview.meaningful || !preview.url) {
+  // THE FIRST ESTIMATE IS SHOWN, SOFTENED, AS SOON AS IT EXISTS. Only Stop
+  // early waits for `meaningful` (a stop over an unsettled take is the trap
+  // that rule exists for). The picture used to wait too, and on the distilled
+  // lane estimate 6 is ~2/3 of the way through the denoise: 129 s of a
+  // Balanced render on an M4 Max with nothing but this placeholder, while the
+  // engine had published five estimates whose layout (light, smoke, the
+  // subject's place) already matched the take (owner, 2026-10-22: "it just
+  // takes a shitload of time, and only near the end does it show").
+  if (!preview.url) {
     if (wrap.dataset.liveState !== 'warming') {
       wrap.innerHTML = `<div class="live-stage-warming">
         <svg class="live-stage-warming-mark" viewBox="0 0 24 16" fill="none" aria-hidden="true">
@@ -222,7 +230,10 @@ function _renderLiveStageFrame(s, preview) {
       img = wrap.querySelector('.live-stage-image');
     }
     if (img.getAttribute('src') !== preview.url) img.setAttribute('src', preview.url);
-    wrap.dataset.liveState = 'meaningful';
+    // Rough until the server calls it meaningful: blurred, so nobody judges a
+    // face or a detail the next estimates are still deciding.
+    img.classList.toggle('is-forming', !preview.meaningful);
+    wrap.dataset.liveState = preview.meaningful ? 'meaningful' : 'forming';
   }
 
   const badge = document.getElementById('liveStageBadge');
@@ -237,7 +248,8 @@ function _renderLiveStageFrame(s, preview) {
   const step = preview.estimate != null && preview.total != null
     ? ` · step ${preview.estimate}/${preview.total}` : '';
   if (title) title.textContent = preview.meaningful
-    ? `forming take${step}` : 'forming take · warming';
+    ? `forming take${step}`
+    : (preview.url ? `forming take${step} · rough` : 'forming take · warming');
   if (eta) {
     eta.textContent = stopping ? 'Finishing the current step, then stopping.'
       : (preview.remaining_sec != null && preview.remaining_sec > 0
@@ -510,11 +522,13 @@ function renderNowPreview(s, prog, previewData) {
     const note = document.getElementById('nowThumbHelpNote');
     if (note && note.textContent !== prev.help) note.textContent = prev.help;
   }
-  if (!prev.meaningful) {
+  if (!prev.url) {
     box.className = 'now-thumb is-warming';
     box.innerHTML = '';
   } else {
-    box.className = 'now-thumb' + (stopping ? ' is-aborting' : '');
+    // The rough estimates show too (see _renderLiveStageFrame); `is-forming`
+    // softens them until the server calls the take meaningful.
+    box.className = 'now-thumb' + (prev.meaningful ? '' : ' is-forming') + (stopping ? ' is-aborting' : '');
     // Replace the src in place rather than the node, so the browser does not
     // flash white between estimates.
     let img = box.querySelector('img');
@@ -530,7 +544,7 @@ function renderNowPreview(s, prog, previewData) {
       ? 'Finishing the current step, then stopping.'
       : (prev.meaningful
           ? `This is the shot it's making. Stop now if it's wrong${saves}.`
-          : 'Finding the shot…');
+          : (prev.url ? 'The shot is forming. It sharpens as the render settles.' : 'Finding the shot…'));
     meta.innerHTML += `<br><span style="color:var(--muted)">${escapeHtml(line)}</span>`;
   }
   if (actions && prev.abortable) {
