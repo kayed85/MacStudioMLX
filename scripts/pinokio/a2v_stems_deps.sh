@@ -96,6 +96,11 @@ PY="$VENV/bin/python3.11"
 export TORCH_HOME="$SEP_HOME"
 unset PYTORCH_ENABLE_MPS_FALLBACK PYTORCH_MPS_FAST_MATH
 RUNNER="$APP_ROOT/scripts/a2v_separate.py"
+# The engine venv's known-good set (4.19.4) rides along with the torch/numpy
+# pins below, so demucs can never move tokenizers / transformers / the mlx trio.
+EC="$APP_ROOT/scripts/pinokio/engine_constraints.txt"
+EC_ARGS=()
+[ -f "$EC" ] && EC_ARGS=(-c "$EC")
 PROBE='import demucs.pretrained, demucs.apply, torch'
 
 if "$PY" -c "$PROBE" >/dev/null 2>&1; then
@@ -114,20 +119,26 @@ PYPINS
   echo "keeping: $(tr '\n' ' ' < "$PINS")"
   # 4.17.5: up to 3 attempts - but only a network or timeout failure is worth
   # repeating; a resolver conflict or a full disk fails the same way again.
+  # 4.19.2 (fleet: 5 of the week's 16 separator failures were the package
+  # download timing out or losing the connection): each attempt also gets a
+  # longer per-request timeout and more of the tool's own retries than
+  # Pinokio's defaults (UV_HTTP_TIMEOUT=60), never fewer than the user set.
+  [ "${UV_HTTP_TIMEOUT:-0}" -ge 180 ] 2>/dev/null || export UV_HTTP_TIMEOUT=180
+  [ "${UV_HTTP_RETRIES:-0}" -ge 5 ] 2>/dev/null || export UV_HTTP_RETRIES=5
   n=1
   while :; do
     if command -v uv >/dev/null 2>&1; then
-      uv pip install --python "$PY" -c "$PINS" 'demucs==4.0.1' 2>&1 | defuse
+      uv pip install --python "$PY" -c "$PINS" ${EC_ARGS[@]+"${EC_ARGS[@]}"} 'demucs==4.0.1' 2>&1 | defuse
       rc=$?
     else
-      "$PY" -m pip install -c "$PINS" 'demucs==4.0.1' 2>&1 | defuse
+      "$PY" -m pip install --retries 5 --timeout 60 -c "$PINS" ${EC_ARGS[@]+"${EC_ARGS[@]}"} 'demucs==4.0.1' 2>&1 | defuse
       rc=$?
     fi
     [ "$rc" -eq 0 ] && break
     case "$(install_cause "$LOG")" in network|timeout) ;; *) break ;; esac
     [ "$n" -ge 3 ] && break
-    echo "vocal separation: attempt $n did not finish - retrying in $((n * ${PHOSPHENE_SEPARATOR_RETRY_WAIT:-10})) s"
-    sleep $((n * ${PHOSPHENE_SEPARATOR_RETRY_WAIT:-10}))
+    echo "vocal separation: attempt $n did not finish - retrying in $((n * n * ${PHOSPHENE_SEPARATOR_RETRY_WAIT:-15})) s"
+    sleep $((n * n * ${PHOSPHENE_SEPARATOR_RETRY_WAIT:-15}))
     n=$((n + 1))
   done
   rm -f "$PINS"

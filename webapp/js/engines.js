@@ -372,6 +372,28 @@ function h3TurboState() {
 function h3TriStepState() {
   return (H3 && H3.tristep) || { available: false, supported: false, downloaded: false };
 }
+// lightx2v v1.3: what Best renders on the High canvas once its adapter is
+// built (server: h3_cell_takes_v13 / make_job). Text and Image only; a pinned
+// Steps count keeps the full sampler.
+function h3V13State() {
+  return (H3 && H3.v13) || { available: false, supported: false, downloaded: false };
+}
+function _h3V13Mode() {
+  const m = (document.getElementById('mode') || {}).value || 't2v';
+  return m === 't2v' || m === 'i2v';
+}
+// Would THIS cell's Best render on v1.3, as things stand?
+function h3V13On(cell, opts) {
+  cell = cell || h3CurrentCell();
+  if (!cell || cell.v13_min == null) return false;
+  opts = opts || {};
+  const fast = (opts.fast != null) ? opts.fast : h3TriStepOn(cell);
+  if (fast) return false;
+  const ov = (opts.steps != null) ? String(opts.steps)
+    : ((document.getElementById('h3_steps') || {}).value || 'auto');
+  if (ov !== 'auto') return false;
+  return _h3V13Mode() && !!h3V13State().available;
+}
 function h3SpeedPref() {
   let v = null;
   try { v = localStorage.getItem('phos_h3_speed'); } catch (e) {}
@@ -420,6 +442,7 @@ function h3CellEtaMin(cell, opts) {
   const fast = (opts.fast != null) ? opts.fast : h3TriStepOn(cell);
   if (fast && cell.tristep_min != null) return _h3TriStepMin(cell);
   if (opts.turbo) return cell.turbo_min;
+  if (h3V13On(cell, { fast: false, steps: opts.steps })) return cell.v13_min;
   const ov = (opts.steps != null) ? String(opts.steps)
     : ((document.getElementById('h3_steps') || {}).value || 'auto');
   if (ov !== 'auto' && /^\d+$/.test(ov)) {
@@ -435,7 +458,9 @@ function h3CellEtaBasis(cell, opts) {
   if (!cell) return '';
   opts = opts || {};
   const fast = (opts.fast != null) ? opts.fast : h3TriStepOn(cell);
-  const fr = fast ? cell.fleet_range_fast : cell.fleet_range;
+  const fr = fast ? cell.fleet_range_fast
+    : (h3V13On(cell, { fast: false }) ? cell.fleet_range_v13 : cell.fleet_range);
+  if (!fr && !fast && h3V13On(cell, { fast: false }) && cell.v13_measured) return 'measured on an M4 Max';
   return fr ? fr.basis : 'estimated — few renders on this Mac class yet';
 }
 function h3FmtEtaMin(m) {
@@ -456,6 +481,9 @@ function h3CellEta(cell, opts) {
   if (opts.turbo) return cell.turbo_eta;
   const ov = (document.getElementById('h3_steps') || {}).value || 'auto';
   if (ov === 'auto' || !/^\d+$/.test(ov)) {
+    if (h3V13On(cell, { fast: false })) {
+      return (!_h3IsI2V() && cell.fleet_range_v13) ? cell.fleet_range_v13.eta_range : cell.v13_eta;
+    }
     // Owner ruling (2026-09-29): Best's own real fleet range, same idea as
     // Fast's above — never for i2v, which the server prices separately and
     // this fleet cell (mode "t2v") does not cover.
@@ -492,8 +520,11 @@ function _h3SyncSamplerTitles() {
   const pts = (cell && cell.steps) || 9;
   const fwd = Math.max(1, pts - 1);
   const best = document.querySelector('#h3SpeedGroup [data-h3-speed="best"]');
-  if (best) best.title = "Best: this shape's full sampler — " + fwd + ' steps per window. '
-    + 'The slower, most careful render.';
+  if (best) best.title = h3V13On(cell, { fast: false })
+    ? 'Best on High: ' + (h3V13State().name || 'lightx2v v1.3') + ', ' + (h3V13State().forwards || 6)
+      + ' steps per window. Takes about half the time. Choose a Steps count to use the old Best sampler.'
+    : "Best: this shape's full sampler — " + fwd + ' steps per window. '
+      + 'The slower, most careful render.';
   const auto = document.querySelector('#h3StepsGroup [data-h3-steps="auto"]');
   if (auto) auto.title = "This shape's tuned count — " + pts + ' sigma points ('
     + fwd + ' forwards per window) at this canvas.';
@@ -533,7 +564,8 @@ function renderH3Turbo() {
     const cellOnlyBest = tri.available && cell && cell.tristep_min == null;
     fastBtn.classList.toggle('cell-only-best', cellOnlyBest);
     fastBtn.title = !tri.supported
-      ? 'Fast needs a newer H3 runner — run "Update Hailuo H3 runner" in the Pinokio sidebar (weights stay).'
+      ? distText('Fast needs a newer H3 runner — run "Update Hailuo H3 runner" in the Pinokio sidebar (weights stay).',
+                 'Fast needs a newer Hailuo H3 runner. Updating the runner isn\u2019t available in the Mac app yet.')
       : !tri.downloaded
         ? '3 steps — about 4× faster, great for drafts and most shots. One click installs the '
           + '180 MB adapter (' + (tri.license || 'MiniMax H3 Community License') + ').'
@@ -543,7 +575,75 @@ function renderH3Turbo() {
   }
   _h3SyncSamplerTitles();
   _h3ApplySpeed();
+  _h3RenderV13Note();
   _h3SyncFaceFixEta();
+}
+
+// The line under the switch for lightx2v v1.3 on High: what it is and who
+// made it once it is in, the one click that gets it before then.
+function _h3RenderV13Note() {
+  const box = document.getElementById('h3V13Note');
+  if (!box) return;
+  const cell = h3CurrentCell();
+  const v = h3V13State();
+  const text = document.getElementById('h3V13NoteText');
+  const btn = document.getElementById('h3V13Get');
+  const show = !!(cell && cell.v13_min != null && _h3V13Mode() && !h3TriStepOn(cell));
+  box.hidden = !show;
+  if (!show || !text) return;
+  const name = v.name || 'lightx2v v1.3';
+  const credit = 'By LightX2V (Apache-2.0 code; ' + (v.license || 'MiniMax H3 Community License') + ' weights).';
+  let msg = '';
+  let canGet = false;
+  if (!v.supported) {
+    msg = 'Best on High takes about half the time with ' + name + '. ' + distText(
+      'Update H3: click "Update Hailuo H3 runner" in the Pinokio sidebar. Your weights stay.',
+      'It needs a newer H3 runner, but the Mac app can\u2019t update the runner yet.');
+  } else if (v.installing) {
+    const d = v.download || {};
+    msg = d.status === 'building' ? 'Preparing ' + name + ' on your Mac…'
+      : 'Downloading ' + name + ': ' + (d.mb || 0) + ' / ' + (d.total_mb || 1320) + ' MB';
+  } else if (!v.downloaded) {
+    const e = (v.download || {}).error;
+    // "about half the time", not "down from <Best>": the Best half of the
+    // switch may show a fleet range, and two different "before" numbers on
+    // one screen would contradict each other.
+    msg = 'New: ' + name + ' runs Best on High in about ' + _h3EtaPlain(cell.v13_eta)
+      + ', about half the time. Richer detail in our side-by-side tests. ' + credit
+      + (e ? ' Last try failed: ' + e : '');
+    canGet = true;
+  } else if (h3V13On(cell, { fast: false })) {
+    msg = 'Best on High uses ' + name + ' (' + (v.forwards || 6) + ' steps). ' + credit
+      + ' Choose a Steps count to use the old Best sampler.';
+  } else {
+    msg = 'Steps set: Best uses the old sampler instead of ' + name + '.';
+  }
+  text.textContent = msg;
+  if (btn) {
+    btn.hidden = !canGet;
+    btn.textContent = 'Get it · ' + (v.download_gb || 1.4) + ' GB';
+  }
+}
+async function h3V13Install() {
+  const toast = (m, kind) => { if (typeof phosToast === 'function') phosToast(m, { kind }); };
+  const btn = document.getElementById('h3V13Get');
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch('/h3/v13/install', { method: 'POST' });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+    toast(j.already_installed ? 'lightx2v v1.3 is already installed.'
+      : "Downloading LightX2V's lightx2v v1.3 (1.4 GB), then preparing it on your Mac. "
+        + 'Best on High will use it automatically when ready.', 'ok');
+  } catch (e) {
+    toast('lightx2v v1.3: ' + (e.message || 'failed'), 'danger');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+{
+  const _v13Btn = document.getElementById('h3V13Get');
+  if (_v13Btn) _v13Btn.onclick = (ev) => { ev.preventDefault(); h3V13Install(); };
 }
 
 // ONE writer for what this render does: both hidden inputs, the lit half, the
@@ -601,7 +701,8 @@ function _h3ApplySpeed() {
         ? cell.tristep_forwards : (tri.steps ? tri.steps - 1 : 3);
     } else if (s && cell) {
       const ov = (stIn || {}).value || 'auto';
-      s.value = (ov !== 'auto' && /^\d+$/.test(ov)) ? parseInt(ov, 10) : cell.steps;
+      s.value = (ov !== 'auto' && /^\d+$/.test(ov)) ? parseInt(ov, 10)
+        : (h3V13On(cell, { fast: false }) ? cell.v13_steps : cell.steps);
     }
     // Steps is a Best control: it only shows while Best is what renders.
     const stepsRow = document.getElementById('h3StepsRow');
@@ -637,7 +738,8 @@ function h3SpeedOfParams(p) {
 // function so all three read the same label from the same field.
 function h3JobSpeedLabel(p) {
   if (!p || p.engine !== 'h3') return '';
-  return h3SpeedOfParams(p) === 'fast' ? 'Fast' : 'Best';
+  if (h3SpeedOfParams(p) === 'fast') return 'Fast';
+  return p.h3_v13 ? 'Best · lightx2v v1.3' : 'Best';
 }
 // "Hailuo H3 · Standard 10s" — the shape a submitted H3 job asked for,
 // looked up from its own h3_tier (never re-derived from the CURRENT form
@@ -658,8 +760,9 @@ async function h3SpeedClick(which) {
   if (tri.available) { setH3Speed('fast'); return; }
   const toast = (m, kind) => { if (typeof phosToast === 'function') phosToast(m, { kind }); };
   if (!tri.supported) {
-    toast('Fast needs a newer Hailuo H3 runner. Run "Update Hailuo H3 runner" in the Pinokio '
-          + 'sidebar — your weights stay.', 'danger');
+    toast(distText('Fast needs a newer Hailuo H3 runner. Run "Update Hailuo H3 runner" in the Pinokio '
+          + 'sidebar — your weights stay.',
+          'Fast needs a newer Hailuo H3 runner. Updating the runner isn\u2019t available in the Mac app yet.'), 'danger');
     return;
   }
   if (tri.installing) { toast('The Fast adapter is already installing — watch the log.', 'ok'); return; }
@@ -918,6 +1021,7 @@ document.addEventListener('keydown', (ev) => {
 window.addEventListener('resize', () => closeEngineMenu({ returnFocus: false }));
 
 function renderEngineSwitch() {
+  renderLtxGenSwitch();   // the Remix-row switch; independent of the header row below
   const box = document.getElementById('engineSwitch');
   const div = document.getElementById('engineSwitchDivider');
   if (!box) return;
@@ -1008,6 +1112,100 @@ function renderEngineSwitch() {
       engineSegClick(b.dataset.engine);
     };
   });
+
+  // ---- LTX generation: only when this install has more than one ----
+  // The server sends `generations` already filtered to the ones whose base pack
+  // is on disk, and empty when there is no real choice, so this row simply does
+  // not exist for a single-generation install. A generation is fixed per panel
+  // process, so picking one restarts the panel (see /ltx/generation).
+  const ltxEng = list.find(e => e.id === 'ltx');
+  const gens = (ltxEng && ltxEng.generations) || [];
+  if (gens.length > 1) {
+    const row = document.createElement('div');
+    row.className = 'eng-gen';
+    row.innerHTML = _ltxGenSwitchHtml(gens, true);
+    _wireLtxGenSwitch(row);
+    menu.appendChild(row);
+  }
+}
+
+// The generation switch, as markup. Shared by the engine menu and the Remix row
+// so the two cannot drift: same buttons, same endpoint, same wording.
+function _ltxGenSwitchHtml(gens, withNote) {
+  return `<span class="eng-gen-label">LTX generation</span>
+      <span class="eng-gen-btns" role="group" aria-label="LTX generation">${
+      gens.map(g => `<button type="button" class="eng-gen-btn${g.active ? ' active' : ''}"
+          data-gen="${escapeHtml(g.id)}" aria-pressed="${g.active ? 'true' : 'false'}"
+          title="${g.active ? 'Rendering with LTX-' + escapeHtml(g.label)
+                           : 'Switch to LTX-' + escapeHtml(g.label) + ' (restarts the panel)'}">${escapeHtml(g.label)}</button>`).join('')
+      }</span>${withNote
+        ? '<span class="eng-gen-note">Switching restarts the panel. Ingredients needs 2.3.</span>'
+        : '<span class="eng-gen-note">Only one runs at a time - switching restarts the panel.</span>'}`;
+}
+function _wireLtxGenSwitch(root) {
+  root.querySelectorAll('.eng-gen-btn').forEach(b => {
+    b.onclick = () => { if (!b.classList.contains('active')) switchLtxGeneration(b.dataset.gen); };
+  });
+}
+// The same switch beside the Remix tools, where Ingredients' "needs 2.3" is
+// felt. Hidden unless the server listed more than one installed generation.
+function renderLtxGenSwitch() {
+  const box = document.getElementById('ltxGenSwitch');
+  if (!box) return;
+  const ltxEng = (globalThis.ENGINES || []).find(e => e.id === 'ltx');
+  const gens = (ltxEng && ltxEng.generations) || [];
+  box.hidden = gens.length < 2;
+  box.innerHTML = gens.length > 1 ? _ltxGenSwitchHtml(gens, false) : '';
+  if (gens.length > 1) _wireLtxGenSwitch(box);
+}
+// Not called at script load: escapeHtml and the rest of the page's helpers are
+// defined by scripts that load AFTER this one. renderEngineSwitch() runs once
+// everything is up and calls this.
+
+// Ask the server to pin a different LTX generation, then wait for the restarted
+// panel and reload so the page, the engine chip and every gated control (the
+// Ingredients chip among them) are rebuilt for the new generation.
+async function switchLtxGeneration(id) {
+  // phosToast (queue.js), NOT a bare `toast`: there is no global `toast` - the
+  // one in this file is a const local to h3SpeedClick. The bare call threw a
+  // ReferenceError on every path: a refusal (render running, jobs waiting) was
+  // swallowed by the catch below and treated as a successful exec, and the
+  // success path died before it polled, so the panel restarted under a page
+  // that never reloaded. lint_webapp flags it (no-undef).
+  const say = (m, kind) => { if (typeof phosToast === 'function') phosToast(m, { kind }); };
+  closeEngineMenu({ returnFocus: false });
+  let r = null;
+  try {
+    r = await fetch('/ltx/generation', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: 'version=' + encodeURIComponent(id),
+    });
+  } catch (e) {
+    // Only a NETWORK failure lands here: the process may have exec'd before
+    // the response reached us - a successful switch, so poll like
+    // panelRestart() does. A refusal is an HTTP answer and is handled below.
+  }
+  if (r) {
+    const d = await r.json().catch(() => ({}));
+    if (!d.ok) {
+      say(d.error || 'Could not switch the LTX generation.', r.status === 409 ? 'warning' : 'danger');
+      return false;
+    }
+    if (d.unchanged) return true;
+  }
+  say('Switching LTX generation - restarting the panel\u2026', 'success');
+  const deadline = Date.now() + 60000;
+  while (Date.now() < deadline) {
+    await new Promise(res => setTimeout(res, 700));
+    try {
+      const v = await fetch('/version', {cache: 'no-store'});
+      if (v.ok) { location.reload(); return true; }
+    } catch (e) { /* still down */ }
+  }
+  say(distText('Panel did not come back within 60s - start it from Pinokio.',
+               'The studio did not come back within 60s - use Studio \u2192 Restart Engine.'), 'danger');
+  return false;
 }
 
 // One sentence per state, and it has to be the RIGHT one — telling a user with
@@ -1936,6 +2134,7 @@ Object.assign(globalThis, {
   engineById, defaultEngine, engineStatus, engineServesMode,
   h3ResolveTierKey, h3TierByKey, h3CellFor, h3CurrentCell,
   setH3Upscale, setH3FaceFixAfter, setH3Orientation, setH3Steps, h3TurboPillSub,
+  h3V13State, h3V13On,
   renderH3Turbo, setH3Turbo, syncModeStripToEngine, renderEngineSwitch,
   setH3Speed, h3SpeedOfParams, h3EstimateLine, setH3TriStep, h3TriStepOn, h3TriStepState,
   h3JobSpeedLabel, h3JobShapeLabel, ltxCellEtaBasis, h3CellEtaBasis,
@@ -1954,4 +2153,9 @@ Object.assign(globalThis, {
   renderH3WindowPrompts, toggleH3WindowHelp, setH3ChainPrompts, setH3Tier,
   h3InsertPromptStructure, h3InsertDialogueLine, h3SyncPromptHelper,
   h3CanServe, h3ClipIsH3, syncH3MediaModeUi, h3FmtEtaMin,
+  // The Ingredients chip (characters.js) IS a generation switch when 2.3 is
+  // installed. Module-private, its `typeof` guard read false on every click
+  // and the chip fell through to the "needs LTX-2.3" toast while its own
+  // tooltip said "click to switch".
+  switchLtxGeneration,
 });

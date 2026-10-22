@@ -586,7 +586,7 @@ function sbRenderCast() {
       ? `<img class="chars-avatar-img" src="${escapeHtml(c.sample_image_url)}" alt="">`
       : `<span class="chars-avatar-ph">${escapeHtml((name || '?').charAt(0).toUpperCase())}</span>`;
     return `<button type="button" class="chars-avatar-chip ${active ? 'active' : ''}"
-              onclick="sbPickCast(${JSON.stringify(c.id).replace(/"/g, '&quot;')})"
+              onclick="sbPickCast(${escapeHtml(JSON.stringify(c.id))})"
               title="${escapeHtml(name)}${active ? ' · click to deselect' : ''}">
               ${avatar}<span class="chars-avatar-name">${escapeHtml(name)}</span></button>`;
   }).join('');
@@ -635,7 +635,8 @@ function sbEnginePickerHtml(active) {
     const style = e ? `--eng-accent:${escapeHtml(e.accent)};--eng-dim:${escapeHtml(e.accent_dim)};--eng-soft:${escapeHtml(e.accent_soft)}` : '';
     const title = o.key === 'auto'
         ? 'The plan decides per shot: a shot with one of your trained characters goes to LTX, everything else to Hailuo H3.'
-      : offer ? 'Hailuo H3 isn’t installed yet — install it from the Phosphene sidebar in Pinokio.'
+      : offer ? distText('Hailuo H3 isn’t installed yet — install it from the Phosphene sidebar in Pinokio.',
+                         'Hailuo H3 isn’t available in the Mac app yet.')
       : blocked ? 'This Mac can’t run Hailuo H3.'
       : o.key === 'h3' ? 'Every shot on Hailuo H3 — it renders dialogue, voices and sound with the picture. No trained characters.'
       : 'Every shot on LTX — the built-in engine, and the only one that loads a trained character.';
@@ -650,7 +651,8 @@ function sbEnginePickerNote(active) {
   const h3 = sbH3Installed();
   if (!h3.available) {
     return h3.capable
-      ? 'Hailuo H3 isn’t installed — <b>Install Hailuo H3</b> in the Phosphene sidebar in Pinokio, and this film can use it. Until then every shot renders on LTX.'
+      ? distText('Hailuo H3 isn’t installed — <b>Install Hailuo H3</b> in the Phosphene sidebar in Pinokio, and this film can use it. Until then every shot renders on LTX.',
+                 'Hailuo H3 isn’t available in the Mac app yet, so every shot renders on LTX.')
       : 'This Mac can’t run Hailuo H3, so every shot renders on LTX.';
   }
   if (active === 'h3') return 'Every shot on Hailuo H3 — dialogue, voices and sound rendered with the picture. <b>A trained character can’t come along</b>: H3 loads no LoRAs.';
@@ -674,7 +676,8 @@ function sbSetEngineMode(key, persist) {
     // this opens the SAME card the header switcher opens.
     const card = ((ENGINES || []).find(x => x.id === 'h3') || {}).install_card;
     if (h3.capable && card && typeof window[card] === 'function') { try { window[card](); } catch (e) {} }
-    else if (h3.capable) phosToast('Install Hailuo H3 from the Phosphene sidebar in Pinokio.', {duration: 6000});
+    else if (h3.capable) phosToast(distText('Install Hailuo H3 from the Phosphene sidebar in Pinokio.',
+                                            'Hailuo H3 isn’t available in the Mac app yet.'), {duration: 6000});
     return;
   }
   if (key === 'h3' && _sbCastId) {
@@ -765,7 +768,8 @@ async function sbPlan() {
   } catch (e) { r = { ok: false, error: String(e) }; }
   if (!r.ok) {
     sbPlanBtnReset();
-    phosToast(r.error || 'Planning could not start.', { kind: 'danger', duration: 6000 });
+    // 4.20: the planner's model (Gemma 3) may still be downloading.
+    if (!(typeof packNeededToast === 'function' && packNeededToast(r))) phosToast(r.error || 'Planning could not start.', { kind: 'danger', duration: 6000 });
     return;
   }
   SB.id = r.id;
@@ -890,7 +894,7 @@ async function sbReplan() {
   let r;
   try { r = await (await fetch('/storyboard/plan', { method: 'POST', body: fd })).json(); }
   catch (e) { r = { ok: false, error: String(e) }; }
-  if (!r.ok) { phosToast(r.error || 'Re-plan could not start.', { kind: 'danger', duration: 6000 }); return; }
+  if (!r.ok) { if (!(typeof packNeededToast === 'function' && packNeededToast(r))) phosToast(r.error || 'Re-plan could not start.', { kind: 'danger', duration: 6000 }); return; }
   sbShow('planning'); sbSetPlanningStage('load'); sbLoad(SB.id);
 }
 
@@ -914,7 +918,7 @@ async function sbTryAgain() {
   let r;
   try { r = await (await fetch('/storyboard/plan', { method: 'POST', body: fd })).json(); }
   catch (e) { r = { ok: false, error: String(e) }; }
-  if (!r.ok) { phosToast(r.error || 'Planning could not start.', { kind: 'danger', duration: 6000 }); return; }
+  if (!r.ok) { if (!(typeof packNeededToast === 'function' && packNeededToast(r))) phosToast(r.error || 'Planning could not start.', { kind: 'danger', duration: 6000 }); return; }
   sbShow('planning'); sbSetPlanningStage('load'); sbLoad(SB.id);
 }
 
@@ -1499,8 +1503,13 @@ function sbShotGridTile(s) {
   const gradeDot = s.grade
     ? `<span class="sb-grid-grade sb-grid-grade-${escapeHtml(s.grade)}">${{ keep: 'K', reroll: 'R', cut: 'C' }[s.grade] || ''}</span>`
     : '';
+  // `#t=0.1` on every thumbnail <video preload="metadata">: WebKit (Safari and
+  // the Mac app's WKWebView) stops at the metadata and paints NOTHING until a
+  // frame is asked for; Chrome happens to decode the first one anyway. The
+  // Editor's media pool learned this first (edPoolPaint); these three tiles
+  // were the ones still blank in the app.
   const thumb = clip
-    ? `<video class="sb-grid-thumb" preload="metadata" muted playsinline src="/file?path=${encodeURIComponent(clip)}"></video>`
+    ? `<video class="sb-grid-thumb" preload="metadata" muted playsinline src="/file?path=${encodeURIComponent(clip)}#t=0.1"></video>`
     : `<div class="sb-grid-thumb sb-grid-thumb-empty" aria-hidden="true"></div>`;
   return `<li class="sb-grid-tile" data-n="${n}" onclick="sbGridTileOpen(${n})" role="button" tabindex="0"
       title="${escapeHtml((s.title || s.prompt || '').slice(0, 140))}">
@@ -1656,7 +1665,7 @@ function sbShotCard(s, r, errs) {
     <div class="sb-shot-out car-card is-stale">
       <div class="car-thumb-wrap" onclick="selectOutput('${escapeHtml(stale)}')">
         <video class="car-thumb" preload="metadata" muted playsinline
-               src="/file?path=${encodeURIComponent(stale)}"></video>
+               src="/file?path=${encodeURIComponent(stale)}#t=0.1"></video>
       </div>
       <div class="info"><span class="name">${escapeHtml(stale.split('/').pop())}</span>
         <span class="sub"><span class="sb-stale-tag">old take</span> · rewritten, not rendered yet</span></div>
@@ -1664,7 +1673,7 @@ function sbShotCard(s, r, errs) {
     <div class="sb-shot-out car-card">
       <div class="car-thumb-wrap" onclick="sbOpenShotClip(${n})">
         <video class="car-thumb" preload="metadata" muted playsinline
-               src="/file?path=${encodeURIComponent(clip)}"
+               src="/file?path=${encodeURIComponent(clip)}#t=0.1"
                onmouseenter="this.currentTime=0;this.playbackRate=0.6;this.play().catch(()=>{})"
                onmouseleave="this.pause();this.currentTime=2.5"></video>
       </div>
@@ -2444,7 +2453,7 @@ async function sbRewrite() {
   let r;
   try { r = await (await fetch('/storyboard/replan-shots', { method: 'POST', body: fd })).json(); }
   catch (e) { r = { ok: false, error: String(e) }; }
-  if (!r.ok) { phosToast(r.error || 'Could not start the rewrite.', { kind: 'danger', duration: 6000 }); return; }
+  if (!r.ok) { if (!(typeof packNeededToast === 'function' && packNeededToast(r))) phosToast(r.error || 'Could not start the rewrite.', { kind: 'danger', duration: 6000 }); return; }
   sbShow('planning'); sbSetPlanningStage('load'); sbLoad(SB.id);
 }
 
@@ -2728,7 +2737,7 @@ function sbBoardRowMenu(b, where) {
 // The FULL board-list screen's row: thumbnail, date, rename, duplicate.
 function sbBoardRow(b) {
   const thumb = b.thumb
-    ? `<video class="sb-board-thumb" preload="metadata" muted playsinline src="/file?path=${encodeURIComponent(b.thumb)}"></video>`
+    ? `<video class="sb-board-thumb" preload="metadata" muted playsinline src="/file?path=${encodeURIComponent(b.thumb)}#t=0.1"></video>`
     : `<span class="sb-board-thumb sb-board-thumb-empty" aria-hidden="true"></span>`;
   const when = sbFmtAgo(b.updated_at || b.created_at);
   return `

@@ -9,7 +9,16 @@
 //                  it doesn't (self-healing — see that step's note)
 //   - uv pip:      idempotent (already-installed packages are no-ops)
 //   - patch:       patch_ltx_codec.py is idempotent + fails loud on drift
-//   - hf download: resumes partial files, skips intact ones
+//   - downloads:   resume partial files, skip intact ones
+//
+// 4.20 - START COMES FIRST. This script now downloads only what a first render
+// needs (~27.5 GB: required_files.json -> install.before_start) and then ends,
+// so Pinokio offers Start. Gemma 3 (Enhance + the Storyboard planner) and the
+// IC-LoRAs (~10.7 GB, install.after_start) are queued in
+// state/install_deferred.json and the PANEL downloads them in the background
+// after the first boot - resumable, one at a time, with progress in the panel.
+// Until 4.20 all ~38 GB came first, with no size, no time and no disk check,
+// and about 4 in 5 Pinokio install starts never reached a first boot.
 //
 // If the user's first install died after the venv was created but before
 // the model downloads, hitting Resume Install picks up exactly where it
@@ -31,7 +40,7 @@ module.exports = {
       when: "{{platform !== 'darwin' || arch !== 'arm64'}}",
       method: "notify",
       params: {
-        html: "<b>MacStudioMLX requires an Apple Silicon Mac (M1 or newer).</b><br>It will not run on Intel Macs, Linux, or Windows."
+        html: "<b>MacStudioMLX requires an Apple Silicon Mac (M1 or newer).</b><br>It will not run on Intel Macs or Windows. Linux on Apple Silicon (M1/M2) installs outside Pinokio: run <code>bash scripts/linux/install.sh</code> in the app folder."
       },
       next: null
     },
@@ -67,6 +76,27 @@ module.exports = {
           panel_uploads: "panel_uploads",
           state:         "state"
         }
+      }
+    },
+
+    // ---- Size, time and disk, BEFORE anything big (4.20) -------------------
+    // Say what is coming, then check the disk can hold it. The numbers in this
+    // notify are the install plan's own (install_plan.py over
+    // required_files.json -> install); test_install_deferred.py fails the
+    // build when they drift. The preflight runs after fs.link on purpose: it
+    // measures the drive mlx_models/ really lands on, which fs.link may have
+    // put on another volume. It stops the install (exit 1) only when the free
+    // space is KNOWN to be short, and says by how much.
+    {
+      method: "notify",
+      params: {
+        html: "<b>Installing Phosphene.</b> About <b>27.5 GB</b> downloads before you can click Start: <b>~37 min at 100 Mbps</b>, ~12 min at 300 Mbps, ~4 min at 1 Gbps, plus a few minutes to set up Python. Needs about <b>32.5 GB free</b> - the next step checks.<br><br>After Start, <b>10.7 GB</b> more (what Enhance and the Storyboard planner run on, and the Upscale & Face Fix, Control, Ingredients and Colorize adapters) downloads in the background inside the panel while you work. Everything resumes if interrupted."
+      }
+    },
+    {
+      method: "shell.run",
+      params: {
+        message: "bash scripts/pinokio/install_preflight.sh"
       }
     },
 
@@ -358,10 +388,17 @@ module.exports = {
     // Patch script exits non-zero if it can't find expected text — that
     // surfaces upstream-restructure problems instead of silently shipping
     // broken installs to users (deep-review recommendation).
+    //
+    // 4.20 - ...in a shell Pinokio actually obeys: Pinokio 8.2 ignores a step's
+    // exit code and stops only on /error:/i or /errno /i in its OUTPUT, and the
+    // patch's failure banner has neither. scripts/pinokio/must.sh runs the
+    // command unchanged and adds a "FATAL error:" line when it exits non-zero.
+    // (Every script this file dispatches does the same for its own refusals;
+    // scripts/check_pinokio_scripts.js fails the build for a call that cannot.)
     {
       method: "shell.run",
       params: {
-        message: ["./ltx-2-mlx/env/bin/python3.11 patch_ltx_codec.py"]
+        message: ["bash scripts/pinokio/must.sh 'The video codec patch did not apply - click Install again; if it repeats, report the lines above' ./ltx-2-mlx/env/bin/python3.11 patch_ltx_codec.py"]
       }
     },
 
@@ -393,7 +430,7 @@ module.exports = {
       method: "shell.run",
       params: {
         message: [
-          "./ltx-2-mlx/env/bin/python3.11 -c \"import ltx_core_mlx, ltx_pipelines_mlx, mlx\""
+          "bash scripts/pinokio/must.sh 'The video engine packages cannot be loaded - click Install again to rebuild them' ./ltx-2-mlx/env/bin/python3.11 -c \"import ltx_core_mlx, ltx_pipelines_mlx, mlx\""
         ]
       }
     },
@@ -416,18 +453,13 @@ module.exports = {
     //      split_model.json to resolve transformer-distilled.safetensors.
     //      Symlink was a workaround for the dcd639e pin we no longer use.) ----
 
-    // ---- Download Gemma 4-bit text encoder (~6 GB) ------------------------
-    {
-      method: "shell.run",
-      params: {
-        venv: "env",
-        path: "ltx-2-mlx",
-        env: { HF_HUB_ENABLE_HF_TRANSFER: "1" },
-        message: [
-          "hf download mlx-community/gemma-3-12b-it-4bit --local-dir ../mlx_models/gemma-3-12b-it-4bit"
-        ]
-      }
-    },
+    // ---- Gemma 3 is NOT downloaded here any more (4.20) --------------------
+    // It was the first big download of every install (8.07 GB measured, the
+    // registry said 6) and nothing RENDERS with it: it is LTX-2.3's text
+    // encoder and what Enhance and the Storyboard planner run on. It is
+    // install.after_start now - the panel fetches it in the background after
+    // the first boot, and Enhance / the planner say "downloading" (or offer
+    // Download now) until it lands instead of failing.
 
     // ---- Download LTX-2.5, the DEFAULT generation (~28 GB) ----------------
     // SHIP-BLOCKER, closed 2026-08-12. LTX-2.5 became the default generation
@@ -459,7 +491,7 @@ module.exports = {
     {
       method: "notify",
       params: {
-        html: "<b>Downloading LTX-2.5 (~27 GB)…</b><br>The engine and its text encoder — this is what the panel renders with. Resumable: if this stops, run Install again and it picks up where it left off.<br><br>A full install is about <b>37 GB</b>: this, the Gemma 3 language model that Enhance and the Storyboard planner run on, and three small control LoRAs. <b>LTX-2.3 is no longer downloaded</b> — it is only needed to TRAIN a character, and the panel offers it in Settings → Models the moment you want it."
+        html: "<b>Downloading LTX-2.5 (27.5 GB)…</b><br>The engine and its text encoder — this is what the panel renders with, and the last big download before Start. Resumable: if this stops, run Install again and it picks up where it left off.<br><br><b>LTX-2.3 is not downloaded</b> — it is only needed to TRAIN a character, and the panel offers it in Settings → Models the moment you want it."
       }
     },
     {
@@ -506,74 +538,21 @@ module.exports = {
       }
     },
 
-    // ---- Colorize IC-LoRA (~0.3 GB, un-gated community weights) -----------
-    // Powers the Colorize restore mode (B&W clip → color). UN-GATED, so no
-    // HF token is needed — but BEST-EFFORT regardless: a network hiccup (or a
-    // future gating change) must NEVER fail the core video install. The panel
-    // surfaces the same Repair path if the file didn't land, and the worker
-    // falls back to resolving the repo id at first use. Lands the file at
-    // mlx_models/loras/ic/ (matches required_files.json → repos[ic_colorize]
-    // + CURATED_LORAS["colorize"].local_path).
+    // ---- Queue the extras for the panel (4.20) ------------------------------
+    // The three IC-LoRA fetches that stood here (Colorize 0.33 GB, Ingredients
+    // 1.31 GB, Control 0.65 GB - used by roughly 1-6% of renderers) are
+    // install.after_start now, with Gemma 3 and the Upscale & Face Fix adapter.
+    // This step writes state/install_deferred.json naming whichever of them is
+    // not on disk; the panel downloads them in the background after the first
+    // boot, one at a time, never taking the drive below 10 GB free. The marker
+    // is the ONLY trigger: Update never writes one, so an existing install is
+    // never handed a download it did not ask for. Each mode still self-serves
+    // on first use (and Settings -> Models offers every pack) if a background
+    // fetch has not landed. Never fails the install.
     {
       method: "shell.run",
       params: {
-        venv: "env",
-        path: "ltx-2-mlx",
-        env: { HF_HUB_ENABLE_HF_TRANSFER: "1" },
-        message: [
-          "echo 'Fetching the Colorize IC-LoRA (restore mode, ~0.3 GB, optional)…' && \\",
-          "hf download DoctorDiffusion/LTX-2.3-IC-LoRA-Colorizer --local-dir ../mlx_models/loras/ic --include 'LTX-2.3-22b-IC-LoRA-Colorizer-0.9.safetensors' \\",
-          "|| echo 'WARN: Colorize IC-LoRA fetch failed — video + image still work; the Colorize mode will fetch it on first use, or click Repair.'"
-        ].join("\n")
-      }
-    },
-
-    // ---- Ingredients IC-LoRA (~1.3 GB, un-gated mirror) -------------------
-    // Powers the flagship Ingredients mode (2-8 refs → one composed clip).
-    // The official Lightricks weight is GATED; DeepBeepMeep/LTX-2 carries the
-    // BYTE-IDENTICAL file un-gated, so no HF token is needed. BEST-EFFORT: a
-    // hiccup must never fail the core video install. CRITICAL: --include pulls
-    // ONLY the one ingredients file — DeepBeepMeep/LTX-2 is a ~708 GB mega-repo,
-    // so a bare `hf download` of it would be catastrophic. The worker falls
-    // back to a targeted single-file fetch at first use; the panel surfaces
-    // Repair. Lands the file at mlx_models/loras/ic/ (matches
-    // required_files.json → repos[ic_ingredients] +
-    // CURATED_LORAS["ingredients"].local_path).
-    {
-      method: "shell.run",
-      params: {
-        venv: "env",
-        path: "ltx-2-mlx",
-        env: { HF_HUB_ENABLE_HF_TRANSFER: "1" },
-        message: [
-          "echo 'Fetching the Ingredients IC-LoRA (multi-reference mode, ~1.3 GB, optional)…' && \\",
-          "hf download DeepBeepMeep/LTX-2 --local-dir ../mlx_models/loras/ic --include 'ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors' \\",
-          "|| echo 'WARN: Ingredients IC-LoRA fetch failed — video + image still work; the Ingredients mode will fetch it on first use, or click Repair.'"
-        ].join("\n")
-      }
-    },
-
-    // ---- Control (Union) IC-LoRA (~0.65 GB, OFFICIAL + un-gated) ----------
-    // Powers the Control mode (drive motion/structure/composition from a
-    // control video). This is the OFFICIAL Lightricks weight AND it is UN-GATED
-    // + public, so — unlike Ingredients — no token, no mirror, no mega-repo
-    // workaround: a plain single-file `hf download --include`, exactly like the
-    // Colorize fetch above. BEST-EFFORT: a hiccup must never fail the core
-    // video install. The worker falls back to resolving the repo id at first
-    // use; the panel surfaces Repair. Lands the file at mlx_models/loras/ic/
-    // (matches required_files.json → repos[ic_union_control] +
-    // CURATED_LORAS["union-control"].local_path).
-    {
-      method: "shell.run",
-      params: {
-        venv: "env",
-        path: "ltx-2-mlx",
-        env: { HF_HUB_ENABLE_HF_TRANSFER: "1" },
-        message: [
-          "echo 'Fetching the Control IC-LoRA (Union, control mode, ~0.65 GB, optional)…' && \\",
-          "hf download Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control --local-dir ../mlx_models/loras/ic --include 'ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors' \\",
-          "|| echo 'WARN: Control IC-LoRA fetch failed — video + image still work; the Control mode will fetch it on first use, or click Repair.'"
-        ].join("\n")
+        message: "./ltx-2-mlx/env/bin/python3.11 install_plan.py defer || echo 'WARN: could not queue the extras - Settings -> Models offers each one.'"
       }
     },
 
@@ -581,7 +560,7 @@ module.exports = {
     {
       method: "notify",
       params: {
-        html: "<b>MacStudioMLX installed</b> — video + image generation (incl. Ideogram 4).<br>Click <b>Start</b> to launch the panel, then <b>Open Panel</b>."
+        html: "<b>MacStudioMLX is ready.</b> Click <b>Start</b>, then <b>Open Panel</b> - you can render right away.<br>The extras (Enhance and the Storyboard planner, plus the Upscale & Face Fix, Control, Ingredients and Colorize adapters) download in the background inside the panel; it shows their progress and says when each one is ready."
       }
     }
   ]

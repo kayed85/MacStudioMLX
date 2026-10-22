@@ -55,9 +55,11 @@ def _helper_run(spec: dict, timeout: float):
     render when it is taken."""
     if not P._GPU_LOCK.acquire(timeout=3.0):
         raise RuntimeError("A render is using the GPU right now — try again when it finishes.")
+    P.gpu_gate_mark("lyrics")
     try:
         return P.HELPER.run(spec, timeout=timeout)
     finally:
+        P.gpu_gate_unmark()
         P._GPU_LOCK.release()
 
 P = None  # the running mlx_ltx_panel module; assigned at wiring time
@@ -120,6 +122,10 @@ def _queue(form: dict) -> dict:
 
 @post("/music/variation")
 def post_music_variation(h, path, qs, ctype) -> None:
+    # 4.19.8: YuE2 is CC BY-NC - its licence screen first (model_licences.py).
+    _lic = P.licence_refusal_for("yue2")
+    if _lic:
+        h._json(_lic, 451); return
     _rb = h._read_form_body()
     if _rb is None:
         return
@@ -181,6 +187,10 @@ def post_music_variation(h, path, qs, ctype) -> None:
 
 @post("/music/transcribe")
 def post_music_transcribe(h, path, qs, ctype) -> None:
+    # 4.19.8: YuE2 is CC BY-NC - its licence screen first (model_licences.py).
+    _lic = P.licence_refusal_for("yue2")
+    if _lic:
+        h._json(_lic, 451); return
     """Get the score of a recording. A queue job like any other so it never
     races a render for the GPU; the result is fetched by job id."""
     _rb = h._read_form_body()
@@ -251,6 +261,10 @@ def get_music_score(h, parsed) -> None:
 
 @post("/music/score/render")
 def post_music_score_render(h, path, qs, ctype) -> None:
+    # 4.19.8: YuE2 is CC BY-NC - its licence screen first (model_licences.py).
+    _lic = P.licence_refusal_for("yue2")
+    if _lic:
+        h._json(_lic, 451); return
     """Render an EDITED score. The text is written into the studio's own
     tree and the job points there; the worker refuses any other path."""
     _rb = h._read_form_body()

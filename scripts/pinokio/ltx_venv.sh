@@ -11,8 +11,17 @@
 #
 # SEMANTICS: the original was a "\n"-joined string message, so it ran WITHOUT
 # `set -e` and the step's exit code was the LAST command's. Preserved here —
-# no `set -e`, same line order, same final command. The only intentional exit
-# is the macOS preflight's `exit 1`.
+# no `set -e`, same line order. The intentional exits are the macOS preflight's
+# and the final "does the new interpreter run" check; both end in `exit 1`
+# AFTER a "FATAL error:" line.
+#
+# HOW A FAILURE STOPS THE INSTALL (4.20). Pinokio 8.2 ignores a shell.run step's
+# exit code; it stops a script only when the step's OUTPUT matches /error:/i or
+# /errno /i (pinokiod kernel/shells.js default `on` handlers). So every real
+# failure here prints one "FATAL error: <reason + what to do>" line. Before,
+# both refusals printed a banner with neither word and the install marched on
+# to a 37 GB download with no venv. post_update.sh calls this file through
+# `require`, which stops the Update itself.
 #
 # WHY IT IS NOT GATED ON `when: !exists(env)`. `uv venv` builds the interpreter
 # as a symlink chain into Pinokio's SHARED managed Python:
@@ -48,6 +57,7 @@ echo '=== install diagnostics: venv create ==='
 MACOS_VER=$(sw_vers -productVersion 2>/dev/null)
 MACOS_MAJOR=$(echo "$MACOS_VER" | cut -d. -f1)
 if echo "$MACOS_MAJOR" | grep -qE '^[0-9]+$' && [ "$MACOS_MAJOR" -lt 14 ]; then
+  echo "FATAL error: Phosphene needs macOS 14 (Sonoma) or newer - this Mac is on macOS $MACOS_VER. Update macOS in System Settings > General > Software Update, then click Install again."
   echo '=================================================================='
   echo "PHOSPHENE CANNOT INSTALL ON macOS $MACOS_VER"
   echo 'Phosphene needs macOS 14 (Sonoma) or newer.'
@@ -69,4 +79,11 @@ uv venv --python 3.11 --seed env
 echo '=== venv created ==='
 ls -la env/bin/python* 2>&1 || echo 'venv create FAILED'
 env/bin/python --version || echo 'venv python NOT executable'
+# THE VENV MUST RUN, or nothing after this can. `uv venv` failing (no network
+# the first time - it downloads Python 3.11 - a full disk, uv not on PATH) used
+# to print 'venv create FAILED' and march on into every pip step.
+if ! env/bin/python3.11 -c 'import sys' >/dev/null 2>&1; then
+  echo 'FATAL error: the Python 3.11 environment for the video engine could not be created. Check your internet connection and free disk space (it downloads Python the first time), then click Install again - nothing already downloaded is lost.'
+  exit 1
+fi
 fi

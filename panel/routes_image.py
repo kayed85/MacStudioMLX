@@ -438,12 +438,16 @@ def get_agent_image_config(h, parsed) -> None:
     })
 
 
-# ====== Hailuo H3 Turbo — install the runner-layout adapter on demand.
-# This currently fails closed with the exact publication requirement;
-# _h3_install_turbo must not fetch a raw LightX2V file as a substitute.
+# ====== Hailuo H3 Turbo — install the managed Turbo adapter on demand
+# (digest-pinned, from its author's repo; _h3_install_turbo must never fetch
+# a raw LightX2V file as a substitute).
 @post("/h3/turbo/install")
 def post_h3_turbo_install(h, path, qs, ctype) -> None:
     P.h3_status_invalidate()   # the 3 s /status memo must not outlive an install action
+    # The Turbo adapters are MiniMax H3 Model Derivatives: same licence screen.
+    _lic = P.licence_refusal_for("h3")
+    if _lic:
+        h._json(_lic, 451); return
     result = P._h3_install_turbo(P.push)
     if not result.get("ok"):
         h._json(result, 409 if "active" in result.get("error", "") else 400)
@@ -456,7 +460,26 @@ def post_h3_turbo_install(h, path, qs, ctype) -> None:
 @post("/h3/tristep/install")
 def post_h3_tristep_install(h, path, qs, ctype) -> None:
     P.h3_status_invalidate()
+    _lic = P.licence_refusal_for("h3")
+    if _lic:
+        h._json(_lic, 451); return
     result = P._h3_install_tristep(P.push)
+    if not result.get("ok"):
+        h._json(result, 409 if "active" in result.get("error", "") else 400)
+        return
+    h._json(result, 202)
+
+
+# ====== Hailuo H3 · lightx2v v1.3 (Best at High) — fetch LightX2V's original
+# file (pinned revision + sha256) and build the runner layout locally.
+@post("/h3/v13/install")
+def post_h3_v13_install(h, path, qs, ctype) -> None:
+    P.h3_status_invalidate()
+    # An H3 Model Derivative: the same licence screen as H3 itself.
+    _lic = P.licence_refusal_for("h3")
+    if _lic:
+        h._json(_lic, 451); return
+    result = P._h3_install_v13(P.push)
     if not result.get("ok"):
         h._json(result, 409 if "active" in result.get("error", "") else 400)
         return
@@ -611,6 +634,10 @@ def post_image_agent(h, path, qs, ctype) -> None:
     except Exception as exc:  # noqa: BLE001
         h._json({"ok": False, "error": f"could not build job: {exc}"}, 400)
         return
+    # 4.19.8: a model whose licence asks for an "I accept" (model_licences.py).
+    _lic = P.job_licence_refusal(job.get("params") or {})
+    if _lic:
+        h._json(_lic, 451); return
     with P.QUEUE_COND:
         P.STATE["queue"].append(job)
         P.QUEUE_COND.notify_all()
@@ -793,6 +820,11 @@ def post_image_generate(h, path, qs, ctype) -> None:
         cfg = P._build_image_engine_config(engine_override, form=payload)
     except ValueError as e:
         h._json({"error": str(e)}, 400); return
+    # 4.19.8: a non-commercial image model (Ideogram 4, FLUX.1 Krea [dev],
+    # Bria FIBO) runs only after its licence screen was accepted on this Mac.
+    _lic = P.licence_refusal_for(P.model_licences.licence_for_image_cfg(cfg))
+    if _lic:
+        h._json(_lic, 451); return
 
     # Output dir: panel_uploads/library/manual/<YYYYMMDD>/<unix_ms>/
     # — date-bucketed for directory hygiene PLUS a per-request
@@ -819,6 +851,7 @@ def post_image_generate(h, path, qs, ctype) -> None:
                      "image generation is paused until it finishes (they'd "
                      "contend for GPU memory). Try again once it completes.",
         }, 429); return
+    P.gpu_gate_mark("image")
     t0 = P.time.time()
     try:
         try:
@@ -843,6 +876,7 @@ def post_image_generate(h, path, qs, ctype) -> None:
         except ValueError as e:
             h._json({"error": str(e)}, 400); return
     finally:
+        P.gpu_gate_unmark()
         P._GPU_LOCK.release()
     elapsed = round(P.time.time() - t0, 2)
 

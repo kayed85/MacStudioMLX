@@ -387,6 +387,11 @@ L13 NEVER WRITE SPEECH THE VIEWER CANNOT HEAR. A shot is SPOKEN, SUNG or SILENT,
     invents mouth noise. If the beat needs him to brief the unit, WRITE THE LINE. If it
     does not, show him working the map in silence and put footsteps, wind, paper and radio
     static in the soundscape instead.
+L14 A LINE PUTS NOTHING ON SCREEN. Whatever a line talks about appears in the picture if
+    the description names it anywhere, so the description names only what the viewer
+    should see: "I left my umbrella on the train" is said in an empty hallway, and the
+    description never mentions an umbrella or a train. Inside <d> use only , . ? and ! -
+    never "..." (it slurs the line).
 """
 
 _H3_EXAMPLES = """\

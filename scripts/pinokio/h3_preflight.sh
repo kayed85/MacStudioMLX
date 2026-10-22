@@ -12,6 +12,14 @@
 # The `echo 'free disk space:' && df -h .` that followed it stays in
 # install_h3.js as its own array element (its own shell, ~25 chars).
 #
+# HOW A REFUSAL STOPS THE INSTALL (4.20). Pinokio 8.2 ignores a shell.run step's
+# exit code; it stops a script only when the step's OUTPUT matches /error:/i or
+# /errno /i (pinokiod kernel/shells.js default `on` handlers). Both refusals
+# below used to print a banner with neither word, so install_h3.js carried on
+# and started the 75 GB download on a Mac that had just said it could not take
+# it. Each now opens with one "FATAL error:" line (the banner stays as the
+# long form).
+#
 # FAIL-OPEN BY DESIGN: if sysctl is missing or unparseable we PROCEED. A
 # preflight that can't read the hardware must never be the thing that blocks an
 # otherwise-fine install.
@@ -25,9 +33,11 @@
 # sync with `H3_MIN_BYTES` in pinokio.js and `H3_MIN_RAM_GB_Q8` in
 # mlx_ltx_panel.py — one number, three files.
 
-MEM_BYTES=$(sysctl -n hw.memsize 2>/dev/null)
+# Linux has no hw.memsize; MemTotal (kB) is the same number there.
+MEM_BYTES=$(sysctl -n hw.memsize 2>/dev/null || awk '/^MemTotal:/ {printf "%.0f\n", $2 * 1024}' /proc/meminfo 2>/dev/null)
 if echo "$MEM_BYTES" | grep -qE '^[0-9]+$' && [ "$MEM_BYTES" -lt 36000000000 ]; then
   MEM_GB=$((MEM_BYTES / 1000000000))
+  echo "FATAL error: Hailuo H3 needs a Mac with at least 36 GB of memory (this Mac has ${MEM_GB} GB). Nothing was downloaded - keep using the built-in LTX engine."
   echo '=================================================================='
   echo "HAILUO H3 NEEDS AT LEAST A 36 GB MAC (this Mac has ${MEM_GB} GB)"
   echo 'Even the reduced-RAM Q8 engine peaks around 25.6 GiB while rendering;'
@@ -89,6 +99,7 @@ AVAIL_KB=$(df -Pk "$_PF_DF_AT" 2>/dev/null | awk 'NR==2 {print $4}')
 if echo "$AVAIL_KB" | grep -qE '^[0-9]+$'; then
   AVAIL_GB=$((AVAIL_KB / 1024 / 1024))
   if [ "$AVAIL_GB" -lt "$NEED_GB" ]; then
+    echo "FATAL error: Hailuo H3 needs about ${NEED_GB} GB of free disk space (this Mac has ${AVAIL_GB} GB free). Nothing was downloaded - free up space, then click Install again."
     echo '=================================================================='
     echo "HAILUO H3 NEEDS ~${NEED_GB} GB FREE (this Mac has ${AVAIL_GB} GB free)"
     echo "That covers ${NEED_WHY}."

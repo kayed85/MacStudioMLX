@@ -223,10 +223,13 @@ including image and training jobs.
 | `lora_kinds` | string | `"style"` | Closed vocabulary: `none` / `style` / `character` / `mixed` |
 | `character_used` | bool | `true` | A cast character drove this render |
 | `audio_mode` | string | `"joint"` | `joint` / `none` (external audio replaces the generated track) / `a2v_dub` / `h3_native` |
+| `h3_sampler` | string | `"v13"` | 4.19.11 — H3 renders only: which sampler ran. **Closed vocabulary**: `best` (the full sampler), `fast`, `turbo`, `v13` (lightx2v v1.3 on Best at High). Keeps the timing lanes apart, which `steps` alone cannot |
 | `first_render` | bool | `true` | Present once per install, on its first successful render ever — the activation funnel without a join |
 | `gpu_steps` | string | `"short"` | 4.17.5 — present only when the render ran in **short GPU steps** (one Metal op per command buffer), the path a macOS GPU-watchdog kill switches a setting to. Closed vocabulary: `short`. Absent = default steps. Answers "does the short path stop the watchdog loop" |
 | `watchdog_retry` | bool | `true` | 4.17.5 — present only when a GPU-watchdog kill was re-run inside the same job (once, on short steps). On `render_completed` it means the retry saved the render |
 | `watchdog_phase` | string | `"load"` | 4.17.5 — present only when macOS's GPU watchdog stopped this job (on `render_completed`, the run that was then re-run): which phase the GPU was in, from the helper's own step lines. **Closed vocabulary**: `encode` (Gemma prompt encoding), `load` (the transformer loading), `denoise`, `decode` |
+| `gpu_abort_retry` | bool | `true` | 4.19.6 — present only when a GPU abort that was not the watchdog (crash_line `gpu_internal` / `gpu_victim` / `gpu_other`) stopped prompt encoding and the job was re-run once in a fresh engine process after a pause. On `render_completed` it means the re-run saved the render |
+| `helper_warm` | bool | `false` | 4.19.6 — LTX renders that ran in the warm engine process: `true` when the (last) run started in a process that had already finished a render, `false` when it started fresh. Absent for engines that do not use it. Tells whether prompt-encoding GPU aborts follow a warm process |
 | `source` | string | `"storyboard"` | v4.9.7 — which surface queued the job. **Closed vocabulary**: `form`, `batch`, `storyboard`, `characters`, `image_studio`, `retry`, `api`, `chain` (an Upscale ×2 queued automatically behind an H3 draft), `unknown`. Makes "how much of the rendering is Storyboard" a one-click breakdown |
 
 ### `render_failed`
@@ -238,6 +241,8 @@ Same as `render_completed` (minus `first_render`), plus:
 | `error_class` | string | `"metal_watchdog"` | **A closed 19-value taxonomy** (`refused`, `oom_jetsam`, `metal_watchdog`, `metal_oom`, `native_crash`, `helper_start_timeout`, `helper_exit`, `model_missing`, `model_corrupt`, `download_failed`, `venv_broken`, `bad_params`, `input_missing`, `file_missing`, `disk_full`, `export_failed`, `timeout`, `cancelled_race`, `other`). Classification runs on the original error text locally; **only the class leaves the machine.** `refused` is in the taxonomy but never rides on a `render_failed` event — it is the value that routes the event to `render_refused` instead, below |
 | `error_fingerprint` | string | `"a3f09c21e7b4"` | Only when `error_class` is `other`: 12 hex chars of the SHA-256 of the already-scrubbed first line. Lets "the same unknown error, 17 times, all on M1 Max" be counted without transmitting the text — the readable line stays in your own `state/usage-log.jsonl` |
 | `error_signature` | string | `"RuntimeError: helper exited before first frame"` | **The only free-text field the panel sends**, see the scrubbing rules below. Kept for ONE transition release alongside `error_class`, then removed |
+| `crash_line` | string | `"gpu_timeout"` | 4.19.2 — only when the LTX render helper died from a signal (SIGABRT, SIGSEGV, …): the **class** of the last native error line it printed, never the line. **Closed vocabulary**: `gpu_timeout`, `gpu_interactivity` (the two GPU-watchdog names), `gpu_hang`, `gpu_page_fault`, `gpu_oom`, `gpu_victim`, `gpu_internal`, `gpu_submissions_ignored`, `gpu_invalid_resource`, `gpu_not_permitted`, `gpu_device_removed` (4.19.4 - the remaining IOGPU/Metal command-buffer error names, split out of `gpu_other`), `gpu_other` (any other Metal command-buffer error), `resource_limit`, `cxx_exception`, `assertion`, `none` (no such line reached the panel). Why: until 4.19.2 the generic SIGABRT sentence quoted the watchdog line as an example, so every unexplained abort was counted as `metal_watchdog` (24 of 4.19.1's 37); those now count as `native_crash`, and this says what they were |
+| `crash_phase` | string | `"start"` | 4.19.2 — same condition as `crash_line`: how far the helper got, from its own step lines. **Closed vocabulary**: `encode`, `load`, `denoise`, `decode` (as `watchdog_phase`), `start` (before its first step line) |
 | `train_error` | string | `"oom"` | 4.19.1 — only on a failed **training** job (`mode: train`): why it stopped. **Closed vocabulary**: `oom` (MLX/Metal could not allocate, or macOS killed the trainer with SIGKILL), `missing_file` (incl. the LTX-2.3 training weights not downloaded: the trainer now checks them first and stops within seconds), `caption_check` (the captions carry another trigger), `disk_full`, `import_error` (the venv is missing a package), `nan_loss` (the loss stopped being a number for 10 steps in a row; the trainer now stops there), `other`. The trainer classifies its own exception by TYPE first and then by MLX's fixed allocation-failure fragments (`lora_lab/failure.py`), sends the word in its `error` event, and the panel forwards it only if it is on this list. Never a path, caption, trigger or message: those stay in the Logs tab and `<dataset>/train.log`. Before 4.19.1 every one of these reached the fleet as `helper_exit` + "training exited with code 1"; that sentence and its `error_class` are unchanged, so the old series continues and `train_error` splits it |
 
 Cancelled jobs are **not** reported — a user cancelling is not a signal about
@@ -287,7 +292,7 @@ The surfaces render events cannot see. One event per action, no free text.
 
 | prop | type | example | why |
 |---|---|---|---|
-| `feature` | string | `"storyboard_plan"` | **Closed vocabulary**: `storyboard_plan`, `storyboard_export`, `editor_open`, `editor_export`, `civitai_download`, `sample_character`, `train_start`, `enhance_prompt`, `train_refused`. Unknown names are dropped locally, never sent. `train_start` fires only past `/train/start`'s RAM refusal (SYS-41) — a refused click counts as `train_refused` with `detail: "ram"` instead |
+| `feature` | string | `"storyboard_plan"` | **Closed vocabulary**: `storyboard_plan`, `storyboard_export`, `editor_open`, `editor_export`, `civitai_download`, `sample_character`, `train_start`, `enhance_prompt`, `train_refused`, `enhance_prompt` is sent by the server when an Enhance succeeds, with the mode (`t2v`, `i2v`, `a2v`) as `detail` (from 2026-10-19; before that nothing sent it, so earlier zeros mean unmeasured, not unused). `share` (the clip toolbar's Share: a caption with the Phosphene link copied and the file selected in Finder; only that the button was used is sent, never which clip). Unknown names are dropped locally, never sent. `train_start` fires only past `/train/start`'s RAM refusal (SYS-41) — a refused click counts as `train_refused` with `detail: "ram"` instead |
 | `detail` | string | `"nle"` | Optional, lowercase `[a-z0-9_.-]` only, ≤32 chars — a sub-choice within the feature |
 | `version` | string | `"4.9.7"` | As on `app_boot` |
 
@@ -317,6 +322,14 @@ never seen again. Between `app_installed` and the first `render_*` the panel
 said nothing, so *"they tried and it was broken"* and *"they looked and left"*
 were the same shape in the data. These events tell those apart.
 
+**`first_use` (growth pass, 2026-10-19).** Pinokio auto-runs Start the moment
+the install finishes, so `first_boot` can fire with nobody at the screen. In
+the 2026-09-20 → 10-11 cohorts, 20% of new installs booted once and never
+rendered, and three in four of those sent nothing but the boot events. The
+page now reports one `first_use` the first time anyone clicks or presses a key
+on it (a hover or scroll does not count), which separates "nobody ever looked"
+from "looked and left". Nothing about what was clicked is sent.
+
 **At most one event per step per install, ever** — with one deliberate
 exception: `engine_env` reports again when its answer *changes* (outcome, or
 from 4.17.5 the `cause` of a failure), because a broken environment that gets
@@ -324,10 +337,10 @@ repaired is the most useful transition on this event. This is not a heartbeat an
 
 | prop | type | example | why |
 |---|---|---|---|
-| `step` | string | `"engine_env"` | **Closed vocabulary**: `first_boot` (the panel came up), `engine_env` (its Python environment can run a render), `weights_check` (the base model is on disk), `first_queue` (a job reached the worker — someone pressed Render) |
+| `step` | string | `"engine_env"` | **Closed vocabulary**: `first_boot` (the panel came up), `engine_env` (its Python environment can run a render), `weights_check` (the base model is on disk), `first_queue` (a job reached the worker — someone pressed Render), `first_use` (someone clicked or typed on the panel page for the first time — reported by the page, the only step it may report; always `ok`) |
 | `outcome` | string | `"failed"` | **Closed vocabulary**: `started`, `ok`, `failed`, `skipped` |
 | `error_class` | string | `"venv_broken"` | Only on `failed`, and only from the same closed taxonomy `render_failed` uses |
-| `cause` | string | `"network"` | 4.17.5 — only on a failed `engine_env`: WHY, one word. **Closed vocabulary**: `network` (a package server could not be reached), `timeout` (downloads timed out), `disk` (disk full), `uv_error` (the package tool could not resolve or build), `python_missing` (the venv's Python does not run), `installing` (Pinokio's Install was still writing the venv when the panel looked - reported again when it finishes), `other`, `unknown` (no installer record: an install that stopped before the engine step, or one older than 4.17.5). Read from the installer's own record (`ltx-2-mlx/env/.phosphene_engine_result.json`, written by `scripts/pinokio/ltx_engine_env.sh` in these words via `install_cause.sh`) - never from its output text |
+| `cause` | string | `"network"` | 4.17.5 — only on a failed `engine_env`: WHY, one word. **Closed vocabulary**: `network` (a package server could not be reached), `timeout` (downloads timed out), `disk` (disk full), `uv_error` (the package tool could not resolve or build), `python_missing` (the venv's Python does not run), `installing` (Pinokio's Install was still writing the venv when the panel looked - reported again when it finishes), `mismatch` (4.19.4 - the packages are all there but transformers refuses the version of one of its own dependencies, e.g. tokenizers 0.23.3 under transformers <5.13; read from the venv's files by the panel, Repair engine fixes it), `other`, `unknown` (no installer record: an install that stopped before the engine step, or one older than 4.17.5). Read from the installer's own record (`ltx-2-mlx/env/.phosphene_engine_result.json`, written by `scripts/pinokio/ltx_engine_env.sh` in these words via `install_cause.sh`) - never from its output text |
 | `version` | string | `"4.16.0"` | The build that reported it |
 | `ram_gb` | int | `16` | SYS-16: lets `first_queue` (this event) be sliced the same way `render_completed`'s `first_render` already is — the reviewer's finding was that activation is LOWEST on the machines that struggle most (36 GB 53%, 8 GB 57%, 16 GB 63%), and answering "first_queue vs first_render, per tier" needed this on both events, not a join against `app_boot` by install_id |
 
@@ -401,7 +414,7 @@ The queue paused itself after three identical failures in a row.
 | `queued` | int | `12` | Jobs left waiting |
 | `error_class` | string | `"model_missing"` | The same closed taxonomy as `render_failed` |
 
-The browser reports `update_prompt`, `broadcast_seen` and the Editor's two `feature_used` values through **one** route, `POST /analytics/ui`, which allowlists every (event, value) pair and answers 400 to anything else. Everything else is emitted server-side.
+The browser reports `update_prompt`, `broadcast_seen`, the `feature_used` values `editor_open`, `editor_export`, `enhance_prompt` and `share`, and the single `install_step` value `first_use` through **one** route, `POST /analytics/ui`, which allowlists every (event, value) pair and answers 400 to anything else. Everything else is emitted server-side.
 
 ### `render_refused`
 
@@ -410,7 +423,7 @@ Once per job the panel **declined on purpose**. Same fields as
 
 | Field | Type | Example | Notes |
 |---|---|---|---|
-| `refusal` | string | `"ingredients_generation"` | **A closed vocabulary** — `ingredients_generation`, `hardware_tier`, `h3_ram`, `h3_mode`, `h3_lora_slots`, `stale_engine` (v4.9+: a 2.5 render refused because the vendored engine predates the Gemma 4 tower — remedy is a second Update click). `image_ram` (v4.9.3+: the Image Studio memory guard — the engine holds more weights than this Mac can hold, or too little is free right now). `pack_missing` (v4.9.3+: High / Keyframes / Extend chosen on a Mac that has not downloaded the Q8 add-on — remedy is Settings → Models). `vocal_separator` (4.17.x+: Lip-sync with "Listen to the voice only" on an install whose vocal separation is missing — remedy is the form's own Install button). Which guard said no. No free text, no fingerprint: the message is our own copy, so there is nothing to scrub and nothing unknown to count |
+| `refusal` | string | `"ingredients_generation"` | **A closed vocabulary** — `ingredients_generation`, `hardware_tier`, `h3_ram`, `h3_mode`, `h3_lora_slots`, `stale_engine` (v4.9+: a 2.5 render refused because the vendored engine predates the Gemma 4 tower — remedy is a second Update click). `image_ram` (v4.9.3+: the Image Studio memory guard — the engine holds more weights than this Mac can hold, or too little is free right now). `pack_missing` (v4.9.3+: High / Keyframes / Extend chosen on a Mac that has not downloaded the Q8 add-on — remedy is Settings → Models). `vocal_separator` (4.17.x+: Lip-sync with "Listen to the voice only" on an install whose vocal separation is missing — remedy is the form's own Install button). `licence_required` (4.19.8+: a model whose licence asks for an "I accept" - Hailuo H3, Ideogram 4, YuE2, FLUX.1 Krea [dev], Bria FIBO - before it was accepted on this Mac; remedy is the licence screen, once). Which guard said no. No free text, no fingerprint: the message is our own copy, so there is nothing to scrub and nothing unknown to count |
 
 #### The rule — a refusal is not a failure
 

@@ -86,6 +86,14 @@ Schema invariants:
 Idempotent: if today's date already has an entry, the new fetch REPLACES
 it (so re-runs in the same UTC day don't duplicate rows).
 
+APPEND-ONLY on disk (2026-10-14). The archive is the only copy of every
+clone/view day older than GitHub's 14-day window, so this script never
+re-serialises history: a new day is a plain O_APPEND of one line, and a
+same-day re-run swaps only the LAST line, keeping every earlier line
+byte-for-byte. A row for today that is NOT the last line (a hand-edited
+file) is left alone and the new row is appended after it — the dashboard
+keeps the later snapshot for a date. See _write_row().
+
 The clones/views fields are duplicated for back-compat: they're the
 SUM of the latest 24-hour entry. clones_window/views_window have the
 full 15-day curve from the same API call.
@@ -140,11 +148,17 @@ COMMITS_CAP = 3000   # trailing 365-day window
 # whole history. 200 open issues+PRs is already an unusable wall on a
 # glance-board; beyond that we truncate and flag it.
 OPEN_ITEMS_CAP = 200
+# All releases, paginated (see fetch_releases). 2,000 is ~20 pages.
+RELEASES_CAP = 2000
 
 # Retry policy for transient failures.
 RETRY_BACKOFFS = (2, 8, 30)
 
-# Rate-limit floor — sleep until reset if we drop below this.
+# Rate-limit floor — sleep until reset if we drop below this. Scaled to the
+# bucket that answered (see _handle_rate_limit): the Search API's bucket is
+# 30 requests a MINUTE, so a fixed floor of 100 put every run to sleep for a
+# full minute after its one search call ("rate-limit low: 29/30 — sleeping
+# 62s") with 4,900 core requests still unspent.
 RATE_LIMIT_FLOOR = 100
 
 # Tracked across the run so we can print a single-line summary at exit.
@@ -185,7 +199,10 @@ def _handle_rate_limit(headers) -> None:
     _last_rate_limit["limit"] = limit
     _last_rate_limit["reset"] = reset
 
-    if remaining < RATE_LIMIT_FLOOR and reset:
+    floor = RATE_LIMIT_FLOOR
+    if limit:
+        floor = min(RATE_LIMIT_FLOOR, max(1, limit // 10))
+    if remaining < floor and reset:
         now = int(time.time())
         wait = max(0, reset - now) + 2  # small cushion
         # Cap absurd waits so a misconfigured token doesn't hang CI.
@@ -535,16 +552,33 @@ def fetch_commits_timeline(repo: str) -> list[dict]:
     return [{"date": d, "count": counts_by_day[d]} for d in sorted(counts_by_day)]
 
 
+_RELEASES_CACHE: dict[str, list] = {}
+
+
+def fetch_releases(repo: str) -> list:
+    """Every release, all pages. One fetch per run, shared by the timeline
+    and the download totals.
+
+    This used to be ONE request with per_page=100, i.e. silently the newest
+    100 releases. The repo had 99 on 2026-10-14; the next tag would have
+    started dropping the oldest release off the table and out of the
+    download total without a word. RELEASES_CAP bounds a runaway."""
+    if repo in _RELEASES_CACHE:
+        return _RELEASES_CACHE[repo]
+    try:
+        rs = _get_paginated(f"/repos/{repo}/releases", max_items=RELEASES_CAP)
+    except urllib.error.HTTPError:
+        rs = []
+    rs = [r for r in rs if isinstance(r, dict)]
+    _RELEASES_CACHE[repo] = rs
+    return rs
+
+
 def fetch_release_timeline(repo: str) -> list[dict]:
     """Release publish dates + cumulative download counts. Lets the
     dashboard show "release X shipped on Y, has Z downloads" — much
     more useful than the bare {total, by_release: {...}} blob."""
-    try:
-        rs = _get(f"/repos/{repo}/releases?per_page=100")
-        if not isinstance(rs, list):
-            return []
-    except urllib.error.HTTPError:
-        return []
+    rs = fetch_releases(repo)
     out: list[dict] = []
     for rel in rs:
         if not isinstance(rel, dict):
@@ -629,12 +663,7 @@ def fetch_release_downloads(repo: str) -> dict:
     series here, so we just take a snapshot — the dashboard can derive
     deltas across snapshots itself. Empty when the repo has no releases
     (Phosphene currently ships via Pinokio clone, not release binaries)."""
-    try:
-        rs = _get(f"/repos/{repo}/releases?per_page=100")
-        if not isinstance(rs, list):
-            return {}
-    except urllib.error.HTTPError:
-        return {}
+    rs = fetch_releases(repo)
     total = 0
     per_release: dict = {}
     for rel in rs:
@@ -691,6 +720,65 @@ def _stars_wow_delta(timeline: list[dict]) -> int:
     recent = cum_at(today_iso) - cum_at(seven_iso)
     prior = cum_at(seven_iso) - cum_at(fourteen_iso)
     return recent - prior
+
+
+# ---- archive write -------------------------------------------------------
+
+
+def _write_row(path: Path, row: dict) -> None:
+    """Add today's row to the archive WITHOUT rewriting history.
+
+    - No row for this date at the end of the file: append one line
+      (O_APPEND), after a newline if the file does not end in one.
+    - The LAST line is already this date (a same-day re-run): replace just
+      that line. Every earlier line is copied through as raw bytes, never
+      parsed and re-dumped, then the file is swapped atomically (temp +
+      fsync + os.replace) so a crash leaves the old or the new file, never a
+      torn one.
+
+    History used to be rewritten on every run: the whole file was parsed,
+    re-serialised and written back. It happened to round-trip byte-for-byte,
+    but one unparseable line was silently DROPPED (a `continue` on
+    JSONDecodeError), and those lines are the only copy of days GitHub no
+    longer serves."""
+    line = json.dumps(row, ensure_ascii=False).encode("utf-8") + b"\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        raw = b""
+    body = raw[:-1] if raw.endswith(b"\n") else raw
+    cut = body.rfind(b"\n") + 1          # start of the last line (0 if one line)
+    last = body[cut:]
+    same_day = False
+    if last.strip():
+        try:
+            same_day = json.loads(last).get("date") == row.get("date")
+        except (json.JSONDecodeError, AttributeError, UnicodeDecodeError):
+            same_day = False
+    if not same_day:
+        with open(path, "ab") as fh:
+            if raw and not raw.endswith(b"\n"):
+                fh.write(b"\n")
+            fh.write(line)
+            fh.flush()
+            try:
+                os.fsync(fh.fileno())
+            except OSError:
+                pass
+        print(f"  appended {row.get('date')} -> {path}", flush=True)
+        return
+    payload = raw[:cut] + line
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with open(tmp, "wb") as fh:
+        fh.write(payload)
+        fh.flush()
+        try:
+            os.fsync(fh.fileno())
+        except OSError:
+            pass
+    os.replace(tmp, path)
+    print(f"  replaced today's row ({row.get('date')}) -> {path}", flush=True)
 
 
 # ---- main ----------------------------------------------------------------
@@ -832,45 +920,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         print("  dry-run: not writing JSONL", flush=True)
     else:
-        # Idempotent append: replace today's row if it already exists.
-        OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-        existing: list[dict] = []
-        if OUTPUT.exists():
-            for line in OUTPUT.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                    if obj.get("date") == today:
-                        continue  # drop today's prior row
-                    existing.append(obj)
-                except json.JSONDecodeError:
-                    continue
-        existing.append(row)
-        # 2026-05-31 review fix (D1): write atomically. The old direct
-        # write_text() truncated the file before writing — a crash/kill
-        # mid-write (or disk-full) destroyed ALL accumulated history, and
-        # clones/views older than GitHub's 14-day window are unrecoverable.
-        # Temp file + fsync + os.replace: the real file is always either the
-        # complete old version or the complete new version, never torn. Guard
-        # against writing an empty payload over good data.
-        payload = "\n".join(json.dumps(r, ensure_ascii=False) for r in existing) + "\n"
-        if not existing or not payload.strip():
-            print("  WARN: refusing to overwrite stats with an empty payload", flush=True)
-        else:
-            import os as _os
-            _tmp = OUTPUT.with_name(f".{OUTPUT.name}.{_os.getpid()}.tmp")
-            with open(_tmp, "w", encoding="utf-8") as _fh:
-                _fh.write(payload)
-                _fh.flush()
-                try:
-                    _os.fsync(_fh.fileno())
-                except OSError:
-                    pass
-            _os.replace(_tmp, OUTPUT)
-            print(f"  wrote {len(existing)} rows -> "
-                  f"{OUTPUT.relative_to(OUTPUT.parent.parent)}", flush=True)
+        _write_row(OUTPUT, row)
 
     # Summary line for GitHub Actions step output.
     clones_wow = _wow_delta(clones_window)

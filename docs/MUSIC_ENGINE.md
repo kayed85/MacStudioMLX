@@ -935,7 +935,8 @@ and the form → argv round trip. It loads no weights.
 form parsing, argv/provenance, progress, WAV MIME/ranges/gallery/Trash,
 process ownership, and an unchanged Video engine switcher. It uses fake
 packs and a stub child; it never loads weights. Run it through pytest with
-MLX forced to CPU, then run `bash scripts/release_gates.sh --fast`.
+MLX forced to CPU, then run the release gates (both are maintained privately;
+see `CONTRIBUTING.md`).
 
 A complete **from-zero Pinokio install, local ETA/memory measurements and
 the owner's listening gate remain pending**. No music inference was run for

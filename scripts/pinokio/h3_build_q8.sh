@@ -19,6 +19,14 @@
 # Idempotent: `.built_ok` (written after a fresh-process validation) plus the
 # shards the index names gate the re-run — see the block above the build.
 #
+# HOW A FAILURE STOPS THE INSTALL (4.20). Pinokio 8.2 ignores a shell.run step's
+# exit code; it stops a script only when the step's OUTPUT matches /error:/i or
+# /errno /i (pinokiod kernel/shells.js default `on` handlers). A build that did
+# not produce a validated pack used to print "WARN: ..." and exit 1, and
+# install_h3.js went on to "Hailuo H3 ready." with no compact engine. Each real
+# failure now prints one "FATAL error:" line. Update keeps this build optional:
+# post_update.sh runs it through `defang`, which turns that line into a WARN.
+#
 # WHY IT MATTERS: the Q8 pack halves the render peak (25.63 vs 42.8 GiB
 # measured), which is what puts H3 in reach of a 36 GB Mac at all — and the
 # panel's `h3_capable()` returns False on a sub-60 GB Mac until this pack
@@ -37,6 +45,7 @@ if [ -z "$APP_ROOT" ]; then
   # nothing about how to not skip it. Both facts below are load-bearing: the
   # cwd, because the interpreter and the quantizer are resolved relatively,
   # and the argument, because `{{cwd}}` only exists inside a Pinokio message.
+  echo 'FATAL error: the compact Hailuo H3 engine build was started without the app folder - report this line (see the command below).'
   echo 'h3_build_q8.sh: no app root passed - skipping the Q8 build.'
   echo ''
   echo 'Run it with cwd = the minimax-h3-mlx checkout, app root as $1:'
@@ -170,6 +179,7 @@ wait_for_idle_panel() {
     if [ "$WAITED" -ge 120 ]; then
       # Not "continuing anyway": loading ~20 GB beside a render is exactly
       # what this wait exists to prevent. Nothing built is lost.
+      echo 'FATAL error: a Phosphene render has been running for over 60 minutes, so the compact Hailuo H3 engine was not built on top of it. Run Install again when the render has finished.'
       echo 'Still rendering after 60 minutes - not loading the compact engine'
       echo 'on top of it. Run this again when the render has finished.'
       exit 1
@@ -195,7 +205,8 @@ else
     echo 'Q8 engine built and validated'
   else
     rm -f "$PACK/quant_config.json" "$PACK/.built_ok"
-    echo 'WARN: the Q8 pack did not validate - it will be rebuilt on the next Install / Update'
+    echo 'FATAL error: the compact Hailuo H3 engine could not be built - the lines above say why (usually a full disk: it needs about 22 GB, or the H3 weights are incomplete). Free up space and click Install again; it is rebuilt from the weights already on disk.'
+    echo 'The Q8 pack did not validate - it will be rebuilt on the next Install / Update'
     exit 1
   fi
 fi

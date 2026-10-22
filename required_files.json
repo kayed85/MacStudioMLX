@@ -92,6 +92,25 @@
       "_venv_comment": "INTERPRETERS ONLY. `bin/activate` was listed here and Pinokio accepted it, so a broken venv read as ready on one side and not the other. uv creates bin/python as a symlink chain into a shared managed interpreter, and installing another pack can move it -- leaving activate in place beside a dangling python. That is the v3.4.0 'installed other packs and Hailuo H3 vanished' report. Both consumers resolve the symlink (fs.existsSync / Path.exists both follow), so a dangling chain is false."
     }
   },
+  "install": {
+    "_comment": "WHAT install.js FETCHES BEFORE START, AND WHAT IT LEAVES FOR LATER (4.20). Until 4.20 install.js downloaded every pack below before Start appeared (~38 GB, an hour or more on a fast line), and the fleet data says about 4 in 5 Pinokio install starts never reach a first panel boot. `before_start` is what a first render needs: the render capability of the default generation plus the 22 MB live-preview decoder. Nothing else may sit in front of Start. `after_start` is everything a full install used to fetch on top of that; the panel downloads it in the background after the first boot, in this order, but ONLY for an install that install.js marked (state/install_deferred.json), so an existing install that updates is never handed a download it did not ask for. Read by install_plan.py (the install.js disk preflight, the size/time line, the marker) and by the panel's background fetcher; test_install_deferred.py holds the two lists against install.js, ltx25_weights.sh and capabilities.render.",
+    "_sizes_comment": "env_gb: the engine venv and the uv cache it is built from, measured 1.1 GB on disk plus wheels; rounded up. headroom_gb: slack the preflight keeps under the required download. background_floor_gb: the panel never lets a background download take the volume below this much free space; an explicit Download click is not held to it.",
+    "before_start": [
+      "q4_25",
+      "gemma4_25",
+      "tae"
+    ],
+    "after_start": [
+      "gemma",
+      "ic_upscale_x2",
+      "ic_union_control",
+      "ic_ingredients",
+      "ic_colorize"
+    ],
+    "env_gb": 3,
+    "headroom_gb": 2,
+    "background_floor_gb": 10
+  },
   "repos": [
     {
       "_v40_comment": "kind flipped base -> optional in v4.0. `base` means an install WITHOUT it reads INCOMPLETE, so a fresh 2.5-only install showed the red 'Base models needed before you can render' block and Pinokio offered Resume Install — for a pack nothing renders with. From v4.0 a fresh install fetches 2.5 only and this is a normal in-panel offer, downloaded when the user wants to TRAIN a character. Existing installs that already hold it see no behaviour change: the files are there, the row reads Ready, and Storage still offers to reclaim it.",
@@ -129,13 +148,14 @@
       "blurb": "LTX-2.3's text encoder — and what Enhance and the Storyboard planner run on, whichever generation renders.",
       "repo_id": "mlx-community/gemma-3-12b-it-4bit",
       "local_dir": "mlx_models/gemma-3-12b-it-4bit",
-      "size_gb": 6,
+      "size_gb": 8.07,
       "files": [
         "config.json",
         "tokenizer.json",
         "model-00001-of-00002.safetensors",
         "model-00002-of-00002.safetensors"
-      ]
+      ],
+      "_size_comment": "8.07 GB measured (model-00001 5,367,455,313 B + model-00002 2,661,219,935 B + tokenizer/config). It read 6 until 4.20, and every size the install and the Models page quoted inherited the understatement."
     },
     {
       "key": "q8",

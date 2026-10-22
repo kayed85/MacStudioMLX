@@ -207,26 +207,16 @@ def get_panel_bug_context(h, parsed) -> None:
             sha = (f"{sha or '?'} (RUNNING; disk is at "
                    f"{_live.get('disk_short') or '?'} — panel not "
                    f"restarted since the update)")
-        mac_ver = ""
-        try:
-            mac_ver = P.subprocess.run(
-                ["sw_vers", "-productVersion"],
-                capture_output=True, text=True, errors="replace", timeout=2,
-            ).stdout.strip()
-        except Exception:                                   # noqa: BLE001
-            pass
-        hw_model = ""
-        try:
-            hw_model = P.subprocess.run(
-                ["sysctl", "-n", "hw.model"],
-                capture_output=True, text=True, errors="replace", timeout=2,
-            ).stdout.strip()
-        except Exception:                                   # noqa: BLE001
-            pass
+        mac_ver = P.hostinfo.os_version()
+        hw_model = P.hostinfo.hw_model()
         mem = P.get_memory()
         ram_gb = round(float(mem.get("total_gb") or 0.0))
         with P.LOCK:
-            tail = list(P.STATE["log"])[-50:]
+            _log = list(P.STATE["log"])
+        # 4.19.3 (#106): not simply the last 50 lines. Maintainer noise is
+        # dropped and earlier error lines are kept ahead of routine chatter,
+        # so a failure from a few minutes ago still reaches the report.
+        tail = P._bug_report_log_excerpt(_log)
         # SYS-12, privacy: this pre-fills the bug-report textarea that
         # opens a PUBLIC GitHub issue. Log lines routinely carry
         # /Users/<username>/... paths (panel_uploads, output paths), and
@@ -292,9 +282,19 @@ def get_models(h, parsed) -> None:
     with P.DOWNLOAD_LOCK:
         payload["active_download"] = (
             {"key": P.DOWNLOAD["key"], "repo_id": P.DOWNLOAD["repo_id"],
-             "started_ts": P.DOWNLOAD["started_ts"], "last_line": P.DOWNLOAD["last_line"]}
+             "started_ts": P.DOWNLOAD["started_ts"], "last_line": P.DOWNLOAD["last_line"],
+             "background": bool(P.DOWNLOAD.get("background"))}
             if P.DOWNLOAD["active"] else None
         )
+    # 4.20: packs a fresh install queued for the background (empty otherwise).
+    payload["deferred_pending"] = P.deferred_pending_keys()
+    # Mac app: the packs the app itself is fetching (absent under Pinokio).
+    _app = P.app_models_state()
+    if _app is not None:
+        payload["app_models"] = _app
+        for row in payload["repos"]:
+            _r = next((x for x in P._repos() if x.get("key") == row.get("key")), None)
+            row["app_owned"] = P.app_models_owns(_r, _app)
     h._json(payload)
 
 
@@ -342,44 +342,47 @@ def post_star_click(h, path, qs, ctype) -> None:
 def post_version_finish(h, path, qs, ctype) -> None:
     # Re-run post_update.sh after a failed in-panel finish (the banner's
     # "Try again"). Same background run, same refusals.
+    if P._dist.is_mac_app():
+        h._json({"ok": False, "app_updates": True,
+                 "error": P._dist.MAC_APP_UPDATES}, 409); return
     code, payload = P.post_update_start("retry")
     h._json(payload, code); return
 
 
-@post("/restart")
-def post_restart(h, path, qs, ctype) -> None:
-    # The "Restart to finish update" pill used to open an alert() that
-    # told the user to go and do it themselves in Pinokio — a button
-    # naming an action and delivering a paragraph. Worse, Chrome
-    # silently swallows repeat dialogs once "prevent additional
-    # dialogs" is ticked, so for some users the click did visibly
-    # nothing at all (reported 2026-08-16).
-    #
-    # os.execv REPLACES this process with a fresh one: same pid, same
-    # port, same argv and cwd, running the code that is on disk NOW.
-    # That is exactly what a stale process needs. The queue and
-    # settings live on disk, so nothing in flight is lost EXCEPT a
-    # running render — which is why a busy panel refuses instead.
-    # The update is not finished until post_update.sh has run: restarting
-    # into new code before that is how a release's new package was skipped.
+def restart_refusal():
+    """Why the panel cannot be re-exec'd right now, or None when it can.
+
+    Returns (http_status, payload). Shared by /restart and anything else that
+    restarts the panel (the LTX generation switch), so the two can never
+    disagree about when a restart is safe — and so a caller can ask BEFORE it
+    changes anything on disk, instead of changing state and then being refused."""
     _pu = P.post_update_status()
     if _pu.get("pending") or _pu.get("active"):
-        h._json({"ok": False, "post_update": True,
-                    "error": "Finishing the update first (installing what the "
-                             "new version needs) - restart becomes available "
-                             "when it is done."}, 409); return
+        return 409, {"ok": False, "post_update": True,
+                     "error": "Finishing the update first (installing what the "
+                              "new version needs) - restart becomes available "
+                              "when it is done."}
     if _pu.get("state") == "failed":
-        h._json({"ok": False, "post_update": True,
-                    "error": "The update did not finish: " + str(_pu.get("error"))
-                             + ". Use Pinokio's Update (Stop, then Update), "
-                             "or try again from the update banner."}, 409); return
+        return 409, {"ok": False, "post_update": True,
+                     "error": "The update did not finish: " + str(_pu.get("error"))
+                              + ". Use Pinokio's Update (Stop, then Update), "
+                              "or try again from the update banner."}
     with P.LOCK:
         _busy = P.STATE.get("current") is not None
     if _busy:
-        h._json({"ok": False, "busy": True,
-                    "error": "A render is running. Stop it first, or "
-                             "wait for it to finish — restarting now "
-                             "would kill it."}, 409); return
+        return 409, {"ok": False, "busy": True,
+                     "error": "A render is running. Stop it first, or "
+                              "wait for it to finish — restarting now "
+                              "would kill it."}
+    return None
+
+
+def reexec_panel(h) -> None:
+    """Answer the request, then replace this process with a fresh one.
+
+    The caller has already passed restart_refusal(). See post_restart for why
+    os.execv is the right restart: same pid, same port, running what is on disk
+    now, and the queue/settings live on disk so nothing is lost."""
     P.persist_queue()
     h._json({"ok": True, "restarting": True})
     try:
@@ -399,6 +402,119 @@ def post_restart(h, path, qs, ctype) -> None:
             P.sys.stderr.write(f"restart failed: {exc}\n")
     P.threading.Thread(target=_reexec, name="panel-restart",
                      daemon=True).start()
+
+
+@post("/restart")
+def post_restart(h, path, qs, ctype) -> None:
+    # The "Restart to finish update" pill used to open an alert() that
+    # told the user to go and do it themselves in Pinokio — a button
+    # naming an action and delivering a paragraph. Worse, Chrome
+    # silently swallows repeat dialogs once "prevent additional
+    # dialogs" is ticked, so for some users the click did visibly
+    # nothing at all (reported 2026-08-16).
+    #
+    # os.execv REPLACES this process with a fresh one: same pid, same
+    # port, same argv and cwd, running the code that is on disk NOW.
+    # That is exactly what a stale process needs. The queue and
+    # settings live on disk, so nothing in flight is lost EXCEPT a
+    # running render — which is why a busy panel refuses instead.
+    # The update is not finished until post_update.sh has run: restarting
+    # into new code before that is how a release's new package was skipped.
+    _refusal = restart_refusal()
+    if _refusal:
+        h._json(_refusal[1], _refusal[0]); return
+    reexec_panel(h)
+
+
+def generation_switch_refusal():
+    """What the generation switch refuses ON TOP of restart_refusal().
+
+    /restart keeps its own refusals unchanged; these two only matter when the
+    restart also changes the generation.
+
+    - Waiting jobs. The queue survives a restart and a job resolves its weights
+      when it STARTS, so a render set up on 2.5 (paused queue, or the moment
+      between two jobs) would come back and run on 2.3 with nobody asking.
+    - A running model download. The re-exec drops the downloader's pipe and
+      the user loses the progress of a multi-GB fetch to a click elsewhere.
+    """
+    with P.LOCK:
+        _waiting = len(P.STATE.get("queue") or [])
+    if _waiting:
+        return 409, {"ok": False, "busy": True, "queued": _waiting,
+                     "error": f"{_waiting} job{'s are' if _waiting != 1 else ' is'} "
+                              "waiting in the queue, set up for the current LTX "
+                              "generation. Let the queue finish or remove them, "
+                              "then switch - otherwise they would run on the other "
+                              "generation."}
+    with P.DOWNLOAD_LOCK:
+        _dl = bool(P.DOWNLOAD.get("active"))
+    if _dl:
+        return 409, {"ok": False, "busy": True, "download": True,
+                     "error": "A model download is running. Switching restarts "
+                              "the panel and would stop it - switch when it is done."}
+    return None
+
+
+@post("/ltx/generation")
+def post_ltx_generation(h, path, qs, ctype) -> None:
+    # Switch which LTX generation the panel renders with (2.3 <-> 2.5).
+    #
+    # The generation is fixed per process: ACTIVE_MODEL_VERSION is read once
+    # from LTX_MODEL_VERSION at import, and the helper, packs, tiers and the
+    # Ingredients gate all key off it. So this is not a live toggle — it
+    # persists the choice to <install>/ENVIRONMENT (the file Pinokio, the
+    # sidebar and the installers all read, so they keep agreeing) and then
+    # re-execs the panel, exactly as /restart does. It replaces editing that
+    # file by hand and restarting from Pinokio.
+    #
+    # Refusals come BEFORE anything is written, and they are the same ones
+    # /restart makes: a running render or an unfinished update. The target must
+    # be a registered generation whose base pack is complete on disk — never a
+    # path or a free-form string from the client.
+    _rb = h._read_form_body()
+    if _rb is None:
+        return
+    body, form = _rb
+    vid = (form.get("version", [""])[0] or "").strip()
+    choices = {c["id"]: c for c in P.ltx_generation_choices()}
+    if vid not in choices:
+        h._json({"ok": False,
+                 "error": f"{vid!r} is not an installed LTX generation. "
+                          f"Installed: {sorted(choices) or 'only the active one'}."},
+                400); return
+    if vid == P.ACTIVE_MODEL_VERSION:
+        h._json({"ok": True, "unchanged": True, "version": vid}); return
+    _refusal = restart_refusal() or generation_switch_refusal()
+    if _refusal:
+        h._json(_refusal[1], _refusal[0]); return
+    # HOLD THE WORKER (Codex 4.19.2). The two refusals above each take the
+    # lock on their own, so the worker could pick the last waiting job up
+    # between them and the panel would re-exec under a running render. One
+    # check under the queue lock, and the queue PAUSED in the same breath, so
+    # nothing starts between here and the exec (a pause does not survive the
+    # restart - load_queue resumes it, #80).
+    with P.QUEUE_COND:
+        if P.STATE.get("current") is not None or P.STATE.get("queue"):
+            h._json({"ok": False, "busy": True,
+                     "error": "A render started just now - switch when it is done."},
+                    409); return
+        _was_paused = bool(P.STATE.get("paused"))
+        P.STATE["paused"] = True
+    try:
+        P.set_environment_value("LTX_MODEL_VERSION", vid)
+    except Exception as exc:                               # noqa: BLE001
+        with P.QUEUE_COND:
+            P.STATE["paused"] = _was_paused
+            P.QUEUE_COND.notify_all()
+        h._json({"ok": False,
+                 "error": f"Could not save the choice to ENVIRONMENT: {exc}"},
+                500); return
+    # The re-exec'd process inherits THIS process's environment, which still
+    # holds the old value (Pinokio put it there at launch), so update it too.
+    P.os.environ["LTX_MODEL_VERSION"] = vid
+    P.push(f"generation: switching to {choices[vid]['label']} - restarting the panel.")
+    reexec_panel(h)
 
 
 @post("/version/check")
@@ -447,9 +563,19 @@ def post_analytics_ui(h, path, qs, ctype) -> None:
                 analytics_update_pressed=P.update_pressed_marker())
     elif event == "broadcast_seen":
         P._analytics_capture("broadcast_seen", {"version": P.running_version()})
+    elif event == "install_step":
+        # The page may report exactly ONE funnel step: `first_use`, the first
+        # click or key press on the panel. Every other step is evaluated
+        # server-side where its answer lives, and a page must not be able to
+        # forge `first_queue` or a failed `engine_env`. The outcome is fixed
+        # here, never read from the form; once-per-install is enforced by
+        # _analytics_install_step itself.
+        if str(_f("step")).strip() != "first_use":
+            h._json({"ok": False, "error": "unknown step"}, 400); return
+        P._analytics_install_step("first_use", "ok")
     elif event == "feature_used":
         feature = str(_f("feature")).strip()
-        if feature not in ("editor_open", "editor_export", "enhance_prompt"):
+        if feature not in ("editor_open", "editor_export", "enhance_prompt", "share"):
             h._json({"ok": False, "error": "unknown feature"}, 400); return
         P._analytics_feature(feature, _f("detail"))
     else:
@@ -483,6 +609,14 @@ def post_version_pull(h, path, qs, ctype) -> None:
     # unless the local repo is clean + on main + with no local
     # commits ahead, but a malicious POST could otherwise bypass
     # that and silently trigger `reset --hard`. Re-validate here.
+    #
+    # Inside the Mac app there is no checkout to pull, and `git` run in its
+    # folder could act on whatever repo encloses it. The app updates the
+    # studio (Phosphene -> Check for Updates...); this route never runs git.
+    if P._dist.is_mac_app():
+        h._json({"ok": False, "app_updates": True,
+                 "error": P._dist.MAC_APP_UPDATES}, 409)
+        return
     cur_branch = (P._git_capture(
         ["rev-parse", "--abbrev-ref", "HEAD"]) or "").strip()
     if cur_branch != "main":
@@ -796,6 +930,9 @@ def post_stop_comfy(h, path, qs, ctype) -> None:
 
 @post("/open_pinokio")
 def post_open_pinokio(h, path, qs, ctype) -> None:
+    if P._dist.is_mac_app():
+        h._json({"ok": False, "error": "Pinokio is not part of the Mac app."}, 409)
+        return
     P.open_pinokio()
     h._json({"ok": True}); return
 
@@ -834,6 +971,27 @@ def post_panel_bug_report(h, path, qs, ctype) -> None:
     title = (payload.get("title") or "[bug] ").strip()
     body = (payload.get("body") or "").strip()
     include_crash = bool(payload.get("includeCrashReports"))
+
+    # 4.19.3 (#106): a report must say what went wrong. The modal checks
+    # this before it calls us, with friendlier copy; this is the backstop
+    # for anything else that posts here. Nothing is built or zipped first.
+    # The modal sends the box's own text as `whatHappened` (judged as is, so
+    # a description that itself starts with "## " is never mistaken for the
+    # next section — Codex, 4.19.3); other callers are judged on the body's
+    # "## What happened" section.
+    _what = payload.get("whatHappened")
+    if not isinstance(_what, str):
+        _what = P._bug_report_what_happened(body)
+    if not P._bug_report_what_ok(_what):
+        h._json({
+            "ok": False, "field": "what_happened",
+            "min_chars": P.BUG_REPORT_WHAT_MIN_CHARS,
+            "error": ("Please add a sentence about what went wrong under "
+                      "\"What happened\" (at least "
+                      f"{P.BUG_REPORT_WHAT_MIN_CHARS} characters). The log is "
+                      "attached for you, but it can't say what you saw."),
+        }, 400)
+        return
 
     # GitHub's URL parser tolerates ~8 KB of querystring before it
     # silently drops the body. Truncate the body to ~6 KB pre-encode

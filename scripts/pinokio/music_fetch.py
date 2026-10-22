@@ -247,6 +247,14 @@ def main(argv=None) -> int:
         return 0
     except (OSError, ValueError, RuntimeError) as e:
         print(f"YuE2 pack: {e}", file=sys.stderr, flush=True)
+        if not args.check:
+            # Pinokio 8.2 ignores a shell.run step's exit code and stops a script
+            # only when the step's OUTPUT matches /error:/i or /errno /i, and
+            # the line above has neither - Install carried on to "YuE2 ready"
+            # with no model. One FATAL line, with the cause in it (the panel's
+            # own installer shows the last line). `--check` (Update's
+            # verification) stays quiet: post_update.sh defangs it anyway.
+            print(f"FATAL error: the YuE2 model files did not finish downloading ({e}) - check your internet connection and free disk space, then click Install again; what is already downloaded is kept.", flush=True)
         return 1
 
 

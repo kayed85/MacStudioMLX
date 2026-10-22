@@ -308,6 +308,16 @@ def get_sidecar(h, parsed) -> None:
         if companion is None:
             h.send_error(404); return
         sidecar = companion
+    # The sidecar itself must stay under the roots too (ov-review A-02): the
+    # media path was resolved and confined above, but `<media>.json` was read
+    # as found - a symlink at that name would have served any file it points
+    # at (panel_settings.json and its saved keys included).
+    try:
+        _side_real = sidecar.resolve()
+    except OSError:
+        h.send_error(404); return
+    if not _side_real.is_file() or not any(_side_real.is_relative_to(r) for r in roots):
+        h.send_error(404); return
     # VC-19: the modal's "Format" line used to read straight from
     # params.width/height — the RENDER canvas, not the DELIVERED file.
     # Balanced's default 720p-fit export (or any upscale) changes the two,
@@ -1037,6 +1047,12 @@ def get_webapp_file(h, parsed) -> None:
         # registry stays single-source server-side.
         body = body.replace(b"__ENGINE_RULES__",
                             P._engine_css().encode("utf-8"))
+    elif ext == ".md" and P._dist.is_mac_app():
+        # Mac app: a Docs page's [[pinokio]] passages (Spicy mode) never leave
+        # the server (owner ruling 2026-10-22).
+        body = P.drop_pinokio_doc_blocks(body.decode("utf-8", "replace")).encode("utf-8")
+    elif ext == ".html" and P._dist.is_mac_app():
+        body = P._strip_pinokio_only(body.decode("utf-8", "replace")).encode("utf-8")
     elif ext in (".js", ".mjs"):
         # The editor's user-facing strings carry the __SEQ__ noun
         # seams. page() substitutes them in the page; module files

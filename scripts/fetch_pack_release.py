@@ -51,7 +51,20 @@ USAGE
     python scripts/fetch_pack_release.py --repo-key q4_25 --dest /tmp/from-zero/pack
     python scripts/fetch_pack_release.py --repo-key q4_25 --check-only
 
-Exit code 0 means every declared file is present and hash-correct.
+Exit code 0 means every declared file is present and hash-correct. Exit code 75
+(EX_TEMPFAIL) means another download is writing the same pack folder right now
+and this one stopped without touching it.
+
+ONE WRITER PER PACK FOLDER
+--------------------------
+The studio's Models page, its background fetcher, ``install.js`` and the Mac
+app's own model download all run THIS script. Two copies writing one folder
+append into the same ``.phosphene_parts`` partials and corrupt both, so a
+download holds an exclusive ``flock`` on ``.<folder>.fetchlock`` beside the
+destination folder for as long as it writes (the kernel drops the lock when
+the process ends, however it ends; the panel's Remove and Repair take the
+same lock before they delete). A second download of the same folder refuses
+at once with exit 75; ``--check-only`` reads and takes no lock.
 
 Stdlib only, on purpose: this runs from ``install.js`` before anything optional
 is installed, and from the panel, which is stdlib-only by house rule.
@@ -60,6 +73,7 @@ is installed, and from the panel, which is stdlib-only by house rule.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -77,6 +91,61 @@ USER_AGENT = "Phosphene"
 CHUNK = 1 << 20
 # Report at most this often, so a 6-shard 11 GB file does not spam the panel log.
 PROGRESS_EVERY_SEC = 2.5
+#: Exit code when another download holds the destination folder (EX_TEMPFAIL).
+EXIT_BUSY = 75
+
+
+class PackBusy(Exception):
+    """Another download is writing this pack folder right now."""
+
+
+#: The one-writer lock lives BESIDE the pack folder, as ".<folder>.fetchlock",
+#: not on the folder itself: removing or repairing a pack deletes the folder,
+#: and a lock on a deleted folder's inode would let the next writer lock a
+#: fresh folder at the same path while the first one still writes there.
+PACK_LOCK_SUFFIX = ".fetchlock"
+
+
+def pack_lock_path(dest_dir: Path) -> Path:
+    """The lock file for a pack folder: its REAL path's sibling, so a
+    Pinokio-style symlink and the Mac app's own path meet on one lock."""
+    real = Path(os.path.realpath(str(dest_dir)))
+    return real.parent / f".{real.name}{PACK_LOCK_SUFFIX}"
+
+
+def lock_dest(dest_dir: Path) -> int:
+    """Take the one-writer lock for ``dest_dir`` (an exclusive, non-blocking
+    flock on its lock file) and return the descriptor; keep it open for as
+    long as the download writes. Raises PackBusy when another process holds
+    it. The kernel drops the lock when the process ends, however it ends."""
+    try:
+        import fcntl
+    except ImportError:              # not a POSIX system: nothing to lock with
+        return -1
+    lock = pack_lock_path(dest_dir)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as e:
+        os.close(fd)
+        if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
+            raise PackBusy(str(dest_dir)) from None
+        raise
+    try:                             # who holds it, for a human reading the file
+        os.ftruncate(fd, 0)
+        os.write(fd, f"{os.getpid()}\n".encode())
+    except OSError:
+        pass
+    return fd
+
+
+def unlock_dest(fd: int) -> None:
+    if fd >= 0:
+        try:
+            os.close(fd)             # closing the descriptor releases the flock
+        except OSError:
+            pass
 
 
 def log(msg: str) -> None:
@@ -378,6 +447,25 @@ def fetch_pack(repo_key: str, root: Path, dest: Path | None,
         log(f"[fetch] {repo_key}: complete, {len(files)} file(s) verified")
         return 0
 
+    # ONE WRITER (Mac app review #7): the Mac app's download and the studio's
+    # Models page / background fetcher both run this script. Refuse, untouched,
+    # when another copy is writing this folder.
+    try:
+        lock_fd = lock_dest(dest_dir)
+    except PackBusy:
+        log(f"[fetch] {repo_key}: BUSY — another download is writing {dest_dir} right now; "
+            f"this one stopped without touching it, so the two never write the same files. "
+            f"It finishes on its own; download again after it if anything is still missing.")
+        return EXIT_BUSY
+    try:
+        return _fetch_locked(repo_key, files, dest_dir, mirror,
+                             attempts=attempts, timeout=timeout)
+    finally:
+        unlock_dest(lock_fd)
+
+
+def _fetch_locked(repo_key: str, files: dict, dest_dir: Path, mirror: dict,
+                  *, attempts: int, timeout: int) -> int:
     total_gb = sum(int(s["bytes"]) for s in files.values()) / 1e9
     log(f"[fetch] {len(files)} file(s), {total_gb:.2f} GB — resumable, sha256-verified")
 
@@ -423,17 +511,24 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--dest applies to a single --repo-key")
 
     rc = 0
+    busy = False
     for key in args.repo_key:
         try:
-            rc |= fetch_pack(key, args.root, args.dest,
+            one = fetch_pack(key, args.root, args.dest,
                              attempts=args.attempts, timeout=args.timeout,
                              check_only=args.check_only)
         except SystemExit:
             raise
         except Exception as e:  # noqa: BLE001 — the installer needs a cause, not a traceback
             log(f"[fetch] {key}: FAILED — {e}")
+            one = 1
+        if one == EXIT_BUSY:
+            busy = True
+        elif one:
             rc = 1
-    return rc
+    # A real failure wins over "busy": the caller must not mistake a broken
+    # download for one that is merely being served by someone else.
+    return rc if rc else (EXIT_BUSY if busy else 0)
 
 
 if __name__ == "__main__":

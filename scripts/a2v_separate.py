@@ -60,6 +60,12 @@ def load_model(name: str):
 # tried after the official host; the hash check applies to it the same.
 DOWNLOAD_ATTEMPTS = 4
 DOWNLOAD_TIMEOUT_S = 60
+# 4.19.2 (fleet: 3 of the 4 weights_failed in a week were timeouts or a
+# dropped connection on a slow link). Every attempt resumes, so an attempt
+# that moved the file forward is not a failure to count: the download keeps
+# going while it makes progress, up to DOWNLOAD_MAX_ATTEMPTS, and gives up
+# after DOWNLOAD_ATTEMPTS attempts in a row that added nothing.
+DOWNLOAD_MAX_ATTEMPTS = 12
 
 
 class DownloadExhausted(RuntimeError):
@@ -141,8 +147,11 @@ def prefetch(name: str, *, sleep=None) -> None:
             continue
         urls = [url] + ([f"{mirror}/{file_name}"] if mirror else [])
         last = None
-        for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
-            src = urls[-1] if attempt > 2 else urls[0]   # mirror (if any) last
+        part = dest + ".partial"
+        stalled = 0                                  # attempts in a row that added nothing
+        for attempt in range(1, DOWNLOAD_MAX_ATTEMPTS + 1):
+            src = urls[-1] if stalled >= 2 else urls[0]  # mirror (if any) last
+            before = os.path.getsize(part) if os.path.isfile(part) else 0
             try:
                 _fetch_one(src, dest)
                 if _hash_ok(dest, file_name):
@@ -150,14 +159,18 @@ def prefetch(name: str, *, sleep=None) -> None:
                 # A corrupt file is not resumable: start that one over.
                 os.replace(dest, dest + ".bad")
                 last = RuntimeError("downloaded file failed its checksum")
+                stalled += 1
             except Exception as exc:                 # noqa: BLE001
                 last = exc
-            print(f"separator weights: attempt {attempt} of {DOWNLOAD_ATTEMPTS} "
-                  f"did not finish ({type(last).__name__}: {last})", file=sys.stderr)
-            if attempt < DOWNLOAD_ATTEMPTS:
-                sleep(min(30, 5 * attempt))
-        else:
-            raise DownloadExhausted(f"the separator model did not download: {last}")
+                after = os.path.getsize(part) if os.path.isfile(part) else 0
+                stalled = 0 if after > before else stalled + 1
+            print(f"separator weights: attempt {attempt} did not finish "
+                  f"({type(last).__name__}: {last})"
+                  + (" - it got further, resuming" if stalled == 0 else ""),
+                  file=sys.stderr)
+            if stalled >= DOWNLOAD_ATTEMPTS or attempt >= DOWNLOAD_MAX_ATTEMPTS:
+                raise DownloadExhausted(f"the separator model did not download: {last}")
+            sleep(min(30, 5 * max(1, stalled)))
 
 
 def read_audio(path: str, ffmpeg: str):

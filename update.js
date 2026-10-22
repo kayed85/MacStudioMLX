@@ -32,10 +32,9 @@
 //     scripts/post_update.sh.
 //   - Assume the copy on the user's disk is ANY historical version. A change
 //     here gets the scrutiny of a schema migration.
-//   - Every dispatch stays under 500 chars — `node scripts/check_pinokio_scripts.js`
-//     — and under 350 in this file, which is the width @Morac2 actually
-//     bisected as safe (#50). The ceiling is 500 only because six shipped
-//     dispatches sit above 350; nothing here needs to.
+//   - Every dispatch stays under 350 chars - the width @Morac2 actually
+//     bisected as safe (#50), which `node scripts/check_pinokio_scripts.js`
+//     now enforces for every launcher script (4.20; it was 500).
 //   - Everything before the pull may only reference files that ALREADY exist
 //     in the user's current tree. That does not mean "inline it": the
 //     obstruction guard and the converge step are `scripts/pinokio/*.sh`,
@@ -55,12 +54,25 @@ module.exports = {
     // explicit-origin form `git pull origin <branch>` broke when public
     // origin/dev was deleted in the 2026-05-22 split.
     //
-    // MUST be one joined string, not separate array elements. Pinokio runs each
-    // element of a `message` array in its OWN shell, so shell variables do not
-    // survive between them: as separate elements this block silently degraded
-    // `git fetch $REMOTE` to a bare `git fetch` and the divergence recovery
-    // `git reset --hard $UPSTREAM` to a bare `git reset --hard`, a no-op
-    // against HEAD that cannot recover from divergence at all.
+    // THE DISPATCH TEXT MUST NOT CARRY "error:" / "errno " OR A NEWLINE (#114,
+    // reported by @Morac2, 2026-10-20). Pinokio 8.2 stops a shell.run step when
+    // its OUTPUT matches /error:/i or /errno /i and ignores the exit code — and
+    // the shell ECHOES the command before running it, so the fetch step's own
+    //   [ -n "$U" ] || { echo 'FATAL error: no upstream configured'; exit 1; }
+    // tripped that matcher ON THE SUCCESS PATH, before the step ran: Update
+    // detached mid-echo with input.event ["error:"] and died. The fetch logic
+    // therefore moved into scripts/pinokio/update_fetch.sh (behaviour byte-for-
+    // byte unchanged); its FATAL lines now print only at runtime on a real
+    // fault, where we still want Pinokio to stop.
+    //
+    // That same matcher retires the old "one joined string" note below: a
+    // `"\n"`-joined message is itself a multi-line echo Pinokio trips on, so
+    // every dispatch here is now a single `bash scripts/pinokio/*.sh` line and
+    // the steps that need shell state across commands own it inside that script.
+    // (The guard and converge steps already moved out for the 350-char ceiling;
+    // this run finished the job for the fetch step and routed the three file
+    // guards through scripts/pinokio/must.sh, which turns a missing script's
+    // non-zero exit into a FATAL line at runtime instead of an echoed one.)
     //
     // v4.0 FIX — `git pull --ff-only $UPSTREAM` HAD NEVER ONCE SUCCEEDED.
     // `$UPSTREAM` expands to "origin/main", and `git pull --ff-only origin/main`
@@ -95,15 +107,17 @@ module.exports = {
     // ordering is the guarantee: NOTHING moves the tree until a fetch has
     // provably succeeded, and reset only ever runs against a ref that fetch
     // just refreshed.
+    // A dispatch's own script can be MISSING (a damaged tree): `bash x.sh` then
+    // exits 127 with a bare "No such file" that Pinokio does not stop on, and
+    // Update marched on without a fetch (4.19.7 review). Each dispatch ends in
+    // `|| [ -f x.sh ] || printf 'FATAL \145rror: ...'`: the file test keeps a
+    // script's OWN failure (which already printed its FATAL line) quiet, and the
+    // octal \145 ("e") prints the stop-word at RUNTIME without it ever sitting
+    // in the echoed text (the #114 crash class; check_ltx_pin.js 2b).
     {
       method: "shell.run",
       params: {
-        message: [
-          "U=$(git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null)",
-          "[ -n \"$U\" ] || { echo 'FATAL error: no upstream configured'; exit 1; }",
-          "echo \"updating $(git rev-parse --abbrev-ref HEAD) from $U\"",
-          "git fetch \"${U%%/*}\" || { echo 'FATAL error: fetch failed (offline?) - nothing changed, re-run Update'; exit 1; }"
-        ].join("\n")
+        message: "bash scripts/pinokio/update_fetch.sh || [ -f scripts/pinokio/update_fetch.sh ] || printf 'FATAL \\145rror: scripts/pinokio/update_fetch.sh is missing - repair with: git checkout -- scripts/pinokio\\n'"
       }
     },
     // Converge. A reset is reached ONLY on proven history divergence.
@@ -170,18 +184,27 @@ module.exports = {
     // itself, no worse: the two land in the same commit, so a tree carrying
     // this update.js carries these scripts. If one is missing the tree is
     // damaged, and the guard MUST NOT be skipped — the destructive step below
-    // is what it protects — so the step aborts with a repair instruction
+    // is what it protects — so the step must abort with a repair instruction
     // instead of proceeding without it.
+    //
+    // That abort is now scripts/pinokio/must.sh's job, not an inline
+    // `if [ -f ... ]; else echo 'FATAL error: ...'` (whose echoed "error:" was
+    // the #114 crash). must.sh runs the guard; a missing guard makes `bash`
+    // exit non-zero, and must.sh turns ANY non-zero exit into one
+    // "FATAL error: <reason> (exit N)" line at RUNTIME, so Pinokio still stops
+    // — without that word ever sitting in the echoed dispatch. The reason text
+    // stays free of "error:" / "errno " for the same reason (it rides the
+    // dispatch line too); check_pinokio_scripts.js enforces that.
     {
       method: "shell.run",
       params: {
-        message: "if [ -f scripts/pinokio/update_obstruction_guard.sh ]; then bash scripts/pinokio/update_obstruction_guard.sh; else echo 'FATAL error: scripts/pinokio/update_obstruction_guard.sh missing - repair with: git checkout -- scripts/pinokio'; exit 1; fi"
+        message: "bash scripts/pinokio/must.sh 'the update obstruction guard is missing - repair with: git checkout -- scripts/pinokio' bash scripts/pinokio/update_obstruction_guard.sh || [ -f scripts/pinokio/must.sh ] || printf 'FATAL \\145rror: scripts/pinokio/must.sh is missing - repair with: git checkout -- scripts/pinokio\\n'"
       }
     },
     {
       method: "shell.run",
       params: {
-        message: "if [ -f scripts/pinokio/update_converge.sh ]; then bash scripts/pinokio/update_converge.sh; else echo 'FATAL error: scripts/pinokio/update_converge.sh missing - repair with: git checkout -- scripts/pinokio'; exit 1; fi"
+        message: "bash scripts/pinokio/must.sh 'the update converge step is missing - repair with: git checkout -- scripts/pinokio' bash scripts/pinokio/update_converge.sh || [ -f scripts/pinokio/must.sh ] || printf 'FATAL \\145rror: scripts/pinokio/must.sh is missing - repair with: git checkout -- scripts/pinokio\\n'"
       }
     },
     // ---- 2. Everything else, from the tree we just pulled ------------------
@@ -193,13 +216,15 @@ module.exports = {
     // text in the middle can silently drop the tail.
     //
     // `bash <path>`, never `./<path>` — no execute bit, nothing depends on git
-    // preserving the mode. The `-f` guard is the one concession to history: a
-    // tree that somehow did not pull (offline, permissions) would otherwise hit
-    // a bare "No such file" and say nothing useful.
+    // preserving the mode. The missing-file concession to history (a tree that
+    // somehow did not pull would otherwise hit a bare "No such file" and say
+    // nothing useful) is now scripts/pinokio/must.sh's: it runs post_update.sh
+    // and, if that is missing or fails, prints the one FATAL line Pinokio stops
+    // on — at runtime, never in the echoed dispatch (the #114 "error:" crash).
     {
       method: "shell.run",
       params: {
-        message: "if [ -f scripts/post_update.sh ]; then bash scripts/post_update.sh; else echo 'FATAL error: scripts/post_update.sh missing - the repo pull above did not land. Re-run Update.'; exit 1; fi"
+        message: "bash scripts/pinokio/must.sh 'post_update did not run - the repo pull above may not have landed; re-run Update' bash scripts/post_update.sh || [ -f scripts/pinokio/must.sh ] || printf 'FATAL \\145rror: scripts/pinokio/must.sh is missing - repair with: git checkout -- scripts/pinokio\\n'"
       }
     }
   ]

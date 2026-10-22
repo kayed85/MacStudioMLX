@@ -51,7 +51,18 @@ const H3_BRANCH = "codex/h3-engine-v2"
 // Every step that works inside the checkout starts here: resolve the roots the
 // panel uses (LTX_H3_ROOT / LTX_H3_MODELS), then enter the checkout. See
 // scripts/pinokio/h3_roots.sh.
-const RH3 = ". scripts/pinokio/h3_roots.sh && cd \"$H3_CHECKOUT\" && "
+//
+// 4.20 - HOW A STEP STOPS THIS INSTALL. Pinokio 8.2 ignores a shell.run step's
+// exit code; it stops a script only when the step's OUTPUT matches /error:/i or
+// /errno /i (pinokiod kernel/shells.js, the default `on` handlers). So every
+// required script this file dispatches (h3_preflight, h3_checkout, h3_venv,
+// h3_deps, h3_build_q8, and h3_roots.sh's h3_enter / h3_fetch_weights) prints
+// one "FATAL error: <reason + what to do>" line when it fails - before this,
+// the preflight refused the download and the install carried on and started it.
+// `h3_enter` replaces the inline `cd`: a missing checkout used to end the `&&`
+// chain in silence. The two optional fetches (Turbo, TAE) never say "error:".
+// scripts/check_pinokio_scripts.js fails the build for a call that cannot stop.
+const RH3 = ". scripts/pinokio/h3_roots.sh && h3_enter && "
 
 module.exports = {
   requires: { bundle: "ai" },
@@ -63,7 +74,23 @@ module.exports = {
         // engine the default everywhere and dropped the real floor to 36 GB.
         // The preflight two steps down enforces 36; this sentence was turning
         // away 36-48 GB Macs the installer would have happily served.
-        html: "<b>Installing Hailuo H3 (second video engine, ~75 GB).</b><br>Generates picture, dialogue and sound together, and sits beside LTX in the engine switcher. Needs an Apple Silicon Mac with 36 GB+ of memory (the compact Q8 engine, built at the end of this install); 60 GB+ additionally unlocks the full bf16 quality engine. MiniMax Community License — territory restrictions apply. Resumable if interrupted."
+        html: "<b>Installing Hailuo H3 (second video engine, ~75 GB).</b><br>Generates picture, dialogue and sound together, and sits beside LTX in the engine switcher. Needs an Apple Silicon Mac with 36 GB+ of memory (the compact Q8 engine, built at the end of this install); 60 GB+ additionally unlocks the full bf16 quality engine. MiniMax H3 Community License: accept it in Phosphene first (click Hailuo H3 in the engine switcher); it does not cover the EU, the UK, South Korea or the US. Resumable if interrupted."
+      }
+    },
+
+    // ---- Licence first (4.19.8) --------------------------------------------
+    // The MiniMax H3 Community License covers only its Applicable Territory
+    // (worldwide except the EU, the UK, South Korea and the US) and asks a
+    // product to bind each user to its use restrictions before giving access
+    // (s. V.2). The panel's licence screen records the acceptance; this step
+    // stops a NEW install until it exists (an install that already has the
+    // weights continues - the panel asks before the next H3 render instead).
+    {
+      method: "shell.run",
+      params: {
+        message: [
+          "bash scripts/pinokio/h3_licence_gate.sh"
+        ]
       }
     },
 
@@ -192,12 +219,22 @@ module.exports = {
       }
     },
 
+    // ---- Its packages, at the known-good set (4.19.5) ----------------------
+    // Through 4.19.4 this was `uv pip install -r requirements.txt`, whose lines
+    // are floors only - every new install resolved whatever PyPI held that
+    // day, and an upstream release could break every new H3 install with no
+    // Phosphene release behind it (the LTX venv's tokenizers 0.23.3 story,
+    // 4.19.4). scripts/pinokio/h3_deps.sh is THE one install into this venv:
+    // it resolves under scripts/pinokio/h3_constraints.txt (-c), which also
+    // MOVES a drifted package back - so Repair and "Update Hailuo H3 runner",
+    // which run this same script, repair a drifted venv - then checks the set
+    // and the runner's imports. It prints "error:" on failure, which is what
+    // stops the Pinokio run here instead of 75 GB later.
     {
       method: "shell.run",
       params: {
         message: [
-          "echo '=== H3 dependencies ==='",
-          RH3 + "uv pip install --python .venv/bin/python -r requirements.txt",
+          RH3 + "bash \"$APP_ROOT/scripts/pinokio/h3_deps.sh\" \"$(pwd)\"",
           RH3 + ".venv/bin/python -c \"import mlx.core as mx, numpy, PIL; print('H3 deps OK')\""
         ]
       }
@@ -240,13 +277,19 @@ module.exports = {
       }
     },
 
-    // ---- Turbo v1.0 release asset (digest-checked fetch) -------------------
-    // Target: lightx2v_v1.0_768p_ourlayout.safetensors — the runner-layout
-    // repack, published as a release asset on the weights-ltx25-v1 lane,
-    // digest-pinned. Provenance: repacked from
-    // lightx2v/Minimax-h3-Turbo (Apache-2.0),
-    // minimax_h3_fl2v_turbo_4step_v1.0_768p_bf16.safetensors (source SHA-256
-    // 1bdabc2e9fce20b1db563b96bcf6e46adcad4c1964f423676436bf266cc7416c).
+    // ---- Turbo v1.0: fetched from UPSTREAM, re-laid out on this Mac --------
+    // Target: lightx2v_v1.0_768p_ourlayout.safetensors - the runner-layout
+    // repack (SHA-256 d51d626fe0845da7e5845a47c323cf3f29086d44d24cb1a4b980882488746197).
+    // 4.19.8: Phosphene no longer hosts this file. It is a MiniMax H3 Model
+    // Derivative, and the H3 licence only allows distribution inside its
+    // Applicable Territory, so scripts/fetch_h3_turbo.py fetches the ORIGINAL
+    // from lightx2v/Minimax-h3-Turbo
+    // (minimax_h3_fl2v_turbo_4step_v1.0_768p_bf16.safetensors, pinned commit,
+    // source SHA-256 1bdabc2e9fce20b1db563b96bcf6e46adcad4c1964f423676436bf266cc7416c),
+    // re-lays it out locally (pure byte moves, no maths) and installs it only
+    // when the result matches the digest above - byte-identical to the file
+    // installs used to download, so Turbo behaves exactly as before. An
+    // install that already has the file is left alone.
     // Do not substitute the raw v0.1 file
     // `minimax_h3_fl2v_turbo_4step_v0.1.safetensors`: its alpha/rank scale
     // lives OUTSIDE the checkpoint and at `--lora ...:1.0` it renders
@@ -254,18 +297,35 @@ module.exports = {
     // `lightx2v_v0.1_ourlayout_alpha8.safetensors`.
     //
     // BEST-EFFORT ON PURPOSE: the panel's /h3/turbo/install endpoint fetches
-    // this same asset on demand with the same digest check, so a transient
-    // network failure here must not fail a 75 GB install that is otherwise
-    // complete. scripts/fetch_h3_turbo.py resumes partials, verifies
-    // SHA-256 d51d626fe0845da7e5845a47c323cf3f29086d44d24cb1a4b980882488746197
-    // and renames into place only after the check — a corrupt transfer is
-    // deleted, never installed. (One short line per command: Pinokio 8.0.x
-    // wedges its shell on ~350+ character lines.)
+    // the managed Turbo adapter on demand, so a transient network failure here
+    // must not fail a 75 GB install that is otherwise complete. The script
+    // resumes partials, verifies both digests and renames into place only
+    // after the check - a corrupt transfer is deleted, never installed. (One
+    // short line per command: Pinokio 8.0.x wedges its shell on ~350+
+    // character lines.)
     {
       method: "shell.run",
       params: {
         message: [
           RH3 + ".venv/bin/python \"$APP_ROOT/scripts/fetch_h3_turbo.py\" --dir \"$H3_LAYOUT/turbo-lora\" || echo 'TURBO FETCH FAILED - panel offers a one-click retry'"
+        ]
+      }
+    },
+
+    // ---- lightx2v v1.3 (Best on High): fetched from UPSTREAM, built here ----
+    // Target: lightx2v_v1.3_768p_phosphene.safetensors (SHA-256
+    // 45ee324a31beacef7a2fbef019b99e16b35d80586dc4e0d60fecf6ca679751d8),
+    // built by scripts/fetch_h3_v13.py from LightX2V's original
+    // minimax_h3_fl2v_turbo_4step_v1.3_768p_bf16.safetensors (pinned commit,
+    // source SHA-256 97b775707bb5732e01dba0cf3833d3fe2947c953859d4d05ea3bd74894c43d2b).
+    // Never hosted by Phosphene: an H3 Model Derivative (MiniMax H3 Community
+    // License; LightX2V's code is Apache-2.0). BEST-EFFORT, like Turbo: the
+    // Speed row's "Get it" button runs the same script on demand.
+    {
+      method: "shell.run",
+      params: {
+        message: [
+          RH3 + ".venv/bin/python \"$APP_ROOT/scripts/fetch_h3_v13.py\" --dir \"$H3_LAYOUT/turbo-lora\" --licence-state \"${LTX_STATE_DIR:-$APP_ROOT/state}\" || echo 'V13 FETCH FAILED - the Speed row offers a retry'"
         ]
       }
     },

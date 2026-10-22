@@ -41,6 +41,11 @@ APP_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 MLX="${1:-$APP_ROOT/ltx-2-mlx}"
 cd "$MLX" 2>/dev/null || { echo "FATAL error: no engine checkout at $MLX - run Install"; exit 1; }
 PY=env/bin/python
+# The engine venv's known-good set (4.19.4): every install below passes it with
+# -c, so no resolve can leave tokenizers / transformers / huggingface-hub / the
+# mlx trio outside what renders. engine_constraints.txt says why each line is there.
+EC="$APP_ROOT/scripts/pinokio/engine_constraints.txt"
+[ -f "$EC" ] || { echo "FATAL error: scripts/pinokio/engine_constraints.txt is missing - re-run Update"; exit 1; }
 
 # OUTCOME RECORD (4.17.5). Every finished run writes env/.phosphene_engine_result
 # .json: {"outcome","cause","ts"} - closed words only (install_cause.sh), no
@@ -101,7 +106,7 @@ LOG="$(mktemp -t phos_engine_env)" || LOG=/dev/null
 defuse() { tee -a "$LOG" | sed -u -e 's/[Ee][Rr][Rr][Oo][Rr]:/problem -/g' -e 's/[Ee]rrno /errno-/g'; }
 
 attempt() {
-  uv pip install --python env/bin/python 'mlx==0.31.1' 'mlx-lm==0.31.1' \
+  uv pip install --python env/bin/python -c "$EC" 'mlx==0.31.1' 'mlx-lm==0.31.1' \
     'mlx-metal==0.31.1' 'transformers>=5.0.0,<5.13.0' 2>&1 | defuse || return 1
   # The packages' dependencies resolve WITH the pins, the same as
   # scripts/post_update.sh step 3 (4.19.0). Alone, this resolve took the newest
@@ -110,14 +115,14 @@ attempt() {
   # walked it DOWN to 0.31.2 (mflux 0.18.0 wants <0.32) - every fresh install
   # since late August ran mlx 0.31.2 with an mlx-arsenal that declares it
   # cannot. Pinned here the solver picks mlx-arsenal 0.11.1 and mlx stays 0.31.1.
-  uv pip install --python env/bin/python --build-constraints ../pip-build-constraints.txt \
+  uv pip install --python env/bin/python -c "$EC" --build-constraints ../pip-build-constraints.txt \
     'mlx==0.31.1' 'mlx-lm==0.31.1' 'mlx-metal==0.31.1' 'transformers>=5.0.0,<5.13.0' \
     ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx ./packages/ltx-trainer 2>&1 | defuse || return 1
-  uv pip install --python env/bin/python --reinstall --no-deps \
+  uv pip install --python env/bin/python -c "$EC" --reinstall --no-deps \
     --build-constraints ../pip-build-constraints.txt \
     ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx ./packages/ltx-trainer 2>&1 | defuse || return 1
-  uv pip install --python env/bin/python --no-deps 'mlx-vlm==0.4.4' 2>&1 | defuse || return 1
-  uv pip install --python env/bin/python certifi pillow numpy 'huggingface-hub>=1.5.0,<2.0' \
+  uv pip install --python env/bin/python -c "$EC" --no-deps 'mlx-vlm==0.4.4' 2>&1 | defuse || return 1
+  uv pip install --python env/bin/python -c "$EC" certifi pillow numpy 'huggingface-hub>=1.5.0,<2.0' \
     'hf_transfer>=0.1.6' 'litellm>=1.83.14' 'smolagents>=1.24.0' 'pywebpush>=2.0' 2>&1 | defuse || return 1
   # The --reinstall above replaced the patched ltx_core_mlx: put the codec patch
   # back before anything renders (install.js runs it again after; idempotent).
@@ -189,7 +194,7 @@ exit 1
 # transformers at all, so an existing 5.13.0 survived every Update and
 # the install stayed unable to generate anything. A promise about
 # another file now names the step that keeps it.
-#   (install.js ran: "uv pip install --python env/bin/python 'mlx==0.31.1' 'mlx-lm==0.31.1' 'mlx-metal==0.31.1' 'transformers>=5.0.0,<5.13.0'")
+#   (install.js ran: "uv pip install --python env/bin/python -c "$EC" 'mlx==0.31.1' 'mlx-lm==0.31.1' 'mlx-metal==0.31.1' 'transformers>=5.0.0,<5.13.0'")
 # Y3 — Train Character ships in 3.0. Without ltx-trainer-mlx in
 # the venv, the trainer subprocess fails at `import yaml` because
 # pyyaml is a transitive dep of ltx-trainer (declared in its
@@ -206,7 +211,7 @@ exit 1
 # pip-build-constraints.txt; update.js runs the same uv command
 # (it used to spell it `PIP_CONSTRAINT=`, which modern pip ignores
 # by design — one lane now, one failure mode).
-#   (install.js ran: "uv pip install --python env/bin/python --build-constraints ../pip-build-constraints.txt ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx ./packag)
+#   (install.js ran: "uv pip install --python env/bin/python -c "$EC" --build-constraints ../pip-build-constraints.txt ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx ./packag)
 # v4.0 — THE SECOND PASS IS THE POINT, and it closes a trap that has
 # shipped since the workspace landed. `ltx-2-mlx` is a uv WORKSPACE:
 # the line above (with deps, without --reinstall) links its members
@@ -227,7 +232,7 @@ exit 1
 # it is the exact command update.js has run for many releases, so
 # the end state is one every install already converges to on its
 # first Update. One lane, one runtime shape.
-#   (install.js ran: "uv pip install --python env/bin/python --reinstall --no-deps --build-constraints ../pip-build-constraints.txt ./packages/ltx-core-mlx ./packages/ltx-)
+#   (install.js ran: "uv pip install --python env/bin/python -c "$EC" --reinstall --no-deps --build-constraints ../pip-build-constraints.txt ./packages/ltx-core-mlx ./packages/ltx-)
 # Auto-caption (Gemma 3 12B via mlx-vlm) needs the mlx-vlm
 # package. Pinned to 0.4.4 — caption_with_gemma.py's import
 # surface (load, generate, prompt_utils.apply_chat_template)
@@ -235,7 +240,7 @@ exit 1
 # mlx-vlm's heavy default deps (PIL>=10, av, etc. that fight
 # mflux/transformers pins). The runtime imports it lazily so
 # a partial install doesn't break the rest of the panel.
-#   (install.js ran: "uv pip install --python env/bin/python --no-deps 'mlx-vlm==0.4.4'")
+#   (install.js ran: "uv pip install --python env/bin/python -c "$EC" --no-deps 'mlx-vlm==0.4.4'")
 # hf_transfer is HuggingFace's Rust-based downloader — 5-10× faster
 # than the default Python downloader for big repos like Q8 (~25 GB).
 # The panel sets HF_HUB_ENABLE_HF_TRANSFER=1 in download envs; if the
@@ -266,7 +271,7 @@ exit 1
 # only ever a transitive dep — if a future dep change drops it, the
 # SSL_CERT_FILE path vanishes and ALL panel stdlib HTTPS breaks.
 # Naming it here keeps the cert bundle guaranteed-present.
-#   (install.js ran: "uv pip install --python env/bin/python certifi pillow numpy 'huggingface-hub>=1.5.0,<2.0' 'hf_transfer>=0.1.6' 'litellm>=1.83.14' 'smolagents>=1.24.0)
+#   (install.js ran: "uv pip install --python env/bin/python -c "$EC" certifi pillow numpy 'huggingface-hub>=1.5.0,<2.0' 'hf_transfer>=0.1.6' 'litellm>=1.83.14' 'smolagents>=1.24.0)
 # v2.0.3: post-install confirmation that the local packages
 # actually landed in site-packages. The Y1.034+ patch script's
 # i2v target tolerates a missing ltx_pipelines_mlx — without

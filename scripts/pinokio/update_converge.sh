@@ -41,9 +41,12 @@
 # INST-02, 2026-09-24). A missing guard is a refusal too.
 G="$(dirname "$0")/update_obstruction_guard.sh"
 [ -f "$G" ] || { echo 'FATAL error: update_obstruction_guard.sh missing - not updating. Nothing deleted.'; exit 1; }
-bash "$G" || exit 1
+bash "$G" || { echo 'FATAL error: the Update safety check did not pass - not updating. Nothing deleted.'; exit 1; }
 
-U=$(git rev-parse --abbrev-ref --symbolic-full-name @{u})
+U=$(git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null) || {
+  echo 'FATAL error: this copy of Phosphene has no update source configured - not updating. Nothing deleted.'
+  exit 1
+}
 M=$(git merge --ff-only "$U" 2>&1) && exec git rev-parse --short HEAD
 A=$(git rev-list --count "$U"..HEAD)
 [ "$A" -gt 0 ] || {
@@ -56,5 +59,5 @@ git diff --quiet && git diff --cached --quiet || {
   exit 1
 }
 echo "diverged: $A commit(s) - resetting"
-git reset --hard "$U" || exit 1
+git reset --hard "$U" || { echo 'FATAL error: could not move Phosphene to the new version - the lines above say why. Nothing else was deleted; run Update again.'; exit 1; }
 git rev-parse --short HEAD

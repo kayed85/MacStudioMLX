@@ -268,6 +268,9 @@ def get_status(h, parsed) -> None:
     # 4.17.4: can a render start at all (the engine venv), and the one-click
     # repair's progress. File checks only - cheap enough for every poll.
     payload["engine_env"] = P.engine_env_status()
+    # 4.19.5: the same question for the Hailuo H3 venv - on its known-good set
+    # (scripts/pinokio/h3_constraints.txt) or not - and its repair's progress.
+    payload["h3_env"] = P.h3_env_status()
     payload["train_profile"] = P.TRAIN_PROFILE
     payload["train_presets"] = P.TRAIN_PRESETS
     payload["train_style_presets"] = P.TRAIN_STYLE_PRESETS
@@ -278,15 +281,34 @@ def get_status(h, parsed) -> None:
     # user gets live feedback even before opening the log panel.
     with P.DOWNLOAD_LOCK:
         if P.DOWNLOAD["active"]:
+            _dl_repo = next((r for r in P._repos() if r.get("key") == P.DOWNLOAD["key"]), {})
             payload["download"] = {
                 "active": True,
                 "key": P.DOWNLOAD["key"],
                 "repo_id": P.DOWNLOAD["repo_id"],
                 "started_ts": P.DOWNLOAD["started_ts"],
                 "last_line": P.DOWNLOAD["last_line"],
+                # 4.20: the post-install background fetcher, not a click.
+                "background": bool(P.DOWNLOAD.get("background")),
+                "name": _dl_repo.get("name") or P.DOWNLOAD["key"],
+                "size_gb": _dl_repo.get("size_gb"),
             }
         else:
             payload["download"] = {"active": False}
+    # 4.20: what install.js left for after Start, and where the background
+    # fetcher is with it (empty and idle on every install it never queued).
+    payload["deferred_downloads"] = P.deferred_status()
+    # Mac app review #11: the process-wide GPU gate. `current` shows the queued
+    # job; an inline image render, a character sheet, Enhance, a lyrics request
+    # or the post-update script hold the GPU OUTSIDE the queue and showed
+    # nowhere, so a client deciding "is it safe to stop the studio" must read
+    # this too: {busy, holder, since, outside_queue}.
+    payload["gpu"] = P.gpu_gate_status()
+    # Mac app only: the app's own model download (app_models.json). The
+    # "Base models needed" card names it instead of offering a second fetch.
+    _app = P.app_models_state()
+    if _app is not None:
+        payload["app_models"] = _app
     payload["hf_available"] = P.HF_BIN is not None
     # Settings snapshot — only needs the public-safe view (booleans
     # for token presence, no secret values). The UI reads
@@ -470,6 +492,9 @@ def post_queue_retry(h, path, qs, ctype) -> None:
     refusal = P.job_input_refusal(new_job["params"])
     if refusal:
         h._json({"error": refusal, "code": "input_missing"}, 400); return
+    _lic = P.job_licence_refusal(new_job["params"])
+    if _lic:
+        h._json(_lic, 451); return
     with P.QUEUE_COND:
         P.STATE["queue"].append(new_job)
         P.QUEUE_COND.notify_all()
@@ -509,6 +534,21 @@ def post_queue_batch(h, path, qs, ctype) -> None:
         built = [P.make_job(form, override_prompt=pr) for pr in chunks]
     except P.CharacterRequestError as exc:
         h._json({"error": str(exc)}, 400); return
+    # 4.19.2: the same up-front refusals /queue/add makes. A batch skipped
+    # them, so a batch of image prompts whose picture had gone failed once per
+    # prompt, each after its turn (fleet 4.19.1: 12 in a row on one Mac).
+    for job in built:
+        refusal = P.job_input_refusal(job.get("params") or {})
+        if refusal:
+            h._json({"error": refusal, "code": "input_missing"}, 400); return
+    for job in built[:1]:            # the form is shared; one licence screen
+        _lic = P.job_licence_refusal(job.get("params") or {})
+        if _lic:
+            h._json(_lic, 451); return
+    for job in built[:1]:            # the form is shared; one install offer
+        refusal = P.a2v_stem_refusal(job["params"])
+        if refusal:
+            h._json({"error": refusal, "code": "vocal_separator_missing"}, 400); return
     # Built first, appended second: a batch is all-or-nothing, so a
     # refusal on prompt 7 cannot leave prompts 1-6 queued.
     with P.QUEUE_COND:
@@ -653,6 +693,12 @@ def post_prompt_enhance(h, path, qs, ctype) -> None:
         mode = "t2v"
     if not user_prompt:
         h._json({"error": "no prompt provided"}, 400); return
+    # 4.20: Gemma 3 is downloaded in the background after the first boot, so
+    # for a while after a fresh install it is not on disk yet. Say so - with
+    # what to do - instead of letting the helper fail to load a model that is
+    # still arriving.
+    if P.enhance_model_missing():
+        h._json(P.gemma3_refusal("Enhance", "its language model, Gemma 3", P.GEMMA), 409); return
     # 2026-05-20 — collect trigger tokens that Gemma MUST preserve
     # case-exact. Three sources, unioned:
     #   1. The panel-supplied `preserve_tokens` form field (the
@@ -711,6 +757,7 @@ def post_prompt_enhance(h, path, qs, ctype) -> None:
         reason = P.current_render_busy_reason()
         P.push(f"[enhance] skipped: {reason}")
         h._json({"error": f"{reason} Enhance works again when it finishes."}, 409); return
+    P.gpu_gate_mark("enhance")
     try:
         result = P.HELPER.run({
             "action": "enhance_prompt",
@@ -724,6 +771,7 @@ def post_prompt_enhance(h, path, qs, ctype) -> None:
         P.push(f"[enhance] failed: {exc}")
         h._json({"error": str(exc)}, 500); return
     finally:
+        P.gpu_gate_unmark()
         P._GPU_LOCK.release()
     # A malformed terminal helper event must still become JSON. Before
     # this guard, None/non-string values raised after the only try/except
@@ -749,6 +797,13 @@ def post_prompt_enhance(h, path, qs, ctype) -> None:
     if triggers_added:
         P.push(f"[enhance] added trigger word(s): {', '.join(triggers_added)}")
     P.push(f"[enhance] → {enhanced[:120]}… ({result.get('elapsed_sec','?')}s)")
+    # `enhance_prompt` was in the feature vocabulary and the /analytics/ui
+    # allowlist since v4.9.7, but nothing ever sent it: the fleet showed 0
+    # Enhance uses across 809 active installs (2026-09-19 -> 10-19), which is
+    # "unmeasured", not "unused". Counted here, on success, where it happens.
+    # It decides whether the 6 GB Gemma 3 that Enhance runs on has to be
+    # downloaded before a new user can press Start at all.
+    P._analytics_feature("enhance_prompt", "a2v" if a2v_mode else mode)
     h._json({
         "ok": True,
         "original": user_prompt,
@@ -794,11 +849,24 @@ def post_run(h, path, qs, ctype) -> None:
     refusal = P.job_input_refusal(job.get("params") or {})
     if refusal:
         h._json({"error": refusal, "code": "input_missing"}, 400); return
+    # 4.19.8: a model whose licence asks for an explicit "I accept" (H3, the
+    # non-commercial models) is refused with 451 until it is accepted; the
+    # panel's licences.js shows the screen and re-sends this request.
+    _lic = P.job_licence_refusal(job.get("params") or {})
+    if _lic:
+        h._json(_lic, 451); return
     # 4.17 Codex EST-10: a follow-up that can never queue is refused NOW,
     # not discovered in the log after a long Extend render.
     refusal = P.extend_face_fix_refusal(job["params"])
     if refusal:
         h._json({"error": refusal, "code": "pack_missing"}, 400); return
+    # Upscale ×2 above QHD exhausted 96 GB + swap: refused before it queues.
+    _up = job["params"]
+    if _up.get("mode") == "upscale" and _up.get("upscale_source_path"):
+        _sw, _sh = P._probe_video_dims(str(_up["upscale_source_path"]))
+        refusal = P.upscale_output_refusal(_sw, _sh)
+        if refusal:
+            h._json({"error": refusal, "code": "hardware_tier"}, 400); return
     # "Listen to the voice only" on an install that cannot separate a voice:
     # refused NOW with an install offer, never rendered on the full mix.
     refusal = P.a2v_stem_refusal(job["params"])
@@ -1203,6 +1271,15 @@ def post_queue_newtake(h, path, qs, ctype) -> None:
     src_params = side.get("params") or {}
     if not src_params:
         h._json({"error": "sidecar has no params to replay"}, 400); return
+    # A Sharp export of a clip that had no settings of its own (an imported
+    # mp4) records only {mode: t2v, sharp_export_*}: no prompt, no canvas. New
+    # Take queued that as a t2v job, which died on its first missing field -
+    # the bare `'stop_comfy'` in the fleet (4.19.5). Nothing to re-roll.
+    if src_params.get("sharp_export_source") and not (
+            src_params.get("prompt") or src_params.get("width")):
+        h._json({"error": "This clip is a Sharp export of a clip with no "
+                          "recorded settings, so there is nothing to re-roll."},
+                400); return
     new_params = dict(src_params)
     stored_take = new_params.get("take")
     if stored_take:
@@ -1245,6 +1322,10 @@ def post_queue_newtake(h, path, qs, ctype) -> None:
         "started_at": None, "finished_at": None, "elapsed_sec": None,
         "params": new_params, "raw_path": None, "output_path": None, "error": None,
     }
+    # 4.19.8: a model whose licence asks for an "I accept" (model_licences.py).
+    _lic = P.job_licence_refusal(new_job.get("params") or {})
+    if _lic:
+        h._json(_lic, 451); return
     with P.QUEUE_COND:
         P.STATE["queue"].append(new_job)
         P.QUEUE_COND.notify_all()
@@ -1375,6 +1456,10 @@ def post_take_resume(h, path, qs, ctype) -> None:
         "started_at": None, "finished_at": None, "elapsed_sec": None,
         "params": base_params, "raw_path": None, "output_path": None, "error": None,
     }
+    # 4.19.8: a model whose licence asks for an "I accept" (model_licences.py).
+    _lic = P.job_licence_refusal(new_job.get("params") or {})
+    if _lic:
+        h._json(_lic, 451); return
     with P.QUEUE_COND:
         P.STATE["queue"].append(new_job)
         P.QUEUE_COND.notify_all()

@@ -14,7 +14,8 @@ tree actually contains*. This does.
 Two independent checks, both must pass:
 
 1. PATH check — nothing on `scripts/public_exclude.txt` may exist in the
-   tree. That file is the single source of truth for "must never ship";
+   tree. An entry is an exact path, or a glob (`test_*.py`) matched the way
+   git matches a pathspec (2026-10-21: the test suites stay private). That file is the single source of truth for "must never ship";
    the promote recipe's `git rm --cached` step (docs/RELEASE_CHECKLIST.md,
    "Promoting — a curated SNAPSHOT", step 1) reads the same file, so the
    removal list and the verification list cannot drift apart.
@@ -39,6 +40,12 @@ reviewed and shipped safely. See the private pattern list's own comments
 for specifics; if a future release wants one of those gated too, add a
 per-hit allowlist rather than a blanket ban.
 
+3. PATH-PATTERN check (2026-10-20) — a pattern-list row whose flag is `p`
+   is a regex matched against every PATH in the tree rather than against
+   content. It is how a private-only file is caught by its name even when
+   its content carries no other marker. The rows themselves
+   live in the same private list, so the public tree never names them.
+
 Usage:
     python3 scripts/public_leak_check.py <tree-ish>
 
@@ -53,6 +60,7 @@ neither counts as a leak verdict, but neither counts as a PASS either.
 """
 from __future__ import annotations
 
+import fnmatch
 import re
 import subprocess
 import sys
@@ -89,6 +97,13 @@ def load_exclude_list() -> list[str]:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
+        if "[" in line or "]" in line:
+            # fnmatch and git disagree on bracket classes (`[^0-9]` is a
+            # negation in git and a literal `^` in fnmatch), so a bracket line
+            # could pass here while git removes something else. Refuse it.
+            sys.stderr.write(f"FAIL setup: {EXCLUDE_FILE}: bracket patterns are not "
+                             f"supported, use * or ?: {line}\n")
+            raise SystemExit(2)
         paths.append(line)
     if not paths:
         sys.stderr.write(f"FAIL setup: {EXCLUDE_FILE} has no active entries\n")
@@ -96,8 +111,10 @@ def load_exclude_list() -> list[str]:
     return paths
 
 
-def load_patterns() -> list[tuple[str, str, bool]]:
-    """Load (label, regex, case_insensitive) from the private pattern list.
+def load_patterns() -> list[tuple[str, str, str]]:
+    """Load (label, regex, flag) from the private pattern list. flag is
+    "0" (case-sensitive content), "1" (case-insensitive content) or "p" (a
+    path regex, checked against `git ls-tree` names).
 
     Fails closed: a missing pattern file is a setup error, never a silent
     "nothing to check." This is what makes it safe for this script to ship
@@ -111,7 +128,7 @@ def load_patterns() -> list[tuple[str, str, bool]]:
             "run from the private tree\n"
         )
         raise SystemExit(2)
-    patterns: list[tuple[str, str, bool]] = []
+    patterns: list[tuple[str, str, str]] = []
     for lineno, line in enumerate(PATTERN_FILE.read_text().splitlines(), 1):
         line = line.rstrip("\n")
         if not line.strip() or line.lstrip().startswith("#"):
@@ -123,18 +140,45 @@ def load_patterns() -> list[tuple[str, str, bool]]:
                 "'<0|1>\\t<label>\\t<regex>'\n"
             )
             raise SystemExit(2)
-        ci_flag, label, pattern = parts
-        patterns.append((label, pattern, ci_flag == "1"))
+        flag, label, pattern = parts
+        if flag not in ("0", "1", "p"):
+            sys.stderr.write(
+                f"FAIL setup: {PATTERN_FILE}:{lineno} flag must be 0, 1 or p\n"
+            )
+            raise SystemExit(2)
+        patterns.append((label, pattern, flag))
     if not patterns:
         sys.stderr.write(f"FAIL setup: {PATTERN_FILE} has no active entries\n")
         raise SystemExit(2)
     return patterns
 
 
+def is_glob(entry: str) -> bool:
+    return any(c in entry for c in "*?")
+
+
+def matches_exclude(path: str, entry: str) -> bool:
+    """One exclude-list entry against one tree path. A plain entry is an
+    exact path. An entry with `*` or `?` is a glob with git's default
+    pathspec semantics (fnmatch, `*` also crosses `/`), which is what the
+    promote recipe's `git rm --cached -- "<entry>"` applies to the same line,
+    so the removal and this verification still read one list one way."""
+    if is_glob(entry):
+        return fnmatch.fnmatchcase(path, entry)
+    return path == entry
+
+
 def check_excluded_paths(tree_ish: str, excluded: list[str]) -> list[str]:
     listing = _git("ls-tree", "-r", "--name-only", tree_ish)
-    present = set(listing.splitlines())
-    return [p for p in excluded if p in present]
+    present = listing.splitlines()
+    hits: list[str] = []
+    for entry in excluded:
+        if is_glob(entry):
+            hits += [f"{p}  (matches {entry})" for p in present
+                     if matches_exclude(p, entry)]
+        elif entry in present:
+            hits.append(entry)
+    return hits
 
 
 def check_pattern_file_absent(tree_ish: str) -> bool:
@@ -144,7 +188,20 @@ def check_pattern_file_absent(tree_ish: str) -> bool:
     return PATTERN_FILE_PATH in set(listing.splitlines())
 
 
-def check_banned_content(tree_ish: str, patterns: list[tuple[str, str, bool]]) -> list[str]:
+def check_banned_paths(tree_ish: str, patterns: list[tuple[str, str, str]]) -> list[str]:
+    """`p` rows: a regex over every path in the tree (re.search)."""
+    listing = _git("ls-tree", "-r", "--name-only", tree_ish).splitlines()
+    hits: list[str] = []
+    for label, pattern, flag in patterns:
+        if flag != "p":
+            continue
+        rx = re.compile(pattern)
+        hits += [f"[{label}] {path}" for path in listing
+                 if path != PATTERN_FILE_PATH and rx.search(path)]
+    return hits
+
+
+def check_banned_content(tree_ish: str, patterns: list[tuple[str, str, str]]) -> list[str]:
     hits: list[str] = []
     # The pattern list necessarily spells out every string it detects, so
     # scanning it against itself is a guaranteed, meaningless self-match —
@@ -154,9 +211,11 @@ def check_banned_content(tree_ish: str, patterns: list[tuple[str, str, bool]]) -
     # This does NOT weaken the security property: PATTERN_FILE_PATH's
     # presence is separately hard-checked by check_pattern_file_absent().
     args_pathspec = ["--", ".", f":!{PATTERN_FILE_PATH}"]
-    for label, pattern, ci in patterns:
+    for label, pattern, flag in patterns:
+        if flag == "p":
+            continue
         args = ["grep", "-nI"]
-        if ci:
+        if flag == "1":
             args.append("-i")
         args += ["-P", "-e", pattern, tree_ish] + args_pathspec
         out = _git(*args)
@@ -189,6 +248,7 @@ def main(argv: list[str]) -> int:
     leaked_paths = check_excluded_paths(tree_ish, excluded)
     pattern_file_leaked = check_pattern_file_absent(tree_ish)
     content_hits = check_banned_content(tree_ish, patterns)
+    path_hits = check_banned_paths(tree_ish, patterns)
 
     ok = True
     if leaked_paths:
@@ -203,6 +263,12 @@ def main(argv: list[str]) -> int:
         ok = False
         print(f"FAIL banned pattern present in {tree_ish}:")
         for h in content_hits:
+            print(f"  {h}")
+
+    if path_hits:
+        ok = False
+        print(f"FAIL banned path pattern present in {tree_ish}:")
+        for h in path_hits:
             print(f"  {h}")
 
     if ok:

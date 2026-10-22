@@ -24,9 +24,17 @@
 # transitive deps resolve first and the version is then locked, after which the
 # FBCache patch is applied.
 
-echo 'Installing the mflux image-engine pack (Ideogram 4 + Qwen-Edit)…' && \
-( uv pip install --python ./ltx-2-mlx/env/bin/python 'mflux==0.18.0' && \
-  uv pip install --python ./ltx-2-mlx/env/bin/python --reinstall --no-deps 'mflux==0.18.0' && \
-  uv pip install --python ./ltx-2-mlx/env/bin/python 'mlx-teacache==0.4.1' && \
-  ./ltx-2-mlx/env/bin/python3.11 patch_mflux_fbcache.py ) \
-|| echo 'WARN: mflux image-engine install hit an error — video still works; use the Reinstall image engines action to retry image generation.'
+# OPTIONAL means its output must never say "error:". Pinokio 8.2 ends an install
+# when a step's output matches /error:/i or /errno /i (pinokiod kernel/shells.js)
+# and uv prints "error: ..." for any failed resolve or download - which would end
+# the whole video install over an image pack the panel can reinstall in one click.
+# The same defence post_update.sh and a2v_stems_deps.sh already carry. The exit
+# status is the subshell's, read from PIPESTATUS.
+echo 'Installing the mflux image-engine pack (Ideogram 4 + Qwen-Edit)…'
+( uv pip install --python ./ltx-2-mlx/env/bin/python -c scripts/pinokio/engine_constraints.txt 'mflux==0.18.0' && \
+  uv pip install --python ./ltx-2-mlx/env/bin/python -c scripts/pinokio/engine_constraints.txt --reinstall --no-deps 'mflux==0.18.0' && \
+  uv pip install --python ./ltx-2-mlx/env/bin/python -c scripts/pinokio/engine_constraints.txt 'mlx-teacache==0.4.1' && \
+  ./ltx-2-mlx/env/bin/python3.11 patch_mflux_fbcache.py ) 2>&1 \
+  | sed -u -e 's/[Ee][Rr][Rr][Oo][Rr]:/problem -/g' -e 's/[Ee]rrno /errno-/g'
+[ "${PIPESTATUS[0]}" -eq 0 ] \
+  || echo 'WARN: mflux image-engine install hit a problem — video still works; use the Reinstall image engines action to retry image generation.'

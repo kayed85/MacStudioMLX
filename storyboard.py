@@ -330,7 +330,26 @@ class StoryboardError(Exception):
 # Durable state
 # ---------------------------------------------------------------------------
 
+#: What a board id may be: the minted `sb_<date>_<hex>`, a hand-named
+#: `sb_amorfati` - one path component, never `..`, never absolute.
+_BOARD_ID_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,127}")
+
+
 def board_dir(state_dir: Path, board_id: str) -> Path:
+    """The board's folder under STATE_DIR/storyboards.
+
+    SECURITY (ov-review A-01). Every board route takes `id` from the request
+    and lands here - including GETs, which a page on any website can fire at
+    the loopback panel with an <img src> (a GET carries no Origin, so the
+    local-request guard passes it). An absolute id replaced the root
+    (`Path(a) / "/tmp/x"` is `/tmp/x`) and `..` climbed out of it, so
+    /storyboard/edit/clip-peaks?id=/any/dir wrote its cache into any writable
+    directory and /storyboard/edit/proxy?id=/any/dir served files from one.
+    An id that is not one plain path component is refused here, once, for
+    all of them. Empty stays the root (callers check for it themselves)."""
+    board_id = str(board_id or "")
+    if board_id and (not _BOARD_ID_RE.fullmatch(board_id) or ".." in board_id):
+        raise StoryboardError(f"not a storyboard id: {board_id[:60]!r}")
     return Path(state_dir) / "storyboards" / board_id
 
 
@@ -1089,6 +1108,29 @@ _IMPLIES_SPEECH_RE = re.compile(
     r"|\bmid-sentence\b|\bmid-speech\b", re.IGNORECASE)
 
 
+# "nobody speaks", "no one says a word", "no voice is heard", "without
+# speaking", "never talks", "doesn't speak" - speech named only to deny it.
+# The speech verb must sit RIGHT after the negator: a gap would let the
+# negation belong to another word ("Without hesitation she addresses the
+# camera", "She never stops talking") and excuse a real speaker.
+# A denial with an exception is not a silent shot: "Nobody speaks except the
+# narrator", "No voice is heard other than hers", "Nobody speaks but him" all
+# have a speaker (4.19.7 review). So a negated phrase is only blanked when its
+# clause carries no except / other than / apart from / aside from / besides /
+# save for, and is not followed directly by "but" (", but a dog barks" keeps
+# its comma and stays a denial). Erring this way only re-flags a shot.
+_SPEECH_EXCEPTION_GUARD = (
+    r"(?![^.;!?\n]*\b(?:except|other than|apart from|aside from|besides|save for)\b)"
+    r"(?!\s+but\b)")
+_NEGATED_SPEECH_RE = re.compile(
+    r"\b(?:nobody|no one|no-one|never|not|without|(?:do|does|did|is|are|was|were|can|could|will|would)n['\u2019]t|cannot)"
+    r"\s+(?:explain|describ|discuss|talk|speak|say|tell|address|announc|declar|recit|narrat"
+    r"|murmur|mutter|whisper|mumbl|ask|answer|repl|shout|instruct|sing|chant)\w*\b" + _SPEECH_EXCEPTION_GUARD +
+    r"|\bno (?:voice|voices|dialogue|speech|talking|singing)\b(?:\s+(?:is|are|was|were))?(?:\s+(?:heard|spoken|present))?"
+    + _SPEECH_EXCEPTION_GUARD,
+    re.IGNORECASE)
+
+
 def shot_speech_problem(prompt: str) -> str | None:
     """The speech verb in `prompt` that has no words to go with it, or None.
 
@@ -1099,6 +1141,13 @@ def shot_speech_problem(prompt: str) -> str | None:
     p = prompt or ""
     if _SPOKEN_WORDS_RE.search(p):
         return None
+    # A prompt that says NOBODY speaks is the silent shot, stated out loud -
+    # our own planner writes "Nobody speaks and no voice is heard at any
+    # point." into silent shots' soundscape, and the verb scan used to read
+    # that sentence as an instruction to speak: the board's Render button
+    # stayed disabled on "'speaks' implies someone is speaking". Blank the
+    # negated phrases first so only an affirmative speech verb is judged.
+    p = _NEGATED_SPEECH_RE.sub(" ", p)
     m = _IMPLIES_SPEECH_RE.search(p)
     return m.group(0) if m else None
 

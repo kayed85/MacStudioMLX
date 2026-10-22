@@ -21,6 +21,15 @@ External agents (Claude Code, Codex, OSS, or anything that speaks HTTP) drive Ph
 
 - Every JSON response is `Content-Type: application/json`.
 - Errors return `{"error": "<message>"}` plus a non-2xx HTTP status.
+- **451 `licence_required` (4.19.8).** A request that would download or run a model whose licence asks
+  for an explicit "I accept" - Hailuo H3 (MiniMax H3 Community License) and the non-commercial models
+  Ideogram 4, YuE2, FLUX.1 Krea [dev] and Bria FIBO - answers **HTTP 451** with
+  `{"ok": false, "code": "licence_required", "licence": "<key>", "error": "...", "url": "<licence>"}`
+  until that licence is accepted once on this Mac. Applies to `/queue/add`, `/queue/retry`,
+  `/queue/batch`, `/image/generate`, `/h3/turbo/install`, `/h3/tristep/install`, `/music/install`,
+  `/music/cover/install` and `/music/lora/fetch`; a job that arrives any other way fails with the same
+  sentence. Read the terms with `GET /licences` and accept with `POST /licences/accept` (below), or once
+  in the panel, which shows the screen by itself.
 - The `/agent/*` namespace is reserved-and-removed: any path under `/agent/` except `/agent/image/config` returns **410 Gone** with `{"error": "agentic flows removed; see docs/API.md"}`. New endpoints should not be added under `/agent/`.
 
 ---
@@ -72,6 +81,7 @@ Add a job to the panel's queue. Returns immediately; the helper renders it async
 | `video_path`, `h3_extend_seconds` | path / float | `mode=extend`: any clip, continued from its last 17 frames and their sound; 0.5–15 s added after it. |
 | `audio`, `image`, `frames`, `audio_start_time`, `audio_stem_auto` | | `mode=a2v` with `engine=h3`: the track is held exactly and the picture rendered to it; `frames` (24 fps) is the length, capped at the audio left after `audio_start_time` and at 30 s; `audio_stem_auto=on` conditions on the separated vocal and delivers the original. |
 | `video_path` | path | `mode=v2a` (Add sound, H3 only): the clip's picture is kept exactly and only its sound is generated; up to 60 s. |
+| `h3_prompt_guards` | `""` \| `off` \| `all` \| comma list | Which prompt guards run on the text the runner encodes (`h3_prompt_guards.py`): `ellipsis`, `spoken`, `hands`, `nouns`. Empty = the default set (`ellipsis`, `spoken`, `hands`; `nouns` is opt-in); `off` sends the prompt verbatim. The guards applied are recorded as `h3_prompt_guards_applied`; `prompt` keeps what was typed. |
 
 **LoRA payload:** the `loras` field is a JSON-encoded array of `{path, strength}` objects. Stack as many as needed: On Hailuo H3, stacking needs the engine's repeatable `--lora` (`/status.h3.loras.max_stack` > 1); an older pack takes one adapter and the `h3_lora_slot` field decides whether it goes to Turbo or to the LoRA.
 
@@ -244,6 +254,8 @@ whatever the chosen quality renders on.
 
 Every `outputs[]` row carries `q`: the output's searchable words, lower-cased, built from its sidecar in the listing pass that already reads it — prompt, label, mode, quality, engine, character, seed, `WxH`, `Nf`, LoRA file stems, the model directory name, the temporal mode and `windows`. The gallery's search box is a substring test over `name + q`; every typed word must match, and typing pulls the older outputs in so the search is over everything.
 
+Every video row also carries `silent`: `true` when the clip has no sound (no audio track in its mp4 header, or a track that never rises above −80 dB), `false` with sound, `null` while not known yet. The header read is inline; the level check runs once per file on a background thread and is cached per (mtime, size) in `state/output_silence.json`, so a poll never decodes anything. The gallery card and the player offer **Add sound** on a `silent` clip when `/status.h3.video_to_audio` is true.
+
 Returns the full panel state.
 
 ```json
@@ -258,7 +270,10 @@ Returns the full panel state.
 ```
 
 Field semantics:
+- `deferred_downloads` (4.20) — `{ active, state, key, message, pending: [{key, name, size_gb, left_gb}], left_gb, finished }`. The packs a fresh install queued for after Start (`state/install_deferred.json`, written by install.js; `required_files.json -> install.after_start`). `state` is `idle`, `starting`, `downloading`, `waiting` (another download holds the slot), `waiting_disk` (the panel keeps `install.background_floor_gb` free; `message` says how much to free), `retry_wait`, `failed` or `done`. Empty and `idle` on any install install.js never queued — an updated install downloads nothing. `download` carries `background: true` while the fetcher holds the slot.
 - `current` — the job actively running (`null` when idle).
+- `gpu` (4.19.10) — `{ busy, holder, since, outside_queue }`: the panel's one GPU gate. `holder` is `"queue"` for the job in `current`, or what holds the GPU outside the queue: `"image"` (an Image Studio render), `"character_sheet"`, `"enhance"` (Prompt Enhance), `"lyrics"`, `"update"` (the post-update script). A client that must not interrupt work (stopping or updating the panel) waits for `current` to be `null`, the queue to be paused or empty, AND `gpu.busy` to be `false`.
+- `app_models` (Mac app only) — the app's own model download: `{ state, packs, active, locked, done_bytes, total_bytes }`. `locked` (4.19.10) is true while the app holds its download lock (`<Phosphene home>/.locks/models.lock`); the panel then offers no Download for those packs and refuses one with 409 `app_downloading`. A second `scripts/fetch_pack_release.py` on a pack folder that is already being written stops untouched with exit code 75.
 - `queue` — jobs waiting, FIFO order.
 - `history` — completed/failed jobs. Each entry has `status`, `elapsed_sec`, `output_path`, `raw_path` (native pre-upscale), `error`.
 - `log` — rolling buffer of helper stdout lines (last ~50 jobs).
@@ -911,6 +926,25 @@ Opens the output's containing folder in Finder (Mac).
 
 ---
 
+## Model licences (4.19.8)
+
+### `GET /licences`
+
+Every licence the panel asks about, with this Mac's acceptance state:
+`{"licences": [{"key": "h3", "model": ..., "licence": ..., "licensor": ..., "version": ..., "url": ...,
+"non_commercial": false, "title": ..., "summary": ..., "terms": [...], "badge": ..., "accept_label": ...,
+"accepted": false, "accepted_at": null, ...}, ...], "ui": {...}}`. Keys: `h3`, `ideogram4`, `yue2`,
+`flux1_dev`, `fibo`. H3's entry also carries `territory_notice`, `excluded_territories`, `report_line`,
+`report_url` and `credit_line`.
+
+### `POST /licences/accept`
+
+Form fields `key=<licence key>` and `accept=1` (the box the user ticked). Records the acceptance for
+the licence's current `version` in `state/model_licences.json` (plus a marker file the H3 installer
+reads) and returns `{"ok": true, "key": ..., "record": {...}, "licence": {...}}`. A changed licence
+version asks again. Accepting on someone's behalf is accepting for them: an agent should show the
+user the terms from `GET /licences` first.
+
 ## Helper / system
 
 ### `POST /helper/restart`
@@ -938,6 +972,18 @@ Answers `202` (started), `200 {nothing_to_do}` (the engine is fine), or `409`
 (a repair is running, or `installing: true` - Pinokio's own Install is still
 writing the venv). Progress and outcome ride `GET /status` -> `engine_env`
 (`ok`, `fault`, `installing`, `repair.{state, active, log, error}`).
+
+### `POST /h3/repair`
+
+4.19.5. Re-runs only `scripts/pinokio/h3_deps.sh` on the Hailuo H3 checkout:
+re-installs H3's Python packages into its own venv at the set this release
+was tested with (`scripts/pinokio/h3_constraints.txt`, passed with `-c`; uv
+moves anything already outside it back). No weights, no Stop - the panel never
+imports the H3 venv. Answers `202` (started) or `409` (H3 is not installed, an
+H3 render is running, or a repair is already running). Progress and outcome
+ride `GET /status` -> `h3_env` (`ok`, `fault`, `repair.{state, active, log,
+error}`). An H3 render on a venv off the set is refused at its start with
+`H3 cannot start: the Hailuo H3 venv ...` and this repair on the card.
 
 ## Push alerts — the completion alert for a closed tab
 
@@ -981,6 +1027,8 @@ Form-encoded. Pre-rewrites a prompt with Gemma. Used by the panel's Enhance butt
 | `loras` | 4.18.0: JSON list of installed LoRA paths on the render. The panel reads each one's name, trigger words and guide (else the creator's description) from the LoRA library — paths it does not list are ignored — and hands at most 4, bounded, to the helper as fenced reference text. A LoRA whose trigger words are all missing from the result gets its first trigger put back at the front. |
 
 Returns `{ ok, original, enhanced, mode, elapsed_sec, source_non_latin, translated, lora_notes_used: [names], lora_triggers_added: [words] }`; `{ error }` with 409 while a render holds the GPU.
+
+**409 `needs_pack` (4.20).** Enhance runs on Gemma 3, which a fresh install downloads in the background *after* the first boot (see `deferred_downloads` under `GET /status`). Until it is on disk the route answers 409 `{ ok: false, error, needs_pack: "gemma", pack_name, pack_size, pack_state }` with `pack_state` one of `downloading`, `queued`, `waiting_disk`, `missing`, and never asks the helper to load it. `/storyboard/plan`, `/storyboard/replan-shots`, `/oneshot/plan` and `/train/auto-caption` answer the same shape for the same reason. `POST /models/download repo_key=<needs_pack>` fetches it now: while the background fetcher holds the download slot that answers 202 `{ queued: true }` and moves the pack to the front of the queue (`{ already: true }` when it is the one downloading).
 
 ### `POST /upload`
 

@@ -71,6 +71,10 @@ SEQ_NOUN_CAP = "Sequence"
 # External agents drive Phosphene via the HTTP API documented in docs/API.md.
 # Pre-removal snapshot: git tag pre-agent-removal-2026-05-15.
 import image_engine as agent_image_engine
+import hostinfo
+# 4.20: what install.js fetches before Start and what the panel fetches after
+# (required_files.json -> install). Stdlib only; install.js runs it too.
+import install_plan
 
 # Agent-facing Ideogram 4 caption builder + validator (pure stdlib). Powers
 # the GET /image/agent/schema + POST /image/agent endpoints — a clean JSON
@@ -79,6 +83,11 @@ import image_engine as agent_image_engine
 # internal caption schema. Faithful Python port of the panel's JS canvas
 # serializer (ideoBuildCaption / ideoSynthDesc / ideoRectToBbox).
 import ideogram_caption
+import model_licences
+# Pinokio or the Phosphene Mac app (PHOSPHENE_DISTRIBUTION / _EDITION). Every
+# user-facing sentence that names Pinokio picks its Mac-app variant through
+# distribution.say(); unset (Pinokio) keeps every sentence as it was.
+import distribution as _dist
 
 try:
     import mlx_lm.utils
@@ -95,6 +104,10 @@ except Exception:
 # loads a model in THIS process. Both are 3.9-compatible because the panel is.
 import storyboard
 import storyboard_planner
+# Hailuo H3 prompt guards — short in-prompt sentences against reported H3
+# failures (lines sung, invented rings, dialogue nouns on screen, ellipses).
+# Pure stdlib; applied in run_h3_job_inner right before the runner argv.
+import h3_prompt_guards
 
 # --- Paths -------------------------------------------------------------------
 # Everything below is overridable via env vars so the panel can be cloned and
@@ -118,6 +131,7 @@ def _resolve_root() -> Path:
 ROOT = _resolve_root()
 MLX = Path(os.environ.get("LTX_MLX_PATH", str(ROOT / "ltx-2-mlx")))
 MODELS_DIR = Path(os.environ.get("LTX_MODELS_DIR", str(ROOT / "mlx_models")))
+_DEFAULT_MODELS_DIR = ROOT / "mlx_models"     # the layout repo_dir() keeps verbatim
 GEMMA = Path(os.environ.get("LTX_GEMMA_PATH", str(MODELS_DIR / "gemma-3-12b-it-4bit")))
 OUTPUT = Path(os.environ.get("LTX_OUTPUT_DIR", str(ROOT / "mlx_outputs")))
 UPLOADS = Path(os.environ.get("LTX_UPLOADS_DIR", str(ROOT / "panel_uploads")))
@@ -156,7 +170,9 @@ def _resolve_helper_python() -> Path:
     explicit = os.environ.get("LTX_HELPER_PYTHON")
     if explicit and Path(explicit).is_file():
         return Path(explicit)
-    for sub in (".venv/bin/python3.11", "env/bin/python3.11", "env/bin/python3"):
+    # python3.11 is the Pinokio/macOS venv; plain python3 is a Linux venv
+    # (omarchy-mlx ships wheels for the distro's Python only).
+    for sub in (".venv/bin/python3.14", "env/bin/python3.14", ".venv/bin/python3.11", "env/bin/python3.11", ".venv/bin/python3", "env/bin/python3"):
         p = MLX / sub
         if p.is_file():
             return p
@@ -226,6 +242,93 @@ def engine_env_fault() -> str:
     if pkgs and not any((d / "ltx_pipelines_mlx").exists() for d in pkgs):
         return ("the engine venv has a Python but no packages — "
                 "ltx_pipelines_mlx never finished installing into it")
+    for d in pkgs:
+        mismatch = engine_dependency_mismatch(d)
+        if mismatch:
+            return f"{ENGINE_ENV_MISMATCH_WORDS} - {mismatch}"
+    return ""
+
+
+# --- THE THIRD SHAPE: PACKAGES PRESENT, VERSIONS THAT REFUSE (4.19.4) -------
+# transformers checks a handful of its dependencies' versions AT IMPORT
+# (transformers/dependency_versions_check.py) and raises on a mismatch, and
+# every render imports it (the Gemma prompt encoder, through mlx_lm). On
+# 2026-10-09 tokenizers 0.23.3 shipped; an Update's eager
+# `--upgrade 'litellm…'` moved it there, transformers <5.13 refused it, and
+# every render on the install died half a minute in with "tokenizers>=0.22.0,
+# <=0.23.0 is required for a normal functioning of this module, but found
+# tokenizers==0.23.3" - filed as bad_params, with no way out in the sentence.
+# Same question as the package-directory check above, answered from files:
+# transformers' own table against the dist-info folders, no import, a few ms.
+# A mismatch is a broken environment, so it gets the Repair engine sentence
+# (scripts/pinokio/ltx_engine_env.sh resolves under engine_constraints.txt,
+# which puts the set back).
+ENGINE_ENV_MISMATCH_WORDS = "the engine venv's packages do not fit together"
+#: The packages transformers checks at import (its pkgs_to_check_at_runtime,
+#: minus python, which is the venv's own).
+TRANSFORMERS_RUNTIME_DEPS = ("tqdm", "regex", "packaging", "filelock", "numpy",
+                             "tokenizers", "huggingface-hub", "safetensors",
+                             "accelerate", "pyyaml")
+
+
+def _dist_versions(site: Path) -> dict:
+    """{normalised name: version} from site-packages' *.dist-info folders."""
+    out: dict = {}
+    try:
+        names = [p.name for p in site.iterdir() if p.name.endswith(".dist-info")]
+    except OSError:
+        return out
+    dupes: set = set()
+    for n in names:
+        stem = n[:-len(".dist-info")]
+        name, _, ver = stem.rpartition("-")
+        if name and ver:
+            key = re.sub(r"[-_.]+", "-", name).lower()
+            if key in out and out[key] != ver:
+                dupes.add(key)
+            out[key] = ver
+    # Two dist-info folders for one package (a stale leftover beside the real
+    # one): which one Python's importlib.metadata picks is not ours to guess,
+    # so say nothing about that package rather than block a working venv
+    # (Codex 4.19.4).
+    for key in dupes:
+        out.pop(key, None)
+    return out
+
+
+def engine_dependency_mismatch(site: Path) -> str:
+    """"" when transformers in `site` will import, else which package is out
+    of the range transformers itself requires. Fails open: anything this
+    cannot read (no transformers, an unparsable table, no `packaging`) is ""."""
+    try:
+        table = site / "transformers" / "dependency_versions_table.py"
+        if not table.is_file():
+            return ""
+        import ast
+        tree = ast.parse(table.read_text(encoding="utf-8"))
+        deps = None
+        for node in tree.body:
+            if (isinstance(node, ast.Assign) and any(
+                    isinstance(t, ast.Name) and t.id == "deps" for t in node.targets)):
+                deps = ast.literal_eval(node.value)
+        if not isinstance(deps, dict):
+            return ""
+        from packaging.requirements import Requirement
+        from packaging.version import Version
+        installed = _dist_versions(site)
+        tf = installed.get("transformers", "?")
+        for pkg in TRANSFORMERS_RUNTIME_DEPS:
+            spec = deps.get(pkg)
+            have = installed.get(pkg)
+            if not spec or not have:
+                continue        # transformers skips what is not installed too
+            req = Requirement(spec)
+            if not req.specifier.contains(Version(have), prereleases=True):
+                return (f"transformers {tf} needs {spec} but {pkg} {have} is "
+                        f"installed, so every render would stop at its first "
+                        f"step")
+    except Exception:                                          # noqa: BLE001
+        return ""
     return ""
 
 
@@ -246,6 +349,12 @@ ENGINE_ENV_REPAIR = (
     "model kept). Or from the Pinokio sidebar: Stop Phosphene, then click "
     "\"Repair Phosphene engine (models kept)\". Renders cannot run until it "
     "is repaired."
+)
+#: The same, inside the Mac app (no Pinokio sidebar there).
+ENGINE_ENV_REPAIR_MAC = (
+    "Press Repair engine in the bar at the top of the studio - it re-installs "
+    "only the engine's Python packages into the venv (a few minutes, every "
+    "model kept). Renders cannot run until it is repaired."
 )
 
 # --- One-click engine repair (4.17.4 fleet fix) -----------------------------
@@ -306,7 +415,7 @@ def _engine_install_running() -> bool:
 #: The installer's own words (scripts/pinokio/install_cause.sh) plus the two
 #: the panel can see for itself. docs/ANALYTICS.md, install_step.cause.
 ENGINE_ENV_CAUSES = ("network", "disk", "uv_error", "python_missing", "timeout",
-                     "installing", "other", "unknown")
+                     "installing", "mismatch", "other", "unknown")
 ENGINE_ENV_RESULT_NAME = ".phosphene_engine_result.json"
 
 
@@ -334,6 +443,11 @@ def engine_env_cause() -> str:
             return "installing"
         if not HELPER_PYTHON.is_file():
             return "python_missing"
+        # 4.19.4: the packages are there but transformers refuses their
+        # versions (engine_dependency_mismatch) - whatever the last install
+        # recorded, that is why this venv cannot render now.
+        if ENGINE_ENV_MISMATCH_WORDS in engine_env_fault():
+            return "mismatch"
         rec = engine_env_record() or {}
         cause = str(rec.get("cause") or "")
         if rec.get("outcome") == "failed" and cause in ENGINE_ENV_CAUSES:
@@ -395,8 +509,11 @@ def engine_env_repair_start() -> tuple[int, dict]:
     if not engine_env_fault():
         return 200, {"ok": True, "nothing_to_do": True}
     if _engine_install_running():
-        return 409, {"error": "Pinokio is still installing the engine. This "
-                              "clears itself when that install finishes.",
+        return 409, {"error": _dist.say(
+                         "Pinokio is still installing the engine. This "
+                         "clears itself when that install finishes.",
+                         "Phosphene is still setting up the engine. This "
+                         "clears itself when setup finishes."),
                      "installing": True}
     with ENGINE_REPAIR_LOCK:
         if ENGINE_REPAIR.get("active"):
@@ -471,7 +588,8 @@ if not HELPER_PYTHON.is_file():
 else:
     _env_fault = engine_env_fault()
     if _env_fault:
-        sys.stderr.write(f"WARN: {_env_fault}.\n      {ENGINE_ENV_REPAIR}\n")
+        sys.stderr.write(f"WARN: {_env_fault}.\n      "
+                         f"{_dist.say(ENGINE_ENV_REPAIR, ENGINE_ENV_REPAIR_MAC)}\n")
 def _pinokio_bin_dirs() -> list:
     """Pinokio's own tool folders, newest layout first.
 
@@ -582,8 +700,11 @@ def _resolve_ffmpeg() -> Path:
     if skipped:
         FFMPEG_NOTE = (f"no ffmpeg with the libx264 encoder was found (checked "
                        f"{', '.join(map(str, skipped))}); exports will fail with "
-                       f"\"Unknown encoder 'libx264'\". Fix: in Pinokio, run "
-                       f"Update, or export LTX_FFMPEG=/path/to/an/ffmpeg that has it.")
+                       f"\"Unknown encoder 'libx264'\". " + _dist.say(
+                           "Fix: in Pinokio, run Update, or export "
+                           "LTX_FFMPEG=/path/to/an/ffmpeg that has it.",
+                           "Fix: quit Phosphene and open it again so setup "
+                           "can find a working video encoder."))
         return skipped[0]
     return _resolve_tool("ffmpeg", "LTX_FFMPEG")
 
@@ -676,65 +797,98 @@ HIDDEN_FILE = STATE_DIR / "panel_hidden.json"
 # the JSONL data is appended daily by a background thread (see
 # stats_fetch_loop) and served at /stats/data. Both endpoints are
 # 127.0.0.1-only like the rest of the panel.
-STATS_DATA_FILE = STATE_DIR / "stats-data.jsonl"
+# READ-ONLY STATS MODE (2026-10-14). PHOSPHENE_STATS_SOURCE_DIR points the
+# dashboard at another install's state dir — the maintainer's real archive —
+# so /stats can be served by a throwaway panel on its own port without
+# booting (or writing into) the panel that owns that data. In this mode the
+# panel READS stats-data.jsonl and usage-log.jsonl from the source dir and
+# never writes there: no stats_fetch_loop, /stats/refresh answers 409, and
+# the usage mirror it appends to stays in its own STATE_DIR. The daily
+# archive is then kept by an external job (launchd, see
+# scripts/STATS_DASHBOARD.md), not by whichever panel happens to be running —
+# the reason the archive went 15 days without a row in Sep-Oct 2026.
+_STATS_SOURCE_RAW = (os.environ.get("PHOSPHENE_STATS_SOURCE_DIR") or "").strip()
+STATS_SOURCE_DIR = Path(_STATS_SOURCE_RAW).expanduser() if _STATS_SOURCE_RAW else None
+STATS_READONLY = STATS_SOURCE_DIR is not None
+STATS_DATA_FILE = (STATS_SOURCE_DIR or STATE_DIR) / "stats-data.jsonl"
 STATS_HTML_FILE = ROOT / "panel_assets" / "stats.html"
 STATS_FETCHER = ROOT / "scripts" / "fetch_repo_stats.py"
 
 # Dashboard v2 (2026-09-30): one range control (7d/30d/90d/all) drives every
-# panel on /stats. Server-side filtering of the JSONL archive lives here so
-# the payload the browser downloads matches what it asked for, and so a
-# range's own cache entry is invalidated (not served stale) the moment the
-# archive file changes underneath it — see _stats_data_for_range.
+# panel on /stats. The range is applied IN THE BROWSER, by date; the server
+# always sends the whole archive (see _stats_data_for_range for why).
 STATS_RANGE_DAYS = {"7d": 7, "30d": 30, "90d": 90, "all": None}
 STATS_RANGE_DEFAULT = "30d"
 _STATS_DATA_RANGE_CACHE: dict[str, tuple[float, bytes]] = {}
 _STATS_DATA_RANGE_LOCK = threading.Lock()
 
+# Fields only the NEWEST row is ever read for (timelines rebuilt from the
+# full GitHub history on every fetch, the open-items board, the release
+# table). Older rows keep their per-day facts only; see _stats_slim_row.
+_STATS_LATEST_ONLY_FIELDS = (
+    "stars_timeline", "forks_timeline", "issues_opened", "issues_closed",
+    "prs_opened", "prs_closed", "commits_timeline", "release_timeline",
+    "open_items", "releases",
+)
 
-def _stats_data_for_range(range_key: str) -> bytes:
-    """JSONL bytes for one range, cached per (range, archive mtime).
 
-    Keying the cache on the file's own mtime — not a TTL — is what keeps
-    this correct after /stats/refresh: the fetcher rewrites STATS_DATA_FILE
-    in place, which bumps mtime, which makes every range's cache entry miss
-    on the very next read. No separate invalidation call needed.
+def _stats_slim_row(row: dict) -> dict:
+    return {k: v for k, v in row.items() if k not in _STATS_LATEST_ONLY_FIELDS}
 
-    A range narrower than "all" asks for 2x the window (e.g. 60 days of
-    rows for "30d") so the dashboard can compute "vs prior period" deltas
-    from one response instead of a second round trip."""
-    key = range_key if range_key in STATS_RANGE_DAYS else STATS_RANGE_DEFAULT
-    days = STATS_RANGE_DAYS[key]
+
+def _stats_data_for_range(range_key: str = STATS_RANGE_DEFAULT) -> bytes:
+    """The archive as JSONL for the dashboard: EVERY row, oldest first,
+    the newest one complete and the older ones slimmed. Cached on the
+    file's mtime, so a fetch that appends a row is seen on the next read.
+
+    `range_key` is accepted for old callers and ignored. Until 2026-10-14
+    the server trimmed the archive to twice the selected window, counted
+    back from the wall clock, and that was the root of three wrong numbers:
+      - the "all-time" tiles (total clones, unique cloners) were summed
+        from whatever the trim left, so they changed with the range chip
+        ("1,993 all-time" was 4 rows' worth on the 7-day view);
+      - a stale archive (no fetch for 15 days) trimmed to almost nothing,
+        and every over-time chart went blank instead of showing the
+        history it had;
+      - the cache was keyed on mtime only while the cutoff moved with the
+        date, so a panel up for four days kept serving the trim it made on
+        the first.
+    Sending everything is ~1 KB per older row (the timelines that make a
+    full row ~16 KB are only read from the newest one), so a year of
+    history is still well under a megabyte on a loopback request."""
     try:
         mtime = STATS_DATA_FILE.stat().st_mtime
     except OSError:
         return b""
     with _STATS_DATA_RANGE_LOCK:
-        cached = _STATS_DATA_RANGE_CACHE.get(key)
+        cached = _STATS_DATA_RANGE_CACHE.get("archive")
         if cached and cached[0] == mtime:
             return cached[1]
     try:
         raw = STATS_DATA_FILE.read_bytes()
     except FileNotFoundError:
         return b""
-    if days is None:
-        body = raw
-    else:
-        cutoff = time.strftime("%Y-%m-%d",
-                                time.gmtime(time.time() - days * 2 * 86400))
-        kept: list[bytes] = []
-        for line in raw.splitlines():
-            stripped = line.strip()
-            if not stripped:
-                continue
-            try:
-                row = json.loads(stripped)
-            except (json.JSONDecodeError, ValueError):
-                continue
-            if str(row.get("date") or "") >= cutoff:
-                kept.append(stripped)
-        body = (b"\n".join(kept) + b"\n") if kept else b""
+    by_date: dict[str, dict] = {}
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            row = json.loads(stripped)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(row, dict) or not row.get("date"):
+            continue
+        # A date seen twice keeps the LATER line (same rule as the fetcher).
+        by_date[str(row["date"])] = row
+    dates = sorted(by_date)
+    out = []
+    for i, d in enumerate(dates):
+        row = by_date[d] if i == len(dates) - 1 else _stats_slim_row(by_date[d])
+        out.append(json.dumps(row, ensure_ascii=False).encode("utf-8"))
+    body = (b"\n".join(out) + b"\n") if out else b""
     with _STATS_DATA_RANGE_LOCK:
-        _STATS_DATA_RANGE_CACHE[key] = (mtime, body)
+        _STATS_DATA_RANGE_CACHE["archive"] = (mtime, body)
     return body
 HELPER_IDLE_TIMEOUT = int(os.environ.get("LTX_HELPER_IDLE_TIMEOUT", "1800"))
 HELPER_LOW_MEMORY = os.environ.get("LTX_HELPER_LOW_MEMORY", "true")
@@ -744,6 +898,33 @@ HELPER_LOW_MEMORY = os.environ.get("LTX_HELPER_LOW_MEMORY", "true")
 # `LTX_LOW_RAM_STREAM=1|0` in the environment forces it either way (testing
 # on a big Mac, or opting out); otherwise it is decided by physical RAM.
 LOW_RAM_STREAM_RAM_GB = 24
+# 4.19.10: the LTX video-decode memory budget follows the Mac's memory. The
+# engine tiles the VAE decode over time once its estimate of ONE activation
+# (the block-3 bf16 tensor) passes LTX2_VAE_DECODE_BUDGET_GB, and that was
+# 8 GB on every Mac. Measured on this Mac (MLX GPU, a 16 GB Mac's ceiling,
+# LTX-2.5 decoder, 768x416 x 481 frames): the real decode peak is ~14x that
+# estimate - 16.97 GiB untiled at budget 8 or 3 (no tiling at all), 11.29 at
+# 0.5, 7.78 at 0.25. So a budget only means something on a small Mac when it
+# is a fraction of a GB: vae_decode_budget_gb() gives Macs of 32 GB or less
+# 0.022 x RAM (16 GB -> 0.35, 24 -> 0.53, 32 -> 0.7; floor 0.125), which tiles
+# long clips (a 20 s clip on 16 GB: ~9 GiB instead of ~17) and leaves a 5 s
+# Quick or Balanced clip in one piece, exactly as before (estimate 0.27-0.33).
+# Macs over 32 GB keep the engine's 8 GB. A value in the environment wins.
+VAE_DECODE_BUDGET_MAX_GB = 8.0
+VAE_DECODE_BUDGET_MIN_GB = 0.125
+VAE_DECODE_BUDGET_RAM_FRACTION = 0.022
+VAE_DECODE_BUDGET_SMALL_MAC_GB = 32.5
+
+
+def vae_decode_budget_gb(ram_gb: float | None = None) -> float:
+    """LTX2_VAE_DECODE_BUDGET_GB for this Mac (see the block above)."""
+    try:
+        ram = float(SYSTEM_RAM_GB if ram_gb is None else ram_gb)
+    except (TypeError, ValueError, NameError):
+        ram = 0.0
+    if ram <= 0 or ram > VAE_DECODE_BUDGET_SMALL_MAC_GB:
+        return VAE_DECODE_BUDGET_MAX_GB
+    return round(max(VAE_DECODE_BUDGET_MIN_GB, ram * VAE_DECODE_BUDGET_RAM_FRACTION), 3)
 # Enhance is an interactive HTTP request, unlike renders that may legitimately
 # run for tens of minutes. Bound its helper wait below the UI/curl client's
 # 120-second ceiling so a silent helper still produces a JSON error response.
@@ -1708,6 +1889,8 @@ def _validate_settings_patch(patch: dict) -> tuple[dict, str | None]:
         else:
             out["first_run_card_dismissed"] = str(v).strip().lower() in ("1", "true", "yes", "on")
 
+    if "spicy_mode" in patch and _dist.is_mac_app():
+        patch = {k: v for k, v in patch.items() if k != "spicy_mode"}   # no Spicy mode in the Mac app
     if "spicy_mode" in patch:
         # Same urlencoded-bool coercion as models_card_dismissed.
         v = patch["spicy_mode"]
@@ -1884,7 +2067,7 @@ def get_settings_public() -> dict:
         "has_hf_token": bool(s.get("hf_token", "").strip()),
         "models_card_dismissed": bool(s.get("models_card_dismissed", False)),
         "first_run_card_dismissed": bool(s.get("first_run_card_dismissed", False)),
-        "spicy_mode": bool(s.get("spicy_mode", False)),
+        "spicy_mode": bool(s.get("spicy_mode", False)) and not _dist.is_mac_app(),
         "live_preview": str(s.get("live_preview", "on")),
         "notify_done": bool(s.get("notify_done", True)),
         "room_tone_auto": bool(s.get("room_tone_auto", True)),
@@ -2051,7 +2234,8 @@ def update_settings(patch: dict) -> tuple[dict, str | None]:
 #    preview thumbnail, source). The CivitAI browser writes these sidecars
 #    automatically when it downloads a LoRA.
 
-LORAS_DIR = ROOT / "mlx_models" / "loras"
+# Under MODELS_DIR like every other weight (== ROOT/mlx_models under Pinokio).
+LORAS_DIR = MODELS_DIR / "loras"
 
 # Curated Lightricks LoRAs. Keyed by short id; the UI exposes these next to
 # user-installed LoRAs in the picker, with `is_curated: true` so the front
@@ -3200,10 +3384,36 @@ def _new_train_job_id() -> str:
     return f"trn-{ts}-{suffix}"
 
 
-def _train_dataset_dir(job_id: str) -> Path:
-    """Per-job dataset folder. Holds images/, captions/, spec.json."""
-    p = TRAIN_DIR / job_id
-    return p
+# ---- LoRA training support: dataset and caption-map helpers, completed-run listing, model preflight, failure classification. (moved to train_support.py) ---------------------------------
+# The helpers around a training job (the job itself, run_train_job_inner, stays in the panel): dataset folders and caption maps, the dev-transformer install, time estimates, advice, and turning a runner event or exit code into a plain-English error.
+# The names stay importable from here: routes and tests reach them as P.<name>.
+# P is handed over right here (not in the route-wiring loop below) because this
+# module has no routes of its own; sys.modules[__name__] is the running panel
+# even while it is still importing.
+import train_support as _train_support
+from train_support import (  # noqa: F401  (re-exported on purpose)
+    _train_caption_map_path,
+    _train_dataset_dir,
+    _train_encode_retry_wanted,
+    _train_estimate_seconds,
+    _train_gemma_fallback_max_length,
+    _train_install_dev_transformer,
+    _train_list_completed,
+    _train_phase_from_line,
+    _train_read_caption_map,
+    _train_reconcile_captions,
+    _train_reconcile_one,
+    _train_release_render_memory,
+    _train_required_models,
+    _train_set_caption_map_entry,
+    _train_weak_advice,
+    _train_wipe_caption_conditions,
+    _train_write_caption_map,
+    train_error_for_exit,
+    train_error_from_event,
+)
+_train_support.P = sys.modules[__name__]
+
 
 
 def _safe_job_id(job_id: str) -> str:
@@ -3214,6 +3424,25 @@ def _safe_job_id(job_id: str) -> str:
     if len(job_id) > 64:
         raise ValueError("job_id too long")
     return job_id
+
+
+def train_trigger_problem(trigger: str) -> str:
+    """"" when `trigger` can name a trained LoRA's files, else why not.
+
+    The trigger IS the file name: the trainer writes
+    <loras>/<trigger>_v2.safetensors and its sidecars. A trigger with a path
+    in it (`/tmp/x`, `../x`) wrote the model and its JSON outside the library,
+    over whatever was there, and the character never appeared in the panel
+    (ov-review D-02). Words, spaces and the usual punctuation stay allowed."""
+    t = str(trigger or "")
+    if any(c in t for c in ("/", "\\", "\x00")) or ".." in t:
+        return ("The trigger word becomes the LoRA's file name, so it can't "
+                "contain / or \\ or '..'.")
+    if t[:1] in (".", "-"):
+        return "The trigger word can't start with '.' or '-'."
+    if len(t) > 64:
+        return "The trigger word is too long (64 characters at most)."
+    return ""
 
 
 def _normalise_caption_text(text: str, trigger: str | None = None) -> str:
@@ -3283,92 +3512,16 @@ def _caption_word_count(text: str) -> int:
 _TRAIN_CAPTION_MAP_NAME = "caption_map.json"
 
 
-def _train_caption_map_path(dataset_dir: Path) -> Path:
-    return dataset_dir / _TRAIN_CAPTION_MAP_NAME
 
 
-def _train_read_caption_map(dataset_dir: Path) -> dict[str, str]:
-    p = _train_caption_map_path(dataset_dir)
-    if not p.is_file():
-        return {}
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            return {str(k): str(v) for k, v in data.items()
-                    if isinstance(k, str) and isinstance(v, str)}
-    except (OSError, json.JSONDecodeError):
-        pass
-    return {}
 
 
-def _train_write_caption_map(dataset_dir: Path, mapping: dict[str, str]) -> None:
-    p = _train_caption_map_path(dataset_dir)
-    try:
-        p.write_text(json.dumps(mapping, indent=2), encoding="utf-8")
-    except OSError:
-        pass
 
 
-def _train_set_caption_map_entry(dataset_dir: Path,
-                                 original_stem: str,
-                                 saved_stem: str) -> None:
-    m = _train_read_caption_map(dataset_dir)
-    m[original_stem] = saved_stem
-    _train_write_caption_map(dataset_dir, m)
 
 
-def _train_reconcile_one(dataset_dir: Path,
-                         original_stem: str,
-                         saved_stem: str) -> bool:
-    """If a caption file exists under `original_stem.txt`, rename it to
-    `saved_stem.txt`. Used when the user uploads `image_001.txt` BEFORE its
-    matching `image_001.png` arrives. Returns True if a paired caption now
-    sits under `<captions>/<saved_stem>.txt`."""
-    captions_dir = dataset_dir / "captions"
-    saved_path = captions_dir / f"{saved_stem}.txt"
-    if saved_path.is_file():
-        return True
-    if original_stem == saved_stem:
-        return False
-    parked = captions_dir / f"{original_stem}.txt"
-    if parked.is_file():
-        try:
-            parked.rename(saved_path)
-            return True
-        except OSError:
-            return False
-    return False
 
 
-def _train_reconcile_captions(dataset_dir: Path) -> tuple[int, int, list[str]]:
-    """Called on training start. Walks images/ + captions/, ensures every
-    caption under an *original* stem in caption_map.json is moved to its
-    saved stem so the trainer's per-image lookup hits. Returns
-    (paired_count, total_images, warnings)."""
-    images_dir = dataset_dir / "images"
-    captions_dir = dataset_dir / "captions"
-    cmap = _train_read_caption_map(dataset_dir)
-    if not images_dir.is_dir():
-        return 0, 0, ["images dir missing"]
-    images = [p for p in sorted(images_dir.iterdir())
-              if p.is_file() and p.suffix.lower() in TRAIN_IMAGE_EXTS]
-    total = len(images)
-    warnings: list[str] = []
-    if not captions_dir.is_dir():
-        return 0, total, warnings
-    for original, saved in cmap.items():
-        if original == saved:
-            continue
-        parked = captions_dir / f"{original}.txt"
-        target = captions_dir / f"{saved}.txt"
-        if parked.is_file() and not target.is_file():
-            try:
-                parked.rename(target)
-            except OSError as e:
-                warnings.append(f"could not move {parked.name} → {target.name}: {e}")
-    paired = sum(1 for img in images
-                 if (captions_dir / f"{img.stem}.txt").is_file())
-    return paired, total, warnings
 
 
 def _suggest_trigger_token() -> str:
@@ -3454,97 +3607,8 @@ def _caption_trigger_mismatches(
     return mismatched, (dominant[0] if dominant else None)
 
 
-def _train_estimate_seconds(preset: str, image_count: int, *,
-                            steps_override: int | None = None,
-                            is_style: bool = False) -> int:
-    """Wall-time estimate in seconds for a training run. The image count
-    has a small overhead for the preprocess pass (image → VAE latent
-    cache, ~3 s/image on M4 Max), then `steps * seconds_per_step` for
-    the train loop itself.
-
-    `is_style` switches the preset lookup table — style training pulls
-    its seconds_per_step from TRAIN_STYLE_PRESETS, not TRAIN_PRESETS."""
-    table = TRAIN_STYLE_PRESETS if is_style else TRAIN_PRESETS
-    cfg = table.get(preset) or table["quick"]
-    # Steps derive from epochs × image_count; advanced override wins.
-    steps = steps_override if steps_override else _preset_steps_for(cfg, image_count)
-    preprocess = 3.0 * max(0, image_count)
-    train = float(steps) * float(cfg["seconds_per_step"])
-    return int(preprocess + train + 30)  # +30 s for setup + checkpoint write
 
 
-def _train_list_completed() -> list[dict]:
-    """Scan mlx_models/loras/ for .safetensors with a Phosphene-trained
-    sidecar (`kind=train_character` OR `kind=train_style`) and return one
-    record per discovered run for the Trained-LoRAs list in the Train tab.
-    Surfacing both kinds in a single list lets the user see their full
-    training inventory in one place; the UI filters by `train_type` to show
-    the kind that matches the active train-type toggle (and lists everything
-    when "All" is selected)."""
-    out: list[dict] = []
-    if LORAS_DIR.exists():
-        for p in sorted(LORAS_DIR.iterdir(),
-                        key=lambda x: x.stat().st_mtime if x.exists() else 0,
-                        reverse=True):
-            if p.suffix.lower() != ".safetensors":
-                continue
-            # Style LoRAs use a `.style.safetensors` suffix, so the sidecar
-            # is `.style.json` not `.json`. Probe both paths.
-            sidecar_candidates = [p.with_suffix(".json")]
-            if p.name.endswith(".style.safetensors"):
-                sidecar_candidates.insert(
-                    0, p.with_name(p.name[: -len(".safetensors")] + ".json")
-                )
-            sidecar = next((s for s in sidecar_candidates if s.is_file()), None)
-            if sidecar is None:
-                continue
-            try:
-                meta = json.loads(sidecar.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            kind = meta.get("kind")
-            if kind not in ("train_character", "train_style"):
-                continue
-            try:
-                stat = p.stat()
-            except OSError:
-                continue
-            verdict = _adapter_verdict(meta)
-            out.append({
-                "id": meta.get("job_id") or p.stem,
-                "name": meta.get("name") or p.stem,
-                "trigger": meta.get("trigger") or "",
-                "preset": meta.get("preset") or "",
-                "kind": kind,
-                "train_type": meta.get("train_type")
-                                or ("style" if kind == "train_style"
-                                    else "character"),
-                "path": str(p),
-                "filename": p.name,
-                "size_mb": round(stat.st_size / (1024 * 1024), 1),
-                "created_at": meta.get("created_at") or stat.st_mtime,
-                "image_count": meta.get("image_count") or 0,
-                # WHETHER THIS FILE CAN DO ANYTHING, carried out of the
-                # sidecar so the library can warn before somebody spends a
-                # render finding out. "unknown" for anything trained by a
-                # build that did not measure — silence is not weakness, and a
-                # chip on every older LoRA would be noise nobody could act on.
-                "adapter_verdict": verdict,
-                # AND WHAT TO DO ABOUT IT. A verdict the user cannot act on
-                # sends them to a GitHub thread to find out what their own
-                # number meant (#62); the remedy travels with the verdict, and
-                # is hardware-aware because on a sub-64 GB Mac "use High" is
-                # not a thing that machine can do.
-                "adapter_advice": (
-                    _train_weak_advice(
-                        verdict,
-                        str(meta.get("preset") or ""),
-                        kind == "train_style",
-                    )
-                    if verdict not in ("ok", "unknown") else ""
-                ),
-            })
-    return out
 
 
 def _adapter_verdict(meta: dict) -> str:
@@ -3562,295 +3626,10 @@ def _adapter_verdict(meta: dict) -> str:
     return "unknown"
 
 
-def _train_weak_advice(verdict: str, preset: str = "", is_style: bool = False) -> str:
-    """One sentence a user can ACT on when their adapter measures weak/inert.
-
-    The measurement shipped in v4.6.0 and the number was correct; what it did
-    not do was tell anyone what to do about it. A first-time user on the Quick
-    preset read "1.98e-04", found nothing in the panel that explained it, and
-    ended up reading a 21-comment GitHub thread to learn that rank 8 has never
-    carried a face (#62). The verdict without the remedy is the actual product
-    failure in that issue.
-
-    The remedy is hardware-dependent, which is why this is a function and not
-    a constant: on a Mac under 64 GB `_select_train_profile` rewrites the whole
-    table and *High is rank 8 at 500 steps on two projections*, so "train again
-    on High" would be advice that machine cannot honour.
-    """
-    verdict = (verdict or "").lower()
-    if verdict == "inert":
-        return (
-            "This adapter carries no weight delta at all — every low-rank "
-            "product is exactly zero, so it cannot change a single pixel. "
-            "Treat the run as failed rather than as a weak result: nothing "
-            "was learned. Check the Logs for a trainer error, then train "
-            "again."
-        )
-    compact = bool(TRAIN_PROFILE.get("compact"))
-    if is_style:
-        head = ("This style adapter came out weak: the deltas it learned may "
-                "be too small to visibly change a render.")
-    else:
-        head = ("This character came out weak: the deltas it learned are "
-                "below the level any adapter that has carried a face here "
-                "has ever measured, so renders will most likely look "
-                "LoRA-free.")
-    if compact:
-        ram = TRAIN_PROFILE.get("ram_gb")
-        where = f"{ram} GB" if ram else "under 64 GB"
-        return (
-            f"{head} This Mac has {where}, so training runs the compact "
-            "profile — even High is rank 8 / 500 steps / 448px on two of the "
-            "four attention projections, not the rank-32 recipe that was "
-            "graded on a face. No preset on this machine reaches that recipe, "
-            "so this is the hardware and not your photos. More images and "
-            "sharper, more varied ones still help; a 64 GB-class Mac is what "
-            "unlocks the graded recipe."
-        )
-    if (preset or "").lower() != "high":
-        return (
-            f"{head} Train again on the High preset — rank 8 (Quick) and "
-            "rank 16 (Medium) have never carried an identity here, and High "
-            "is the only recipe that has. Raising the character strength "
-            "toward 2.0 helps a weak adapter a little; it cannot rescue one "
-            "this far under the floor."
-        )
-    return (
-        f"{head} This was already the High preset, so the next levers are the "
-        "dataset rather than the recipe: more images (20-40), sharper and more "
-        "varied in pose and lighting, and captions that name the trigger plainly. "
-        "Please attach the training log to https://github.com/mrbizarro/phosphene/issues/62 "
-        "— a weak High run is the case that issue is still open on."
-    )
 
 
-def _train_required_models() -> list[dict]:
-    """Return the list of model files Train Character needs and whether each
-    is present locally. Surfaces missing models to the UI so the user can
-    one-click download them via the existing hf flow.
-
-    Train Character requires the FULL-PRECISION `transformer-dev.safetensors`
-    from the LTX-2.3 Q8 repo (~21 GB). The dev base is required because
-    distilled is structurally wrong for training (different sigma schedule
-    than the trainer's flow-matching objective) — and it must be the Q8
-    repo's full-precision copy because the Q4 repo's transformer-dev is
-    QUANTIZED (~11 GB): the trainer refuses it (train.py's
-    FULL_DEV_MIN_BYTES) since it silently trains a near-zero LoRA (#35).
-    The default install ships neither, to save disk for inference-only
-    users.
-
-    Gemma + the rest of the Q4 stack (vae, audio, etc.) are already required
-    for inference so they should already be present, but we check anyway.
-    """
-    q4_local_dir = ROOT / "mlx_models" / "ltx-2.3-mlx-q4"
-    q8_local_dir = ROOT / "mlx_models" / "ltx-2.3-mlx-q8"
-    gemma_local_dir = ROOT / "mlx_models" / "gemma-3-12b-it-4bit"
-    gemma_repo_id = "mlx-community/gemma-3-12b-it-4bit"
-
-    def _file_present(local_dir: Path, repo_id: str, filename: str,
-                      *, extra_dirs: list[Path] | None = None,
-                      min_bytes: int = _MIN_FILE_BYTES) -> bool:
-        """Check known locations for a model file in this order:
-
-          1. The primary local_dir (where the helper expects it by default).
-          2. Any `extra_dirs` callers list explicitly — used for files that
-             can legitimately live in more than one place. The dev
-             transformer is the canonical example: original downloads
-             land in mlx_models/ltx-2.3-mlx-q4/ but Phosphene also ships
-             a Q8-friendly copy under mlx_models/ltx-2.3-mlx-q8/, and the
-             trainer happily loads either. Without this fallback the
-             preflight reports "missing" on installs that only have the
-             Q8-side copy and prompts an unnecessary 11 GB redownload.
-          3. The configured HF_HOME hub for repo_id.
-          4. The user-default HF cache (~/.cache/huggingface/hub) — covers
-             installs where HF_HOME wasn't set at first download time and
-             weights landed in the default location.
-        """
-        candidates: list[Path] = [local_dir / filename]
-        for d in (extra_dirs or []):
-            candidates.append(d / filename)
-        cache_dir = _repo_hf_cache_dir(repo_id)
-        if cache_dir is not None:
-            candidates.append(cache_dir / filename)
-        # Last-resort: default HF cache, regardless of HF_HOME. Matches what
-        # huggingface_hub does when neither env var is set. Old downloads
-        # often live here even when HF_HOME is now pointing elsewhere.
-        safe = repo_id.replace("/", "--")
-        default_root = Path.home() / ".cache" / "huggingface" / "hub" / f"models--{safe}" / "snapshots"
-        try:
-            if default_root.is_dir():
-                snaps = sorted(default_root.iterdir(),
-                               key=lambda d: d.stat().st_mtime, reverse=True)
-                if snaps:
-                    candidates.append(snaps[0] / filename)
-        except OSError:
-            pass
-        for c in candidates:
-            try:
-                if c.exists() and c.stat().st_size >= min_bytes:
-                    return True
-            except OSError:
-                continue
-        return False
-
-    # Mirror of lora_lab/train.py FULL_DEV_MIN_BYTES: anything smaller is a
-    # quantized transformer-dev, which the trainer refuses. The preflight
-    # must not show green on a file the trainer will reject (#35).
-    _FULL_DEV_MIN_BYTES = 15 * 1000**3
-
-    items = [
-        {
-            # THE ASSUMPTION THAT EXPIRED. This function's own docstring says
-            # "the rest of the Q4 stack (vae, audio, etc.) are already required
-            # for inference so they should already be present" — true right up
-            # until v4.0, when a fresh install stopped fetching LTX-2.3 at all.
-            # The trainer runs against 2.3 and needs its VAE, audio VAE and
-            # vocoder; without this row the Train tab would have looked ready
-            # and failed at load time on a pack nobody told the user about.
-            "key": "ltx23_base",
-            "label": "LTX-2.3 base pack (training runs against 2.3)",
-            "blurb": "The trainer runs against LTX-2.3, not 2.5 — it needs 2.3's "
-                     "VAE, audio VAE and vocoder. Your clips still render on "
-                     "LTX-2.5; this is training-only. A fresh v4.0 install does "
-                     "not download it, so it is fetched when you want to train.",
-            "repo_id": "dgrauet/ltx-2.3-mlx-q4",
-            "filename": "vae_decoder.safetensors",
-            "local_dir": str(q4_local_dir),
-            "size_gb": 20.48,
-            "ready": _file_present(q4_local_dir, "dgrauet/ltx-2.3-mlx-q4",
-                                   "vae_decoder.safetensors"),
-        },
-        {
-            "key": "ltx_dev_transformer",
-            "label": "LTX-2.3 dev transformer (training-only, full precision)",
-            # SYS-15/SYS-42: "the dev transformer has the right flow-matching
-            # schedule for LoRA-from-images training" was lab jargon a
-            # creator can't act on. Outcome language: what it's for, and
-            # what goes wrong if the wrong copy is used.
-            "blurb": "Required for training — a different file from the one "
-                     "your renders already use. Must be the full-precision "
-                     "copy (~21 GB): a smaller, compressed copy trains a "
-                     "LoRA that looks fine in the log and does nothing when "
-                     "you use it.",
-            "repo_id": "dgrauet/ltx-2.3-mlx-q8",
-            "filename": "transformer-dev.safetensors",
-            "local_dir": str(q8_local_dir),
-            "size_gb": 20.6,
-            # Size-gated: an 11 GB quantized dev (the old preflight's Q4
-            # download, still on many disks) must show NOT-ready, because
-            # the trainer refuses it and the LoRA comes out dead (#35).
-            "ready": _file_present(q8_local_dir, "dgrauet/ltx-2.3-mlx-q8",
-                                   "transformer-dev.safetensors",
-                                   extra_dirs=[q4_local_dir],
-                                   min_bytes=_FULL_DEV_MIN_BYTES),
-        },
-        {
-            "key": "gemma_text_encoder",
-            "label": "Gemma 3 12B (text encoder)",
-            "blurb": "Encodes prompts for both inference and training. Already "
-                     "required by Phosphene's renderer, so this is usually green.",
-            "repo_id": gemma_repo_id,
-            "filename": "config.json",
-            "local_dir": str(gemma_local_dir),
-            "size_gb": 6.0,
-            "ready": _file_present(gemma_local_dir, gemma_repo_id, "config.json"),
-        },
-    ]
-    return items
 
 
-def _train_install_dev_transformer(push_log) -> dict:
-    """Trigger an hf download for just `transformer-dev.safetensors` from
-    the LTX-2.3 Q8 repo — the FULL-PRECISION copy the trainer requires.
-    (Until v3.4.1 this pulled the Q4 repo's transformer-dev, which is
-    quantized: the trainer refuses it and the LoRA trains dead — #35.)
-    Reuses the same `hf download` binary the existing
-    HF download flow uses; runs synchronously in a worker thread so the
-    caller can stream progress (the panel currently invokes this from a
-    /train/install endpoint that returns quickly + then polls /status).
-
-    Returns {"ok": True, "started": True, "repo_id": ...} or {"ok": False,
-    "error": "..."} if the download couldn't be started (already running,
-    binary missing, etc.).
-    """
-    import subprocess
-    if DOWNLOAD["active"]:
-        return {"ok": False,
-                "error": f"another download is already active "
-                         f"({DOWNLOAD.get('repo_id', '?')})."}
-
-    repo_id = "dgrauet/ltx-2.3-mlx-q8"
-    local_dir = ROOT / "mlx_models" / "ltx-2.3-mlx-q8"
-    local_dir.mkdir(parents=True, exist_ok=True)
-
-    hf_bin = HF_BIN if HF_BIN is not None else _resolve_hf()
-    if hf_bin is None:
-        return {"ok": False, "error": "hf CLI not found on PATH."}
-
-    cmd = [str(hf_bin), "download", repo_id,
-           "--include", "transformer-dev.safetensors",
-           "--local-dir", str(local_dir)]
-
-    env = dict(os.environ)
-    hf_token = _active_hf_token()
-    if hf_token:
-        env["HF_TOKEN"] = hf_token
-        env["HUGGING_FACE_HUB_TOKEN"] = hf_token
-
-    with DOWNLOAD_LOCK:
-        DOWNLOAD["active"] = True
-        DOWNLOAD["key"] = "ltx_dev_transformer"
-        DOWNLOAD["repo_id"] = repo_id
-        DOWNLOAD["started_ts"] = time.time()
-        DOWNLOAD["last_line"] = ""
-
-    def _runner():
-        try:
-            push_log(f"[hf] dev transformer download started "
-                     f"({repo_id} / transformer-dev.safetensors, ~21 GB — "
-                     f"the full-precision copy training requires).")
-            proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, errors="replace", bufsize=1, env=env, start_new_session=True)
-            if not _download_register(proc):
-                push_log("[hf] dev transformer download cancelled.")
-                return
-            buf = ""
-            assert proc.stdout is not None
-            while True:
-                ch = proc.stdout.read(1)
-                if not ch:
-                    break
-                if ch in ("\n", "\r"):
-                    line = buf.strip()
-                    buf = ""
-                    if line:
-                        with DOWNLOAD_LOCK:
-                            DOWNLOAD["last_line"] = line[:200]
-                        push_log(f"[hf:dev] {line[:300]}")
-                else:
-                    buf += ch
-            rc = proc.wait()
-            if rc == 0:
-                push_log("[hf] dev transformer downloaded successfully.")
-            else:
-                push_log(f"[hf] dev transformer download exited with code {rc}.")
-        except Exception as exc:
-            push_log(f"[hf] dev transformer crashed: {exc}")
-        finally:
-            with DOWNLOAD_LOCK:
-                DOWNLOAD["active"] = False
-                DOWNLOAD["key"] = None
-                DOWNLOAD["repo_id"] = None
-                DOWNLOAD["started_ts"] = None
-                DOWNLOAD["last_line"] = ""
-                DOWNLOAD["proc"] = None
-                DOWNLOAD["pgid"] = None
-                DOWNLOAD["cancelled"] = False
-
-    threading.Thread(target=_runner, daemon=True, name="hf-dev-download").start()
-    return {"ok": True, "started": True, "repo_id": repo_id,
-            "filename": "transformer-dev.safetensors"}
 
 
 # One in-flight Turbo fetch at a time, mirroring the sample-character lane:
@@ -3872,13 +3651,16 @@ def _set_h3_turbo_dl(**kw) -> None:
 
 
 def _h3_turbo_asset(key: str | None = None) -> dict:
-    """The managed adapter to fetch: v4-600 EMA from its author's repo by
-    default; the LightX2V release asset when asked for by key."""
+    """The managed adapter to fetch: v4-600 EMA from its author's repo.
+
+    Every managed download comes from the adapter author's own repo. The
+    LightX2V v1.0 repack used to be reachable here by key from a Phosphene
+    release asset; that asset is gone (4.19.8, licence), and the installer
+    builds the file locally from upstream instead (scripts/fetch_h3_turbo.py)."""
     key = key or H3_TURBO_DEFAULT_ASSET
-    if key in H3_TURBO_ASSETS:
-        return dict(H3_TURBO_ASSETS[key], key=key)
-    return {"key": "v1.0", "file": H3_TURBO_LORA_FILE, "url": H3_TURBO_ASSET_URL,
-            "sha256": H3_TURBO_ASSET_SHA256, "bytes": H3_TURBO_ASSET_BYTES}
+    if key not in H3_TURBO_ASSETS:
+        raise KeyError(f"no managed Turbo download named {key!r}")
+    return dict(H3_TURBO_ASSETS[key], key=key)
 
 
 # ONE companion fetch at a time, from any caller (the install button, the
@@ -4005,7 +3787,7 @@ def _h3_turbo_fetch_embedder(target_dir, push_log, runner=None, *,
 
 
 def _h3_turbo_download_bg(target_dir, push_log, asset: dict | None = None) -> None:
-    """Stream the digest-pinned v1.0 repack release asset into the H3 pack."""
+    """Stream the digest-pinned managed Turbo adapter into the H3 pack."""
     import urllib.request
     import hashlib
     asset = asset or _h3_turbo_asset()
@@ -4053,6 +3835,12 @@ def _h3_turbo_download_bg(target_dir, push_log, asset: dict | None = None) -> No
                                "please retry")
         tmp.replace(target)
         push_log(f"[h3:turbo] adapter installed → {target}")
+        try:
+            # Same as Fast's: the runner's per-head copy, retried by the
+            # first Turbo render if this fails.
+            h3_bake_runner_layout(target, push_log)
+        except Exception as e:  # noqa: BLE001
+            push_log(f"[h3:turbo] qkv re-order deferred to the first render: {e}")
         _h3_turbo_fetch_embedder(target_dir, push_log, force=True)
         _set_h3_turbo_dl(status="done", mb=total_mb, total_mb=total_mb,
                          error=None)
@@ -4068,11 +3856,12 @@ def _h3_turbo_download_bg(target_dir, push_log, asset: dict | None = None) -> No
 
 
 def _h3_install_turbo(push_log, download_fn=None, embedder_fn=None) -> dict:
-    """Fetch the digest-pinned runner-layout Turbo adapter on demand.
+    """Fetch the digest-pinned Turbo adapter on demand (the v4-600 EMA
+    adapter, from its author's repo; see _h3_turbo_asset).
 
-    The v1.0 repack is a published release asset with a pinned SHA-256
-    (H3_TURBO_ASSET_SHA256, verified byte-identical against the repack the
-    adapter selection was graded on). The raw LightX2V v0.1 file is still
+    An install that already has the v1.0 repack (built locally from upstream
+    by scripts/fetch_h3_turbo.py, digest H3_TURBO_ASSET_SHA256) keeps using
+    it; the resolver order is H3_TURBO_LORA_CANDIDATES. The raw LightX2V v0.1 file is still
     refused by name in the resolver: its alpha/rank factor lives outside the
     checkpoint, and at scale 1.0 it renders coloured noise.
     """
@@ -4084,10 +3873,13 @@ def _h3_install_turbo(push_log, download_fn=None, embedder_fn=None) -> dict:
                          + "; ".join(paths["missing"])}
     if not h3_supports_lora():
         return {"ok": False,
-                "error": "This Hailuo H3 checkout predates Turbo (no --lora "
-                         "support in its runner). Re-run 'Install Hailuo H3' "
-                         "from the Phosphene sidebar in Pinokio to update the "
-                         "clone — it keeps every weight already on disk."}
+                "error": _dist.say(
+                    "This Hailuo H3 checkout predates Turbo (no --lora "
+                    "support in its runner). Re-run 'Install Hailuo H3' "
+                    "from the Phosphene sidebar in Pinokio to update the "
+                    "clone — it keeps every weight already on disk.",
+                    "This Hailuo H3 runner predates Turbo. Updating the "
+                    "runner isn't available in the Mac app yet.")}
     target = _h3_turbo_dir()
     if any((target / f).is_file() for f, _v, _fb in H3_TURBO_LORA_CANDIDATES):
         # The adapter is here; an install from before the adaLN companion came
@@ -5223,6 +5015,46 @@ def _read_local_version() -> str | None:
         return None
 
 
+#: The commit a release TARBALL was built from. The tracked file holds the
+#: literal git placeholder; `git archive` (GitHub's tarballs and the Pro bundle
+#: builder alike) substitutes the real SHA through `.gitattributes`
+#: export-subst. A git checkout keeps the placeholder and reads git instead.
+BUNDLE_COMMIT_FILE = ".phosphene_commit"
+
+
+def _read_bundle_commit() -> str | None:
+    """The 40-hex SHA of the code a release tarball holds, or None.
+
+    The Mac app sets PHOSPHENE_PANEL_COMMIT (the tag it unpacked) and that
+    wins under mac-app; otherwise BUNDLE_COMMIT_FILE. The Mac app installs the
+    panel from a tarball: no .git, so the version pill used to read
+    "4.19.6 · (unknown)". The placeholder a checkout carries (`$Format:%H$`)
+    and anything else that is not a SHA read as None."""
+    if _dist.is_mac_app():
+        env_sha = (os.environ.get("PHOSPHENE_PANEL_COMMIT") or "").strip().lower()
+        if re.fullmatch(r"[0-9a-f]{40}", env_sha):
+            return env_sha
+    try:
+        raw = (ROOT / BUNDLE_COMMIT_FILE).read_text(encoding="utf-8",
+                                                     errors="replace").strip()
+    except OSError:
+        return None
+    raw = raw.lower()
+    return raw if re.fullmatch(r"[0-9a-f]{40}", raw) else None
+
+
+def _root_is_checkout() -> bool:
+    """True when the panel's own folder is a git checkout (a .git dir, or the
+    .git FILE of a worktree). A tarball install is not one - and `git
+    rev-parse` run there would walk UP and answer for whatever repo happens
+    to contain the folder, naming a build this panel is not (a sandbox under
+    the app's repo showed "4.19.8 · alpha/0.3"). Inside the Mac app the app
+    names the commit (PHOSPHENE_PANEL_COMMIT), so git is not asked at all."""
+    if _dist.is_mac_app() and _read_bundle_commit():
+        return False
+    return (ROOT / ".git").exists()
+
+
 def _fetch_raw_text(url: str, timeout: int = 10) -> str | None:
     """GET a public URL and return its body as a stripped string, or None
     on any error. Used for the raw VERSION-file fetch from origin/main on
@@ -5295,9 +5127,13 @@ def _capture_boot_head() -> None:
         _BOOT_VERSION = _read_local_version()
     if _BOOT_HEAD_SHA is not None:
         return
-    sha = _git_capture(["rev-parse", "HEAD"])
+    sha = _git_capture(["rev-parse", "HEAD"]) if _root_is_checkout() else None
     if not sha:
-        return                      # not a checkout — the SHA fields stay None
+        # A release tarball (the Mac app's install): no git, but the commit it
+        # was cut from is in BUNDLE_COMMIT_FILE. No branch, no date - the pill
+        # names the version and the short SHA, which is the whole answer.
+        _BOOT_HEAD_SHA = _read_bundle_commit()
+        return                      # not a checkout — branch/date stay None
     _BOOT_HEAD_SHA = sha
     _BOOT_BRANCH = _git_capture(["rev-parse", "--abbrev-ref", "HEAD"])
     _BOOT_COMMIT_DATE = _git_capture(
@@ -5353,8 +5189,10 @@ def _detect_local_install_state() -> None:
     doesn't change while the panel is running (no auto-pull on the user's
     behalf). Pinokio's Update step kills + restarts the panel, so a fresh
     detect runs after every Update."""
-    sha = _git_capture(["rev-parse", "HEAD"])
-    branch = _git_capture(["rev-parse", "--abbrev-ref", "HEAD"]) or "(unknown)"
+    checkout = _root_is_checkout()
+    sha = _git_capture(["rev-parse", "HEAD"]) if checkout else None
+    branch = (_git_capture(["rev-parse", "--abbrev-ref", "HEAD"]) if checkout
+              else None) or "(unknown)"
     # `git status --porcelain -uno` empty = no MODIFIED TRACKED files.
     #
     # -uno (untracked-files=no) is load-bearing, not a tidy-up. Plain
@@ -5372,7 +5210,7 @@ def _detect_local_install_state() -> None:
     # one case where an untracked file DOES matter — an incoming commit
     # adding a file at the same path — git refuses on its own, and that
     # error is surfaced verbatim by the /version/pull handler.
-    porcelain = _git_capture(["status", "--porcelain", "-uno"])
+    porcelain = _git_capture(["status", "--porcelain", "-uno"]) if checkout else None
     dirty = bool(porcelain and porcelain.strip())
     local_version = _read_local_version()
     # 2026-05-21 — capture HEAD commit date so the dev pill can show
@@ -5382,8 +5220,13 @@ def _detect_local_install_state() -> None:
     # had pulled fresh code. Showing the commit date alongside the
     # short SHA lets us tell them concretely "you're on the May 18
     # build — please pull again, latest is May 21."
-    local_commit_date = _git_capture(["log", "-1", "--format=%cd",
-                                       "--date=format:%Y-%m-%d"])
+    local_commit_date = (_git_capture(["log", "-1", "--format=%cd",
+                                        "--date=format:%Y-%m-%d"])
+                         if checkout else None)
+    if not sha:
+        sha = _read_bundle_commit()     # a release tarball names its commit
+        if sha:
+            branch = None
     with _VERSION_LOCK:
         _VERSION_STATE["local_sha"] = sha
         _VERSION_STATE["local_short"] = sha[:7] if sha else None
@@ -5393,8 +5236,14 @@ def _detect_local_install_state() -> None:
         _VERSION_STATE["local_dirty"] = dirty
         # Suppress remote checks when the user is clearly running their own
         # variant — we'd be wrong to nag them about being "behind."
-        if not VERSION_CHECK_ENABLED:
+        if _dist.is_mac_app():
+            # The Mac app updates the studio itself (Sparkle + a new tarball);
+            # there is no checkout to pull and nothing to poll GitHub for.
+            _VERSION_STATE["suppress_reason"] = "updates come from the Phosphene app"
+        elif not VERSION_CHECK_ENABLED:
             _VERSION_STATE["suppress_reason"] = "disabled by PHOSPHENE_DISABLE_VERSION_CHECK"
+        elif not checkout:
+            _VERSION_STATE["suppress_reason"] = "not a git checkout"
         elif not sha:
             _VERSION_STATE["suppress_reason"] = "not a git checkout"
         elif branch != "main":
@@ -5618,7 +5467,8 @@ def get_version_state() -> dict:
     with _VERSION_LOCK:
         snap = dict(_VERSION_STATE)
     boot = boot_build_stamp()
-    disk_sha = _git_capture(["rev-parse", "HEAD"])
+    disk_sha = (_git_capture(["rev-parse", "HEAD"]) if _root_is_checkout()
+                else _read_bundle_commit())
     # The header stamp answers exactly one question — what code is this
     # process running — so it is answered from the boot snapshot or not at
     # all. Never snap["local_*"]: that agrees with disk within one poll.
@@ -5637,6 +5487,9 @@ def get_version_state() -> dict:
     snap["stale_process"] = bool(
         disk_sha and boot["sha"] and disk_sha != boot["sha"])
     snap["post_update"] = post_update_status()
+    # Where this panel runs: the page's pill defers to the app's own updater
+    # under the Mac app (app_updates) and shows the edition label.
+    snap.update(_dist.info())
     return snap
 
 
@@ -5644,16 +5497,37 @@ def get_version_state() -> dict:
 # Repo-stats background fetcher (Mr Bizarro's solo-maintainer dashboard).
 # Runs the stdlib-only fetcher script as a subprocess once per 24h, appending
 # a JSON line to state/stats-data.jsonl. Dashboard at /stats reads this file.
-# 127.0.0.1-only by design (state/ is gitignored, file lives on the user's
-# Mac only). Skipped silently if no GitHub token is resolvable — this fetcher
-# is opt-in via "have a token configured". It only READS GitHub's API and
-# sends nothing anywhere; the panel's outbound usage analytics is a separate
-# module entirely (see "Anonymous usage analytics" / docs/ANALYTICS.md).
+# 127.0.0.1-only by design (state/ is gitignored, file lives on the
+# maintainer's Mac only). It only READS GitHub's API and sends nothing
+# anywhere; the panel's outbound usage analytics is a separate module
+# entirely (see "Anonymous usage analytics" / docs/ANALYTICS.md).
+#
+# OPT-IN ONLY (4.19.3, issue #106). Until 4.19.2 this loop started on EVERY
+# install and, to find a token, ran the user's own `gh auth token` — so any
+# user with the GitHub CLI logged in had the panel silently borrow THEIR
+# GitHub credentials once a day to read OUR repo's traffic numbers, and
+# everyone else got "stats: no GitHub token resolvable ..." in their log and
+# in their bug reports. The one rule now: nothing in this section runs, reads
+# a token, spawns `gh` or logs a line unless the process was started with
+# PHOSPHENE_STATS_FETCH=1. The maintainer's daily archive does not need it —
+# a launchd job keeps it (scripts/STATS_DASHBOARD.md).
 # ---------------------------------------------------------------------------
 
 _STATS_POLL_INTERVAL_SEC = 24 * 60 * 60  # daily
 _STATS_STARTUP_DELAY_SEC = 90            # let the panel finish booting first
 _STATS_MIN_REFETCH_SEC   = 6 * 60 * 60   # don't re-fetch faster than every 6h
+
+
+STATS_FETCH_ENV = "PHOSPHENE_STATS_FETCH"
+
+
+def _stats_fetch_enabled() -> bool:
+    """True only when this process was started with PHOSPHENE_STATS_FETCH=1
+    (or true/yes/on). Read at call time, never cached, so a test can flip it.
+    Every entry point of the repo-stats fetcher checks this FIRST — before
+    any token lookup, any `gh` subprocess and any log line — see the
+    section header for why (issue #106)."""
+    return _optional_bool_env(STATS_FETCH_ENV) is True
 
 
 def _resolve_github_token() -> str:
@@ -5662,7 +5536,12 @@ def _resolve_github_token() -> str:
        2. GH_STATS_TOKEN — fetcher's own preferred name
        3. GH_TOKEN / GITHUB_TOKEN — generic env vars
        4. `gh auth token` subprocess (when gh CLI is installed + authed)
-    Returns empty string if nothing works — caller logs once and skips."""
+    Returns empty string if nothing works — caller logs once and skips.
+
+    Without the PHOSPHENE_STATS_FETCH opt-in this returns "" at once: no
+    environment variable is read and `gh` is never run."""
+    if not _stats_fetch_enabled():
+        return ""
     for name in ("PHOSPHENE_REPO_STATS_TOKEN", "GH_STATS_TOKEN",
                  "GH_TOKEN", "GITHUB_TOKEN"):
         v = (os.environ.get(name) or "").strip()
@@ -5703,6 +5582,10 @@ def _run_stats_fetch_once() -> None:
     docstring. Idempotent — the fetcher itself replaces today's row on
     re-runs in the same UTC day."""
     global _STATS_WARNED_NO_TOKEN, _STATS_WARNED_FETCH_FAIL
+    if not _stats_fetch_enabled():
+        return  # not the maintainer's opt-in: no token, no `gh`, no log line
+    if STATS_READONLY:
+        return  # the archive belongs to another install; see STATS_SOURCE_DIR
     if not STATS_FETCHER.is_file():
         return  # repo install missing the script — fail silent
     token = _resolve_github_token()
@@ -5718,6 +5601,11 @@ def _run_stats_fetch_once() -> None:
         return
     env = os.environ.copy()
     env["GITHUB_TOKEN"] = token
+    # Write the archive the dashboard READS. The fetcher's own default is
+    # <repo>/state/stats-data.jsonl, which is a different file whenever the
+    # panel runs with LTX_STATE_DIR set — a refresh then landed somewhere
+    # /stats never looked.
+    env["PHOSPHENE_STATS_OUT"] = str(STATS_DATA_FILE)
     try:
         cp = subprocess.run(
             [sys.executable, str(STATS_FETCHER)],
@@ -5765,7 +5653,12 @@ def stats_fetch_loop() -> None:
     file is missing or stale), then daily on _STATS_POLL_INTERVAL_SEC.
 
     The startup-fetch is gated by _STATS_MIN_REFETCH_SEC so multiple panel
-    restarts in a short window don't hammer the GitHub API for nothing."""
+    restarts in a short window don't hammer the GitHub API for nothing.
+
+    Returns immediately without the PHOSPHENE_STATS_FETCH opt-in (the boot
+    block does not even start the thread then; this is the second lock)."""
+    if not _stats_fetch_enabled() or STATS_READONLY:
+        return
     time.sleep(_STATS_STARTUP_DELAY_SEC)
     # First-run / cold-start fetch — but only if it's been a while.
     try:
@@ -5835,11 +5728,208 @@ def _repos() -> list[dict]:
     return list(_REQUIRED.get("repos", []))
 
 
+def repo_dir(repo: dict) -> Path:
+    """Where one required_files.json repo lives on disk.
+
+    The manifest says `mlx_models/<dir>` (relative to the install), and every
+    panel path for weights hangs off MODELS_DIR (LTX_MODELS_DIR). Those two
+    agree under Pinokio, whose start.js sets LTX_MODELS_DIR to
+    `<install>/mlx_models`. The Mac app keeps its models OUTSIDE the
+    versioned code folder (so an update unpacks new code next to the same
+    data) - and a check that walked ROOT/<local_dir> reported "Base models
+    needed ... (5 files left)" over a working install, and downloaded into
+    a folder the renders never read. One resolver, used by the check, the
+    downloader, Repair and the Storage view alike."""
+    local = str(repo.get("local_dir") or "")
+    parts = Path(local).parts
+    if (parts and parts[0] == "mlx_models" and not Path(local).is_absolute()
+            and MODELS_DIR != _DEFAULT_MODELS_DIR):
+        return MODELS_DIR.joinpath(*parts[1:])
+    # The default layout (Pinokio: LTX_MODELS_DIR is <install>/mlx_models):
+    # exactly the path this has always been.
+    return ROOT / local
+
+
+# ---- The Mac app's own model download (CONTRACTS.md, "models later") ------
+# The app opens the studio with the engine only and fetches the draft set in
+# the background with scripts/fetch_pack_release.py, writing its progress to
+# <LTX_STATE_DIR>/app_models.json (every <= 5 s while downloading). Two
+# fetchers writing one pack folder is not safe, so while the app holds a pack
+# the panel offers no Download for it, refuses one, and its own background
+# fetcher skips it. Pinokio never writes the file and never reads it.
+APP_MODELS_FILE = "app_models.json"
+APP_MODELS_ACTIVE = ("downloading", "paused")
+#: A "downloading" file this much older than its last rewrite is a crashed
+#: app, not a download: the panel's own buttons come back.
+APP_MODELS_STALE_SEC = 120
+#: Exit code of scripts/fetch_pack_release.py when another fetcher holds the
+#: pack folder (its one-writer flock; EXIT_BUSY there).
+PACK_FETCH_BUSY_RC = 75
+#: The Mac app's model-download lock (bootstrap.sh `lock_acquire models`): a
+#: directory under <Phosphene home>/.locks holding the owner's PID.
+APP_MODELS_LOCK = Path(".locks") / "models.lock"
+
+
+def _app_home() -> Path:
+    """The Mac app's Phosphene home. The app puts LTX_STATE_DIR at
+    <home>/state; PHOSPHENE_HOME, when set, says it outright."""
+    explicit = (os.environ.get("PHOSPHENE_HOME") or "").strip()
+    return Path(explicit) if explicit else STATE_DIR.parent
+
+
+def app_models_lock_owner() -> int | None:
+    """PID of the live process holding the Mac app's model-download lock, or
+    None (no lock, unreadable, or its owner is gone - a stale lock the app
+    reaps itself). Mac app review #7: the studio respects this lock even when
+    app_models.json is missing or stale, because the lock, not the progress
+    file, is what says a download is writing right now."""
+    try:
+        pid = int((_app_home() / APP_MODELS_LOCK / "owner").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    if pid <= 1 or pid == os.getpid():
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return None
+    except PermissionError:
+        pass                         # alive, someone else's: still a holder
+    except OSError:
+        return None
+    # A PID the OS reused for something else is not the app's downloader: the
+    # owner must still be the app's setup script (its own lock_owner_ok rule).
+    return pid if _is_app_bootstrap(pid) else None
+
+
+_APP_OWNER_CACHE: dict[int, tuple[float, bool]] = {}
+
+
+def _is_app_bootstrap(pid: int) -> bool:
+    """Is `pid` running the Mac app's bootstrap.sh? Cached 10 s per PID
+    (/status asks on every poll)."""
+    now = time.time()
+    hit = _APP_OWNER_CACHE.get(pid)
+    if hit and now - hit[0] < 10.0:
+        return hit[1]
+    try:
+        cmd = subprocess.run(["ps", "-o", "command=", "-p", str(int(pid))],
+                             capture_output=True, text=True, errors="replace",
+                             timeout=2).stdout
+    except (OSError, subprocess.SubprocessError, ValueError):
+        cmd = ""
+    ok = "bootstrap.sh" in cmd
+    if len(_APP_OWNER_CACHE) > 32:
+        _APP_OWNER_CACHE.clear()
+    _APP_OWNER_CACHE[pid] = (now, ok)
+    return ok
+
+
+#: = scripts/fetch_pack_release.py PACK_LOCK_SUFFIX: every writer of a pack
+#: folder (that fetcher in any process, and Remove / Repair here) holds an
+#: exclusive flock on ".<folder>.fetchlock" beside the folder's real path.
+PACK_LOCK_SUFFIX = ".fetchlock"
+
+
+def pack_folder_lock(folder) -> int | None:
+    """Take the one-writer lock for a pack folder without waiting. Returns the
+    descriptor to close when done (-1: nothing to lock), or None when another
+    process is writing that folder right now."""
+    try:
+        import fcntl
+    except ImportError:
+        return -1
+    real = Path(os.path.realpath(str(folder)))
+    if not real.parent.is_dir():
+        return -1
+    try:
+        fd = os.open(str(real.parent / f".{real.name}{PACK_LOCK_SUFFIX}"),
+                     os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError:
+        return -1
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
+
+
+def pack_folder_unlock(fds) -> None:
+    for fd in fds or ():
+        if fd is not None and fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def app_models_state() -> dict | None:
+    """The app's download state, mac-app only; None when there is none."""
+    if not _dist.is_mac_app():
+        return None
+    lock_pid = app_models_lock_owner()
+    path = STATE_DIR / APP_MODELS_FILE
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        age = time.time() - path.stat().st_mtime
+    except (OSError, ValueError):
+        raw, age = None, 0.0
+    if not isinstance(raw, dict):
+        if lock_pid is None:
+            return None
+        # The app holds its download lock but wrote no (readable) progress
+        # file yet: a download is starting. Which packs is unknown, so it
+        # owns every pack until the file says otherwise (app_models_owns).
+        raw = {"state": "downloading"}
+    state = str(raw.get("state") or "idle")
+    packs = [str(x) for x in (raw.get("packs") or []) if isinstance(x, str)]
+    def _n(v):
+        try:
+            return max(0, int(v))
+        except (TypeError, ValueError):
+            return 0
+    active = state in APP_MODELS_ACTIVE and not (
+        state == "downloading" and age > APP_MODELS_STALE_SEC)
+    if lock_pid is not None and state not in ("done", "failed"):
+        # A live lock holder is downloading whatever its file says - even a
+        # file the app has not rewritten for a while (it rewrites only on
+        # progress) or one that still says "idle" from before this run.
+        active = True
+    return {"state": state, "packs": packs, "active": active,
+            "locked": lock_pid is not None,
+            "done_bytes": _n(raw.get("done_bytes")),
+            "total_bytes": _n(raw.get("total_bytes"))}
+
+
+def app_models_owns(repo: dict | None, st: dict | None = None) -> bool:
+    """True while the Mac app is downloading (or has paused) this pack."""
+    if not repo:
+        return False
+    st = st if st is not None else app_models_state()
+    if not st or not st["active"]:
+        return False
+    if st.get("locked") and not st["packs"]:
+        return True                  # lock held, pack list not written yet
+    return repo_dir(repo).name in st["packs"] or Path(
+        str(repo.get("local_dir") or "")).name in st["packs"]
+
+
+def _plan_repo(repo: dict | None) -> dict:
+    """The repo with an ABSOLUTE local_dir, for install_plan's root-relative
+    helpers (install_plan also runs under install.js, where ROOT is right)."""
+    if not repo:
+        return {}
+    out = dict(repo)
+    out["local_dir"] = str(repo_dir(repo))
+    return out
+
+
 def _repo_missing(repo: dict) -> list[str]:
     """Files missing or zero-byte for one repo, expressed as bare filenames
     (relative to the repo's local_dir). Bare names are friendlier in the UI
     than full paths."""
-    base = ROOT / repo["local_dir"]
+    base = repo_dir(repo)
     missing = []
     for fname in repo.get("files", []):
         p = base / fname
@@ -6761,7 +6851,7 @@ def storage_rows() -> list[dict]:
     # rather than delete it and file a bug.
     gemma3 = next((r for r in _repos() if r.get("key") == "gemma"), None)
     if gemma3:
-        base = ROOT / gemma3["local_dir"]
+        base = repo_dir(gemma3)
         nbytes = _dir_size_bytes(base)
         if nbytes:
             rows.append({
@@ -6958,7 +7048,7 @@ def _placement_dirs() -> list[tuple[dict, Path]]:
     exists on disk. Honors the LTX_Q8_LOCAL override the rest of the panel uses."""
     out = []
     for r in _repos():
-        base = Q8_LOCAL_PATH if r.get("key") == "q8" else (ROOT / r["local_dir"])
+        base = Q8_LOCAL_PATH if r.get("key") == "q8" else repo_dir(r)
         try:
             if base.is_dir():
                 out.append((r, base))
@@ -7186,7 +7276,7 @@ def _model_integrity(force: bool = False) -> dict:
     for r in snap:
         if not r.get("complete"):
             continue  # a missing model is the download flow's job, not integrity's
-        base = Path(r.get("location") or (ROOT / r["local_dir"]))
+        base = Path(r.get("location") or repo_dir(r))
         for fname in defs.get(r["key"], {}).get("files", []):
             if not fname.endswith(".safetensors"):
                 continue
@@ -7315,8 +7405,10 @@ def _output_codec_report() -> dict:
         _OUTPUT_CODEC_CACHE["warned_key"] = key
         push("[codec-audit] OUTPUT CODEC MISMATCH on "
              f"{report['file']}: {'; '.join(report['problems'])} - the codec "
-             "patch may not be applied (the v3.8.1 class). Click Update in "
-             "Pinokio; if it persists, reinstall.")
+             "patch may not be applied (the v3.8.1 class). "
+             + _dist.say("Click Update in Pinokio; if it persists, reinstall.",
+                         "Use Phosphene \u2192 Check for Updates\u2026; if it "
+                         "persists, use Help \u2192 Report a Bug\u2026"))
     _OUTPUT_CODEC_CACHE["key"] = key
     _OUTPUT_CODEC_CACHE["report"] = report
     return report
@@ -7469,7 +7561,7 @@ def _deep_verify_thread() -> None:
                 continue
             repo_def = defs.get(r["key"], {})
             repo_id = repo_def.get("repo_id", "")
-            base = Path(r.get("location") or (ROOT / r["local_dir"]))
+            base = Path(r.get("location") or repo_dir(r))
             # Expected hashes come from whichever source the registry
             # declares for this pack: HuggingFace LFS metadata (every 2.3
             # pack, unchanged) or the pack's own manifest (a mirrored pack
@@ -7515,7 +7607,7 @@ def _deep_verify_thread() -> None:
         for r in _repos():
             repo_id = r.get("repo_id", "")
             _q = _quant_for_repo_key(r.get("key"))
-            base = pack_path(_q) if _q else (ROOT / r["local_dir"])
+            base = pack_path(_q) if _q else repo_dir(r)
             if not any(_placed_size(base / f) for f in r.get("files", [])):
                 continue                # not installed here — don't ask upstream
             for fname, m in _expected_meta(r.get("key"), repo_id, base).items():
@@ -7591,6 +7683,11 @@ DOWNLOAD: dict = {
     # a cancelled attempt looked like a failed one and was RETRIED, and a
     # cancel during backoff did nothing at all (Codex INST-07 / JOB-05).
     "cancelled": False,
+    # 4.20: True while the slot is held by the post-install background fetcher
+    # (deferred_fetch_step) rather than a click. The UI words the card calmly
+    # ("you can render now") and a Download click for another queued pack
+    # moves it up the queue instead of answering 409.
+    "background": False,
 }
 
 
@@ -7616,7 +7713,7 @@ def _download_register(proc) -> bool:
     return not cancelled
 
 
-def _download_thread(repo: dict) -> None:
+def _download_thread(repo: dict) -> str:
     """Run `hf download <repo_id> --local-dir <repo.local_dir>` and stream
     stdout/stderr line-by-line into STATE['log']. Sets DOWNLOAD["active"]
     back to False on exit (success or fail). Files land at repo['local_dir']
@@ -7641,7 +7738,7 @@ def _download_thread(repo: dict) -> None:
     cancel-by-killing-the-process-group are all shared, because the alternative
     is a second downloader that drifts from this one."""
     repo_id = repo["repo_id"]
-    target = ROOT / repo["local_dir"]
+    target = repo_dir(repo)
     target.mkdir(parents=True, exist_ok=True)
     mirror = repo.get("mirror") or {}
     is_release_mirror = mirror.get("kind") == "github-release"
@@ -7700,11 +7797,16 @@ def _download_thread(repo: dict) -> None:
 
     max_attempts = 3
     backoff_sec = 5
+    # 4.20: what happened, for the background fetcher: "ok" | "cancelled" |
+    # "failed" | "busy" (4.19.10: another fetcher holds the pack folder).
+    # Thread callers ignore it, as before.
+    outcome = "failed"
     try:
         for attempt in range(1, max_attempts + 1):
             with DOWNLOAD_LOCK:
                 if not DOWNLOAD["active"] or DOWNLOAD["cancelled"]:
                     push(f"[{dl_tag}] {dl_label} cancelled before attempt {attempt}.")
+                    outcome = "cancelled"
                     break
             if attempt > 1:
                 push(f"[{dl_tag}] {dl_label} attempt {attempt}/{max_attempts} — resuming from where the previous attempt stopped.")
@@ -7723,6 +7825,7 @@ def _download_thread(repo: dict) -> None:
                 break
             if not _download_register(proc):
                 push(f"[{dl_tag}] {dl_label} cancelled.")
+                outcome = "cancelled"
                 break
             # Stream every line. hf emits a tqdm progress bar with carriage
             # returns; we split on \r as well as \n so progress updates show
@@ -7776,11 +7879,22 @@ def _download_thread(repo: dict) -> None:
                         DOWNLOAD["key"] = repo.get("key")
                         DOWNLOAD["repo_id"] = repo["repo_id"]
                     continue
+                outcome = "ok"
+                break
+            if is_release_mirror and rc == PACK_FETCH_BUSY_RC:
+                # Mac app review #7: another fetcher (the Mac app's own model
+                # download, or a second studio) holds this pack folder. The
+                # fetcher stopped without writing; retrying would only bounce.
+                push(f"[{dl_tag}] {dl_label}: another download is already writing "
+                     f"this pack, so this one stopped without touching it. It "
+                     f"carries on when that one finishes.")
+                outcome = "busy"
                 break
             with DOWNLOAD_LOCK:
                 cancelled = DOWNLOAD["cancelled"] or not DOWNLOAD["active"]
             if cancelled:
                 push(f"[{dl_tag}] {dl_label} cancelled (exit {rc}).")
+                outcome = "cancelled"
                 break
             if attempt < max_attempts:
                 push(f"[{dl_tag}] {dl_label} attempt {attempt} failed (exit {rc}). Retrying in {backoff_sec}s — the downloader resumes from where it stopped.")
@@ -7806,6 +7920,8 @@ def _download_thread(repo: dict) -> None:
             DOWNLOAD["proc"] = None
             DOWNLOAD["pgid"] = None
             DOWNLOAD["cancelled"] = False
+            DOWNLOAD["background"] = False
+    return outcome
 
 
 def _kill_active_download() -> None:
@@ -7829,6 +7945,321 @@ def _kill_active_download() -> None:
 atexit.register(_kill_active_download)
 
 
+# ---- Background downloads after the first boot (4.20) ------------------------
+# install.js used to download ~38 GB before Start appeared. Since 4.20 it stops
+# at what a first render needs (required_files.json -> install.before_start,
+# ~27.5 GB) and writes state/install_deferred.json naming the rest
+# (install.after_start: Gemma 3 for Enhance and the Storyboard planner, the
+# Upscale & Face Fix adapter, the three 2.3 IC-LoRAs). This fetcher works
+# through that list after the panel boots:
+#   * one pack at a time, through the SAME slot and downloader as a click on
+#     Download (_download_thread), so progress, Cancel and resume are the ones
+#     the Models page already has;
+#   * never taking the models drive below install.background_floor_gb free -
+#     renders need room too; it waits and re-checks instead;
+#   * a pack the user cancels is dropped from the list (they said no; the
+#     Models page still offers it); a failure backs off and retries;
+#   * ONLY when the marker exists. Update never writes one, so an existing
+#     install that updates is never handed a download it did not ask for.
+DEFERRED_LOCK = threading.Lock()
+DEFERRED: dict = {
+    "state": "idle",        # idle | starting | downloading | waiting | waiting_disk | retry_wait | failed | done
+    "key": None,            # the pack being worked on
+    "message": "",          # one plain sentence for the UI
+    "failures": {},         # key -> consecutive failures this boot
+    "retry_at": {},         # key -> epoch seconds before which it is not retried
+    "finished": [],         # keys that landed this boot (for the "ready" toast)
+}
+DEFERRED_START_DELAY_SEC = float(os.environ.get("LTX_DEFERRED_START_DELAY", "20") or 20)
+DEFERRED_SLOT_WAIT_SEC = 15.0
+DEFERRED_DISK_RECHECK_SEC = 300.0
+DEFERRED_RETRY_SEC = 600.0
+DEFERRED_MAX_FAILURES = 4
+
+
+def _deferred_set(**kw) -> None:
+    with DEFERRED_LOCK:
+        DEFERRED.update(kw)
+
+
+def _deferred_repo(key: str) -> dict | None:
+    return next((r for r in _repos() if r.get("key") == key), None)
+
+
+def deferred_marker_keys() -> list[str]:
+    """The keys install.js queued that the registry still knows, in order."""
+    m = install_plan.read_marker(STATE_DIR)
+    if not m:
+        return []
+    known = {r.get("key") for r in _repos()}
+    return [k for k in m["pending"] if k in known]
+
+
+def _deferred_missing(repo: dict | None) -> bool:
+    """Missing from THIS install's own folder. Deliberately not the HF-cache
+    fallback _repo_effective_missing() also accepts: Enhance, the planner and
+    the IC modes load these from the local path, so a copy in some cache does
+    not make them work."""
+    return repo is None or bool(_repo_missing(repo))
+
+
+def deferred_pending_keys() -> list[str]:
+    """Queued AND still missing on disk."""
+    return [k for k in deferred_marker_keys() if _deferred_missing(_deferred_repo(k))]
+
+
+def _deferred_floor_bytes() -> int:
+    return int(install_plan.install_block(_REQUIRED)["background_floor_gb"] * 1e9)
+
+
+def deferred_pack_state(key: str) -> str:
+    """What the fetcher is doing about ONE pack: downloading | queued |
+    waiting_disk | missing (not queued at all) | ready."""
+    repo = _deferred_repo(key)
+    if repo is not None and not _deferred_missing(repo):
+        return "ready"
+    with DOWNLOAD_LOCK:
+        if DOWNLOAD["active"] and DOWNLOAD.get("key") == key:
+            return "downloading"
+    if key in deferred_pending_keys():
+        free = install_plan.free_bytes(ROOT)
+        left = (install_plan.remaining_bytes(ROOT, _plan_repo(repo), _MIN_FILE_BYTES)
+                + install_plan.peak_overhead(repo or {}))
+        if free is not None and free < left + _deferred_floor_bytes():
+            return "waiting_disk"
+        return "queued"
+    return "missing"
+
+
+def deferred_status() -> dict:
+    """/status.deferred_downloads - the background list as the UI shows it."""
+    rows = []
+    for k in deferred_pending_keys():
+        repo = _deferred_repo(k) or {}
+        left = install_plan.remaining_bytes(ROOT, _plan_repo(repo), _MIN_FILE_BYTES)
+        rows.append({"key": k, "name": repo.get("name") or k,
+                     "size_gb": round(install_plan.expected_bytes(repo) / 1e9, 2),
+                     "left_gb": round(left / 1e9, 2)})
+    with DEFERRED_LOCK:
+        snap = {"state": DEFERRED["state"], "key": DEFERRED["key"],
+                "message": DEFERRED["message"], "finished": list(DEFERRED["finished"])}
+    return {**snap, "active": bool(rows), "pending": rows,
+            "left_gb": round(sum(r["left_gb"] for r in rows), 2)}
+
+
+def deferred_fetch_step() -> float | None:
+    """One pass of the background fetcher: start at most one download (and run
+    it to the end), or decide to wait. Returns the seconds to sleep before the
+    next pass, or None when there is nothing left to do this boot."""
+    keys = deferred_marker_keys()
+    live = []
+    app_st = app_models_state()
+    for k in keys:
+        repo = _deferred_repo(k)
+        if repo is not None and _deferred_missing(repo):
+            live.append(k)
+        else:
+            # Landed (or got there another way - a click, an Update): done.
+            install_plan.drop_from_marker(STATE_DIR, k)
+    if live and all(app_models_owns(_deferred_repo(k), app_st) for k in live):
+        return 30.0                 # the Mac app is fetching them: wait it out
+    live = [k for k in live if not app_models_owns(_deferred_repo(k), app_st)]
+    if not live:
+        _deferred_set(state="done" if keys else "idle", key=None, message="")
+        return None
+    now = time.time()
+    with DEFERRED_LOCK:
+        fails = dict(DEFERRED["failures"])
+        retry_at = dict(DEFERRED["retry_at"])
+    candidates = [k for k in live if fails.get(k, 0) < DEFERRED_MAX_FAILURES]
+    if not candidates:
+        _deferred_set(state="failed", key=None,
+                      message="The background downloads kept failing - Settings -> Models "
+                              "offers each one, and they resume where they stopped.")
+        return None
+    ready_now = [k for k in candidates if retry_at.get(k, 0) <= now]
+    if not ready_now:
+        _deferred_set(state="retry_wait", key=None,
+                      message="A background download failed; retrying in a few minutes.")
+        return max(5.0, min(retry_at.get(k, now) for k in candidates) - now)
+    free = install_plan.free_bytes(ROOT)
+    floor = _deferred_floor_bytes()
+    # The first pack in order that FITS. A big one that does not (Gemma 3 on a
+    # nearly full 256 GB Mac) must not hold back the small ones behind it.
+    key = None
+    for k in ready_now:
+        left = install_plan.remaining_bytes(ROOT, _plan_repo(_deferred_repo(k)), _MIN_FILE_BYTES)
+        left += install_plan.peak_overhead(_deferred_repo(k))
+        if free is None or free >= left + floor:
+            key = k
+            break
+    if key is None:
+        first = _deferred_repo(ready_now[0])
+        left = install_plan.remaining_bytes(ROOT, _plan_repo(first), _MIN_FILE_BYTES)
+        _deferred_set(state="waiting_disk", key=ready_now[0], message=(
+            f"Paused: {first.get('name') or ready_now[0]} needs {install_plan.fmt_gb(left)} and "
+            f"Phosphene keeps {install_plan.fmt_gb(floor)} free for your renders - this "
+            f"drive has {install_plan.fmt_gb(free)} free. Free up "
+            f"{install_plan.fmt_gb(left + floor - free)} and it carries on by itself."))
+        return DEFERRED_DISK_RECHECK_SEC
+    repo = _deferred_repo(key)
+    left = install_plan.remaining_bytes(ROOT, _plan_repo(repo), _MIN_FILE_BYTES)
+    is_mirror = ((repo.get("mirror") or {}).get("kind") == "github-release")
+    if HF_BIN is None and not is_mirror:
+        with DEFERRED_LOCK:
+            DEFERRED["failures"][key] = DEFERRED_MAX_FAILURES
+        _deferred_set(state="failed", key=key,
+                      message=_dist.say(
+                          "The hf downloader is missing - click Update in Pinokio.",
+                          "The hf downloader is missing - quit Phosphene and "
+                          "open it again to rerun setup."))
+        return 1.0
+    with DOWNLOAD_LOCK:
+        if DOWNLOAD["active"]:
+            busy = True
+        else:
+            busy = False
+            DOWNLOAD.update({"active": True, "key": key, "repo_id": repo["repo_id"],
+                             "started_ts": time.time(), "cancelled": False,
+                             "last_line": "starting (background)…", "background": True})
+    if busy:
+        _deferred_set(state="waiting", key=key,
+                      message="Waiting for the current download to finish.")
+        return DEFERRED_SLOT_WAIT_SEC
+    _deferred_set(state="downloading", key=key, message="")
+    push(f"[background] downloading {repo.get('name') or key} "
+         f"(~{install_plan.fmt_gb(left)}) - you can render meanwhile.")
+    outcome = _download_thread(repo)
+    if not _deferred_missing(repo):
+        install_plan.drop_from_marker(STATE_DIR, key)
+        with DEFERRED_LOCK:
+            DEFERRED["failures"].pop(key, None)
+            DEFERRED["finished"].append(key)
+        with _INTEGRITY_LOCK:
+            _INTEGRITY_CACHE["ts"] = 0.0
+        push(f"[background] {repo.get('name') or key} is ready.")
+        return 1.0
+    if outcome == "busy":
+        # Another fetcher (the Mac app) is writing this pack: not a failure,
+        # nothing to back off from - wait for it like any busy slot.
+        _deferred_set(state="waiting", key=key,
+                      message="Another download is writing this model; waiting for it.")
+        return DEFERRED_SLOT_WAIT_SEC
+    if outcome == "cancelled":
+        install_plan.drop_from_marker(STATE_DIR, key)
+        push(f"[background] {repo.get('name') or key} skipped - Settings -> Models "
+             f"offers it whenever you want it.")
+        return 1.0
+    with DEFERRED_LOCK:
+        n = DEFERRED["failures"].get(key, 0) + 1
+        DEFERRED["failures"][key] = n
+        DEFERRED["retry_at"][key] = time.time() + DEFERRED_RETRY_SEC
+    return 1.0
+
+
+def deferred_fetch_loop() -> None:
+    """Background thread body. Started at boot only when the marker exists."""
+    _deferred_set(state="starting", message="")
+    time.sleep(max(0.0, DEFERRED_START_DELAY_SEC))
+    while True:
+        try:
+            wait = deferred_fetch_step()
+        except Exception as exc:  # noqa: BLE001 - never take the panel down
+            push(f"[background] download queue error: {exc}")
+            wait = DEFERRED_RETRY_SEC
+        if wait is None:
+            return
+        time.sleep(wait)
+
+
+def deferred_fetch_enabled() -> bool:
+    if (os.environ.get("LTX_DEFERRED_DOWNLOADS") or "").strip().lower() in ("0", "off", "false", "no"):
+        return False
+    return bool(deferred_marker_keys())
+
+
+def deferred_prioritize(key: str) -> bool:
+    """A click on Download for a pack that is queued behind the one running:
+    move it to the front instead of refusing. True when it was queued."""
+    return install_plan.prioritize_in_marker(STATE_DIR, key)
+
+
+def pack_needed_payload(key: str, feature: str, what: str) -> dict:
+    """The 409 body a feature returns when the pack it runs on is not on disk
+    yet - one sentence the user can act on, plus what the button needs.
+    `what` names the pack in the user's words ("its language model")."""
+    repo = _deferred_repo(key) or {}
+    size = install_plan.fmt_gb(install_plan.expected_bytes(repo)) if repo else "?"
+    state = deferred_pack_state(key)
+    if state == "downloading":
+        msg = (f"{feature} needs {what} ({size}), which is still downloading in the "
+               f"background. It works the moment that finishes - no restart needed.")
+    elif state == "queued":
+        msg = (f"{feature} needs {what} ({size}), which is queued to download in the "
+               f"background. Click Download now to fetch it first.")
+    elif state == "waiting_disk":
+        free = install_plan.free_bytes(ROOT) or 0
+        floor = _deferred_floor_bytes()
+        left = (install_plan.remaining_bytes(ROOT, _plan_repo(repo), _MIN_FILE_BYTES)
+                + install_plan.peak_overhead(repo))
+        msg = (f"{feature} needs {what} ({size}). Its background download is paused: "
+               f"Phosphene keeps {install_plan.fmt_gb(floor)} free for your renders and this "
+               f"drive has {install_plan.fmt_gb(free)}. Free up "
+               f"{install_plan.fmt_gb(max(0, left + floor - free))} and it starts by itself"
+               f" - or click Download now to fetch it anyway.")
+    else:
+        msg = f"{feature} needs {what} ({size}), which is not downloaded yet."
+    return {"ok": False, "error": msg, "needs_pack": key,
+            "pack_name": repo.get("name") or key, "pack_size": size, "pack_state": state}
+
+
+def _gemma3_missing_at(path: Path) -> bool:
+    """Is the Gemma 3 model Enhance / the planner load from absent at `path`?
+
+    On the registry's own folder the registry answers (the same files the
+    Models page counts). A path moved with LTX_GEMMA_PATH /
+    LTX_STORYBOARD_PLANNER is the user's: there the folder must at least hold a
+    config.json, which every mlx-lm model folder has."""
+    try:
+        repo = _deferred_repo("gemma")
+        if repo is not None and Path(path).resolve() == repo_dir(repo).resolve():
+            return _deferred_missing(repo)
+        return not (Path(path) / "config.json").is_file()
+    except OSError:
+        return True
+
+
+def enhance_model_missing() -> bool:
+    return _gemma3_missing_at(GEMMA)
+
+
+def planner_model_missing() -> bool:
+    try:
+        return _gemma3_missing_at(Path(storyboard_planner.DEFAULT_MODEL_PATH))
+    except Exception:  # noqa: BLE001 - an unreadable path is the planner's own error
+        return False
+
+
+def gemma3_refusal(feature: str, what: str, path) -> dict:
+    """The 409 body for a feature whose Gemma 3 is not there. On the registry's
+    own folder that is the pack offer (downloading / Download now). On a folder
+    the user moved it to (LTX_GEMMA_PATH / LTX_STORYBOARD_PLANNER) a download
+    into the default folder would not help - say which setting points where."""
+    repo = _deferred_repo("gemma")
+    try:
+        default = repo is not None and Path(path).resolve() == repo_dir(repo).resolve()
+    except OSError:
+        default = False
+    if default:
+        return pack_needed_payload("gemma", feature, what)
+    var = ("LTX_STORYBOARD_PLANNER" if os.environ.get("LTX_STORYBOARD_PLANNER")
+           and "planner" in feature.lower() else "LTX_GEMMA_PATH")
+    return {"ok": False, "error": (f"{feature} loads {what} from {path} ({var}), and "
+                                   f"there is no model there. Point {var} at the folder "
+                                   f"that holds it, or remove the setting to use the "
+                                   f"downloaded copy.")}
+
+
 # ---- CivitAI bridge ---------------------------------------------------------
 # CivitAI is the de-facto LoRA distribution hub. We hit its public REST API
 # (no auth required for SFW; an optional CIVITAI_API_KEY env var unlocks
@@ -7840,335 +8271,59 @@ atexit.register(_kill_active_download)
 # https://github.com/civitai/civitai/wiki/REST-API-Reference but we trim
 # the response server-side so the panel only ships what the UI needs.
 
-CIVITAI_API_BASE = "https://civitai.com/api/v1"
-CIVITAI_USER_AGENT = "phosphene/1.0 (https://github.com/mrbizarro/phosphene)"
+# ---- CivitAI client (moved to civitai_client.py) -----------------------------
+# The search, host allowlist and download code lives in civitai_client.py now.
+# These names stay importable from here: panel/routes_loras.py and the tests
+# reach them as P.<name>, and the module is handed P at wiring time below.
+import civitai_client as _civitai_client
+from civitai_client import (  # noqa: F401  (re-exported on purpose)
+    CIVITAI_API_BASE,
+    CIVITAI_DL,
+    CIVITAI_DL_LOCK,
+    CIVITAI_USER_AGENT,
+    CivitaiDownloadCancelled,
+    _CIVITAI_BASE_MODELS_BY_CONTEXT,
+    _CIVITAI_DL_TOKEN_RE,
+    _CIVITAI_FAMILIES_BY_CONTEXT,
+    _CIVITAI_IMAGE_FAMILIES,
+    _CIVITAI_VIDEO_FAMILIES,
+    _civitai_dl_commit,
+    _civitai_dl_tick,
+    _civitai_download,
+    _civitai_host_allowed,
+    _civitai_opener,
+    _civitai_request,
+    _civitai_search,
+    civitai_dl_begin,
+    civitai_dl_cancel,
+    civitai_dl_end,
+    civitai_dl_state,
+    civitai_dl_token,
+)
 
 
-# 2026-05-31 security fix (deep-review). The CivitAI download path takes a
-# `download_url` from model metadata (attacker-influenceable) and sends the
-# user's API token in BOTH the URL (`?token=`) and an `Authorization: Bearer`
-# header. Two holes were closed:
-#   1. The old host gate was `netloc.endswith("civitai.com")` — which also
-#      matches `evilcivitai.com`. Now an EXACT host allowlist.
-#   2. Python's default HTTPRedirectHandler re-attaches the Authorization
-#      header across redirects to ANY host, so a crafted/compromised download
-#      that 30x-redirects off-domain would exfiltrate the token. The handler
-#      below strips Authorization on any cross-host redirect.
-def _civitai_host_allowed(netloc: str) -> bool:
-    """True only for civitai.com itself or a real *.civitai.com subdomain."""
-    host = (netloc or "").split("@")[-1].split(":")[0].strip().lower()
-    return host == "civitai.com" or host.endswith(".civitai.com")
 
 
-def _civitai_opener():
-    """A urllib opener that strips the Authorization header on any cross-host
-    redirect, so the CivitAI token never travels to a host the user didn't
-    authenticate to. Built lazily so urllib.request is imported before the
-    handler subclass is defined (no module-load import-order coupling)."""
-    import urllib.request
-    import urllib.parse
-
-    class _AuthStrippingRedirectHandler(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, req, fp, code, msg, headers, newurl):
-            new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
-            if new_req is None:
-                return None
-            try:
-                # Keep Authorization only while staying inside the civitai.com
-                # domain (civitai.com -> images.civitai.com is legit). Strip it
-                # the moment a redirect leaves the domain — e.g. to a pre-signed
-                # CDN (which needs no auth anyway) or to an attacker's host.
-                new_netloc = urllib.parse.urlparse(newurl).netloc
-                if not _civitai_host_allowed(new_netloc):
-                    hdrs = {k: v for k, v in new_req.header_items()
-                            if k.lower() != "authorization"}
-                    new_req = urllib.request.Request(
-                        new_req.full_url, headers=hdrs, method=new_req.get_method())
-            except Exception:
-                # Reasoning about the redirect failed — fail closed.
-                try:
-                    new_req.remove_header("Authorization")
-                except Exception:
-                    pass
-            return new_req
-
-    return urllib.request.build_opener(_AuthStrippingRedirectHandler())
 
 
-def _civitai_request(path: str, params: dict | None = None,
-                     timeout: float = 20.0) -> dict:
-    """Minimal stdlib HTTP client for the CivitAI API. No third-party
-    deps so we don't pin requests / httpx into the install. Returns the
-    decoded JSON body or raises RuntimeError on non-2xx."""
-    import urllib.parse, urllib.request
-    url = f"{CIVITAI_API_BASE}{path}"
-    if params:
-        # urlencode handles the URL-quoting (spaces → %20 etc.) so
-        # baseModels=LTXV 2.3 makes it through unmangled.
-        url = url + "?" + urllib.parse.urlencode(params, doseq=True)
-    req = urllib.request.Request(url, headers={
-        "Accept": "application/json",
-        "User-Agent": CIVITAI_USER_AGENT,
-    })
-    api_key = _active_civitai_key()
-    if api_key:
-        req.add_header("Authorization", f"Bearer {api_key}")
-    # CivitAI's API throws the occasional 502/503/504 on a perfectly good
-    # request (owner hit "HTTP error 503" mid-search). Three attempts with a
-    # short back-off turn that into a pause instead of a dead search, and
-    # the message a user finally sees says what to do, not a status code.
-    import urllib.error
-    last: Exception | None = None
-    for attempt in range(3):
-        try:
-            with _civitai_opener().open(req, timeout=timeout) as resp:
-                body = resp.read().decode("utf-8", "replace")
-                return json.loads(body)
-        except urllib.error.HTTPError as exc:
-            last = exc
-            if exc.code in (500, 502, 503, 504, 429) and attempt < 2:
-                time.sleep(1.5 * (attempt + 1))
-                continue
-            if exc.code in (500, 502, 503, 504):
-                raise RuntimeError("CivitAI is busy right now (it answered "
-                                   f"{exc.code}). Try again in a few seconds.") from exc
-            if exc.code == 429:
-                raise RuntimeError("CivitAI is rate-limiting this Mac — wait a minute "
-                                   "and search again.") from exc
-            if exc.code in (401, 403):
-                raise RuntimeError("CivitAI refused the request (401/403) — check the "
-                                   "CivitAI API key in Settings.") from exc
-            raise RuntimeError(f"CivitAI answered HTTP {exc.code}.") from exc
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            last = exc
-            if attempt < 2:
-                time.sleep(1.5 * (attempt + 1))
-                continue
-            raise RuntimeError("Could not reach civitai.com — check the connection "
-                               "and try again.") from exc
-        except Exception as exc:                               # noqa: BLE001
-            raise RuntimeError(f"{type(exc).__name__}: {exc}") from exc
-    raise RuntimeError(f"{type(last).__name__}: {last}")
 
 
-# Sub-families for the image context. Each entry maps a UI family-pill id
-# to the list of CivitAI baseModel strings it covers. The "all" pill is
-# the union of every list below — built dynamically so adding a new
-# family stays a one-line edit. Probed against the live CivitAI API
-# 2026-05-20; CivitAI's taxonomy uses different names than what their
-# own model-card UI shows.
-#
-# Flux LoRAs are intentionally excluded — Phosphene's image engines are
-# Qwen-Image-Edit-2511 (via mflux) and HiDream-O1-Image-Dev. There's no
-# Flux engine exposed today, so surfacing Flux LoRAs in the browser
-# would just create install candidates that no engine can run.
-_CIVITAI_IMAGE_FAMILIES: dict[str, list[str]] = {
-    "flux":    ["Flux.1 D", "Flux.1 S", "Flux.1 Dev", "Flux.1 Schnell", "Flux.1 Krea", "Flux.1", "Flux.2"],
-    "qwen":    ["Qwen 2", "Qwen"],   # Qwen-Image-Edit-2511 + Qwen-Image (2509)
-    "hidream": ["HiDream-O1"],       # HiDream-O1-Image-Dev
-}
-# Sub-families for the VIDEO context — one per video ENGINE. Same mechanism
-# the image context uses, and for a stronger reason: LTX and H3 don't merely
-# prefer different LoRAs, they cannot load each other's at all (different
-# module tree, different runner, different loader). The family pill is
-# therefore not a convenience filter here, it is the lane selector, and
-# openCivitaiModal() preselects it from the ACTIVE engine so an LTX user's
-# default view is byte-for-byte what it was before H3 LoRAs existed.
-#
-# Both strings probed against the live CivitAI API rather than guessed:
-#   "LTXV 2.3"    verified 2026-05-20 — "LTX 2.3", "LTX-Video 2.3" and
-#                 "LTXV2.3" all return zero.
-#   "MiniMax H3"  verified 2026-08-09 — "MiniMax", "Hailuo" and "Hailuo H3"
-#                 all return zero; "MiniMax H3" is the only spelling with hits.
-_CIVITAI_VIDEO_FAMILIES: dict[str, list[str]] = {
-    "ltx": ["LTXV 2.3"],
-    "h3":  ["MiniMax H3"],
-}
-# family-map per context, so the `family` query param means the same thing on
-# both surfaces and adding a family stays a one-line edit in ONE of the two
-# dicts above.
-_CIVITAI_FAMILIES_BY_CONTEXT: dict[str, dict[str, list[str]]] = {
-    "video": _CIVITAI_VIDEO_FAMILIES,
-    "image": _CIVITAI_IMAGE_FAMILIES,
-}
-_CIVITAI_BASE_MODELS_BY_CONTEXT = {
-    # Video LoRAs — the default. Union of every video family; the `family`
-    # query param on /civitai/search narrows it to one engine's lane.
-    "video": [bm for bms in _CIVITAI_VIDEO_FAMILIES.values() for bm in bms],
-    # Image LoRAs — union of every family in _CIVITAI_IMAGE_FAMILIES.
-    # Sub-filtering happens via the `family` query param on /civitai/search.
-    "image": [bm for bms in _CIVITAI_IMAGE_FAMILIES.values() for bm in bms],
-}
+
+
 
 def spicy_mode_enabled() -> bool:
-    """Return the single server-side authorization predicate for NSFW UI/data."""
+    """Return the single server-side authorization predicate for NSFW UI/data.
+
+    Owner ruling 2026-10-22: the installed Mac app (PHOSPHENE_DISTRIBUTION=
+    mac-app, and Pro inside it) has no Spicy mode - always OFF there, whatever
+    panel_settings.json says (a persisted true from a copied Pinokio state is
+    ignored), so its CivitAI browser always runs the spicy-off path (nsfw=false
+    upstream + the flagged-item filter). The Pinokio edition is unchanged."""
+    if _dist.is_mac_app():
+        return False
     return bool(get_settings().get("spicy_mode", False))
 
 
-def _civitai_search(query: str = "", nsfw: bool = False,
-                    cursor: str = "", limit: int = 20,
-                    context: str = "video", family: str = "") -> dict:
-    """Search LoRAs. Returns the trimmed shape:
-        { "items": [{
-            "id", "name", "creator", "description", "tags", "downloads",
-            "rating", "nsfw", "preview_url", "version_id",
-            "download_url", "trigger_words", "recommended_strength",
-            "size_kb", "base_model"
-          }, ...],
-          "total_pages", "current_page" }
-    Each item carries everything the front end needs to render a card
-    AND everything the download endpoint needs to write a sidecar — no
-    second round-trip required to install."""
-    # Spicy mode gate (v2.0 — server-side authoritative). When the user
-    # hasn't enabled Spicy mode in Settings, force nsfw=False regardless
-    # of what the client sent. This keeps NSFW results out of casual /
-    # kid-accessible installs even if someone fiddles the client param.
-    spicy_on = spicy_mode_enabled()
-    if not spicy_on:
-        nsfw = False
-    # CivitAI's /models endpoint uses cursor-style pagination
-    # (`nextCursor` in the response → pass back as `cursor` on the next
-    # request). Page numbers are deprecated for this endpoint. We expose
-    # the same cursor flow to the panel UI so it can render a "Load more"
-    # affordance without faking pagination on top of cursors.
-    # Context-aware baseModels (2026-05-18). The Images workflow needs to
-    # see Flux / Qwen / HiDream LoRAs, NOT LTX-2.3 video LoRAs. Unknown
-    # contexts silently fall back to the video default so any caller that
-    # forgets to set context still gets sensible results.
-    base_models_filter = _CIVITAI_BASE_MODELS_BY_CONTEXT.get(
-        context, _CIVITAI_BASE_MODELS_BY_CONTEXT["video"]
-    )
-    # Sub-family narrowing. The browser exposes pills per context — "LTX-2.3"
-    # / "Hailuo H3" on video, "Qwen-Image" / "HiDream" on image — so users can
-    # scope the result set to the engine they're about to use. family=""
-    # (or missing, or "all") leaves the full context list active.
-    fam = (family or "").strip().lower()
-    _fam_map = _CIVITAI_FAMILIES_BY_CONTEXT.get(context) or {}
-    if fam and fam in _fam_map:
-        base_models_filter = _fam_map[fam]
-    # The CivitAI API accepts multi-value baseModels as repeated query
-    # params (`baseModels=X&baseModels=Y`), not comma-separated. Passing
-    # a list here triggers `urlencode(..., doseq=True)` in _civitai_request
-    # to emit the repeated form.
-    params: dict[str, object] = {
-        "types": "LORA",
-        "baseModels": base_models_filter,
-        "limit": limit,
-        "sort": "Most Downloaded",
-        "nsfw": "true" if nsfw else "false",
-    }
-    q = query.strip()
-    if q:
-        # CivitAI's text search (`query`) is a different backend from the
-        # browse listing and it does NOT honour `baseModels`: the two
-        # together return an empty page for every word ("turbo" → 0 while
-        # "Minimax H3 Turbo Loras" sits on page one of the un-queried list).
-        # So a typed search drops the server-side base filter, nudges the
-        # search with the engine's own word (the backend ranks "minimax
-        # turbo" all-H3), and the base-model filter is applied HERE on the
-        # results, paging until the page is full or the well runs dry.
-        _hint_words = {"h3": "minimax", "ltx": "ltx", "qwen": "qwen",
-                       "hidream": "hidream"}
-        # One engine → one hinted search. "All" → one hinted search per
-        # engine in the context, merged (a bare "anime" search fills its
-        # pages with SDXL LoRAs and the base filter leaves nothing).
-        _hints = ([_hint_words.get(fam, "")] if fam
-                  else [_hint_words.get(k, "") for k in (_fam_map or {}).keys()] or [""])
-        params.pop("baseModels", None)
-        params["limit"] = 50
-        _want = {bm.lower() for bm in base_models_filter}
-        raw_items: list[dict] = []
-        _seen: set = set()
-        raw = {}
-        for _hint in _hints:
-            _p = dict(params)
-            _p["query"] = (f"{_hint} {q}" if _hint and _hint not in q.lower() else q)
-            if cursor:
-                _p["cursor"] = cursor
-            for _page in range(4):
-                raw = _civitai_request("/models", params=_p)
-                for m in (raw.get("items") or []):
-                    _bm = str(((m.get("modelVersions") or [{}])[0]).get("baseModel") or "").lower()
-                    if _bm in _want and m.get("id") not in _seen:
-                        _seen.add(m.get("id"))
-                        raw_items.append(m)
-                _next = (raw.get("metadata") or {}).get("nextCursor")
-                if len(raw_items) >= limit or not _next:
-                    break
-                _p["cursor"] = _next
-            if len(raw_items) >= limit:
-                break
-        raw = {**raw, "items": raw_items[:limit]}
-    else:
-        if cursor:
-            params["cursor"] = cursor
-        raw = _civitai_request("/models", params=params)
-    items = []
-    for m in (raw.get("items") or []):
-        versions = m.get("modelVersions") or []
-        if not versions:
-            continue
-        v = versions[0]
-        files = v.get("files") or []
-        # Pick the first .safetensors file. CivitAI sometimes hosts
-        # multiple file variants (pruned, full, etc.); prefer the one
-        # marked `primary: true` if present, otherwise fall back to the
-        # first .safetensors.
-        primary = next((f for f in files if f.get("primary") and
-                        f.get("name", "").lower().endswith(".safetensors")),
-                       None) or next((f for f in files if
-                       f.get("name", "").lower().endswith(".safetensors")),
-                       None)
-        if not primary:
-            continue
-        images = v.get("images") or []
-        # Prefer the first image-type preview if any exist (some LTX LoRAs
-        # ship both video MP4s AND still images). Fall back to the first
-        # entry of any type. We pass the type back to the client so the
-        # renderer can pick <img> vs <video> appropriately — for LTX
-        # video LoRAs the previews are usually MP4s, which would just
-        # 404 inside an <img> tag.
-        preview_obj = (
-            next((img for img in images if img.get("type") == "image" and img.get("url")), None)
-            or next((img for img in images if img.get("url")), None)
-        )
-        preview = preview_obj.get("url") if preview_obj else None
-        preview_type = preview_obj.get("type") if preview_obj else None
-        creator = (m.get("creator") or {}).get("username") or "unknown"
-        # CivitAI puts trigger words on the version (`trainedWords`).
-        trigger = list(v.get("trainedWords") or [])
-        items.append({
-            "id": m.get("id"),
-            "version_id": v.get("id"),
-            "name": m.get("name") or f"model-{m.get('id')}",
-            "creator": creator,
-            "description": (m.get("description") or "")[:600],
-            "tags": list(m.get("tags") or []),
-            "downloads": (m.get("stats") or {}).get("downloadCount"),
-            "rating": (m.get("stats") or {}).get("rating"),
-            "nsfw": bool(m.get("nsfw")),
-            "preview_url": preview,
-            "preview_type": preview_type,        # "image" | "video" | None
-            "filename": primary.get("name"),
-            "size_kb": primary.get("sizeKB"),
-            "download_url": primary.get("downloadUrl"),
-            "trigger_words": trigger,
-            "recommended_strength": 1.0,    # CivitAI doesn't expose this; default
-            "base_model": v.get("baseModel"),
-            "civitai_url": f"https://civitai.com/models/{m.get('id')}",
-        })
-    # Defense-in-depth: when Spicy mode is off, also drop any items the
-    # API returned with nsfw=true. CivitAI's `nsfw=false` request param
-    # filters by image-tier (Soft/Mature/X) but model cards have a
-    # separate boolean we re-check here so nothing slips through.
-    if not spicy_on:
-        items = [it for it in items if not it.get("nsfw")]
-    metadata = raw.get("metadata") or {}
-    return {
-        "items": items,
-        "next_cursor": metadata.get("nextCursor"),
-        "has_more": bool(metadata.get("nextCursor")),
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -8395,276 +8550,24 @@ def _hf_lora_download(repo_id: str, filename: str, meta: dict) -> dict:
             "layout": layout_info.get("layout"), "converted": bool(layout_info.get("converted"))}
 
 
-# ---- CivitAI download progress + cancel (4.18.0) ------------------------------
-# The browser's Install button used to say "Downloading…" for the whole of a
-# 300 MB-2 GB download with no number and no way out. The download still runs
-# inside its own POST (the server is threaded); the browser names it with a
-# random token, polls GET /civitai/download/state for bytes, and can POST
-# /civitai/download/cancel. A cancel stops the stream at the next chunk and
-# the existing .partial cleanup removes what had arrived — nothing half-
-# downloaded is ever registered as a LoRA.
-CIVITAI_DL: dict[str, dict] = {}
-CIVITAI_DL_LOCK = threading.Lock()
-_CIVITAI_DL_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
 
-class CivitaiDownloadCancelled(RuntimeError):
-    """The person pressed Cancel; the partial file is already gone."""
 
 
-def civitai_dl_token(raw) -> str:
-    t = str(raw or "").strip()
-    return t if _CIVITAI_DL_TOKEN_RE.match(t) else ""
 
 
-def civitai_dl_begin(token: str, name: str) -> None:
-    if not token:
-        return
-    with CIVITAI_DL_LOCK:
-        # A crashed tab never polls its entry away; keep the table small.
-        if len(CIVITAI_DL) > 32:
-            for k in list(CIVITAI_DL)[:-16]:
-                CIVITAI_DL.pop(k, None)
-        CIVITAI_DL[token] = {"state": "running", "bytes": 0, "total": 0,
-                             "name": str(name or "")[:120], "cancel": False}
 
 
-def civitai_dl_state(token: str) -> dict | None:
-    with CIVITAI_DL_LOCK:
-        e = CIVITAI_DL.get(token)
-        return dict(e) if e else None
 
 
-def civitai_dl_cancel(token: str) -> bool:
-    """True when the download will stop. False once it has passed the commit
-    point (every byte arrived, the file is being put in place) — a Cancel
-    then would answer "cancelled" for a LoRA that still installs."""
-    with CIVITAI_DL_LOCK:
-        e = CIVITAI_DL.get(token)
-        if not e or e.get("state") != "running":
-            return False
-        e["cancel"] = True
-        return True
 
 
-def _civitai_dl_commit(token: str) -> None:
-    """The commit point: honour a Cancel that arrived after the last chunk,
-    else close the door on any later one (state -> "installing")."""
-    if not token:
-        return
-    with CIVITAI_DL_LOCK:
-        e = CIVITAI_DL.get(token)
-        if not e:
-            return
-        if e.get("cancel"):
-            e["state"] = "cancelled"
-            raise CivitaiDownloadCancelled("Download cancelled — nothing was kept.")
-        e["state"] = "installing"
 
 
-def civitai_dl_end(token: str) -> None:
-    with CIVITAI_DL_LOCK:
-        CIVITAI_DL.pop(token, None)
 
 
-def _civitai_dl_tick(token: str, written: int, total: int) -> None:
-    """Record progress; raise when the person asked to stop."""
-    if not token:
-        return
-    with CIVITAI_DL_LOCK:
-        e = CIVITAI_DL.get(token)
-        if not e:
-            return
-        e["bytes"], e["total"] = int(written), int(total or 0)
-        if e.get("cancel"):
-            e["state"] = "cancelled"
-            raise CivitaiDownloadCancelled("Download cancelled — nothing was kept.")
 
 
-def _civitai_download(download_url: str, meta: dict, token: str = "") -> dict:
-    """Download a CivitAI .safetensors into the right LoRA dir for its base
-    model and write a sidecar JSON. Returns
-    { name, path, sidecar_path, size_bytes, lane }.
-    Streams to a .partial file then renames atomically — a Pinokio kill
-    mid-download leaves nothing the next scan would mistake for a
-    complete LoRA.
-
-    Lane routing (2026-08-09) is decided from the ITEM's own `base_model`,
-    not from which browser context the click came from. A MiniMax H3 LoRA
-    lands in the H3 weights tree even if the user found it while the browser
-    was showing "All", because the file's family is a property of the file,
-    and mis-filing it would put an unloadable adapter in the LTX picker."""
-    import urllib.parse, urllib.request
-    if not download_url:
-        raise RuntimeError("download_url required")
-    # Restrict to civitai.com to prevent the endpoint being used as a
-    # generic HTTP fetcher. Subdomains (e.g. images.civitai.com) are
-    # also OK because CivitAI sometimes redirects there.
-    parsed = urllib.parse.urlparse(download_url)
-    if parsed.scheme != "https" or not _civitai_host_allowed(parsed.netloc):
-        raise RuntimeError(f"refusing to download from {parsed.netloc}; "
-                           f"only civitai.com (and *.civitai.com) is allowed")
-    # CivitAI's download endpoint started requiring auth for many models
-    # in 2025+. The Authorization header sometimes works, but the
-    # canonical path is `?token=<key>` on the URL — and many CDN hops
-    # only honour the token in the URL. Try the URL form first when a
-    # key is available.
-    api_key_env = _active_civitai_key()
-    if api_key_env and "token=" not in (parsed.query or ""):
-        sep = "&" if parsed.query else "?"
-        download_url = download_url + sep + "token=" + urllib.parse.quote(api_key_env)
-    # Which engine's library does this belong to? _classify_lora_modes is the
-    # single source for that mapping — the picker filter, the sidecar and this
-    # router all read the same function, so a new family is one edit there.
-    lane = ("h3" if "video:h3" in _classify_lora_modes(meta.get("base_model"))
-            else "ltx")
-    loras_dir = _safe_h3_loras_dir() if lane == "h3" else _safe_loras_dir()
-    # Filename from meta (preferred — preserves CivitAI's name) or fall
-    # back to the URL's last path segment.
-    fname = (meta.get("filename") or
-             os.path.basename(parsed.path) or
-             f"civitai_{meta.get('id', 'unknown')}.safetensors")
-    if not fname.lower().endswith(".safetensors"):
-        fname += ".safetensors"
-    # Sanitize aggressively — CivitAI names can contain spaces and
-    # weirder characters; the helper later passes this filename through
-    # the safetensors loader which is filesystem-only and fine with
-    # spaces, but the picker UI is calmer with snake_case.
-    safe_fname = re.sub(r"[^A-Za-z0-9._-]+", "_", fname).strip("_")
-    target = loras_dir / safe_fname
-    if target.exists():
-        # Don't silently re-download. Surface the conflict so the user
-        # can decide (the UI will offer a choice; for now just skip).
-        return {
-            "name": meta.get("name") or target.stem,
-            "path": str(target),
-            "size_bytes": target.stat().st_size,
-            "lane": lane,
-            "skipped": True,
-            "reason": "already exists",
-        }
-    tmp = target.with_suffix(target.suffix + ".partial")
-    push(f"[civitai] downloading {meta.get('name') or safe_fname}")
-    api_key = _active_civitai_key()
-    headers = {"User-Agent": CIVITAI_USER_AGENT}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    req = urllib.request.Request(download_url, headers=headers)
-    bytes_written = 0
-    last_log = 0.0
-    _opener = _civitai_opener()  # strips Authorization on cross-host redirect
-    try:
-        try:
-            resp_ctx = _opener.open(req, timeout=60)
-        except urllib.request.HTTPError as he:
-            # Surface the 401 case with a clear remediation. CivitAI now
-            # requires API tokens for most LoRA downloads, even SFW ones,
-            # but the API key for the search endpoint is optional — so a
-            # user can browse without setting up auth and only hit this
-            # wall on first install.
-            if he.code == 401:
-                raise RuntimeError(
-                    "CivitAI returned 401 Unauthorized. CivitAI requires an "
-                    "API token for LoRA downloads. Get one at "
-                    "https://civitai.com/user/account, then set the "
-                    "CIVITAI_API_KEY environment variable before launching "
-                    "the panel (or in Pinokio's Phosphene start script). "
-                    "Restart Pinokio's Phosphene to pick it up."
-                )
-            raise
-        with resp_ctx as resp:
-            total = int(resp.headers.get("Content-Length") or 0)
-            _civitai_dl_tick(token, 0, total)
-            with tmp.open("wb") as fh:
-                while True:
-                    chunk = resp.read(1024 * 256)
-                    if not chunk:
-                        break
-                    fh.write(chunk)
-                    bytes_written += len(chunk)
-                    _civitai_dl_tick(token, bytes_written, total)
-                    now = time.time()
-                    if now - last_log > 1.0:
-                        if total:
-                            pct = int(100 * bytes_written / total)
-                            push(f"[civitai] {pct}% · "
-                                 f"{bytes_written // (1024*1024)}/"
-                                 f"{total // (1024*1024)} MB")
-                        else:
-                            push(f"[civitai] {bytes_written // (1024*1024)} MB")
-                        last_log = now
-        _civitai_dl_commit(token)
-        os.replace(tmp, target)
-    except CivitaiDownloadCancelled:
-        try: tmp.unlink()
-        except OSError: pass
-        push(f"[civitai] cancelled {meta.get('name') or safe_fname} — partial file removed")
-        raise
-    except Exception:
-        try: tmp.unlink()
-        except OSError: pass
-        raise
-    push(f"[civitai] saved {target.name} ({bytes_written // (1024*1024)} MB)")
-    # ---- H3 lane: classify the key layout NOW, at install time --------------
-    # Doing it here rather than at render time means the ComfyUI rename happens
-    # once, in front of the user, with the log open — and a diffusers-namespace
-    # LoRA is refused at the moment they clicked Install instead of 30 s into a
-    # 20-minute render. The file is REMOVED on refusal: leaving an unloadable
-    # adapter in the library would put a permanently-failing entry in the
-    # picker, which is worse than the wasted download it cost to find out.
-    layout_info = {"layout": None, "converted": False, "prefix": ""}
-    if lane == "h3":
-        try:
-            layout_info = _h3_lora_prepare(target)
-        except Exception as exc:
-            try:
-                target.unlink()
-            except OSError:
-                pass
-            push(f"[civitai] refused {target.name}: {exc}")
-            raise RuntimeError(str(exc)) from exc
-    strength = (_h3_lora_browser_strength(target, meta, "civitai") if lane == "h3"
-                else float(meta.get("recommended_strength") or 1.0))
-    # Write the sidecar — kept tolerant of meta gaps so a partial
-    # payload still produces a usable picker entry.
-    sidecar = target.with_suffix(".json")
-    sidecar_data = {
-        "name": meta.get("name") or target.stem,
-        "description": meta.get("description") or "",
-        "trigger_words": (list(meta.get("trigger_words") or [])
-                          or list(layout_info.get("trigger_words") or [])),
-        "recommended_strength": strength,
-        "preview_url": meta.get("preview_url"),
-        "base_model": (meta.get("base_model")
-                       or ("MiniMax H3" if lane == "h3" else "LTXV 2.3")),
-        "civitai_id": meta.get("id"),
-        "civitai_version_id": meta.get("version_id"),
-        "civitai_url": meta.get("civitai_url"),
-        "downloaded_at": iso_now(),
-        "downloaded_size_bytes": bytes_written,
-        # What we found, and what we did about it. Written for both lanes so
-        # the field means the same thing everywhere; None on LTX, where the
-        # panel does no layout surgery.
-        "lora_layout": layout_info.get("layout"),
-        "lora_converted_prefix": (layout_info.get("prefix") or None
-                                  if layout_info.get("converted") else None),
-    }
-    try:
-        atomic_write_text(sidecar, json.dumps(sidecar_data, indent=2))
-    except Exception as exc:
-        push(f"[civitai] WARN: could not write sidecar ({exc})")
-    return {
-        "name": sidecar_data["name"],
-        "path": str(target),
-        "sidecar_path": str(sidecar),
-        "size_bytes": bytes_written,
-        # "ltx" | "h3" — the client uses this to decide whether it may
-        # auto-enable the new LoRA on the currently-selected engine.
-        "lane": lane,
-        "layout": layout_info.get("layout"),
-        "converted": bool(layout_info.get("converted")),
-        "skipped": False,
-    }
 
 
 # Aspect presets — width × height (model-safe, multiples of 32)
@@ -8834,8 +8737,11 @@ def caffeinate_on() -> None:
     global CAFFEINATE_PROC
     if CAFFEINATE_PROC and CAFFEINATE_PROC.poll() is None:
         return
+    argv = hostinfo.keep_awake_prefix()
+    if not argv:
+        return
     try:
-        CAFFEINATE_PROC = subprocess.Popen(["caffeinate", "-i"],
+        CAFFEINATE_PROC = subprocess.Popen(argv,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         push("caffeinate active — Mac won't idle-sleep while queue is running")
     except Exception as exc:
@@ -9025,14 +8931,7 @@ CAPABILITIES: dict[str, dict] = {
 
 def _detect_total_ram_gb() -> float:
     """Return physical unified memory in GiB, or 0.0 when unavailable."""
-    try:
-        out = subprocess.run(
-            ["sysctl", "-n", "hw.memsize"],
-            capture_output=True, text=True, errors="replace", timeout=1,
-        ).stdout.strip()
-        return int(out) / 1024**3
-    except Exception:
-        return 0.0
+    return hostinfo.total_ram_bytes() / 1024**3
 
 
 SYSTEM_RAM_GB = _detect_total_ram_gb()
@@ -9295,20 +9194,23 @@ H3_TURBO_LORA_CANDIDATES = (
     (H3_TURBO_FALLBACK_LORA_FILE, "v0.1", True),
     (H3_TURBO_CKPT500_FILE, "ckpt500-EMA", True),
 )
-# Exact upstream source for the v1.0 repack, kept for provenance.
+# Exact upstream source for the v1.0 repack. Since 4.19.8 Phosphene no longer
+# hosts the repack: it is a MiniMax H3 Model Derivative, and the H3 licence
+# only allows distribution inside its Applicable Territory. install_h3.js runs
+# scripts/fetch_h3_turbo.py, which fetches THIS file from LightX2V's own repo
+# (pinned commit + digest) and re-lays it out on the user's Mac. The pins below
+# must match that script (test_h3_turbo_adapter.py holds them together).
+H3_TURBO_SOURCE_REVISION = "30f485ed874aa44c8183348ad361c5eabad318da"
 H3_TURBO_SOURCE_FILE = "minimax_h3_fl2v_turbo_4step_v1.0_768p_bf16.safetensors"
+H3_TURBO_SOURCE_URL = ("https://huggingface.co/" + H3_TURBO_REPO + "/resolve/"
+                       + H3_TURBO_SOURCE_REVISION + "/" + H3_TURBO_SOURCE_FILE)
 H3_TURBO_SOURCE_SHA256 = (
     "1bdabc2e9fce20b1db563b96bcf6e46adcad4c1964f423676436bf266cc7416c"
 )
-# The runner-layout repack, published 2026-08-14 as a digest-pinned release
-# asset on the same lane as the LTX-2.5 packs. The digest below was verified
-# against the local repack that core_tan's testing and the owner's visual
-# review selected — byte-identical before the pin was written down.
-H3_TURBO_RELEASE_TAG = "weights-ltx25-v1"
-H3_TURBO_ASSET_URL = (
-    "https://github.com/mrbizarro/Phosphene/releases/download/"
-    + H3_TURBO_RELEASE_TAG + "/" + H3_TURBO_LORA_FILE
-)
+H3_TURBO_SOURCE_BYTES = 1383677808
+# The locally built runner-layout repack: byte-identical to the file
+# Phosphene used to host (verified 2026-10-21 against the old release
+# asset's digest), so Turbo on v1.0 renders exactly as before.
 H3_TURBO_ASSET_SHA256 = (
     "d51d626fe0845da7e5845a47c323cf3f29086d44d24cb1a4b980882488746197"
 )
@@ -9320,8 +9222,8 @@ H3_TURBO_STEPS = 4                       # the 4-step adapters (v1.0 / v0.1 / ck
 # Sigma points per adapter version; anything unlisted is a 4-step adapter.
 H3_TURBO_VERSION_STEPS = {"v4-600-EMA": H3_TURBO_V4_STEPS}
 # What the managed download fetches. The v4 adapter comes straight from its
-# author's repo (bare layout, digest-pinned); the LightX2V release asset stays
-# reachable by key for installs that cannot reach Hugging Face.
+# author's repo (bare layout, digest-pinned). The LightX2V v1.0 repack is not a
+# managed download any more: install_h3.js builds it locally from upstream.
 H3_TURBO_ASSETS = {
     "v4-600-EMA": {"file": H3_TURBO_V4_FILE, "url": H3_TURBO_V4_URL,
                    "sha256": H3_TURBO_V4_SHA256, "bytes": H3_TURBO_V4_BYTES},
@@ -9443,6 +9345,59 @@ H3_TRISTEP_MEASURED_ETA: dict[tuple[str, str, str], tuple[float, str]] = {
     ("standard", "5s", "t2v"): (4.9, "~5 min"),
     ("high", "5s", "i2v"): (9.0, "~9 min"),
     ("high", "5s", "t2v"): (8.4, "~8 min"),
+}
+
+# ---- lightx2v v1.3: Best at High on LightX2V's few-step adapter ---------------
+# LightX2V's v1.3 768p distillation of H3 (lightx2v/Minimax-h3-Turbo, released
+# 2026-10-20) at 7 sigma points = 6 forwards, video shift 6 (the shift its
+# author trained the 768p adapters on). Measured on the M4 Max 64 GB at High
+# 1024x576, 124 frames, same seed: today's Best 15 forwards 1950 s end to end,
+# v1.3 6 forwards 870 s (-55%); the owner's read of the side-by-side: the fast
+# clip looks better, richer, higher quality. More prompts (two-person
+# dialogue, fast body motion, typography) in the PM hub's speed/ folder.
+#
+# Where it runs: Best on the High canvas, Text and Image, every 5 s-window
+# length. A Steps pin keeps the full sampler (that is the opt-out), Fast and
+# Turbo never stack with it, Native / dense / the media modes keep their own
+# samplers. Free for everyone.
+#
+# THE FILE. Phosphene does not host it (an H3 Model Derivative, MiniMax H3
+# Community License; LightX2V's code is Apache-2.0). scripts/fetch_h3_v13.py
+# fetches the original from LightX2V's repo at a pinned commit + digest and
+# re-lays it out on this Mac, with the qkv rows already in the DiT's per-head
+# order (so no runner flag, and a user LoRA stacked on top is untouched) and
+# alpha/rank (8/128) folded into B exactly. The pins below MUST match that
+# script; test_h3_v13.py holds them together.
+H3_V13_REPO = "lightx2v/Minimax-h3-Turbo"
+H3_V13_SOURCE_REVISION = "30f485ed874aa44c8183348ad361c5eabad318da"
+H3_V13_SOURCE_FILE = "minimax_h3_fl2v_turbo_4step_v1.3_768p_bf16.safetensors"
+H3_V13_SOURCE_URL = ("https://huggingface.co/" + H3_V13_REPO + "/resolve/"
+                     + H3_V13_SOURCE_REVISION + "/" + H3_V13_SOURCE_FILE)
+H3_V13_SOURCE_SHA256 = "97b775707bb5732e01dba0cf3833d3fe2947c953859d4d05ea3bd74894c43d2b"
+H3_V13_SOURCE_BYTES = 1383677808
+H3_V13_FILE = "lightx2v_v1.3_768p_phosphene.safetensors"
+H3_V13_SHA256 = "45ee324a31beacef7a2fbef019b99e16b35d80586dc4e0d60fecf6ca679751d8"
+H3_V13_BYTES = 1956165376
+H3_V13_STEPS = 7                     # sigma POINTS -> 6 forwards
+H3_V13_FORWARDS = H3_V13_STEPS - 1
+H3_V13_VIDEO_SHIFT = "6"             # the runner's --video-shift (default 12)
+# A forward with the runtime adapter costs ~3% more (126.5 vs 122.6 s/forward).
+H3_V13_FORWARD_COST = 1.03
+H3_V13_QUALITIES = ("high",)
+H3_V13_MODES = ("t2v", "i2v")
+H3_V13_DOWNLOAD_GB = 1.4
+# Free disk the build needs: the 1.4 GB source plus the 2.0 GB result, while
+# both exist, plus a margin so a render's swap never meets a full disk.
+H3_V13_DISK_NEED_GB = 5.0
+H3_V13_LICENSE = "MiniMax H3 Community License"
+H3_V13_CODE_LICENSE = "Apache-2.0"
+H3_V13_NAME = "lightx2v v1.3"
+H3_V13_LABEL = "High: faster Best (lightx2v v1.3)"
+H3_V13_CREDIT = ("lightx2v v1.3 by LightX2V (ModelTC). Code: Apache-2.0; "
+                 "weights: MiniMax H3 Community License.")
+# End-to-end wall clocks, M4 Max 64 GB, keyed (quality, length, mode).
+H3_V13_MEASURED_ETA: dict[tuple[str, str, str], tuple[float, str]] = {
+    ("high", "5s", "t2v"): (14.5, "~15 min"),
 }
 # Upscale & Face Fix (1 refine step from the clip, ×2) after a 5 s render, by
 # source canvas. 640×384 → 1280×768 measured 2.5–2.8 min; 1024×576 measured
@@ -9569,9 +9524,12 @@ H3_TIER_CHAIN_NOTE = ("Every 5 s window is asked for the same prompt, so a "
 H3_TIER_CHAIN_NOTE_LEGACY = ("Scripted dialogue repeats once per 5 s window — "
                              "put dialogue cues late in the prompt. Per-window "
                              "prompts need `--chain-prompts` on the installed "
-                             "H3 runner; re-run 'Install Hailuo H3' from the "
-                             "Phosphene sidebar to update the clone (weights "
-                             "stay).")
+                             "H3 runner; " + _dist.say(
+                                 "re-run 'Install Hailuo H3' from the "
+                                 "Phosphene sidebar to update the clone (weights "
+                                 "stay).",
+                                 "updating that runner isn't available in the "
+                                 "Mac app yet."))
 # The `?` copy for the per-window prompts control. Server-side because the panel
 # already keeps every honest sentence in Python — one place to edit, and the UI
 # can never disagree with the mechanism it is describing.
@@ -10064,8 +10022,12 @@ def _job_fleet_baseline_min(job: dict) -> tuple[str, float] | None:
         if not cell or not cell.get("frames"):
             return None
         fast = bool(p.get("h3_tristep") or p.get("h3_turbo"))
+        # 4.19.11 review: a lightx2v v1.3 render is measured against the v1.3
+        # lane's own fleet median (none yet = no fleet sample), never against
+        # the full sampler's, or its ~2.3x speed would read as a fast Mac.
         hit = fleet_estimate_range("h3", "t2v", key, cell["frames"],
-                                   speed="fast" if fast else "best")
+                                   speed="fast" if fast else
+                                   "v13" if p.get("h3_v13") else "best")
     else:
         if str(p.get("schedule_preset") or "").strip().lower() == "fast":
             return None
@@ -10464,8 +10426,7 @@ def _hw_chip_family() -> str:
     if _HW_CHIP_FAMILY is None:
         fam = "unknown"
         try:
-            brand = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"],
-                                   capture_output=True, text=True, errors="replace", timeout=3).stdout.strip()
+            brand = hostinfo.chip_brand()
             m = re.search(r"Apple (M\d+)(?: (Pro|Max|Ultra))?", brand)
             if m:
                 fam = m.group(1) + (f" {m.group(2)}" if m.group(2) else "")
@@ -10575,6 +10536,69 @@ GPU_STEPS_M1M2 = {"MLX_MAX_OPS_PER_BUFFER": "10", "MLX_MAX_MB_PER_BUFFER": "10"}
 GPU_STEPS_SHORT = {"MLX_MAX_OPS_PER_BUFFER": "1", "MLX_MAX_MB_PER_BUFFER": "1"}
 #: Closed vocabulary for render_*.watchdog_phase (docs/ANALYTICS.md).
 WATCHDOG_PHASES = ("encode", "load", "denoise", "decode")
+#: 4.19.2 - render_failed.crash_phase: the watchdog phases plus "start" (the
+#: helper died before its first step line).
+CRASH_PHASES = WATCHDOG_PHASES + ("start",)
+#: 4.19.2 - render_failed.crash_line: the CLASS of the last native error line
+#: a helper printed before it died from a signal. First match wins; the text
+#: itself never leaves the Mac. "none" = no such line reached the panel.
+_CRASH_LINE_CLASSES = (
+    ("gpu_timeout", ("kiogpucommandbuffercallbackerrortimeout",
+                     "caused gpu timeout error")),
+    ("gpu_interactivity", ("impactinginteractivity", "impacting interactivity")),
+    ("gpu_hang", ("kiogpucommandbuffercallbackerrorhang", "gpu hang")),
+    ("gpu_page_fault", ("pagefault", "page fault")),
+    ("gpu_oom", ("kiogpucommandbuffercallbackerroroutofmemory",
+                 "insufficient memory")),
+    ("gpu_victim", ("innocentvictim", "innocent victim")),
+    # 4.19.4: the rest of IOGPU's / Metal's command-buffer error names, so
+    # `gpu_other` stops being one bucket. Fleet 4.19.3: an M2 Max (macOS
+    # 15.3) died 3 times in prompt encoding with a command-buffer error that
+    # was none of the six above - and passed on its next try each time.
+    ("gpu_internal", ("internal error", "errorinternal")),
+    ("gpu_submissions_ignored", ("submissionsignored", "submissions ignored")),
+    ("gpu_invalid_resource", ("invalidresource", "invalid resource")),
+    ("gpu_not_permitted", ("notpermitted", "not permitted")),
+    ("gpu_device_removed", ("deviceremoved", "device removed")),
+    ("gpu_other", ("kiogpucommandbuffercallbackerror",
+                   "command buffer execution failed", "[metal]")),
+    ("resource_limit", ("resource limit",)),
+    ("cxx_exception", ("libc++abi", "terminating due to uncaught exception",
+                       "terminate called")),
+    ("assertion", ("assertion failed",)),
+)
+CRASH_LINES = tuple(c for c, _ in _CRASH_LINE_CLASSES) + ("none",)
+# 4.19.6: the non-watchdog GPU aborts in prompt encoding that pass on a later,
+# fresh start (fleet 4.19.2+: M2 Max / macOS 15.x, M1 Max / macOS 26.6) - see
+# WarmHelper.run. Re-run once, in a fresh helper, after this pause.
+METAL_ABORT_RETRY_LINES = ("gpu_internal", "gpu_victim", "gpu_other")
+try:
+    METAL_ABORT_COOLDOWN_SEC = max(0, int(os.environ.get("LTX_METAL_ABORT_COOLDOWN_SEC") or 45))
+except ValueError:
+    METAL_ABORT_COOLDOWN_SEC = 45
+
+
+#: 4.19.4 (Codex): the plain-language names below are GPU errors only on a
+#: line that is about the GPU - "Operation not permitted" in a C++ exception
+#: is a file or process permission, not Metal. These classes need a marker.
+_CRASH_LINE_GPU_ONLY = ("gpu_internal", "gpu_submissions_ignored",
+                        "gpu_invalid_resource", "gpu_not_permitted",
+                        "gpu_device_removed")
+_CRASH_LINE_GPU_MARKERS = ("command buffer", "kiogpu", "[metal]", "mtl", "gpu")
+
+
+def crash_line_class(line: str) -> str:
+    """The closed class of a native error line, or "" for any other line."""
+    low = str(line or "").lower()
+    if not low:
+        return ""
+    gpu_line = any(m in low for m in _CRASH_LINE_GPU_MARKERS)
+    for cls, needles in _CRASH_LINE_CLASSES:
+        if cls in _CRASH_LINE_GPU_ONLY and not gpu_line:
+            continue
+        if any(n in low for n in needles):
+            return cls
+    return ""
 GPU_STEPS_NOTE = ("short GPU steps: macOS's GPU watchdog stopped this setting "
                   "before on this Mac, so it renders in smaller pieces (a "
                   "little slower)")
@@ -10677,6 +10701,35 @@ def metal_watchdog_needs_short_encode(key: str) -> bool:
     return bool(ent.get("short_encode"))
 
 
+# 4.19.2 (fleet 4.19.1): 12 of the 13 real watchdog kills whose phase is known
+# died in PROMPT ENCODING, on short steps already - and prompt encoding costs
+# the same at every size. One Mac followed our "Retry smaller" advice down to
+# 256x192 and was stopped in encoding five more times. A kill in encoding gets
+# advice that can work instead.
+METAL_WATCHDOG_ENCODE_WAY = (
+    "It stopped while reading the prompt, which costs the same at every size, "
+    "so a smaller render will not help. Quit apps that use the graphics chip "
+    "(games, video playing in a browser, other AI apps), then press Retry")
+#: ...and since that cause is the moment (what else is using the GPU), not the
+#: size, a setting stopped in encoding pauses for minutes, not a day.
+METAL_WATCHDOG_ENCODE_REFUSE_SEC = 15 * 60
+
+
+def metal_watchdog_pause_words(phase: str | None) -> str:
+    return ("for 15 minutes" if str(phase or "") == "encode"
+            else "for 24 hours")
+
+
+def metal_watchdog_way(mode: str | None, phase: str | None = None) -> str:
+    """The way out after a watchdog kill on short steps, for this mode/phase."""
+    if str(phase or "") == "encode":
+        return METAL_WATCHDOG_ENCODE_WAY
+    if str(mode or "t2v") in ("t2v", "i2v", "i2v_clean_audio", "a2v",
+                              "keyframe", "upscale"):
+        return "Press Retry smaller, or pick a lower quality or a shorter clip"
+    return "Try a shorter extension or section, or a shorter source clip"
+
+
 def metal_watchdog_refusal(key: str, now: float | None = None,
                            mode: str | None = None) -> str | None:
     """The refusal for a setting the watchdog killed even on short steps, for
@@ -10688,16 +10741,16 @@ def metal_watchdog_refusal(key: str, now: float | None = None,
     if int(ent.get("short_kills") or 0) <= 0:
         return None
     last = int(ent.get("short_last_ts") or ent.get("last_ts") or 0)
-    if (now if now is not None else time.time()) - last > METAL_WATCHDOG_REFUSE_SEC:
+    phase = ent.get("phase")
+    window = (METAL_WATCHDOG_ENCODE_REFUSE_SEC if phase == "encode"
+              else METAL_WATCHDOG_REFUSE_SEC)
+    if (now if now is not None else time.time()) - last > window:
         return None
-    way = ("Press Retry smaller, or pick a lower quality or a shorter clip"
-           if str(mode or "t2v") in ("t2v", "i2v", "i2v_clean_audio", "a2v",
-                                     "keyframe", "upscale")
-           else "Try a shorter extension or section, or a shorter source clip")
+    way = metal_watchdog_way(mode, phase)
     return ("macOS's GPU watchdog stopped this exact render twice on this Mac - "
             "the second time in short GPU steps - so it is not started again "
             f"(it would stop the same way). {way}. This size is tried again "
-            "after the next update, or in 24 hours.")
+            f"after the next update, or {metal_watchdog_pause_words(phase).replace('for ', 'in ')}.")
 
 
 
@@ -11217,6 +11270,21 @@ def _build_h3_tiers() -> dict[str, dict]:
                     # recipe, so the cell's own price is Fast + the fix.
                     eta_min = tristep["tristep_min"] + tristep.get("facefix_min", 0.0)
                     eta, eta_measured = _fmt_eta(eta_min), False
+            # lightx2v v1.3 prices only the cells where Best runs it
+            # (h3_cell_takes_v13): 6 forwards at ~3% more per forward.
+            v13 = {}
+            if (q["key"] in H3_V13_QUALITIES and not ln["dense"]
+                    and not q.get("fast_hd")):
+                v_min = min(eta_min, h3_estimate_minutes(
+                    w, h, window_frames, windows, H3_V13_FORWARDS) * H3_V13_FORWARD_COST)
+                v_eta, v_meas = _fmt_eta(v_min), False
+                hit = H3_V13_MEASURED_ETA.get((q["key"], ln["key"], "t2v"))
+                if hit:
+                    v_min, v_meas = hit[0] * hw, True
+                    v_eta = hit[1] if hw == 1.0 else _fmt_eta(v_min)
+                v13 = {"v13_min": round(v_min, 2), "v13_eta": v_eta,
+                       "v13_measured": v_meas, "v13_steps": H3_V13_STEPS,
+                       "v13_forwards": windows * H3_V13_FORWARDS}
             spec = f"{w}×{h} · {frames}f"
             if windows > 1:
                 spec += f" · {windows}×5s"
@@ -11269,6 +11337,7 @@ def _build_h3_tiers() -> dict[str, dict]:
                 "dense": bool(ln["dense"]),
                 "offered": bool(q["offered"] and ln["offered"]),
                 **tristep,
+                **v13,
             }
             # Owner ruling (2026-09-29): real fleet ranges where there are
             # enough of them, one per speed this cell actually offers (H3's
@@ -11277,6 +11346,10 @@ def _build_h3_tiers() -> dict[str, dict]:
             fleet_best = fleet_calibrated_range("h3", "t2v", key, frames, speed="best")
             if fleet_best:
                 tiers[key]["fleet_range"] = fleet_best
+            if tiers[key].get("v13_min") is not None:
+                fleet_v13 = fleet_calibrated_range("h3", "t2v", key, frames, speed="v13")
+                if fleet_v13:
+                    tiers[key]["fleet_range_v13"] = fleet_v13
             if tiers[key].get("tristep_min") is not None:
                 fleet_fast = fleet_calibrated_range("h3", "t2v", key, frames, speed="fast")
                 if fleet_fast:
@@ -11363,9 +11436,10 @@ def h3_cell_gate(cell: dict) -> tuple[bool, str]:
         return (False,
                 f"{cell['length_label']} renders as "
                 f"{cell['chain_windows']} chained 5 s windows, which needs "
-                f"`--chain-windows` on the installed H3 runner. Re-run "
-                f"'Install Hailuo H3' from the Phosphene sidebar to update the "
-                f"clone — your weights stay.")
+                f"`--chain-windows` on the installed H3 runner. " + _dist.say(
+                    "Re-run 'Install Hailuo H3' from the Phosphene sidebar to "
+                    "update the clone — your weights stay.",
+                    "Updating the Hailuo H3 runner isn't available in the Mac app yet."))
     if cell.get("fast_hd"):
         if cell.get("dense"):
             return (False, "Fast HD is built from 5 s windows; pick 3s, 5s, 10s or 15s.")
@@ -12704,6 +12778,10 @@ def job_recipe_minutes(params: dict, *, calibration: bool = False) -> tuple[str,
                        else cell.get("tristep_min"))
         elif p.get("h3_turbo"):
             minutes = cell.get("turbo_min")
+        elif p.get("h3_v13") and cell.get("v13_min") is not None:
+            # lightx2v v1.3 on Best at High: its own measured number, so a
+            # 15-minute recipe never calibrates against the 33-minute one.
+            minutes = cell.get("v13_min")
         elif pinned:
             if calibration:
                 return None        # a workload no cell prices (Codex H3-4)
@@ -13285,10 +13363,326 @@ def h3_mlx_fault() -> str:
 
 
 H3_MLX_REPAIR = (
-    "Fix it from the Pinokio sidebar: \"Repair Hailuo H3\" reinstalls that "
-    "venv's packages and keeps every weight you have. LTX renders are "
-    "unaffected — the two engines keep separate venvs for this exact reason."
+    "Press Repair Hailuo H3 on this card - it re-installs only that venv's "
+    "Python packages, at the set this release was tested with (about a "
+    "minute, every weight kept). Or from the Pinokio sidebar: Stop Phosphene, "
+    "then \"Update Hailuo H3 runner\". LTX "
+    "renders are unaffected — the two engines keep separate venvs for this "
+    "exact reason."
 )
+#: 4.19.5: one sentence for every H3 venv fault (old MLX, a transformers
+#: dependency mismatch, a venv off its known-good set). Before, the sidebar
+#: entry it named ("Repair Hailuo H3") only exists while H3 is NOT ready - a
+#: venv with old packages reads as ready, so the menu showed "Update Hailuo H3
+#: runner" instead and the sentence sent people looking for a missing button.
+H3_ENV_REPAIR = H3_MLX_REPAIR
+#: The same, inside the Mac app (no Pinokio sidebar there).
+H3_ENV_REPAIR_MAC = (
+    "Press Repair Hailuo H3 on this card - it re-installs only that venv's "
+    "Python packages, at the set this release was tested with (about a "
+    "minute, every weight kept). LTX renders are unaffected — the two "
+    "engines keep separate venvs for this exact reason."
+)
+
+
+# --- THE H3 VENV'S KNOWN-GOOD SET (4.19.5) ----------------------------------
+# Through 4.19.4 the H3 venv was resolved from the runner's requirements.txt
+# alone - floors, no lock - so every new H3 install ran whatever PyPI held that
+# day. scripts/pinokio/h3_constraints.txt is the set this release was rendered
+# with, and scripts/pinokio/h3_deps.sh is the one install into that venv
+# (install_h3.js, every Update, and the Repair below), always under it.
+#
+# The preflight here is the panel's half: before an H3 render takes the GPU,
+# read the venv's dist-info folders (no import, a few ms) and compare the
+# packages the runner is built on with the set. A venv off the set - a 4.19.4
+# install whose Update has not run the repair yet, a stray `pip install` -
+# is refused in a second with the one-click repair, instead of being allowed
+# to fail minutes into a render (or worse, to render differently from every
+# other install with no record of why). transformers' own import-time
+# dependency check (engine_dependency_mismatch, the 4.19.4 class) is asked of
+# this venv too - that one would fail the render outright.
+H3_CONSTRAINTS = ROOT / "scripts" / "pinokio" / "h3_constraints.txt"
+H3_DEPS_INSTALLER = "scripts/pinokio/h3_deps.sh"
+#: The packages the runner is built on - judged against the set before every
+#: H3 render. Everything else in the set is held by the install (-c) but not
+#: worth refusing a render over. Kept in step with REQUIRED in
+#: scripts/pinokio/h3_env_check.py (test_h3_env_lock.py).
+H3_ENV_JUDGED = ("mlx", "mlx-metal", "mlx-vlm", "transformers", "tokenizers",
+                 "huggingface-hub", "safetensors", "numpy", "pillow")
+H3_ENV_OFFSET_WORDS = "the Hailuo H3 venv is not on the package set this release was tested with"
+H3_REPAIR_LOCK = threading.Lock()
+H3_REPAIR: dict = {"state": "idle", "active": False}
+H3_REPAIR_TIMEOUT_S = 1200
+
+
+def h3_constraint_pins(path: Path | None = None) -> dict:
+    """{normalised name: version} for every exact pin in h3_constraints.txt.
+    {} when the file cannot be read - an unreadable lock judges nothing."""
+    out: dict = {}
+    try:
+        text = (path or H3_CONSTRAINTS).read_text(encoding="utf-8")
+    except OSError:
+        return out
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        m = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9._-]*)\s*==\s*([^\s,;]+)", line)
+        if m:
+            out[re.sub(r"[-_.]+", "-", m.group(1)).lower()] = m.group(2)
+    return out
+
+
+def _h3_site_packages(py: Path) -> list:
+    try:
+        return [d for d in (py.parent.parent / "lib").glob("python*/site-packages")
+                if d.is_dir()]
+    except OSError:
+        return []
+
+
+def h3_env_offset(py: Path | None = None) -> str:
+    """"" when the H3 venv's judged packages are the known-good set's, else
+    which ones are not. Fails open on anything it cannot read.
+
+    Judged only where the set applies: macOS (Linux on Apple Silicon builds
+    this venv in scripts/linux/install_h3.sh with its own mlx wheel), the
+    app's own venv (an LTX_H3_PYTHON override is a developer's interpreter,
+    not ours to judge) and not with LTX_H3_ENV_CHECK=0 (a developer pointing
+    LTX_H3_ROOT at a runner checkout they manage themselves)."""
+    if sys.platform != "darwin" or os.environ.get("LTX_H3_ENV_CHECK", "").strip() == "0":
+        return ""
+    if os.environ.get("LTX_H3_PYTHON", "").strip():
+        return ""
+    py = py or _h3_python()
+    if py is None:
+        return ""
+    pins = h3_constraint_pins()
+    if not pins:
+        return ""
+    off = []
+    for site in _h3_site_packages(py):
+        have = _dist_versions(site)
+        for name in H3_ENV_JUDGED:
+            want, got = pins.get(name), have.get(name)
+            if want and got and got != want:
+                off.append(f"{name} {got} (tested: {want})")
+    if not off:
+        return ""
+    return f"{H3_ENV_OFFSET_WORDS} - {', '.join(off[:4])}" + (
+        f" and {len(off) - 4} more" if len(off) > 4 else "")
+
+
+def h3_env_fault() -> str:
+    """"" when the H3 venv can run this release's runner, else the reason -
+    the old-MLX shape (h3_mlx_fault), then transformers refusing its own
+    dependencies, then a venv off the known-good set. Every shape carries
+    "venv" (venv_broken in the fleet view) and none of the words an earlier
+    row of the error taxonomy claims."""
+    fault = h3_mlx_fault()
+    if fault:
+        return fault
+    py = _h3_python()
+    if py is None:
+        return ""
+    for site in _h3_site_packages(py):
+        mismatch = engine_dependency_mismatch(site)
+        if mismatch:
+            return f"the Hailuo H3 venv's packages do not fit together - {mismatch}"
+    return h3_env_offset(py)
+
+
+H3_DEPS_LOCK_NAME = ".phosphene_h3_deps.d"   # h3_deps.sh's lock dir in the venv
+
+
+def _h3_deps_running() -> bool:
+    """True while scripts/pinokio/h3_deps.sh holds its lock in the H3 venv -
+    the panel's own Repair, or Pinokio's Install / Update running it."""
+    try:
+        pid = int((((H3_ROOT / ".venv" / H3_DEPS_LOCK_NAME / "pid")
+                    .read_text(encoding="utf-8").split() or ["0"])[0]))
+    except (OSError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def h3_env_busy() -> str:
+    with H3_REPAIR_LOCK:
+        active = bool(H3_REPAIR.get("active"))
+    if active or _h3_deps_running():
+        return ("Hailuo H3's packages are being repaired right now - H3 "
+                "renders can start when it finishes (about a minute)")
+    return ""
+
+
+def _h3_repair_hold(next_job: dict | None) -> str:
+    """The worker's hold for an H3 job at the head of the queue while H3's
+    packages are being installed (Codex 4.19.5): dequeued, it would only be
+    refused - and three identical refusals trip the queue breaker."""
+    if not isinstance(next_job, dict) or (next_job.get("params") or {}).get("engine") != "h3":
+        return ""
+    if not h3_env_busy() and not _h3_auto_repair_start():
+        return ""
+    return ("Queue held: Hailuo H3's packages are being repaired (about a "
+            "minute). The next H3 render starts when it finishes.")
+
+
+#: One automatic repair per panel run - a repair that did not take must not
+#: loop; the job is then refused with the manual Repair, as before.
+_H3_AUTO_REPAIR: dict = {"tried": False}
+
+
+def _h3_auto_repair_start() -> bool:
+    """Start the H3 venv repair by itself when an H3 render is next and the
+    venv is off its known-good set. True when a repair was started.
+
+    FLEET (4.19.5-4.19.6, 10 installs in 5 days): every H3 user's first render
+    after updating into the 4.19.5 constraint set was refused with "the Hailuo
+    H3 venv is not on the package set this release was tested with - mlx
+    0.32.x (tested: 0.32.4)". Each of them pressed Repair and rendered ~10
+    minutes later - the repair always worked; the Update had not run it for
+    them (an update that never ran post_update.sh 8b, or one stopped before
+    it). The refusal was a failed render plus a click for a fix the panel can
+    make itself: now the job waits in the queue while the same repair
+    (h3_deps.sh, packages only, weights untouched) runs, then renders."""
+    if _H3_AUTO_REPAIR.get("tried"):
+        return False
+    # Only the app's own checkout. LTX_H3_ROOT points the panel at a checkout
+    # somebody manages themselves (a shared tree, a developer's engine
+    # worktree whose venv is off the set on purpose): the panel judges it and
+    # offers the button, but never rewrites its packages unasked.
+    if os.environ.get("LTX_H3_ROOT", "").strip():
+        return False
+    try:
+        fault = h3_env_fault()
+    except Exception:                                            # noqa: BLE001
+        return False
+    if not fault:
+        return False
+    _H3_AUTO_REPAIR["tried"] = True
+    code, _payload = h3_env_repair_start()
+    if code != 202:
+        return False
+    push("[h3] the next render needs Hailuo H3's packages repaired first "
+         f"({fault}) - repairing automatically, then it starts.")
+    return True
+
+
+def h3_env_status() -> dict:
+    """/status.h3_env: is the H3 venv fit to render, and the repair's state.
+    `ok` is true when H3 is not installed (that is h3_paths()' story)."""
+    fault = h3_env_fault()
+    with H3_REPAIR_LOCK:
+        repair = {k: v for k, v in H3_REPAIR.items() if k != "log"}
+        repair["log"] = list(H3_REPAIR.get("log") or [])[-6:]
+    return {"ok": not fault and not repair.get("active"), "fault": fault,
+            "repair": repair}
+
+
+def _h3_job_running() -> bool:
+    with LOCK:
+        cur = STATE.get("current")
+        return bool(isinstance(cur, dict)
+                    and (cur.get("params") or {}).get("engine") == "h3")
+
+
+def h3_env_repair_start() -> tuple[int, dict]:
+    """POST /h3/repair - run scripts/pinokio/h3_deps.sh on the H3 checkout:
+    the same constrained install Install and Update run, no weights touched.
+    The panel never imports the H3 venv (every H3 render is its own
+    subprocess), so this is safe with the panel up - but not under a running
+    H3 render, which has that venv's packages open."""
+    if _h3_python() is None:
+        return 409, {"error": _dist.say(
+            "Hailuo H3 is not installed here - install it "
+            "from the Pinokio sidebar first.",
+            "Hailuo H3 isn't available in the Mac app yet.")}
+    if _h3_deps_running():
+        return 409, {"error": "H3's packages are already being installed "
+                              "(Install, Update or a repair) - this clears "
+                              "itself when that finishes.", "repair": True}
+    if _external_build_hold():
+        return 409, {"error": "The Hailuo H3 compact engine is being built or "
+                              "an update is installing - repair after it "
+                              "finishes."}
+    # Checked and claimed under the queue lock (Codex 4.19.5): the worker sets
+    # STATE["current"] under the same lock, so an H3 job either is current
+    # now (refused here) or dequeues after `active` is set (held by
+    # _h3_repair_hold) - never both started.
+    with LOCK:
+        if _h3_job_running():
+            return 409, {"error": "An H3 render is running - repair after it "
+                                  "finishes, or stop it first."}
+        with H3_REPAIR_LOCK:
+            if H3_REPAIR.get("active"):
+                return 409, {"error": "The H3 repair is already running.", "repair": True}
+            H3_REPAIR.clear()
+            H3_REPAIR.update({"state": "running", "active": True,
+                              "started_ts": time.time(), "finished_ts": None,
+                              "error": None, "log": collections.deque(maxlen=60)})
+    threading.Thread(target=_h3_env_repair_thread, daemon=True,
+                     name="h3-env-repair").start()
+    push("[h3] repairing the Hailuo H3 venv (its Python packages, at the set "
+         "this release was tested with; weights are not touched)")
+    return 202, {"ok": True, "started": True}
+
+
+def _h3_env_repair_thread() -> None:
+    env = _music_install_env()          # Pinokio's uv on PATH, venv deactivated
+    cmd = ["bash", str(ROOT / H3_DEPS_INSTALLER), str(H3_ROOT)]
+    tail: list = []
+    error = None
+    timer = None
+    try:
+        proc = subprocess.Popen(cmd, cwd=str(ROOT), env=env,
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, bufsize=1,
+                                errors="replace", start_new_session=True)
+        timer = _kill_group_after(proc, H3_REPAIR_TIMEOUT_S)
+        for raw in proc.stdout:
+            for line in raw.replace("\r", "\n").splitlines():
+                line = line.rstrip()
+                if not line:
+                    continue
+                tail = (tail + [line])[-8:]
+                with H3_REPAIR_LOCK:
+                    H3_REPAIR["log"].append(line[:300])
+        rc = proc.wait(timeout=60)
+        if getattr(timer, "fired", False):
+            raise subprocess.TimeoutExpired(cmd, H3_REPAIR_TIMEOUT_S)
+        if rc != 0:
+            # h3_deps.sh says why on a "FATAL error: ..." line (4.20; it was a
+            # bare "error:" line before - both still read).
+            reason = next((l for l in reversed(tail)
+                           if l.startswith(("FATAL error:", "error:"))), "")
+            error = (reason.split("error:", 1)[1].strip() if reason
+                     else f"the install stopped (exit {rc})")
+    except subprocess.TimeoutExpired:
+        error = f"the install took longer than {H3_REPAIR_TIMEOUT_S // 60} minutes"
+    except Exception as exc:                                     # noqa: BLE001
+        error = f"the install could not run: {exc}"
+    finally:
+        if timer is not None:
+            timer.cancel()
+    fault = h3_env_fault()
+    if error is None and fault:
+        error = f"the install finished but H3 is still not usable: {fault}"
+    with H3_REPAIR_LOCK:
+        H3_REPAIR.update(active=False, finished_ts=time.time(),
+                         state="failed" if error else "done", error=error)
+    try:
+        with QUEUE_COND:            # a held H3 render can start now
+            QUEUE_COND.notify_all()
+    except Exception:                                            # noqa: BLE001
+        pass
+    push("[h3] " + (f"repair failed: {error}" if error
+                    else "Hailuo H3 venv repaired - H3 renders can run"))
 
 
 def h3_paths() -> dict:
@@ -13323,10 +13717,10 @@ def h3_paths() -> dict:
         pass
     for root in _h3_model_roots():
         cand_dit = root / "deepbeep-pruned-bf16" / H3_DIT_FILENAME
-        if not cand_dit.is_file():
+        if not _h3_holds_dit(root):
             continue
         models_root = root
-        dit = cand_dit
+        dit = cand_dit if cand_dit.is_file() else None
         # LTX_H3_COMPACT_DIR picks an alternate conditioning-encoder dir under the same
         # models root (e.g. "heretic-q8", an abliterated encoder re-quantized to the
         # ddalcu layout). Dev/testing override; default stays the shipped ddalcu-q8.
@@ -13350,7 +13744,7 @@ def h3_paths() -> dict:
         missing.append(f"runner {runner}")
     if python is None:
         missing.append(f"venv python under {H3_ROOT / '.venv'}")
-    if dit is None:
+    if dit is None and models_root is None:
         missing.append(f"pruned bf16 DiT ({H3_DIT_FILENAME})")
     if compact_root is None:
         missing.append("Q8 components (text_encoder / video_vae / audio_vae)")
@@ -13372,7 +13766,8 @@ def h3_paths() -> dict:
     # `repairable` is the load-bearing one: weights present + code/venv gone.
     # It is what stops the panel silently reporting "not installed" to a user
     # who has 75 GB of H3 weights sitting on their disk.
-    weights_ok = dit is not None and compact_root is not None and text_config is not None
+    weights_ok = (models_root is not None
+                  and compact_root is not None and text_config is not None)
     runner_ok = runner.is_file()
     venv_ok = python is not None
     venv_built = _h3_venv_present()
@@ -13393,9 +13788,10 @@ def h3_paths() -> dict:
         "runner": runner,
         "python": python,
         "dit": dit,
-        # bf16 master path stays canonical in `dit`; the render-time swap to
-        # the Q8 pack happens in the dispatch via h3_dit_choice(), so /status
-        # can always show BOTH what exists and what will be used.
+        # bf16 master path stays canonical in `dit` (None when there is no
+        # master: a Linux Q8-only install); the render-time swap to the Q8
+        # pack happens in the dispatch via h3_dit_choice(), so /status can
+        # always show BOTH what exists and what will be used.
         "compact_root": compact_root,
         "text_config": text_config,
         "missing": missing,
@@ -13437,12 +13833,17 @@ def _h3_q8_shards_complete(d: Path) -> bool:
         return False
 
 
+def _h3_q8_pack_complete(d: Path) -> bool:
+    return ((d / "config.json").is_file()
+            and (d / "quant_config.json").is_file()
+            and _h3_q8_shards_complete(d))
+
+
 def _h3_q8_dit_dir() -> Path | None:
     """The quantized DiT pack, if present: config + quant recipe + all shards."""
     for root in _h3_model_roots():
         d = root / H3_DIT_Q8_DIRNAME
-        if (d / "config.json").is_file() and (d / "quant_config.json").is_file() \
-                and _h3_q8_shards_complete(d):
+        if _h3_q8_pack_complete(d):
             return d
     return None
 
@@ -13466,7 +13867,9 @@ def h3_dit_choice() -> tuple[str, Path | None]:
     # 48 GB Mac died with Metal "Insufficient Memory" on every render, Draft
     # included (Pinokio report, M5 Max 48 GB, Q8 engine built and skipped).
     # Q8 is the only lane that fits there; the dispatch says so in the log.
-    if pref == "bf16" and (SYSTEM_RAM_GB >= H3_MIN_RAM_GB or q8 is None):
+    # Nor is one with no bf16 master on disk (#94: a Linux Q8-only install).
+    if pref == "bf16" and h3_paths()["dit"] is not None \
+            and (SYSTEM_RAM_GB >= H3_MIN_RAM_GB or q8 is None):
         return "bf16", None
     if pref == "q8" and q8 is None:
         pref = "auto"      # fall through, surfaced via /status
@@ -13533,7 +13936,15 @@ def h3_size_note() -> str:
     up (X, 2026-09-24). The floors come from the constants the gates use."""
     return (f"~75 GB · needs {H3_MIN_RAM_GB_Q8:.0f} GB+ unified memory "
             f"(compact Q8 engine; {H3_MIN_RAM_GB:.0f} GB+ also unlocks the full "
-            f"bf16 engine) · MiniMax Community License (territory restrictions apply)")
+            f"bf16 engine) · MiniMax H3 Community License (not valid in the EU, UK, South Korea or US)")
+
+
+def _h3_q8_lane_mac(ram: str) -> str:
+    """h3_ram_verdict's Q8-lane sentence inside the Mac app: it can run here,
+    but the app cannot install, repair or build H3 yet."""
+    return (f"Hailuo H3 can run on this Mac on its reduced-RAM lane (the "
+            f"compact Q8 engine needs {H3_MIN_RAM_GB_Q8:.0f} GB; {ram}), but "
+            f"it isn't available in the Mac app yet. Render on LTX.")
 
 
 def h3_ram_verdict() -> dict:
@@ -13595,20 +14006,20 @@ def h3_ram_verdict() -> dict:
             return {
                 "lane": "q8", "blocked": True, "needs_q8_dit": True,
                 "floor_gb": H3_MIN_RAM_GB_Q8,
-                "message": (
+                "message": _dist.say((
                     f"Hailuo H3 runs on this Mac — on its reduced-RAM lane, "
                     f"the compact Q8 engine, which needs "
                     f"{H3_MIN_RAM_GB_Q8:.0f} GB ({ram}). Its weights are on "
                     f"disk but the engine needs repair: in Pinokio, open "
                     f"Phosphene in the sidebar and click "
                     f"'{H3_REPAIR_MENU_TEXT}'. That also builds the compact "
-                    f"engine (about 5 minutes). Render on LTX until then."),
+                    f"engine (about 5 minutes). Render on LTX until then."), _h3_q8_lane_mac(ram)),
             }
         if _p["missing"]:
             return {
                 "lane": "q8", "blocked": True, "needs_q8_dit": True,
                 "floor_gb": H3_MIN_RAM_GB_Q8,
-                "message": (
+                "message": _dist.say((
                     f"Hailuo H3 runs on this Mac — on its reduced-RAM lane, "
                     f"the compact Q8 engine, which needs "
                     f"{H3_MIN_RAM_GB_Q8:.0f} GB ({ram}). It is not installed "
@@ -13616,12 +14027,12 @@ def h3_ram_verdict() -> dict:
                     f"'{H3_INSTALL_MENU_TEXT}'. The install downloads what "
                     f"is missing of ~75 GB and builds the compact engine at "
                     f"the end (about 5 more minutes). Render on LTX until "
-                    f"then."),
+                    f"then."), _h3_q8_lane_mac(ram)),
             }
         return {
             "lane": "q8", "blocked": True, "needs_q8_dit": True,
             "floor_gb": H3_MIN_RAM_GB_Q8,
-            "message": (
+            "message": _dist.say((
                 f"Hailuo H3 runs on this Mac — on its reduced-RAM lane. The "
                 f"bf16 engine needs {H3_MIN_RAM_GB:.0f} GB and "
                 f"{ram}, but the Q8 engine's floor is "
@@ -13629,7 +14040,7 @@ def h3_ram_verdict() -> dict:
                 f"In Pinokio, open Phosphene in the sidebar and click "
                 f"'{H3_BUILD_MENU_TEXT}' — it builds that engine locally "
                 f"(~5 minutes, ~22 GB on disk, no extra download) and skips "
-                f"everything already present. Render on LTX until then."),
+                f"everything already present. Render on LTX until then."), _h3_q8_lane_mac(ram)),
         }
     return {
         "lane": None, "blocked": True, "needs_q8_dit": False,
@@ -13660,7 +14071,7 @@ def h3_reference_image_error(src: Path) -> str:
     except ImportError as exc:
         return (f"The engine venv is not usable: it cannot load Pillow "
                 f"({exc.__class__.__name__}), so no image can be read. "
-                + ENGINE_ENV_REPAIR)
+                + _dist.say(ENGINE_ENV_REPAIR, ENGINE_ENV_REPAIR_MAC))
     try:
         with _PilImg.open(src):
             pass
@@ -13740,9 +14151,10 @@ def _h3_runner_behind(flag: str, runner: str | Path, remedy: str = "") -> str:
     """The message for a render that needs a runner flag this clone lacks."""
     tail = f" {remedy}" if remedy else ""
     return (
-        f"{H3_RUNNER_BEHIND}: it has no `{flag}` ({runner}). Re-run "
-        f"'Install Hailuo H3' from the Phosphene sidebar to update the clone "
-        f"— every weight already on disk is kept.{tail}"
+        f"{H3_RUNNER_BEHIND}: it has no `{flag}` ({runner}). " + _dist.say(
+            "Re-run 'Install Hailuo H3' from the Phosphene sidebar to update "
+            "the clone — every weight already on disk is kept.",
+            "Updating the Hailuo H3 runner isn't available in the Mac app yet.") + tail
     )
 
 
@@ -13792,6 +14204,13 @@ def h3_supports_lora() -> bool:
     return _h3_runner_has_flag("--lora")
 
 
+def _h3_holds_dit(root: Path) -> bool:
+    """Find the bf16 master, or a complete Linux Q8 pack."""
+    if (root / "deepbeep-pruned-bf16" / H3_DIT_FILENAME).is_file():
+        return True
+    return not hostinfo.IS_MAC and _h3_q8_pack_complete(root / H3_DIT_Q8_DIRNAME)
+
+
 def _h3_turbo_dir() -> Path:
     """Where Turbo's adapter lives: alongside the other weight components.
 
@@ -13799,7 +14218,7 @@ def _h3_turbo_dir() -> Path:
     DiT, so Turbo lands next to `deepbeep-pruned-bf16` / `ddalcu-q8` rather
     than in a third place."""
     for root in _h3_model_roots():
-        if (root / "deepbeep-pruned-bf16" / H3_DIT_FILENAME).is_file():
+        if _h3_holds_dit(root):
             return root / H3_TURBO_DIRNAME
     return H3_MODELS / H3_TURBO_DIRNAME
 
@@ -13988,6 +14407,169 @@ def h3_turbo_argv(paths: dict | None = None) -> list[str]:
     return argv
 
 
+# ---- Speed adapters: fused qkv rows in THIS checkpoint's order -------------
+# H3's DiT stores `attn.qkv_proj` rows PER HEAD, (heads, 3, head_dim): a
+# one-way ANOVA on the Q8 DiT's row norms separates the q/k/v groups at
+# F 1362 (blocks.0) / 5006 (blocks.49) read that way, against 83 / 43 read
+# contiguously. Every speed adapter we resolve was trained or converted
+# through the ComfyUI/diffusers definition, whose rows are CONTIGUOUS,
+# (3, heads, head_dim): the same test on their B·A deltas reads contiguous at
+# blocks.49 for Kijai's TaoMate r19 (1897 vs 11), the official TaoMate r128
+# (1931 vs 10), larryvrh's v4-600 EMA (1038 vs 0) and LightX2V's v1.x
+# conversions (fetch_h3_turbo.py says so in its own docstring). The runner
+# re-orders those rows only under `--lora-qkv-permute`, OFF by default since
+# 2026-08-15 — so Fast and Turbo were writing the q update onto the first
+# 18.7 heads' q/k/v triplets, k onto the next, v onto the rest. That flag is
+# global to the run and would also hit a user LoRA stacked on top (one
+# lora-lab trains natively is already per-head), so the panel re-orders the
+# speed adapter's rows ITSELF, once, into a sibling file the runner reads
+# verbatim: `<adapter dir>/runner-layout/<same name>`. Pure byte moves of
+# whole rows — dtype-agnostic, no float maths, no new dependency — and the
+# source file (digest-pinned) is never touched.
+H3_RUNNER_LAYOUT_DIRNAME = "runner-layout"
+H3_QKV_HEADS = 56
+H3_QKV_HEAD_DIM = 128
+H3_QKV_LORA_B_SUFFIX = ".attn.qkv_proj.lora_B.weight"
+H3_RUNNER_LAYOUT_KEY = "phosphene_qkv_rows"
+H3_RUNNER_LAYOUT_VALUE = "per-head (heads, 3, head_dim), re-ordered from (3, heads, head_dim)"
+
+
+def _st_header(path: Path) -> tuple[int, dict]:
+    """A safetensors file's (header length, header) — the JSON only."""
+    with open(path, "rb") as fh:
+        size = int.from_bytes(fh.read(8), "little")
+        if not 0 < size <= 100 * 1024 * 1024:
+            raise ValueError(f"{path.name}: not a safetensors file")
+        header = json.loads(fh.read(size))
+    if not isinstance(header, dict):
+        raise ValueError(f"{path.name}: not a safetensors file")
+    return size, header
+
+
+def h3_runner_layout_file(src: Path | str) -> Path:
+    src = Path(src)
+    return src.parent / H3_RUNNER_LAYOUT_DIRNAME / src.name
+
+
+def _h3_runner_layout_current(src: Path, dst: Path) -> bool:
+    """The re-ordered copy exists and was made from THIS source file."""
+    try:
+        meta = _st_header(dst)[1].get("__metadata__") or {}
+        st = src.stat()
+    except (OSError, ValueError, UnicodeDecodeError):
+        return False
+    return (meta.get(H3_RUNNER_LAYOUT_KEY) == H3_RUNNER_LAYOUT_VALUE
+            and meta.get("phosphene_source_bytes") == str(st.st_size)
+            and meta.get("phosphene_source_mtime_ns") == str(st.st_mtime_ns))
+
+
+def _h3_qkv_rows_per_head(blob: bytes, rows: int) -> bytes:
+    """`lora_B` rows (3, heads, head_dim) -> (heads, 3, head_dim), as bytes.
+    Row-major storage keeps each row's bytes contiguous, so this moves 168
+    blocks of 128 rows and never reads a value."""
+    heads, head_dim = H3_QKV_HEADS, H3_QKV_HEAD_DIM
+    if rows != 3 * heads * head_dim or len(blob) % rows:
+        raise ValueError(f"qkv lora_B has {rows} rows, expected {3 * heads * head_dim}")
+    block = (len(blob) // rows) * head_dim
+    return b"".join(blob[(j * heads + h) * block:(j * heads + h + 1) * block]
+                    for h in range(heads) for j in range(3))
+
+
+_h3_bake_locks: dict[str, threading.Lock] = {}
+_h3_bake_locks_guard = threading.Lock()
+
+
+def h3_bake_runner_layout(src: Path | str, push=None) -> Path:
+    """Write (once) and return the per-head copy of a speed adapter.
+
+    Re-made whenever the source's size or mtime changes; written to a
+    `.partial` and renamed, so a killed bake never leaves a file the runner
+    would read. Raises with a plain reason (disk, unreadable file).
+
+    One bake per destination at a time (4.19.11 review): the Fast/Turbo
+    download thread and the first render can both reach a newly downloaded
+    adapter; without the lock both wrote the same `.partial` and the loser's
+    rename raised FileNotFoundError, failing that render. The second caller
+    now waits and finds the copy current."""
+    src = Path(src)
+    dst = h3_runner_layout_file(src)
+    if _h3_runner_layout_current(src, dst):
+        return dst
+    with _h3_bake_locks_guard:
+        lock = _h3_bake_locks.setdefault(str(dst), threading.Lock())
+    with lock:
+        if _h3_runner_layout_current(src, dst):
+            return dst
+        return _h3_bake_runner_layout_locked(src, dst, push)
+
+
+def _h3_bake_runner_layout_locked(src: Path, dst: Path, push=None) -> Path:
+    """h3_bake_runner_layout's body; the caller holds dst's lock."""
+    hlen, header = _st_header(src)
+    st = src.stat()
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    free = shutil.disk_usage(dst.parent).free
+    if free < st.st_size + 512 * 1024 * 1024:
+        raise RuntimeError(
+            f"not enough free disk to prepare {src.name} for H3 "
+            f"({st.st_size / 1e9:.1f} GB needed, {free / 1e9:.1f} GB free) — "
+            "free some space and render again")
+    meta = dict(header.get("__metadata__") or {})
+    meta.update({H3_RUNNER_LAYOUT_KEY: H3_RUNNER_LAYOUT_VALUE,
+                 "phosphene_source": src.name,
+                 "phosphene_source_bytes": str(st.st_size),
+                 "phosphene_source_mtime_ns": str(st.st_mtime_ns)})
+    out_header = {**header, "__metadata__": meta}
+    raw = json.dumps(out_header, separators=(",", ":")).encode("utf-8")
+    raw += b" " * (-len(raw) % 8)          # the format's 8-byte alignment pad
+    tensors = sorted(((k, v) for k, v in header.items() if k != "__metadata__"),
+                     key=lambda kv: kv[1]["data_offsets"][0])
+    moved = 0
+    tmp = dst.with_name(f"{dst.name}.{os.getpid()}.partial")
+    try:
+        with open(src, "rb") as fin, open(tmp, "wb") as fout:
+            fout.write(len(raw).to_bytes(8, "little"))
+            fout.write(raw)
+            pos = 0
+            for name, info in tensors:
+                start, end = info["data_offsets"]
+                if start != pos:
+                    raise ValueError(f"{src.name}: tensor data is not contiguous at {name}")
+                fin.seek(8 + hlen + start)
+                blob = fin.read(end - start)
+                if len(blob) != end - start:
+                    raise ValueError(f"{src.name}: truncated at {name}")
+                if name.endswith(H3_QKV_LORA_B_SUFFIX):
+                    blob = _h3_qkv_rows_per_head(blob, int(info["shape"][0]))
+                    moved += 1
+                fout.write(blob)
+                pos = end
+        if not moved:
+            raise ValueError(f"{src.name}: no attn.qkv_proj lora_B tensors found")
+        tmp.replace(dst)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    if push:
+        push(f"[h3] {src.name}: {moved} qkv row-blocks re-ordered to the "
+             f"checkpoint's per-head layout → {dst}")
+    return dst
+
+
+def h3_speed_adapter_for_runner(resolved: dict, push=None) -> dict:
+    """The resolved Fast/Turbo paths with `lora` pointing at the file the
+    runner should read; the downloaded file moves to `lora_source`.
+
+    A runner without `--lora-qkv-permute` predates 2026-08-15 and re-orders
+    the rows of every `--lora` itself, so it gets the source file as-is —
+    re-ordering twice would put the rows back in the wrong order."""
+    src = resolved.get("lora")
+    if src is None or not _h3_runner_has_flag("--lora-qkv-permute"):
+        return {**resolved, "lora_source": src, "qkv_rows": "runner"}
+    return {**resolved, "lora": h3_bake_runner_layout(src, push),
+            "lora_source": src, "qkv_rows": "per-head"}
+
+
 def h3_turbo_status() -> dict:
     """Turbo's own availability block for /status + the page bootstrap.
 
@@ -14018,9 +14600,9 @@ def h3_turbo_status() -> dict:
         "adapter": str(paths["lora"]) if paths["lora"] else None,
         "adapter_version": paths["version"],
         "fallback": paths["fallback"],
-        # The v1.0 repack is a published, digest-pinned release asset, so the
-        # one-click install is live whenever the runner can take a LoRA at
-        # all. `installing` mirrors the in-flight download so /status never
+        # The managed adapter (v4-600 EMA) comes digest-pinned from its
+        # author's repo, so the one-click install is live whenever the runner
+        # can take a LoRA at all. `installing` mirrors the in-flight download so /status never
         # claims idle while a fetch is streaming.
         "install_available": bool(supported),
         "installing": _h3_turbo_dl_state.get("status") == "downloading",
@@ -14220,6 +14802,12 @@ def _h3_tristep_download_bg(target_dir, push_log, asset: dict | None = None,
             raise RuntimeError("checksum mismatch (download corrupt) — please retry")
         tmp.replace(target)
         push_log(f"[h3:tristep] adapter installed → {target}")
+        try:
+            # The runner's per-head copy now, so the first Fast render does
+            # not pay for it; a failure here is retried by that render.
+            h3_bake_runner_layout(target, push_log)
+        except Exception as e:  # noqa: BLE001
+            push_log(f"[h3:tristep] qkv re-order deferred to the first render: {e}")
         _set_h3_tristep_dl(status="done", mb=total_mb, total_mb=total_mb,
                            error=None)
     except Exception as e:  # noqa: BLE001
@@ -14239,10 +14827,13 @@ def _h3_install_tristep(push_log, download_fn=None) -> dict:
                          + "; ".join(paths["missing"])}
     if not h3_supports_sigma_subset():
         return {"ok": False,
-                "error": "This Hailuo H3 runner predates Fast (3 steps) "
-                         "(no --sigma-subset). Run 'Update Hailuo H3 runner' "
-                         "from the Phosphene sidebar in Pinokio — your weights "
-                         "stay."}
+                "error": _dist.say(
+                    "This Hailuo H3 runner predates Fast (3 steps) "
+                    "(no --sigma-subset). Run 'Update Hailuo H3 runner' "
+                    "from the Phosphene sidebar in Pinokio — your weights "
+                    "stay.",
+                    "This Hailuo H3 runner predates Fast (3 steps). Updating "
+                    "the runner isn't available in the Mac app yet.")}
     resolved = h3_tristep_paths()
     target = resolved["dir"]
     if resolved["files_ok"]:
@@ -14262,6 +14853,208 @@ def _h3_install_tristep(push_log, download_fn=None) -> dict:
     return {"ok": True, "started": True, "dir": str(target),
             "asset": H3_TRISTEP_URL, "sha256": H3_TRISTEP_SHA256,
             "bytes": H3_TRISTEP_BYTES, "license": H3_TRISTEP_LICENSE}
+
+
+# ---- lightx2v v1.3 (Best at High) — resolver, argv, status, fetch ------------
+def h3_supports_video_shift() -> bool:
+    """Whether the INSTALLED runner takes `--video-shift` (v1.3's own shift 6;
+    the runner's default is 12)."""
+    return h3_supports_lora_stack() and _h3_runner_has_flag("--video-shift")
+
+
+def h3_supports_v13() -> bool:
+    """v1.3 rides as one more `--lora` beside the user's: the stacking runner
+    is all it needs. A runner without `--video-shift` renders it at the
+    default shift 12 - side by side with shift 6 on the two-person dialogue
+    test the faces, mouths and timing matched (2026-10-22), so an install
+    gets v1.3 from the panel Update alone and shift 6 once its runner moves.
+
+    The built file's qkv rows are already per head, so the runner must NOT
+    re-order them: a runner without `--lora-qkv-permute` predates 2026-08-15
+    and re-orders every `--lora` itself (see h3_bake_runner_layout)."""
+    return h3_supports_lora_stack() and _h3_runner_has_flag("--lora-qkv-permute")
+
+
+def h3_cell_takes_v13(cell: dict) -> bool:
+    """Best on the High canvas at a 5 s-window length (single or chained).
+    Fast HD is the Fast pass by definition; the dense single pass and the
+    other canvases were never rendered on v1.3."""
+    return (cell.get("quality") in H3_V13_QUALITIES
+            and not bool(cell.get("dense")) and not bool(cell.get("fast_hd")))
+
+
+def h3_v13_paths() -> dict:
+    """The v1.3 adapter, if it is on disk at its exact size. No glob: the
+    upstream source file (whose alpha/rank is NOT folded) must never be read
+    as the adapter."""
+    directory = _h3_turbo_dir()
+    candidate = directory / H3_V13_FILE
+    try:
+        ok = candidate.is_file() and candidate.stat().st_size == H3_V13_BYTES
+    except OSError:
+        ok = False
+    if ok:
+        return {"dir": directory, "lora": candidate, "files_ok": True, "missing": []}
+    return {"dir": directory, "lora": None, "files_ok": False,
+            "missing": [f"adapter ({H3_V13_FILE}, built from a "
+                        f"~{H3_V13_DOWNLOAD_GB} GB download)"]}
+
+
+def h3_v13_argv(paths: dict | None = None, shift: bool | None = None) -> list[str]:
+    """The runner argv fragment: shift 6 where the runner takes it, and the
+    adapter at 1.0 (its alpha is folded in). `--steps` is stamped by the
+    caller (H3_V13_STEPS)."""
+    resolved = paths or h3_v13_paths()
+    if not resolved.get("files_ok") or resolved.get("lora") is None:
+        raise RuntimeError("the lightx2v v1.3 adapter is not available")
+    if shift is None:
+        shift = h3_supports_video_shift()
+    return ((["--video-shift", H3_V13_VIDEO_SHIFT] if shift else [])
+            + ["--lora", f"{resolved['lora']}:1.0"])
+
+
+_h3_v13_dl_lock = threading.Lock()
+_h3_v13_dl_state: dict = {"status": "idle", "mb": 0, "total_mb": 0, "error": None}
+
+
+def _set_h3_v13_dl(**kw) -> None:
+    with _h3_v13_dl_lock:
+        _h3_v13_dl_state.clear()
+        _h3_v13_dl_state.update(kw)
+
+
+def h3_v13_status() -> dict:
+    """/status + BOOT block for v1.3: can the runner take it, is the file here."""
+    supported = h3_supports_v13()
+    paths = h3_v13_paths()
+    downloaded = bool(paths["files_ok"])
+    return {
+        "available": bool(supported and downloaded),
+        "supported": supported,
+        "downloaded": downloaded,
+        "reason": ("runner_too_old" if not supported
+                   else "not_downloaded" if not downloaded else "ok"),
+        "steps": H3_V13_STEPS,
+        "forwards": H3_V13_FORWARDS,
+        "video_shift": float(H3_V13_VIDEO_SHIFT) if h3_supports_video_shift() else 12.0,
+        "qualities": list(H3_V13_QUALITIES),
+        "modes": list(H3_V13_MODES),
+        "download_gb": H3_V13_DOWNLOAD_GB,
+        "disk_need_gb": H3_V13_DISK_NEED_GB,
+        "repo": H3_V13_REPO,
+        "license": H3_V13_LICENSE,
+        "code_license": H3_V13_CODE_LICENSE,
+        "name": H3_V13_NAME,
+        "label": H3_V13_LABEL,
+        "credit": H3_V13_CREDIT,
+        "adapter": str(paths["lora"]) if paths["lora"] else None,
+        "install_available": bool(supported),
+        "installing": _h3_v13_dl_state.get("status") in ("downloading", "building"),
+        "download": dict(_h3_v13_dl_state),
+        "dir": str(paths["dir"]),
+        "missing": paths["missing"],
+    }
+
+
+def _h3_v13_fetch_bg(target_dir, push_log, runner=None) -> None:
+    """Run scripts/fetch_h3_v13.py (download from LightX2V's repo, verify,
+    re-lay out, verify, rename). The script owns every digest and the
+    resume; this only relays its progress. Standard library only, so the
+    panel's own interpreter runs it."""
+    total_mb = H3_V13_SOURCE_BYTES // (1 << 20)
+    cmd = [sys.executable, str(ROOT / "scripts" / "fetch_h3_v13.py"),
+           "--dir", str(target_dir)]
+    try:
+        push_log(f"[h3:v13] fetching {H3_V13_SOURCE_FILE} from {H3_V13_REPO} @ "
+                 f"{H3_V13_SOURCE_REVISION[:7]} (~{total_mb} MB, {H3_V13_LICENSE})")
+        proc = (runner or subprocess.Popen)(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            errors="replace", env=_h3_v13_fetch_env())
+        tail: list[str] = []
+        for line in proc.stdout:
+            line = line.rstrip()
+            if line.startswith("PROGRESS "):
+                try:
+                    done = int(line.split()[1])
+                except (IndexError, ValueError):
+                    continue
+                _set_h3_v13_dl(status="downloading", mb=done // (1 << 20),
+                               total_mb=total_mb, error=None)
+                continue
+            if line.startswith("building "):
+                _set_h3_v13_dl(status="building", mb=total_mb, total_mb=total_mb,
+                               error=None)
+            if line:
+                tail = (tail + [line])[-4:]
+                push_log(f"[h3:v13] {line}")
+        rc = proc.wait()
+        if rc != 0 or not h3_v13_paths()["files_ok"]:
+            raise RuntimeError(" / ".join(tail[-2:]) or f"exit {rc}")
+        push_log(f"[h3:v13] adapter installed -> {Path(target_dir) / H3_V13_FILE}")
+        _set_h3_v13_dl(status="done", mb=total_mb, total_mb=total_mb, error=None)
+    except Exception as e:  # noqa: BLE001
+        _set_h3_v13_dl(status="error", mb=0, total_mb=total_mb, error=str(e)[:200])
+        push_log(f"[h3:v13] FAILED: {e}")
+
+
+def _h3_v13_fetch_env() -> dict:
+    """The fetch is plain urllib: give it the certificate bundle Pinokio
+    strips (SSL_*), and nothing that changes Python's own behaviour."""
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP")}
+    env["PYTHONUNBUFFERED"] = "1"
+    try:
+        import certifi  # noqa: PLC0415
+        env.setdefault("SSL_CERT_FILE", certifi.where())
+    except Exception:  # noqa: BLE001
+        pass
+    return env
+
+
+def _h3_install_v13(push_log, fetch_fn=None) -> dict:
+    """On-demand fetch + local build of the v1.3 adapter (one at a time)."""
+    paths = h3_paths()
+    if paths["missing"]:
+        return {"ok": False,
+                "error": "lightx2v v1.3 is an add-on to the Hailuo H3 pack, and "
+                         "H3 isn't fully installed yet: " + "; ".join(paths["missing"])}
+    if not h3_supports_v13():
+        return {"ok": False,
+                "error": _dist.say(
+                    "This Hailuo H3 runner predates lightx2v v1.3 (it takes one "
+                    "adapter only). Run 'Update Hailuo H3 runner' from the "
+                    "Phosphene sidebar in Pinokio - your weights stay.",
+                    "This Hailuo H3 runner predates lightx2v v1.3. Updating "
+                    "the runner isn't available in the Mac app yet.")}
+    resolved = h3_v13_paths()
+    target = resolved["dir"]
+    if resolved["files_ok"]:
+        return {"ok": True, "started": False, "already_installed": True,
+                "dir": str(target)}
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        free_gb = shutil.disk_usage(target).free / 1e9
+    except OSError:
+        free_gb = None
+    if free_gb is not None and free_gb < H3_V13_DISK_NEED_GB:
+        return {"ok": False,
+                "error": f"lightx2v v1.3 needs about {H3_V13_DISK_NEED_GB:g} GB free "
+                         f"to prepare (1.4 GB download, 2 GB when ready). This "
+                         f"disk has {free_gb:.1f} GB free."}
+    with _h3_v13_dl_lock:
+        if _h3_v13_dl_state.get("status") in ("downloading", "building"):
+            return {"ok": False,
+                    "error": "a lightx2v v1.3 download is already active"}
+        _h3_v13_dl_state.clear()
+        _h3_v13_dl_state.update(status="downloading", mb=0,
+                                total_mb=H3_V13_SOURCE_BYTES // (1 << 20), error=None)
+    fn = fetch_fn or _h3_v13_fetch_bg
+    threading.Thread(target=fn, args=(target, push_log), daemon=True,
+                     name="h3-v13-fetch").start()
+    return {"ok": True, "started": True, "dir": str(target),
+            "source": H3_V13_SOURCE_URL, "sha256": H3_V13_SOURCE_SHA256,
+            "bytes": H3_V13_SOURCE_BYTES, "license": H3_V13_LICENSE,
+            "credit": H3_V13_CREDIT}
 
 
 # ============================================================================
@@ -14373,7 +15166,7 @@ def _h3_loras_dir() -> Path:
     DiT — the identical rule `_h3_turbo_dir()` uses, so Turbo's adapter and a
     CivitAI adapter end up as siblings instead of in two different places."""
     for root in _h3_model_roots():
-        if (root / "deepbeep-pruned-bf16" / H3_DIT_FILENAME).is_file():
+        if _h3_holds_dit(root):
             return root / H3_LORAS_DIRNAME
     return H3_MODELS / H3_LORAS_DIRNAME
 
@@ -16106,10 +16899,14 @@ def h3_status() -> dict:
                 else "missing_decoder"),
             "note": (
                 "" if (available and h3_live_preview_ready())
-                else ("This Hailuo H3 pack predates the live preview. "
-                      "Run \'Update Hailuo H3 runner\' from the Phosphene "
-                      "sidebar in Pinokio — your weights stay. Renders are "
-                      "unaffected meanwhile.")
+                else _dist.say(
+                    "This Hailuo H3 pack predates the live preview. "
+                    "Run \'Update Hailuo H3 runner\' from the Phosphene "
+                    "sidebar in Pinokio — your weights stay. Renders are "
+                    "unaffected meanwhile.",
+                    "This Hailuo H3 pack predates the live preview. Updating "
+                    "the runner isn't available in the Mac app yet. Renders "
+                    "are unaffected.")
                 if (available and not h3_supports_live_preview()) else ""),
         },
         # Turbo — the 4-step distill LoRA. A separate block rather than a bare
@@ -16139,6 +16936,17 @@ def h3_status() -> dict:
                      "installing": False, "download": {}, "dir": str(_h3_turbo_dir()),
                      "missing": [], "note": H3_TRISTEP_NOTE,
                      "label": H3_TRISTEP_LABEL}),
+        # lightx2v v1.3 — Best at High. Same three-cause shape as Fast.
+        "v13": (h3_v13_status() if available else
+                {"available": False, "supported": False, "downloaded": False,
+                 "reason": "h3_" + paths["reason"], "steps": H3_V13_STEPS,
+                 "forwards": H3_V13_FORWARDS, "qualities": list(H3_V13_QUALITIES),
+                 "modes": list(H3_V13_MODES), "download_gb": H3_V13_DOWNLOAD_GB,
+                 "disk_need_gb": H3_V13_DISK_NEED_GB, "repo": H3_V13_REPO,
+                 "license": H3_V13_LICENSE, "code_license": H3_V13_CODE_LICENSE,
+                 "name": H3_V13_NAME, "label": H3_V13_LABEL, "credit": H3_V13_CREDIT,
+                 "adapter": None, "install_available": False, "installing": False,
+                 "download": {}, "dir": str(_h3_turbo_dir()), "missing": []}),
         # User LoRAs — the CivitAI lane. A separate block from `turbo` for the
         # same reason turbo is separate from `first_frame`: "you can't pick a
         # LoRA" has three unrelated causes (H3 absent / runner predates --lora
@@ -16318,6 +17126,16 @@ MUSIC_GPU_POLL_S = 0.5
 # jobs (a dev/test panel) can HOLD the file lock while a song renders, so those
 # jobs queue behind it. A user's panel never writes the shared lock unless told to.
 MUSIC_TAKES_GPU_LOCK = os.environ.get("PHOSPHENE_MUSIC_TAKES_GPU_LOCK", "") == "1"
+# MAINTAINER'S MAC ONLY (4.19.3). Both lock paths above belong to the
+# maintainer's lab: the directory lives in his own project tree and the file
+# is what his agents and command-line renders create. On anybody else's Mac a
+# file that happened to sit at /tmp/phosphene_gpu.lock would hold their song
+# for an hour and then refuse it. So the locks are honoured only where they
+# can mean something: on a Mac carrying the ~/.phosphene-test-rig marker (the
+# maintainer's — see _analytics_is_test_rig), with PHOSPHENE_MUSIC_TAKES_GPU_LOCK,
+# or with PHOSPHENE_MUSIC_WAITS_GPU_LOCK=1. PHOSPHENE_MUSIC_WAITS_GPU_LOCK=0
+# turns it off even on that Mac.
+MUSIC_WAITS_GPU_LOCK_ENV = "PHOSPHENE_MUSIC_WAITS_GPU_LOCK"
 
 
 def _music_python() -> Path | None:
@@ -16612,7 +17430,7 @@ def music_status() -> dict:
 
 # ---- In-panel music engine install -----------------------------------------
 # "It kicks in when you try to use it": Audio → Compose installs YuE2 from the
-# panel itself. The panel runs the SAME six steps as the Pinokio sidebar's
+# panel itself. The panel runs the SAME seven steps as the Pinokio sidebar's
 # install_music.js — the same command strings, from the app folder, so the
 # sidebar entry and this button can never drift apart (test_music_install.py
 # compares the two lists). Every step is idempotent, so Install again after a
@@ -16623,6 +17441,10 @@ def music_status() -> dict:
 # and is registered with the orphan reaper, so a panel that dies mid-install
 # does not leave a second downloader racing the next one.
 MUSIC_INSTALL_STEPS = (
+    # 4.19.8: the YuE2 licence (accepted in the panel; /music/install asks with
+    # HTTP 451 before it ever starts this list), checked again like the sidebar.
+    ("licence", "Checking the YuE2 licence", 1,
+     'bash scripts/pinokio/music_licence_gate.sh'),
     ("preflight", "Checking memory and disk space", 1,
      'bash scripts/pinokio/music_preflight.sh'),
     ("clone", "Downloading the engine code", 3,
@@ -16725,7 +17547,8 @@ def music_install_start(kind: str = "install") -> tuple[int, dict]:
                               "error": None, "pgid": None,
                               "log": collections.deque(maxlen=60)})
     threading.Thread(target=_music_install_thread, daemon=True, name="music-install").start()
-    push("[music-install] started from the panel (same steps as the Pinokio sidebar entry)")
+    push(_dist.say("[music-install] started from the panel (same steps as the Pinokio sidebar entry)",
+                   "[music-install] started from the studio"))
     return 202, {"ok": True, "started": True}
 
 
@@ -16808,12 +17631,23 @@ def _music_install_thread() -> None:
             if key == "clone" or key == "sync" or key == "venv":
                 missing_tool = next((t for t in ("uv", "git") if shutil.which(t, path=env["PATH"]) is None), None)
                 if missing_tool:
-                    error = (f"'{missing_tool}' was not found, so the panel cannot run this step. "
-                             "Use “Install the music engine” in the Phosphene sidebar in Pinokio instead.")
+                    error = _dist.say(
+                        f"'{missing_tool}' was not found, so the panel cannot run this step. "
+                        "Use “Install the music engine” in the Phosphene sidebar in Pinokio instead.",
+                        f"'{missing_tool}' was not found, so Phosphene can't run this step. "
+                        "Quit Phosphene and open it again to rerun setup, then try again.")
                     break
             reason = next((l for l in reversed(tail) if not l.startswith(("+", "Traceback"))), "")
-            error = f"{label} failed (exit {rc})" + (f": {reason}" if reason else "") + \
-                    ". Click Install again to resume — nothing already downloaded is lost."
+            # The scripts end a failure with "FATAL error: <reason + next click>"
+            # (that line is what stops a Pinokio install; 4.20). Show the reason,
+            # not the marker, and do not say "Install again" twice.
+            if reason.startswith("FATAL error:"):
+                reason = reason[len("FATAL error:"):].strip()
+            error = f"{label} failed (exit {rc})" + (f": {reason}" if reason else "")
+            if not error.endswith("."):
+                error += "."
+            if "Install again" not in reason:
+                error += " Click Install again to resume — nothing already downloaded is lost."
             break
     stopped = _MUSIC_INSTALL_STOP.is_set()
     ok = not stopped and error is None and not music_paths()["missing"]
@@ -17073,8 +17907,25 @@ def music_progress(line: str, previous: dict | None = None) -> dict | None:
     return {"phase": phase, "phase_label": label, "pct": pct}
 
 
+def _music_honours_lab_gpu_locks() -> bool:
+    """Whether this panel should wait on the maintainer's lab GPU locks at
+    all (see MUSIC_WAITS_GPU_LOCK_ENV). Read at call time."""
+    env = _optional_bool_env(MUSIC_WAITS_GPU_LOCK_ENV)
+    if env is not None:
+        return env
+    if MUSIC_TAKES_GPU_LOCK:
+        return True
+    try:
+        return ANALYTICS_TEST_RIG_MARKER.exists()
+    except OSError:
+        return False
+
+
 def _music_external_gpu_lock() -> Path | None:
-    """The first external GPU lock that exists (file or directory), else None."""
+    """The first external GPU lock that exists (file or directory), else None.
+    Always None on a user's Mac — see _music_honours_lab_gpu_locks()."""
+    if not _music_honours_lab_gpu_locks():
+        return None
     for path in (MUSIC_GPU_DIR_LOCK, MUSIC_GPU_FILE_LOCK):
         try:
             if path.exists() or path.is_symlink():
@@ -17173,8 +18024,8 @@ def run_music_job_inner(job: dict) -> None:
     if paths["missing"]:
         missing = "; ".join(paths["missing"])
         if paths["repairable"]:
-            raise RuntimeError(f"The YuE2 weights are on disk but the engine needs repair — missing: {missing}. Open Audio → Compose and click 'Repair music engine' (or use the Phosphene sidebar in Pinokio) — it is idempotent and skips every weight already on disk, so this is a couple of minutes, NOT an 11 GB download.")
-        raise RuntimeError(f"The music engine isn't installed — missing: {missing}. Open Audio → Compose and click 'Install music engine' (or use the Phosphene sidebar in Pinokio) — ~11 GB, resumable.")
+            raise RuntimeError(f"The YuE2 weights are on disk but the engine needs repair — missing: {missing}. Open Audio → Compose and click 'Repair music engine'" + _dist.say(" (or use the Phosphene sidebar in Pinokio)", "") + " — it is idempotent and skips every weight already on disk, so this is a couple of minutes, NOT an 11 GB download.")
+        raise RuntimeError(f"The music engine isn't installed — missing: {missing}. Open Audio → Compose and click 'Install music engine'" + _dist.say(" (or use the Phosphene sidebar in Pinokio)", "") + " — ~11 GB, resumable.")
     if (not p["music_style"] and not p["music_lyrics"] and not p["music_instrumental"]
             and p["music_variation"] not in ("take", "sound", "score")):
         raise RenderRefused("music_input", "Give it something to work with — lyrics, a style description, or both.")
@@ -17458,8 +18309,100 @@ def engines_payload() -> list[dict]:
             _gen = _lbl.replace("LTX-", "").strip()
             if _gen and _gen != _lbl.strip():
                 d["generation"] = _gen
+            # Every generation whose base pack is on disk, so the engine menu
+            # can offer a switch. Only offered when there is a real choice.
+            d["generations"] = ltx_generation_choices()
         out.append(d)
     return out
+
+
+def ltx_generation_choices() -> list[dict]:
+    """The LTX generations this install can switch between.
+
+    A generation is offered only when it can RENDER: its `render` capability
+    (base pack AND its own text encoder — Gemma 3 for 2.3, Gemma 4 for 2.5) is
+    complete. That is the same question, with the same HF-cache-aware answer,
+    the panel's blocker card and the Models modal ask (capability_missing), so
+    the switch can never offer a generation the panel would then call
+    incomplete. A q4 pack alone is not enough: switching onto a generation
+    whose text encoder is half-downloaded boots a panel that cannot render.
+    Complete is not enough either: a pack the boot integrity scan flags
+    (truncated / unreadable safetensors header - the "mosaic" class) is not
+    offered, because switching onto it boots straight into the Repair banner.
+    _model_integrity() is header-only and cached, so this stays cheap.
+    The active one is always listed so the menu can show which is current.
+    Returns [] when there is no real choice (fewer than two usable
+    generations), which hides the control entirely."""
+    try:
+        corrupt = {b.get("repo") for b in (_model_integrity().get("bad") or [])}
+    except Exception:                                       # noqa: BLE001
+        corrupt = set()
+    out: list[dict] = []
+    for v in MODEL_VERSIONS:
+        vid = v["id"]
+        active = vid == ACTIVE_MODEL_VERSION
+        try:
+            installed = (not capability_missing("render", vid)
+                         and not corrupt.intersection(capability_repo_keys("render", vid)))
+        except Exception:                                   # noqa: BLE001
+            installed = False
+        if not (installed or active):
+            continue
+        out.append({
+            "id": vid,
+            "label": str(v.get("label") or vid).replace("LTX-", "").strip(),
+            "active": active,
+            "default": bool(v.get("default")),
+        })
+    return out if len(out) > 1 else []
+
+
+def set_environment_value(key: str, value: str) -> None:
+    """Set `KEY=value` in <install>/ENVIRONMENT, preserving every other line.
+
+    That file is the one the Pinokio launcher, pinokio.js and download_q8.js
+    all read, so writing here keeps the panel, the sidebar and the installers
+    agreeing about the generation after the next full Pinokio restart.
+
+    EVERY live assignment of KEY is rewritten, not just the last. Pinokio's
+    dotenv, pinokio.js and q8_weights.sh take the LAST one, but download_q8.js
+    takes the FIRST — rewriting only the last left a file with duplicates
+    meaning ltx23 to the panel and ltx25 to the Q8 downloader. Commented lines
+    are left alone. No assignment: one is appended. A CRLF file stays CRLF, the
+    file's mode is kept, a symlinked ENVIRONMENT is written through (not
+    replaced by a regular file), and the write is atomic_write_text's temp +
+    fsync + rename, so a crash cannot leave a half-written ENVIRONMENT and two
+    writers cannot trample one temp file."""
+    if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key) or not re.fullmatch(r"[A-Za-z0-9_.-]+", value):
+        raise ValueError("refusing to write an unsafe ENVIRONMENT entry")
+    path = ROOT / "ENVIRONMENT"
+    if path.is_symlink():
+        path = path.resolve()
+    try:
+        # Bytes, not read_text(): universal-newline reading turns every CRLF
+        # into LF, which rewrote a CRLF file's EVERY line to change one.
+        text = path.read_bytes().decode("utf8")
+        mode = path.stat().st_mode & 0o777
+    except FileNotFoundError:
+        text, mode = "", 0o644
+    nl = "\r\n" if "\r\n" in text else "\n"
+    lines = text.split("\n")
+    pat = re.compile(r"^\s*(?:export\s+)?" + re.escape(key) + r"\s*[=:]")
+    hits = [i for i, ln in enumerate(lines) if pat.match(ln) and not ln.lstrip().startswith("#")]
+    entry = f"{key}={value}"
+    if hits:
+        for i in hits:
+            lines[i] = entry + ("\r" if lines[i].endswith("\r") else "")
+    else:
+        cr = "\r" if nl == "\r\n" else ""
+        if lines and lines[-1] == "":
+            lines.insert(len(lines) - 1, entry + cr)
+        else:
+            if lines and lines[-1] and cr and not lines[-1].endswith("\r"):
+                lines[-1] += cr
+            lines.append(entry + cr)
+            lines.append("")
+    atomic_write_text(path, "\n".join(lines), mode=mode)
 
 
 def _engine_css() -> str:
@@ -17583,9 +18526,28 @@ _ANALYTICS_RECEIVER_DIRECTIVES = {
 # state/ (gitignored, fs.link-preserved across Pinokio Reset) and is capped
 # so a heavy user's log can't grow without bound.
 USAGE_LOG_FILE = STATE_DIR / "usage-log.jsonl"
+# What the dashboard's "this Mac" numbers READ. The same file, except in
+# read-only stats mode, where it is the source install's mirror (read, never
+# appended — capture keeps writing USAGE_LOG_FILE in this panel's own state).
+USAGE_LOG_READ_FILE = (STATS_SOURCE_DIR / "usage-log.jsonl") if STATS_SOURCE_DIR else USAGE_LOG_FILE
+# The maintainer's own installs, for the fleet view's owner exclusion — see
+# _owner_exclusion_sql. Local, private, never shipped: a JSON file of
+# install ids (and optional machine fingerprints) that are NOT users.
+ANALYTICS_OWNER_FILE = Path(
+    (os.environ.get("PHOSPHENE_ANALYTICS_OWNER_FILE") or "").strip()
+    or str((STATS_SOURCE_DIR or STATE_DIR) / "analytics-owner-installs.json")
+).expanduser()
+# A file whose mere presence marks EVERY install on this Mac as a test rig.
+# See _analytics_is_test_rig: the env var alone never reached a single event.
+ANALYTICS_TEST_RIG_MARKER = Path.home() / ".phosphene-test-rig"
 USAGE_LOG_MAX_BYTES = 5 * 1024 * 1024
 USAGE_FLEET_CACHE = STATE_DIR / "usage-fleet.json"
 USAGE_FLEET_TTL_SEC = 6 * 60 * 60
+# Bumped whenever the fleet payload's meaning changes, so a cache written by
+# an older build is refetched instead of served for up to 6 h under the new
+# labels. 2: owner exclusion, rendered installs, rolling weekly active,
+# per-install pack losses (2026-10-14). 3: LIMIT 10000 on row series.
+USAGE_FLEET_SCHEMA = 3
 _USAGE_LOG_LOCK = threading.Lock()
 
 # Keys that must never appear in an event payload. This is defense in depth,
@@ -17620,6 +18582,36 @@ _ANALYTICS_PATH_RES = (
                r"|Library|System))(?:/[^\s'\"<>,;)\]]*)*"),
     re.compile(r"(?:/[\w.+\-]+){2,}/?"),
 )
+
+# THREE SHAPES THE PASSES ABOVE LET THROUGH (ov-review A-03), run before them
+# by _analytics_redact_paths():
+#   * a username with a space. The anchored pass stops at whitespace, so
+#     `'/Users/Jane Doe/Models/x.safetensors'` left "Doe" (the surname) in the
+#     signature. A quoted string that starts like a path is redacted whole,
+#     quotes kept, and an unquoted home folder is cut up to its next slash.
+#   * a URL. The path passes ate the URL's path and kept its query string -
+#     `?token=...` went out verbatim. Scheme and host stay (which server
+#     failed is the useful half); userinfo, path and query go.
+#   * a Windows path (`C:\\Users\\Alice\\...`), which no pass knew.
+_ANALYTICS_URL_RE = re.compile(
+    r"\b([a-zA-Z][a-zA-Z0-9+.-]{1,15})://(?:[^@/\s'\"]*@)?([^/\s'\"?#]+)[^\s'\"]*")
+_ANALYTICS_QUOTED_PATH_RE = re.compile(
+    r"(['\"])(?:~/|/|[A-Za-z]:\\|\.{1,2}/)[^'\"\n]*\1")
+_ANALYTICS_HOME_RE = re.compile(r"/(?:Users|home)/[^/\n'\"]{1,64}(?=/)")
+_ANALYTICS_WINPATH_RE = re.compile(r"\b[A-Za-z]:\\[^\s'\"<>|]*")
+
+
+def _analytics_redact_paths(s: str) -> str:
+    """Every path and URL in `s` replaced - see _ANALYTICS_PATH_RES."""
+    s = _ANALYTICS_URL_RE.sub(lambda m: f"{m.group(1)}://{m.group(2)}/<url>", s)
+    s = _ANALYTICS_QUOTED_PATH_RE.sub(lambda m: f"{m.group(1)}<path>{m.group(1)}", s)
+    s = _ANALYTICS_HOME_RE.sub("<path>", s)
+    s = _ANALYTICS_WINPATH_RE.sub("<path>", s)
+    for rx in _ANALYTICS_PATH_RES:
+        s = rx.sub("<path>", s)
+    return s
+
+
 _ANALYTICS_UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
@@ -17685,8 +18677,22 @@ def _analytics_is_test_rig() -> bool:
     + no-geo-or-IL" heuristic re-derived by hand each time (see
     sys-fleet/q.py in the flow-review folder for that heuristic — this
     replaces the need for it going forward, on every install that sets
-    the var)."""
-    return _optional_bool_env("PHOSPHENE_TEST_RIG") is True
+    the var).
+
+    2026-10-14: PostHog held ZERO events with test_rig=true, ever. The
+    variable is real, but nothing that starts a panel on the maintainer's
+    Mac sets it: Pinokio launches start.js with its own environment, and a
+    clean-room install is a fresh Pinokio app. So the rule also accepts a
+    MARKER FILE, ~/.phosphene-test-rig — one `touch` on the maintainer's Mac
+    and every install there, however it was launched, is tagged. An explicit
+    PHOSPHENE_TEST_RIG=0 still wins (to test the untagged path)."""
+    env = _optional_bool_env("PHOSPHENE_TEST_RIG")
+    if env is not None:
+        return env
+    try:
+        return ANALYTICS_TEST_RIG_MARKER.exists()
+    except OSError:
+        return False
 
 
 def _analytics_key() -> str:
@@ -17750,6 +18756,108 @@ def _analytics_install_id() -> str:
     return new
 
 
+# ---- Bug-report log excerpt + "What happened" (4.19.3, issue #106) ----------
+# #106 arrived with "What happened" and "Expected" empty and ONE log line:
+# the maintainer stats fetcher saying it had no GitHub token — a line about a
+# feature no user has, which said nothing about the user's problem. Two fixes:
+# the report must say what went wrong, and the auto-attached log must carry
+# the lines that explain a failure, never maintainer noise.
+BUG_REPORT_WHAT_MIN_CHARS = 10
+BUG_REPORT_LOG_LINES = 50
+BUG_REPORT_TAIL_LINES = 25
+# Lines that never belong in a user's bug report: the maintainer-only repo
+# stats fetcher (pre-4.19.3 builds pushed "stats: ..." into the shared log)
+# and anything about GitHub tokens. Matched after the "[HH:MM:SS] " stamp.
+_BUG_REPORT_NOISE_RES = (
+    re.compile(r"^(?:\[\d\d:\d\d:\d\d\]\s*)?\[?(?:repo[ -])?stats(?:\]|\s*:)", re.I),
+    re.compile(r"github token|gh auth token|rate-limit remaining|"
+               r"stats dashboard|maintainer stats|stats_fetch", re.I),
+)
+# A line that probably explains a failure. Deliberately broad: a wrongly
+# promoted line costs one row in a 50-row excerpt; a missed one is the
+# reason a report can't be acted on.
+_BUG_REPORT_ERROR_RE = re.compile(
+    r"\b(?:error|errors|failed|failure|fail|traceback|exception|fatal|"
+    r"crash(?:ed)?|killed|refused|out of memory|oom|watchdog|errno|"
+    r"sigkill|sigsegv|sigabrt|sigbus|cannot|could not|couldn't|"
+    r"not found|missing|timed out|timeout)\b", re.I)
+# ...and Python's own exception lines: "ValueError: ...", "RuntimeError",
+# "KeyboardInterrupt" is not one, "JSONDecodeError" is. Word boundaries keep
+# the regex above from seeing "error" inside "ValueError", and that last line
+# is the one that names the cause (Codex, 4.19.3). Case-sensitive on purpose.
+_BUG_REPORT_EXC_RE = re.compile(r"\b[A-Z]\w*(?:Error|Exception)\b")
+
+
+def _bug_report_is_noise(line: str) -> bool:
+    s = str(line or "")
+    return any(rx.search(s) for rx in _BUG_REPORT_NOISE_RES)
+
+
+def _bug_report_log_excerpt(lines, limit: int = BUG_REPORT_LOG_LINES,
+                            tail: int = BUG_REPORT_TAIL_LINES) -> list[str]:
+    """Pick the log lines a bug report carries, oldest first.
+
+    Until 4.19.3 this was simply the last 50 lines of the in-memory log, so a
+    failure followed by a few minutes of ordinary activity fell out of the
+    report, and harmless maintainer lines took up the room. Now:
+      1. noise (see _BUG_REPORT_NOISE_RES) is dropped outright;
+      2. the most recent `tail` lines are always kept (what just happened);
+      3. the remaining room goes to earlier lines that look like errors,
+         newest first, each with one line before and two after;
+      4. any room left is filled with the lines just before the tail.
+    Gaps inside the excerpt are marked with a "[… N lines skipped …]" row
+    so the reader can tell the excerpt from the raw log."""
+    kept = [str(x) for x in (lines or []) if str(x or "").strip()
+            and not _bug_report_is_noise(x)]
+    n = len(kept)
+    if n <= limit:
+        return kept
+    head_end = n - tail                      # indices < head_end are "earlier"
+    chosen = set(range(head_end, n))
+    budget = limit - tail
+    for i in range(head_end - 1, -1, -1):
+        if budget <= 0:
+            break
+        if not (_BUG_REPORT_ERROR_RE.search(kept[i])
+                or _BUG_REPORT_EXC_RE.search(kept[i])):
+            continue
+        for j in (i, i - 1, i + 1, i + 2):
+            if budget > 0 and 0 <= j < head_end and j not in chosen:
+                chosen.add(j)
+                budget -= 1
+    j = head_end - 1
+    while budget > 0 and j >= 0:
+        if j not in chosen:
+            chosen.add(j)
+            budget -= 1
+        j -= 1
+    out: list[str] = []
+    prev = None
+    for i in sorted(chosen):
+        if prev is not None and i != prev + 1:
+            gap = i - prev - 1
+            out.append(f"[… {gap} line{'s' if gap != 1 else ''} skipped …]")
+        out.append(kept[i])
+        prev = i
+    return out
+
+
+def _bug_report_what_happened(body: str) -> str:
+    """The text under the report's "## What happened" heading, up to the
+    next "## " heading; "" when the heading is absent."""
+    m = re.search(r"^##[ \t]*What happened[ \t]*$", str(body or ""),
+                  re.M | re.I)
+    if not m:
+        return ""
+    rest = body[m.end():]
+    nxt = re.search(r"^##[ \t]", rest, re.M)
+    return (rest[:nxt.start()] if nxt else rest).strip()
+
+
+def _bug_report_what_ok(text: str) -> bool:
+    return len(" ".join(str(text or "").split())) >= BUG_REPORT_WHAT_MIN_CHARS
+
+
 def _bug_report_scrub_line(line: str) -> str:
     """Strip home-folder paths (which usually carry the macOS username, and
     that username is frequently the person's real name) from ONE line of a
@@ -17763,10 +18871,7 @@ def _bug_report_scrub_line(line: str) -> str:
     tail. This reuses the SAME path regexes, per line, keeping every line
     and the tail's full diagnostic shape."""
     try:
-        s = str(line or "")
-        for rx in _ANALYTICS_PATH_RES:
-            s = rx.sub("<path>", s)
-        return s
+        return _analytics_redact_paths(str(line or ""))
     except Exception:
         return str(line or "")
 
@@ -17790,8 +18895,7 @@ def _analytics_scrub_text(text, secrets=()) -> str:
             # enough not to blank out ordinary words in an error string.
             if len(sec) >= 6 and sec in s:
                 s = s.replace(sec, "<redacted>")
-        for rx in _ANALYTICS_PATH_RES:
-            s = rx.sub("<path>", s)
+        s = _analytics_redact_paths(s)
         s = " ".join(s.split())
         return s[:ANALYTICS_STR_MAX]
     except Exception:
@@ -17889,10 +18993,7 @@ def _analytics_chip_family() -> str:
         return _CHIP_FAMILY_CACHE
     family = "unknown"
     try:
-        brand = subprocess.run(
-            ["sysctl", "-n", "machdep.cpu.brand_string"],
-            capture_output=True, text=True, errors="replace", timeout=2,
-        ).stdout.strip()
+        brand = hostinfo.chip_brand()
         m = _CHIP_FAMILY_RE.search(brand)
         if m:
             family = f"M{m.group(1)}" + (f" {m.group(2).title()}" if m.group(2) else "")
@@ -17940,40 +19041,32 @@ def _analytics_pack_state() -> dict:
     }
 
 
-def _usage_log_rotate() -> None:
-    """Halve the local mirror when it hits the cap. Keeps the NEWEST half —
-    the dashboard's windows are all 7/14-day, so old lines have no readers.
-    Rewrites in place via the same temp+replace shape the rest of the panel
-    uses so a kill mid-rotate can't truncate the log to nothing."""
-    try:
-        lines = USAGE_LOG_FILE.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return
-    keep = lines[len(lines) // 2:]
-    tmp = USAGE_LOG_FILE.with_name(f".{USAGE_LOG_FILE.name}.{os.getpid()}.tmp")
-    try:
-        tmp.write_text("\n".join(keep) + ("\n" if keep else ""), encoding="utf-8")
-        os.replace(tmp, USAGE_LOG_FILE)
-    except OSError:
-        try: tmp.unlink()
-        except OSError: pass
+# ---- Usage log and stats report: the local usage log, the local report and the fleet (PostHog) report. (moved to usage_stats.py) ---------------------------------
+# Reads and writes state/usage-log.jsonl and builds the numbers behind the stats dashboard; the event contract is docs/ANALYTICS.md.
+# The names stay importable from here: routes and tests reach them as P.<name>.
+# P is handed over right here (not in the route-wiring loop below) because this
+# module has no routes of its own; sys.modules[__name__] is the running panel
+# even while it is still importing.
+import usage_stats as _usage_stats
+from usage_stats import (  # noqa: F401  (re-exported on purpose)
+    _usage_attach_local,
+    _usage_fleet_query_one,
+    _usage_fleet_report,
+    _usage_growth_block,
+    _usage_local_report,
+    _usage_log_append,
+    _usage_log_read,
+    _usage_log_rotate,
+    _usage_pack_loss_summary,
+    _usage_parse_ts,
+    _usage_rank,
+    _usage_report,
+    _usage_rolling_weeks,
+)
+_usage_stats.P = sys.modules[__name__]
 
 
-def _usage_log_append(record: dict) -> None:
-    """Append one JSON line to the local mirror. Never raises."""
-    try:
-        _ensure_state_dir()
-        line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
-        with _USAGE_LOG_LOCK:
-            try:
-                if USAGE_LOG_FILE.stat().st_size + len(line) > USAGE_LOG_MAX_BYTES:
-                    _usage_log_rotate()
-            except OSError:
-                pass  # missing file is the normal first-write case
-            with USAGE_LOG_FILE.open("a", encoding="utf-8") as fh:
-                fh.write(line)
-    except Exception:
-        pass
+
 
 
 def _analytics_post(payload: dict) -> None:
@@ -18231,7 +19324,16 @@ def update_pressed_landed(marker: str) -> tuple[bool, str]:
 # invents one. This is the same discipline as the error taxonomy, for the same
 # reason — a free-text step name is a field nobody can chart and a string
 # nobody reviewed.
-_INSTALL_STEPS = ("first_boot", "engine_env", "weights_check", "first_queue")
+# `first_use` (growth pass, 2026-10-19): the first click or key press anyone
+# makes on the panel page. Pinokio auto-runs Start the moment the ~37 GB
+# install finishes, so `first_boot` can fire with nobody in front of the
+# screen; in the 2026-09-20 -> 10-11 cohorts 20% of new installs booted once
+# and never rendered, and three in four of those sent nothing but the boot
+# events. `first_use` splits "nobody ever looked" from "looked and left" -
+# they need opposite fixes. Reported by the page through /analytics/ui, the
+# only step the browser may report.
+_INSTALL_STEPS = ("first_boot", "engine_env", "weights_check", "first_queue",
+                  "first_use")
 _INSTALL_OUTCOMES = ("started", "ok", "failed", "skipped")
 _UPDATE_STAGES = ("running_new", "restart_pending")
 _UPDATE_OUTCOMES = ("ok", "failed")
@@ -18442,7 +19544,13 @@ _ANALYTICS_FEATURES = ("storyboard_plan", "storyboard_export", "editor_open",
                        # fires only past the refusal; train_refused counts
                        # the clicks that never got there, so neither number
                        # silently absorbs the other.
-                       "train_refused")
+                       "train_refused",
+                       # Growth pass 2026-10-19: the clip toolbar's Share
+                       # (caption with the repo link + the file selected in
+                       # Finder). Nothing about the clip is sent - only that
+                       # the button was used, so "do people share what they
+                       # make" stops being a guess.
+                       "share")
 
 
 def _analytics_feature(feature: str, detail: str = "") -> None:
@@ -18534,6 +19642,10 @@ _ANALYTICS_REFUSAL_REASONS = (
     # "Listen to the voice only" on an install whose vocal separator is
     # missing — an install prompt, not a fault (lip-sync quality, 4.17.x).
     ("vocal_separator", ("vocal separation is not installed",)),
+    # A model whose licence asks for an explicit "I accept" (model_licences.py)
+    # before it is downloaded or first run - a one-time prompt, not a fault
+    # (4.19.8). Every message model_licences.refusal() builds carries it.
+    ("licence_required", ("accept the licence once",)),
 )
 
 _ANALYTICS_REFUSAL_SLUGS = tuple(s for s, _ in _ANALYTICS_REFUSAL_REASONS)
@@ -18653,6 +19765,11 @@ _ANALYTICS_ERROR_CLASSES = (
                        "runner is behind this panel")),
     ("venv_broken", ("venv", "dangling", "runner missing",
                      "no module named",
+                     # transformers' own import-time version check (4.19.4:
+                     # tokenizers 0.23.3 under transformers <5.13 - 7 renders
+                     # on one Mac filed as bad_params on the word "required").
+                     # A package set that refuses to import is a broken venv.
+                     "required for a normal functioning of this module",
                      # The engine tree itself is absent. The fleet's shape is
                      # `[Errno 2] No such file or directory: 'ltx-2-mlx<path>'`
                      # (67 events, 2 installs) — the scrubber leaves the
@@ -18690,9 +19807,36 @@ _ANALYTICS_ERROR_CLASSES = (
 )
 
 
+_ANALYTICS_TB_FRAME_RX = re.compile(r'^\s*File "[^"]*", line \d+')
+
+
+def _analytics_drop_tb_frames(text: str) -> str:
+    """The error text minus Python traceback frames (`File "…", line N, in f`
+    and the source line printed under each).
+
+    4.19.4: an engine subprocess's error carries its tail, and every frame
+    of a traceback out of the engine venv names `…/ltx-2-mlx/env/lib/…` -
+    which the `venv_broken` row matches. So EVERY FLUX.2 failure with a
+    traceback was filed as a broken venv (two Macs, 21 events since 4.16),
+    whatever the exception said. Frames say where, never what: the class is
+    decided by the rest."""
+    out: list[str] = []
+    skip_next = False
+    for line in text.splitlines():
+        if _ANALYTICS_TB_FRAME_RX.match(line):
+            skip_next = True
+            continue
+        if skip_next and line.startswith((" ", "\t")):
+            skip_next = False
+            continue
+        skip_next = False
+        out.append(line)
+    return "\n".join(out)
+
+
 def _analytics_error_class(raw) -> str:
     """Map an original error string onto the closed taxonomy."""
-    s = str(raw or "").strip().lower()
+    s = _analytics_drop_tb_frames(str(raw or "")).strip().lower()
     if not s:
         return "other"
     for name, needles in _ANALYTICS_ERROR_CLASSES:
@@ -18833,6 +19977,13 @@ def _analytics_render_event(job: dict) -> None:
             "source": _analytics_source(p, job),
             "audio_mode": _analytics_audio_mode(p, engine, mode),
         }
+        # 4.19.11: which H3 sampler ran, so the fleet's timing lanes never
+        # infer it from `steps` (7 points is lightx2v v1.3, Turbo AND a Best
+        # pinned to 7). Closed vocabulary; H3 renders only.
+        if engine == "h3":
+            props["h3_sampler"] = ("fast" if p.get("h3_tristep") else
+                                   "turbo" if p.get("h3_turbo") else
+                                   "v13" if p.get("h3_v13") else "best")
         # 4.17.5: did this render run in short GPU steps (the Metal watchdog
         # path), and did a watchdog kill get re-run inside the same job?
         if job.get("gpu_steps") == "short":
@@ -18841,6 +19992,21 @@ def _analytics_render_event(job: dict) -> None:
             props["watchdog_retry"] = True
         if job.get("watchdog_phase") in WATCHDOG_PHASES:
             props["watchdog_phase"] = job["watchdog_phase"]
+        # 4.19.6: a non-watchdog GPU abort in prompt encoding re-run after a
+        # pause, and whether the (last) run started in a helper that had
+        # already finished a render - the two facts that confirm or refute
+        # the prompt-encoding abort fix (WarmHelper.run).
+        if job.get("gpu_abort_retry"):
+            props["gpu_abort_retry"] = True
+        if isinstance(job.get("helper_warm"), bool):
+            props["helper_warm"] = job["helper_warm"]
+        # 4.19.2: a helper that died from a signal - what its last native
+        # line was (closed class) and how far it got. Failures only.
+        if status != "done":
+            if job.get("crash_line") in CRASH_LINES:
+                props["crash_line"] = job["crash_line"]
+            if job.get("crash_phase") in CRASH_PHASES:
+                props["crash_phase"] = job["crash_phase"]
         # wall_sec_bucket only when the wall clock is known — a None would
         # just pollute the percentile aggregation it exists to feed.
         wall = _analytics_wall_sec_bucket(job.get("elapsed_sec"))
@@ -18929,216 +20095,10 @@ def _analytics_render_event(job: dict) -> None:
 _USAGE_FLEET_LOCK = threading.Lock()
 
 
-def _usage_log_read(max_age_days: float | None = None) -> list[dict]:
-    """Parse the local mirror. Bad lines are skipped, not fatal — this file
-    is append-only from several threads and a torn last line is possible."""
-    out: list[dict] = []
-    try:
-        raw = USAGE_LOG_FILE.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return out
-    cutoff = (time.time() - max_age_days * 86400) if max_age_days else None
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rec = json.loads(line)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if not isinstance(rec, dict) or "event" not in rec:
-            continue
-        if cutoff is not None:
-            try:
-                if float(rec.get("ts") or 0) < cutoff:
-                    continue
-            except (TypeError, ValueError):
-                continue
-        out.append(rec)
-    return out
 
 
-def _usage_rank(counter: dict, key_name: str, limit: int = 12) -> list[dict]:
-    """{value: count} -> sorted [{<key_name>: value, "count": n}] rows."""
-    rows = sorted(counter.items(), key=lambda kv: (-kv[1], str(kv[0])))
-    return [{key_name: k, "count": v} for k, v in rows[:limit]]
 
 
-def _usage_local_report(range_key: str = STATS_RANGE_DEFAULT) -> dict:
-    """Aggregate the local mirror into the dashboard's payload shape.
-
-    Deliberately the SAME shape the fleet path produces, so stats.html has
-    exactly one renderer and the only difference the user sees is the
-    `source` label and the note above the tiles.
-
-    Day buckets use UTC (time.gmtime), matching the fleet path's HogQL
-    `toDate(timestamp)` (ClickHouse dates are UTC by default) and the
-    GitHub-stats archive's UTC `date` field. This used to bucket by the
-    MACHINE's own local midnight — on Mr Bizarro's Mac that is UTC+2/+3, so
-    the same calendar day could show a different render count depending on
-    whether /stats/usage happened to be serving the local fallback or the
-    fleet view that day. A single-machine report has no meaningful "vs
-    prior period" delta at small counts (2 renders vs 3 reads as "+50%"),
-    so this path leaves deltas out rather than manufacture noise — the
-    fleet path is where deltas matter and where there's enough volume for
-    them to mean something."""
-    recs = _usage_log_read()
-    now = time.time()
-    days = STATS_RANGE_DAYS.get(range_key, STATS_RANGE_DAYS[STATS_RANGE_DEFAULT])
-    range_cutoff = (now - days * 86400) if days else 0.0
-    # Every windowed figure below (boots, engines/H3 share, error rate,
-    # versions/chips/RAM, pack flips) follows the selected range, same as
-    # the fleet path. Only renders_by_day keeps its fixed 30-day chart.
-    d30 = now - 30 * 86400
-
-    boots_by_day: dict[str, int] = {}
-    engines: dict[str, int] = {}
-    errors: dict[str, int] = {}
-    error_groups: dict[str, dict] = {}
-    versions: dict[str, int] = {}
-    chips: dict[str, int] = {}
-    rams: dict[str, int] = {}
-    flips: dict[tuple, int] = {}
-    refusals: dict[str, int] = {}
-    renders_in_range = ok_in_range = fail_in_range = 0
-    h3_in_range = tot_in_range = 0
-    refused_in_range = 0
-    active_in_range = False
-
-    total_renders = 0
-    renders_by_day: dict[str, int] = {}
-    first_boot_ts = None
-
-    for rec in recs:
-        try:
-            ts = float(rec.get("ts") or 0)
-        except (TypeError, ValueError):
-            continue
-        ev = str(rec.get("event") or "")
-        props = rec.get("props") if isinstance(rec.get("props"), dict) else {}
-        if ts >= range_cutoff:
-            active_in_range = True
-        if ev == "app_boot":
-            if first_boot_ts is None or ts < first_boot_ts:
-                first_boot_ts = ts
-            if ts >= range_cutoff:
-                day = time.strftime("%Y-%m-%d", time.gmtime(ts))
-                boots_by_day[day] = boots_by_day.get(day, 0) + 1
-                versions[str(props.get("version") or "unknown")] = \
-                    versions.get(str(props.get("version") or "unknown"), 0) + 1
-                chips[str(props.get("chip_family") or "unknown")] = \
-                    chips.get(str(props.get("chip_family") or "unknown"), 0) + 1
-                ram_key = str(props.get("ram_gb") or "unknown")
-                rams[ram_key] = rams.get(ram_key, 0) + 1
-        elif ev in ("render_completed", "render_failed"):
-            if ev == "render_completed":
-                total_renders += 1
-                if ts >= d30:
-                    day = time.strftime("%Y-%m-%d", time.gmtime(ts))
-                    renders_by_day[day] = renders_by_day.get(day, 0) + 1
-            if ts >= range_cutoff:
-                renders_in_range += 1
-            if ts >= range_cutoff:
-                tot_in_range += 1
-                eng = str(props.get("engine") or "unknown")
-                engines[eng] = engines.get(eng, 0) + 1
-                if eng == "h3":
-                    h3_in_range += 1
-                if ev == "render_completed":
-                    ok_in_range += 1
-                else:
-                    fail_in_range += 1
-            if ev == "render_failed" and ts >= range_cutoff:
-                sig = str(props.get("error_signature") or "unknown error")
-                errors[sig] = errors.get(sig, 0) + 1
-                cls = str(props.get("error_class") or "other")
-                g = error_groups.setdefault(cls, {
-                    "count": 0, "first_seen": ts, "last_seen": ts,
-                    "sigs": {},
-                })
-                g["count"] += 1
-                g["first_seen"] = min(g["first_seen"], ts)
-                g["last_seen"] = max(g["last_seen"], ts)
-                g["sigs"][sig] = g["sigs"].get(sig, 0) + 1
-        elif ev == "render_refused":
-            # DELIBERATELY OUTSIDE every render number above. A refusal did
-            # not render, did not fail and cost no GPU time, so it belongs
-            # in neither the numerator nor the denominator of the error
-            # rate — counting it in either is the bug this branch exists to
-            # prevent. It gets its own tile because "how often do we send
-            # someone into a wall" is a real question, just a different one.
-            if ts >= range_cutoff:
-                refused_in_range += 1
-                slug = str(props.get("refusal") or "unknown")
-                refusals[slug] = refusals.get(slug, 0) + 1
-        elif ev == "pack_state_change" and ts >= range_cutoff:
-            k = (str(props.get("pack") or "?"),
-                 bool(props.get("from")), bool(props.get("to")))
-            flips[k] = flips.get(k, 0) + 1
-
-    flip_rows = [{"pack": p, "from": f, "to": t, "count": c}
-                 for (p, f, t), c in sorted(flips.items(), key=lambda kv: -kv[1])]
-    h3_lost = sum(r["count"] for r in flip_rows
-                  if r["pack"] == "h3" and r["from"] and not r["to"])
-
-    error_group_rows = []
-    for cls, g in error_groups.items():
-        top_sig = max(g["sigs"].items(), key=lambda kv: kv[1])[0] if g["sigs"] else "unknown error"
-        error_group_rows.append({
-            "error_class": cls,
-            "count": g["count"],
-            "installs": 1,  # local mirror is always this one machine
-            # ISO 8601 with a Z suffix — same shape PostHog's timestamp
-            # column returns, so the dashboard's one JS date parser handles
-            # both sources identically.
-            "first_seen": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(g["first_seen"])),
-            "last_seen": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(g["last_seen"])),
-            "top_message": top_sig,
-            "signatures": len(g["sigs"]),
-        })
-    error_group_rows.sort(key=lambda r: (-r["installs"], -r["count"]))
-
-    return {
-        "ok": True,
-        "source": "local",
-        "generated_at": iso_now(),
-        "cached": False,
-        "range": range_key,
-        "note": ("this machine only - add a PostHog query key in Settings "
-                 "for fleet data"),
-        "tiles": {
-            "weekly_active_installs": 1 if active_in_range else 0,
-            # The stats-v2 tile reads active_in_range (the fleet path's
-            # name); without it the local fallback showed "—" (4.17.3 review).
-            "active_in_range": 1 if active_in_range else 0,
-            "total_renders": total_renders,
-            "total_installs": 1 if first_boot_ts else 0,
-            "renders_in_range": renders_in_range,
-            "h3_share_pct": round(100.0 * h3_in_range / tot_in_range, 1) if tot_in_range else None,
-            "error_rate_pct": (round(100.0 * fail_in_range / (ok_in_range + fail_in_range), 1)
-                               if (ok_in_range + fail_in_range) else None),
-            "refusals_in_range": refused_in_range,
-        },
-        "deltas": {},  # single machine, small counts — see docstring
-        "growth": _usage_growth_block(
-            [(time.strftime("%Y-%m-%d", time.gmtime(first_boot_ts)), 1)] if first_boot_ts else [],
-            [(d, renders_by_day[d]) for d in sorted(renders_by_day)],
-            []),
-        "boots_by_day": [{"date": d, "count": boots_by_day[d]}
-                         for d in sorted(boots_by_day)],
-        "engines": _usage_rank(engines, "engine", 8),
-        "top_errors": [{"signature": k, "count": v} for k, v in
-                       sorted(errors.items(), key=lambda kv: (-kv[1], kv[0]))[:5]],
-        "error_groups": error_group_rows,
-        "top_refusals": [{"refusal": k, "count": v} for k, v in
-                         sorted(refusals.items(),
-                                key=lambda kv: (-kv[1], kv[0]))[:5]],
-        "versions": _usage_rank(versions, "version"),
-        "chips": _usage_rank(chips, "chip"),
-        "ram": _usage_rank(rams, "ram_gb"),
-        "pack_flips": {"h3_lost": h3_lost, "rows": flip_rows},
-        "events_logged": len(recs),
-    }
 
 
 # HogQL fragments for the fleet view. Built by a function, not a static
@@ -19152,6 +20112,66 @@ def _usage_local_report(range_key: str = STATS_RANGE_DEFAULT) -> dict:
 # real user. Every query is built through _fleet_where[_raw] so a new one
 # can't repeat either omission.
 _TEST_RIG_EXCLUDE = "ifNull(properties['test_rig'], 'false') != 'true'"
+
+_OWNER_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+_OWNER_FP_VALUE_RE = re.compile(r"^[A-Za-z0-9 ._-]{1,40}$")
+_OWNER_FP_PROPS = {"country": "$geoip_country_code", "chip_family": "chip_family",
+                   "ram_gb": "ram_gb"}
+
+
+def _owner_exclusion_sql() -> str:
+    """HogQL clause dropping the maintainer's own installs, or "".
+
+    Why a second rule next to test_rig: test_rig only tags events sent
+    AFTER an install learned to set it, and on 2026-10-14 no event had ever
+    carried it. Measured that day: one machine class, M4 Max / 64 GB, held
+    467 installs of which 79% booted once and never rendered, against
+    6-25% for every other class — the maintainer's clean-room installs and
+    test boots, counted as users. Since geo-IP was switched back on
+    (2026-09-19) the same machine is identifiable by country.
+
+    ANALYTICS_OWNER_FILE (local, private) holds
+        {"install_ids": ["<uuid>", ...],
+         "fingerprints": [{"country": "IL", "chip_family": "M4 Max",
+                           "ram_gb": 64}]}
+    install_ids are the ids found in the maintainer's own state dirs;
+    a fingerprint drops every install that EVER reported all of its fields.
+    Values are validated (uuid / short [A-Za-z0-9 ._-]) before they reach a
+    query; anything else is skipped, so a bad file can narrow nothing but
+    itself."""
+    try:
+        data = json.loads(ANALYTICS_OWNER_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    parts: list[str] = []
+    ids = sorted({str(i).strip().lower() for i in (data.get("install_ids") or [])
+                  if _OWNER_ID_RE.match(str(i).strip().lower())})
+    if ids:
+        parts.append("distinct_id NOT IN (" + ", ".join(f"'{i}'" for i in ids) + ")")
+    for fp in (data.get("fingerprints") or []):
+        if not isinstance(fp, dict):
+            continue
+        conds = []
+        for key, prop in _OWNER_FP_PROPS.items():
+            if key not in fp:
+                continue
+            v = fp[key]
+            if isinstance(v, bool):
+                conds = []
+                break
+            if isinstance(v, (int, float)):
+                conds.append(f"properties['{prop}'] = {float(v):g}")
+            elif isinstance(v, str) and _OWNER_FP_VALUE_RE.match(v):
+                conds.append(f"properties['{prop}'] = '{v}'")
+            else:
+                conds = []
+                break
+        if conds:
+            parts.append("distinct_id NOT IN (SELECT distinct_id FROM events WHERE "
+                         + " AND ".join(conds) + ")")
+    return " AND ".join(parts)
 
 
 def _fleet_window_sql(range_key: str, *, prior: bool = False) -> str:
@@ -19177,6 +20197,9 @@ def _fleet_where_raw(event_clause: str, window_sql: str = "") -> str:
     if window_sql:
         parts.append(window_sql)
     parts.append(_TEST_RIG_EXCLUDE)
+    owner = _owner_exclusion_sql()
+    if owner:
+        parts.append(owner)
     return " AND ".join(parts)
 
 
@@ -19211,7 +20234,7 @@ def _fleet_queries(range_key: str) -> dict[str, str]:
         "boots_by_day":
             "SELECT toDate(timestamp) AS d, count() AS c FROM events WHERE "
             + _fleet_where("event = 'app_boot'", range_key)
-            + " GROUP BY d ORDER BY d",
+            + " GROUP BY d ORDER BY d LIMIT 10000",
         "engines":
             "SELECT properties['engine'] AS e, count() AS c FROM events WHERE "
             + _fleet_where(ev_render, range_key) + " GROUP BY e ORDER BY c DESC",
@@ -19291,72 +20314,78 @@ def _fleet_queries(range_key: str) -> dict[str, str]:
         # it is NEW on the day of its first boot — app_installed fires once
         # per install but only since it existed, so first-boot is the honest
         # date.
+        # Day series carry an explicit LIMIT: HogQL's default is 100 rows,
+        # and the archive passes 100 days in Nov 2026 — the all-time
+        # install curve would have stopped short of today without a word.
         "total_renders":
             "SELECT count() FROM events WHERE "
             + _fleet_where_raw("event = 'render_completed'"),
         "total_installs":
             "SELECT count(DISTINCT distinct_id) FROM events WHERE "
             + _fleet_where_raw("event = 'app_boot'"),
+        # The user number (2026-10-14). An install that never finished a
+        # render is a failed install, a reinstall that minted a new id, or a
+        # test boot — 1,129 of the 2,453 "installs" that day had booted
+        # exactly once. Finishing one render is the line a person crosses.
+        "rendered_installs":
+            "SELECT count(DISTINCT distinct_id) FROM events WHERE "
+            + _fleet_where_raw("event = 'render_completed'"),
         "installs_by_day":
             "SELECT d, count() AS c FROM (SELECT distinct_id, toDate(min(timestamp)) AS d "
             "FROM events WHERE " + _fleet_where_raw("event = 'app_boot'")
-            + " GROUP BY distinct_id) GROUP BY d ORDER BY d",
+            + " GROUP BY distinct_id) GROUP BY d ORDER BY d LIMIT 10000",
         "renders_by_day":
             "SELECT toDate(timestamp) AS d, count() AS c FROM events WHERE "
             + _fleet_where("event = 'render_completed'", range_key)
-            + " GROUP BY d ORDER BY d",
-        # Complete weeks only: the running week would read as a collapse
-        # ("552 → 106") on a Sunday morning. Fixed 12-week context window,
-        # independent of the dashboard's range control on purpose — this is
-        # an evergreen "is the app growing" curve, not a range-scoped tile.
+            + " GROUP BY d ORDER BY d LIMIT 10000",
+        # ONE definition of "weekly active": installs that opened Phosphene
+        # in a 7 x 24 h window. The curve is twelve such windows laid back to
+        # back ENDING NOW, so its last point IS the weekly-active tile. It
+        # used to be calendar weeks (complete Sunday-Saturday weeks only)
+        # while the tile was the rolling last 7 days: "weekly active
+        # 298 -> 316" under a tile reading 327, the same words for two
+        # numbers. k = whole weeks before now; 0 is the current window.
         "active_by_week":
-            "SELECT toStartOfWeek(timestamp) AS w, count(DISTINCT distinct_id) AS c "
-            "FROM events WHERE "
+            "SELECT intDiv(dateDiff('second', timestamp, now()), 604800) AS k, "
+            "count(DISTINCT distinct_id) AS c FROM events WHERE "
             + _fleet_where_raw("event = 'app_boot'",
-                               "timestamp > now() - INTERVAL 12 WEEK "
-                               "AND toStartOfWeek(timestamp) < toStartOfWeek(now())")
-            + " GROUP BY w ORDER BY w",
+                               "timestamp > now() - INTERVAL 84 DAY")
+            + " GROUP BY k ORDER BY k DESC",
+        # Per install, per pack: did it lose the pack in the range, and what
+        # is its state at the LAST change? `pack_flips` above counts EVENTS,
+        # and a pack missing at one launch and back at the next is two of
+        # them: 6 of the 8 "H3 went from installed to missing" events in the
+        # week to 2026-10-14 were back by a later launch, four within an
+        # hour — launches that landed mid-Update, not broken installs.
+        "pack_losses":
+            "SELECT properties['pack'] AS pack, distinct_id, "
+            "argMax(properties['to'], timestamp) AS last_to, "
+            "maxIf(timestamp, properties['to'] = 'false') AS lost_at FROM events WHERE "
+            + _fleet_where("event = 'pack_state_change'", range_key)
+            + " GROUP BY pack, distinct_id "
+            "HAVING countIf(properties['from'] = 'true' AND properties['to'] = 'false') > 0"
+            # HogQL returns 100 rows unless told otherwise; the all-time run
+            # came back with exactly 100 and silently dropped the rest.
+            " LIMIT 10000",
+        # Last launch per install in the range — any launch after a loss
+        # falls inside the range too. A flat GROUP BY: the earlier
+        # `distinct_id IN (losses subquery)` form timed out on every
+        # attempt for 30d and all-time.
+        "pack_loss_last_boot":
+            "SELECT distinct_id, max(timestamp) FROM events WHERE "
+            + _fleet_where("event = 'app_boot'", range_key)
+            + " GROUP BY distinct_id LIMIT 10000",
     }
 
 
-def _usage_growth_block(installs_by_day: list, renders_by_day: list,
-                        active_by_week: list) -> dict:
-    """The dashboard's growth series, one shape for fleet and local.
-
-    installs_by_day carries the cumulative count alongside the day's new
-    installs so the page draws the curve without re-summing; the last
-    cumulative value equals total installs by construction."""
-    inst, running = [], 0
-    for d, c in installs_by_day:
-        running += int(c)
-        inst.append({"date": str(d), "new": int(c), "cumulative": running})
-    return {
-        "installs_by_day": inst,
-        "renders_by_day": [{"date": str(d), "count": int(c)} for d, c in renders_by_day],
-        "active_by_week": [{"week": str(w), "installs": int(c)} for w, c in active_by_week],
-    }
 
 
-def _usage_fleet_query_one(hogql: str, key: str) -> list:
-    """Run one HogQL query. Returns the `results` rows, or [] on any error.
 
-    10 s timeout (not the 2 s capture timeout — this is a human waiting on a
-    dashboard, not a render path). Raises nothing; the caller treats an
-    empty result as "this panel of the dashboard has no data"."""
-    body = json.dumps({"query": {"kind": "HogQLQuery", "query": hogql}}).encode("utf-8")
-    project = (os.environ.get("PHOSPHENE_ANALYTICS_PROJECT") or "@current").strip()
-    req = urllib.request.Request(
-        f"{_analytics_api_host()}/api/projects/{quote(project)}/query/",
-        data=body,
-        headers={"Content-Type": "application/json",
-                 "Authorization": f"Bearer {key}",
-                 "User-Agent": "phosphene-panel-stats"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        data = json.loads(resp.read().decode("utf-8", "replace"))
-    rows = data.get("results")
-    return rows if isinstance(rows, list) else []
+
+
+
+
+
 
 
 def _pct_delta(cur, prev) -> float | None:
@@ -19373,250 +20402,10 @@ def _pct_delta(cur, prev) -> float | None:
     return round(100.0 * (cur - prev) / prev, 1)
 
 
-def _usage_fleet_report(range_key: str = STATS_RANGE_DEFAULT) -> dict | None:
-    """Build the fleet payload, or None when no query key is configured.
-
-    Every sub-query is independent: one failing (rate limit, schema drift,
-    a property that no install has sent yet) leaves that panel empty rather
-    than collapsing the whole view back to local. If EVERY query fails we
-    return None so the caller falls back to local with a warning."""
-    key = _analytics_query_key()
-    if not key:
-        return None
-    queries = _fleet_queries(range_key)
-    res: dict[str, list] = {}
-    failures = 0
-    for name, hogql in queries.items():
-        try:
-            res[name] = _usage_fleet_query_one(hogql, key)
-        except Exception:
-            res[name] = []
-            failures += 1
-    if failures == len(queries):
-        return None
-
-    def _scalar(name):
-        rows = res.get(name) or []
-        try:
-            return rows[0][0]
-        except (IndexError, TypeError):
-            return None
-
-    def _outcomes(name):
-        rows = {str(r[0]): int(r[1]) for r in (res.get(name) or [])
-                if isinstance(r, (list, tuple)) and len(r) >= 2}
-        return rows.get("render_completed", 0), rows.get("render_failed", 0)
-
-    # `people` rides along because a refusal's whole question is "how many
-    # DIFFERENT people did we send into this wall" — 65 events from 16
-    # people is a product bug; 65 from one person is a bookmark.
-    refusals = [{"refusal": str(r[0] or "unknown"), "count": int(r[1]),
-                 "people": int(r[2]) if len(r) >= 3 else 0}
-                for r in (res.get("refusals") or [])
-                if isinstance(r, (list, tuple)) and len(r) >= 2]
-    ok_n, fail_n = _outcomes("outcomes")
-    ok_prior, fail_prior = _outcomes("outcomes_prior")
-    engines = [{"engine": str(r[0] or "unknown"), "count": int(r[1])}
-               for r in (res.get("engines") or [])
-               if isinstance(r, (list, tuple)) and len(r) >= 2]
-    tot = sum(e["count"] for e in engines)
-    h3 = sum(e["count"] for e in engines if e["engine"] == "h3")
-
-    flip_rows = []
-    for r in (res.get("pack_flips") or []):
-        if not (isinstance(r, (list, tuple)) and len(r) >= 4):
-            continue
-        flip_rows.append({
-            "pack": str(r[0] or "?"),
-            "from": str(r[1]).lower() in ("true", "1"),
-            "to": str(r[2]).lower() in ("true", "1"),
-            "count": int(r[3]),
-        })
-    h3_lost = sum(r["count"] for r in flip_rows
-                  if r["pack"] == "h3" and r["from"] and not r["to"])
-
-    active_n = _scalar("active_in_range")
-    active_prior_n = _scalar("active_in_range_prior")
-    error_rate_n = (round(100.0 * fail_n / (ok_n + fail_n), 1)
-                    if (ok_n + fail_n) else None)
-    error_rate_prior = (round(100.0 * fail_prior / (ok_prior + fail_prior), 1)
-                        if (ok_prior + fail_prior) else None)
-
-    error_groups = []
-    for r in (res.get("error_groups") or []):
-        if not (isinstance(r, (list, tuple)) and len(r) >= 6):
-            continue
-        error_groups.append({
-            "error_class": str(r[0] or "other"),
-            "count": int(r[1] or 0),
-            "installs": int(r[2] or 0),
-            "first_seen": str(r[3] or ""),
-            "last_seen": str(r[4] or ""),
-            "top_message": str(r[5] or "unknown error"),
-        })
-
-    return {
-        "ok": True,
-        "source": "fleet",
-        "generated_at": iso_now(),
-        "cached": False,
-        "range": range_key,
-        "note": "",
-        "partial": failures > 0,
-        "tiles": {
-            "weekly_active_installs": _scalar("wau"),
-            "daily_active_installs": _scalar("dau"),
-            "total_renders": _scalar("total_renders"),
-            "total_installs": _scalar("total_installs"),
-            "active_in_range": active_n,
-            "renders_in_range": ok_n + fail_n,
-            "h3_share_pct": round(100.0 * h3 / tot, 1) if tot else None,
-            "error_rate_pct": error_rate_n,
-            # Not in renders_in_range and not in error_rate_pct — see the
-            # local aggregator's render_refused branch for why.
-            "refusals_in_range": sum(r["count"] for r in refusals),
-        },
-        # None (not zeroed) for range_key == "all". _fleet_window_sql
-        # returns an EMPTY clause for both the current and prior "all"
-        # queries (there is no window to bound them by), which means
-        # ok_prior/fail_prior/active_prior_n above are the SAME all-time
-        # totals as the current ones — _pct_delta(x, x) computes a real
-        # 0.0, not "no baseline". Gate on range_key explicitly rather than
-        # trust the arithmetic: "all time" has no prior period, full stop.
-        "deltas": {} if range_key == "all" else {
-            "renders_in_range_pct": _pct_delta(ok_n + fail_n, ok_prior + fail_prior),
-            "active_in_range_pct": _pct_delta(active_n, active_prior_n),
-            "error_rate_pp": (round(error_rate_n - error_rate_prior, 1)
-                              if error_rate_n is not None and error_rate_prior is not None
-                              else None),
-            # Raw failure-count trend for the Errors section header — a
-            # separate question from the RATE above (fewer installs total
-            # can raise the rate while the raw count falls).
-            "errors_count_pct": _pct_delta(fail_n, fail_prior),
-        },
-        "growth": _usage_growth_block(
-            [(r[0], r[1]) for r in (res.get("installs_by_day") or [])
-             if isinstance(r, (list, tuple)) and len(r) >= 2],
-            [(r[0], r[1]) for r in (res.get("renders_by_day") or [])
-             if isinstance(r, (list, tuple)) and len(r) >= 2],
-            [(r[0], r[1]) for r in (res.get("active_by_week") or [])
-             if isinstance(r, (list, tuple)) and len(r) >= 2]),
-        "boots_by_day": [{"date": str(r[0]), "count": int(r[1])}
-                         for r in (res.get("boots_by_day") or [])
-                         if isinstance(r, (list, tuple)) and len(r) >= 2],
-        "engines": engines,
-        "top_errors": [{"signature": str(r[0] or "unknown error"), "count": int(r[1]),
-                        "people": int(r[2]) if len(r) > 2 and r[2] is not None else None}
-                       for r in (res.get("top_errors") or [])
-                       if isinstance(r, (list, tuple)) and len(r) >= 2],
-        "error_groups": error_groups,
-        "failures_by_version": [{"version": str(r[0] or "unknown"), "failed": int(r[1] or 0),
-                                 "ok": int(r[2] or 0), "people": int(r[3] or 0),
-                                 "count": int(r[1] or 0),
-                                 "pct": round(100.0 * int(r[1] or 0) / max(1, int(r[1] or 0) + int(r[2] or 0)), 1)}
-                                for r in (res.get("failures_by_version") or [])
-                                if isinstance(r, (list, tuple)) and len(r) >= 4],
-        "top_refusals": refusals,
-        "versions": [{"version": str(r[0] or "unknown"), "count": int(r[1])}
-                     for r in (res.get("versions") or [])
-                     if isinstance(r, (list, tuple)) and len(r) >= 2],
-        "chips": [{"chip": str(r[0] or "unknown"), "count": int(r[1])}
-                  for r in (res.get("chips") or [])
-                  if isinstance(r, (list, tuple)) and len(r) >= 2],
-        "ram": [{"ram_gb": str(r[0] or "unknown"), "count": int(r[1])}
-                for r in (res.get("ram") or [])
-                if isinstance(r, (list, tuple)) and len(r) >= 2],
-        "pack_flips": {"h3_lost": h3_lost, "rows": flip_rows},
-    }
 
 
-def _usage_attach_local(report: dict) -> dict:
-    """Ride this machine's own totals along with whatever we return.
-
-    Owner, 2026-09-18: "when I ask you for total renders, I mean total renders
-    from the fleet too… one of the first windows I want to see is total renders
-    for all the fleet." The dashboard used to show ONE number called
-    "Total renders" whose meaning silently changed with whether a query key was
-    configured — the fleet's total, or this Mac's. Two numbers, both labelled,
-    always: the fleet answers "how much is this app used", the machine answers
-    "how much have I used it", and neither can be mistaken for the other.
-    """
-    try:
-        # Fixed 7-day window regardless of the dashboard's selected range —
-        # this block is an evergreen "how much have I used it" reference
-        # (same idea as the fleet tiles' wau), not the range-scoped view.
-        local = _usage_local_report("7d")
-    except Exception:
-        return report
-    report["machine"] = {
-        "total_renders": (local.get("tiles") or {}).get("total_renders"),
-        "renders_7d": (local.get("tiles") or {}).get("renders_in_range"),
-        "error_rate_pct": (local.get("tiles") or {}).get("error_rate_pct"),
-        "first_day": (((local.get("growth") or {}).get("installs_by_day") or [{}])[0]
-                      or {}).get("date"),
-    }
-    return report
 
 
-def _usage_report(force: bool = False, range_key: str = STATS_RANGE_DEFAULT) -> dict:
-    """What GET /stats/usage returns. Fleet when a query key is configured
-    and the 6 h cache is stale; otherwise the cache; otherwise local.
-
-    Either way the payload carries `machine` (this Mac) AND says whether the
-    fleet half is available — `fleet_blocked` is "no_key" or "query_failed",
-    so the dashboard can show the fleet tile as unknown with a remedy instead
-    of quietly substituting a local number under a fleet label.
-
-    Cached PER RANGE (stats-v2, 2026-09-30): USAGE_FLEET_CACHE on disk holds
-    one entry per range key, each with its own `_fetched_at`, so switching
-    the dashboard's range control doesn't serve 7-day numbers under a
-    30-day label or force a fresh PostHog round trip on every click — only
-    the FIRST time a given range goes stale within the 6 h TTL."""
-    range_key = range_key if range_key in STATS_RANGE_DAYS else STATS_RANGE_DEFAULT
-    with _USAGE_FLEET_LOCK:
-        if _analytics_query_key():
-            if not force:
-                try:
-                    all_cached = json.loads(USAGE_FLEET_CACHE.read_text(encoding="utf-8"))
-                    cached = all_cached.get(range_key) if isinstance(all_cached, dict) else None
-                    if (cached and time.time() - float(cached.get("_fetched_at") or 0)
-                            < USAGE_FLEET_TTL_SEC):
-                        cached = dict(cached)
-                        cached["cached"] = True
-                        cached["fleet_blocked"] = ""
-                        return _usage_attach_local(cached)
-                except (OSError, ValueError, json.JSONDecodeError, AttributeError):
-                    pass
-            fleet = None
-            try:
-                fleet = _usage_fleet_report(range_key)
-            except Exception:
-                fleet = None
-            if fleet:
-                fleet["_fetched_at"] = time.time()
-                fleet["fleet_blocked"] = ""
-                try:
-                    _ensure_state_dir()
-                    try:
-                        all_cached = json.loads(USAGE_FLEET_CACHE.read_text(encoding="utf-8"))
-                        if not isinstance(all_cached, dict):
-                            all_cached = {}
-                    except (OSError, ValueError, json.JSONDecodeError):
-                        all_cached = {}
-                    all_cached[range_key] = fleet
-                    atomic_write_text(USAGE_FLEET_CACHE,
-                                      json.dumps(all_cached, indent=2))
-                except Exception:
-                    pass
-                return _usage_attach_local(fleet)
-            local = _usage_local_report(range_key)
-            local["fleet_blocked"] = "query_failed"
-            local["warning"] = ("PostHog query failed - showing this machine "
-                                "only. Check the personal API key in Settings.")
-            return _usage_attach_local(local)
-    local = _usage_local_report(range_key)
-    local["fleet_blocked"] = "no_key"
-    return _usage_attach_local(local)
 
 
 def _apply_generation_profile_to_job(job: dict) -> None:
@@ -19822,32 +20611,12 @@ def ltx_mode_price_card(mode: str, steps: int | None = None, *,
 
 def get_memory() -> dict:
     info = {"total_gb": 0.0, "used_gb": 0.0, "pressure_pct": 0, "swap_gb": 0.0}
-    try:
-        total = int(subprocess.run(["sysctl", "-n", "hw.memsize"],
-            capture_output=True, text=True, errors="replace", timeout=1).stdout.strip())
-        info["total_gb"] = total / 1024**3
-        vm = subprocess.run(["vm_stat"], capture_output=True, text=True, errors="replace", timeout=1).stdout
-        m = re.search(r"page size of (\d+)", vm)
-        page_size = int(m.group(1)) if m else 16384
-
-        def pages(name: str) -> int:
-            mm = re.search(rf"{re.escape(name)}:\s+(\d+)", vm)
-            return int(mm.group(1)) if mm else 0
-
-        used_bytes = (pages("Pages active") + pages("Pages wired down")
-                      + pages("Pages occupied by compressor")) * page_size
-        info["used_gb"] = used_bytes / 1024**3
-        info["pressure_pct"] = round(used_bytes / total * 100) if total else 0
-
-        swap = subprocess.run(["sysctl", "-n", "vm.swapusage"],
-            capture_output=True, text=True, errors="replace", timeout=1).stdout
-        m = re.search(r"used\s*=\s*([\d.]+)([KMG])", swap)
-        if m:
-            v = float(m.group(1))
-            mult = {"K": 1 / 1024 / 1024, "M": 1 / 1024, "G": 1.0}[m.group(2)]
-            info["swap_gb"] = v * mult
-    except Exception:
-        pass
+    mem = hostinfo.memory_usage()
+    total = mem["total"]
+    info["total_gb"] = total / 1024**3
+    info["used_gb"] = mem["used"] / 1024**3
+    info["pressure_pct"] = round(mem["used"] / total * 100) if total else 0
+    info["swap_gb"] = mem["swap_used"] / 1024**3
     # SYS-19: `pressure_pct` above (active+wired+compressed / total) is a
     # USED ratio, not a pressure signal — plan_memory_policy() above
     # deliberately keeps using it exactly as-is (its 82%+swap>=4GB
@@ -19861,14 +20630,7 @@ def get_memory() -> dict:
     # jetsam-kill (1 normal / 2 warning / 3 critical) — a genuine pressure
     # level, not a used ratio. New field, additive; nothing that reads
     # pressure_pct changes.
-    try:
-        lvl = subprocess.run(
-            ["sysctl", "-n", "kern.memorystatus_vm_pressure_level"],
-            capture_output=True, text=True, errors="replace", timeout=1,
-        ).stdout.strip()
-        info["pressure_level"] = int(lvl) if lvl.isdigit() else 1
-    except Exception:
-        info["pressure_level"] = 1
+    info["pressure_level"] = hostinfo.pressure_level()
     return info
 
 
@@ -20038,8 +20800,9 @@ def _mp4_boxes(buf: bytes, start: int = 0, end: int | None = None):
         pos += size
 
 
-def _mp4_display_dims(path) -> tuple[int, int] | None:
-    """(width, height) of an mp4's first video track, from its tkhd box."""
+def _mp4_read_moov(path) -> bytes | None:
+    """The `moov` box of an mp4 (its track headers), or None. Seeks over the
+    top-level boxes and never reads `mdat`, so it costs a few KB per file."""
     try:
         with open(path, "rb") as fh:
             total = os.fstat(fh.fileno()).st_size
@@ -20067,6 +20830,12 @@ def _mp4_display_dims(path) -> tuple[int, int] | None:
                 pos += size
     except OSError:
         return None
+    return moov or None
+
+
+def _mp4_display_dims(path) -> tuple[int, int] | None:
+    """(width, height) of an mp4's first video track, from its tkhd box."""
+    moov = _mp4_read_moov(path)
     if not moov:
         return None
     for typ, a, b in _mp4_boxes(moov):
@@ -20097,6 +20866,160 @@ def _output_dims(path) -> tuple[int, int] | None:
     dims = _mp4_display_dims(path)
     _OUTPUT_DIMS_CACHE[key] = (st.st_mtime_ns, st.st_size, dims)
     return dims
+
+
+# W6 (2026-10-19): Add sound was nearly undiscovered — 3 renders by 2
+# users in 14 days against 115 Lip-sync renders. The gallery and the player now
+# offer it on every SILENT clip, which needs the server to know which clips are
+# silent without the browser probing anything:
+#   * no audio track at all — read from the mp4's own track headers (the moov
+#     box, a few KB, the same read the size chip already does), answered inline;
+#   * an audio track that is digital silence (an exported Editor cut, a muted
+#     import) — one ffmpeg volumedetect pass, run on a background thread and
+#     never on the request; the listing says None ("not known yet") until the
+#     answer lands and the next poll carries it.
+# Every answer is cached per (mtime, size) and persisted in STATE_DIR, so a
+# clip is decoded once in its life, not once per /status poll or per restart.
+OUTPUT_SILENT_MAX_DB = -80.0       # volumedetect max_volume at or under = silence
+_SILENCE_CACHE_NAME = "output_silence.json"
+_SILENCE_CACHE: dict[str, list] = {}       # path -> [mtime_ns, size, silent]
+_SILENCE_LOCK = threading.Lock()
+_SILENCE_PENDING: "collections.OrderedDict[str, None]" = collections.OrderedDict()
+_SILENCE_WAKE = threading.Event()
+_SILENCE_STATE = {"loaded": False, "thread": None, "dirty": False}
+
+
+def _mp4_has_audio_track(path) -> bool | None:
+    """True/False when the mp4's header says whether it carries a sound
+    track (a `trak` whose `hdlr` is `soun`); None when it cannot be read."""
+    moov = _mp4_read_moov(path)
+    if not moov:
+        return None
+    for typ, a, b in _mp4_boxes(moov):
+        if typ != b"trak":
+            continue
+        for mtyp, ma, mb in _mp4_boxes(moov, a, b):
+            if mtyp != b"mdia":
+                continue
+            for htyp, ha, hb in _mp4_boxes(moov, ma, mb):
+                # hdlr: version+flags (4), pre_defined (4), handler_type (4)
+                if htyp == b"hdlr" and hb - ha >= 12 and moov[ha + 8:ha + 12] == b"soun":
+                    return True
+    return False
+
+
+def _audio_is_digital_silence(path) -> bool | None:
+    """Whether a clip's first audio stream never rises above
+    OUTPUT_SILENT_MAX_DB. None when ffmpeg cannot say (no decoder, a broken
+    file, a timeout) — the clip is then simply not offered Add sound."""
+    try:
+        r = subprocess.run(
+            [str(FFMPEG), "-nostdin", "-hide_banner", "-v", "info", "-i", str(path),
+             "-map", "0:a:0", "-af", "volumedetect", "-f", "null", "-"],
+            capture_output=True, text=True, errors="replace", timeout=60)
+    except Exception:
+        return None
+    m = re.search(r"max_volume:\s*(-?inf|-?[0-9.]+)\s*dB", r.stderr or "")
+    if not m:
+        return None
+    v = m.group(1)
+    if v.endswith("inf"):
+        return v.startswith("-")
+    try:
+        return float(v) <= OUTPUT_SILENT_MAX_DB
+    except ValueError:
+        return None
+
+
+def _silence_cache_path() -> Path:
+    return STATE_DIR / _SILENCE_CACHE_NAME
+
+
+def _silence_load_once() -> None:
+    if _SILENCE_STATE["loaded"]:
+        return
+    _SILENCE_STATE["loaded"] = True
+    try:
+        raw = json.loads(_silence_cache_path().read_text())
+        if isinstance(raw, dict):
+            for k, v in raw.items():
+                if isinstance(v, list) and len(v) == 3:
+                    _SILENCE_CACHE[str(k)] = v
+    except (OSError, ValueError):
+        pass
+
+
+def _silence_save() -> None:
+    with _SILENCE_LOCK:
+        if not _SILENCE_STATE["dirty"]:
+            return
+        _SILENCE_STATE["dirty"] = False
+        snap = {k: v for k, v in _SILENCE_CACHE.items() if v[2] is not None}
+    snap = {k: v for k, v in snap.items() if os.path.exists(k)}
+    try:
+        atomic_write_text(_silence_cache_path(), json.dumps(snap))
+    except Exception:
+        pass
+
+
+def _silence_worker() -> None:
+    while True:
+        _SILENCE_WAKE.wait(timeout=30)
+        _SILENCE_WAKE.clear()
+        while True:
+            with _SILENCE_LOCK:
+                if not _SILENCE_PENDING:
+                    break
+                path, _ = _SILENCE_PENDING.popitem(last=False)
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            silent = _audio_is_digital_silence(path)
+            with _SILENCE_LOCK:
+                _SILENCE_CACHE[path] = [st.st_mtime_ns, st.st_size, silent]
+                _SILENCE_STATE["dirty"] = True
+        _silence_save()
+
+
+def output_is_silent(path) -> bool | None:
+    """True when a gallery clip has no sound (no audio track, or a track of
+    digital silence), False when it has sound, None when not known yet.
+    Never decodes on the caller's thread — see the W6 note above."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = str(path)
+    with _SILENCE_LOCK:
+        _silence_load_once()
+        hit = _SILENCE_CACHE.get(key)
+        if hit and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
+            # None here = queued, or ffmpeg could not say; either way the
+            # header is not re-read and nothing is queued twice.
+            return hit[2]
+    has_audio = _mp4_has_audio_track(path)
+    if has_audio is None:
+        return None
+    with _SILENCE_LOCK:
+        if not has_audio:
+            _SILENCE_CACHE[key] = [st.st_mtime_ns, st.st_size, True]
+            _SILENCE_STATE["dirty"] = True
+            silent = True
+        else:
+            # Remember "has a track, level unknown" so the header is not
+            # re-read every poll while the worker gets to it.
+            _SILENCE_CACHE[key] = [st.st_mtime_ns, st.st_size, None]
+            _SILENCE_PENDING[key] = None
+            silent = None
+            if _SILENCE_STATE["thread"] is None:
+                t = threading.Thread(target=_silence_worker, name="output-silence",
+                                     daemon=True)
+                _SILENCE_STATE["thread"] = t
+                t.start()
+    if silent is None:
+        _SILENCE_WAKE.set()
+    return silent
 
 
 def _probe_video_frames(path: str) -> int:
@@ -20183,6 +21106,53 @@ def ltx_grid_frames_up(frames: int) -> int:
 # The longest clip the ×2 lane renders whole unless the form asks for more:
 # a 5 s H3 High render (124 frames) on its LTX grid (129). Measured there.
 UPSCALE_FULL_CLIP_FRAMES = 129
+
+
+# Upscale ×2 safety rail: the lane doubles the source canvas, and above QHD
+# the output exhausted 96 GB + swap (3072×1792 did, 2026-10-12). Refused at
+# queue time, in the form's own words, instead of after a long render.
+# The limit is QHD's PIXEL COUNT (2560×1440 = 3.7 MP), whatever the shape — a
+# portrait 1440×2560 or a square 1536×1536 costs no more memory than landscape
+# QHD — and it is judged on the canvas the lane will actually render (the
+# tier's own size cap included), not on a blind ×2.
+UPSCALE_MAX_OUTPUT_W = 2560
+UPSCALE_MAX_OUTPUT_H = 1440
+
+
+def upscale_output_canvas(src_w, src_h) -> tuple[int, int] | None:
+    """The canvas an Upscale ×2 of a src_w×src_h clip renders at on this Mac,
+    or None when the size is unknown or the tier refuses it anyway (scale
+    < 1.25 has its own sentence). The worker's own arithmetic, shared."""
+    try:
+        sw, sh = int(src_w or 0), int(src_h or 0)
+    except (TypeError, ValueError):
+        return None
+    if sw <= 0 or sh <= 0:
+        return None
+    cap = int(tier_max_dim("i2v") or 0) or max(sw, sh) * 2
+    scale = min(2.0, cap / float(max(sw, sh)))
+    if scale < 1.25:
+        return None
+    return ltx_floor_canvas(int(sw * scale), int(sh * scale))
+
+
+def upscale_output_refusal(src_w, src_h) -> str | None:
+    """None if the ×2 of a src_w×src_h clip fits within QHD, else the sentence."""
+    canvas = upscale_output_canvas(src_w, src_h)
+    if not canvas:
+        return None
+    out_w, out_h = canvas
+    # PIXELS, not a rectangle (Codex 4.19.2): a square 768 source becomes
+    # 1536x1536 - 2.4 MP, well under QHD's 3.7 MP - and a box test refused it.
+    if out_w * out_h <= UPSCALE_MAX_OUTPUT_W * UPSCALE_MAX_OUTPUT_H:
+        return None
+    sw, sh = int(src_w), int(src_h)
+    portrait = sh > sw
+    lim_w, lim_h = ((UPSCALE_MAX_OUTPUT_H, UPSCALE_MAX_OUTPUT_W) if portrait
+                    else (UPSCALE_MAX_OUTPUT_W, UPSCALE_MAX_OUTPUT_H))
+    return (f"The source is {sw}×{sh}; ×2 would be {out_w}×{out_h}, above the "
+            f"{lim_w}×{lim_h} limit. Render the source at "
+            f"{lim_w // 2}×{lim_h // 2} or smaller.")
 
 
 def upscale_frame_plan(src_frames: int, form_frames=None) -> tuple[int, int]:
@@ -21207,6 +22177,9 @@ def list_outputs(
     for _e in sliced:
         _d = _output_dims(_e["path"]) if _e.get("kind") == "video" else None
         _e["width"], _e["height"] = (_d if _d else (None, None))
+        # W6: True on a clip with no sound (the gallery and the player offer
+        # Add sound on it), False with sound, None while not known yet.
+        _e["silent"] = output_is_silent(_e["path"]) if _e.get("kind") == "video" else None
     if return_total:
         return sliced, total
     return sliced
@@ -21416,6 +22389,9 @@ class WarmHelper:
         # The phase the helper was in at its last line - a watchdog kill is
         # remembered with it ("encode" / "load" / "denoise" / "decode").
         self._last_phase = ""
+        # 4.19.2: the closed class of the last native error line the helper
+        # printed (crash_line_class) - what a SIGABRT actually said.
+        self._crash_line = ""
         # What the helper said on its way out. A helper that dies during
         # startup prints its traceback and exits, and the panel used to
         # report only the bookkeeping event — `helper failed to start:
@@ -21426,6 +22402,9 @@ class WarmHelper:
         # Wide enough that a traceback's frames survive an argument dump
         # printed under the exception (see failure_frame).
         self._boot_tail: collections.deque = collections.deque(maxlen=40)
+        # 4.19.6: how many runs the LIVE helper process has finished (0 = a
+        # fresh process). See run(): prompt-encoding aborts follow a warm helper.
+        self._jobs_in_proc = 0
 
     def _ensure(self) -> None:
         with self.lock:
@@ -21439,7 +22418,7 @@ class WarmHelper:
             fault = engine_env_fault()
             if fault:
                 raise RuntimeError(f"engine venv is not usable: {fault}. "
-                                   f"{ENGINE_ENV_REPAIR}")
+                                   f"{_dist.say(ENGINE_ENV_REPAIR, ENGINE_ENV_REPAIR_MAC)}")
             busy = engine_env_busy()
             if busy:
                 raise RuntimeError(f"Not started: {busy}. Press Retry then.")
@@ -21485,6 +22464,10 @@ class WarmHelper:
             env["LTX_LOW_MEMORY"] = HELPER_LOW_MEMORY
             env["LTX_LOW_RAM_STREAM"] = "1" if low_ram_streaming_enabled() else "0"
             env["LTX_STREAM_LORA"] = "1" if low_ram_streaming_enabled() else "0"
+            # 4.19.10: the VAE decode budget follows this Mac's memory (the
+            # engine reads it at decode time). The user's own value wins.
+            if not (os.environ.get("LTX2_VAE_DECODE_BUDGET_GB") or "").strip():
+                env["LTX2_VAE_DECODE_BUDGET_GB"] = f"{vae_decode_budget_gb():g}"
             env["LTX_ENABLE_MODEL_UPSCALE"] = "1" if MODEL_UPSCALE_ENABLED else "0"
             # Output codec env vars sourced from panel settings. The patched
             # ffmpeg call inside ltx_core_mlx reads these at job time, so
@@ -21544,6 +22527,7 @@ class WarmHelper:
                      + ", ".join(f"{k}={env[k]}" for k in _steps))
             push(f"Spawning warm helper (low_memory={HELPER_LOW_MEMORY}, idle_timeout={HELPER_IDLE_TIMEOUT}s)")
             helper_cwd = str(MLX) if MLX.exists() else str(ROOT)
+            self._jobs_in_proc = 0
             self.proc = subprocess.Popen(
                 [str(HELPER_PYTHON), str(HELPER_SCRIPT)],
                 cwd=helper_cwd, env=env,
@@ -21672,6 +22656,17 @@ class WarmHelper:
                     return None
                 if not chunk:
                     # EOF — helper closed stdout (likely crashed or was killed).
+                    # A native abort's last words can arrive WITHOUT a final
+                    # newline; they used to be dropped here unread, so the
+                    # watchdog line that names the crash never reached the
+                    # sniffer (4.19.2).
+                    _tail = self._read_carry.decode("utf-8", "replace").strip()
+                    self._read_carry = b""
+                    if _tail:
+                        push(_tail)
+                        if collect_tail is not None:
+                            collect_tail.append(_tail)
+                        self._sniff_helper_line(_tail)
                     return None
                 self._read_carry += chunk
                 continue  # loop back to drain complete lines from the buffer
@@ -21865,6 +22860,9 @@ class WarmHelper:
             self._metal_timeout_seen = True
         if not self._past_prompt_encode and self._PAST_PROMPT_ENCODE_RX.search(line):
             self._past_prompt_encode = True
+        _cls = crash_line_class(line)
+        if _cls:
+            self._crash_line = _cls
         for _rx, _phase in self._PHASE_RX:
             if _rx.search(line):
                 self._last_phase = _phase
@@ -21928,7 +22926,20 @@ class WarmHelper:
         if (key and self.gemma_max_length is None
                 and metal_watchdog_needs_short_encode(key)):
             self.gemma_max_length = self.GEMMA_FALLBACK_MAX_LENGTH
+        # 4.19.6 (fleet, 4.19.2+): 37 of 40 LTX GPU aborts died in prompt
+        # encoding, and on the install that carried most of them 47 of 49
+        # warm-helper starts died there against 22 of 74 fresh ones - the
+        # 4.17.5 re-run worked because it started a NEW helper, not because
+        # of its shorter steps. A setting macOS already stopped in encoding
+        # therefore starts in a fresh helper (~10-15 s; output unchanged).
+        if (key and self._jobs_in_proc > 0 and self.is_alive()
+                and metal_watchdog_needs_short_encode(key)):
+            push("[gpu] Starting a fresh engine process for this render - macOS "
+                 "stopped this setting while reading the prompt before.")
+            with self.run_lock:
+                self.kill()
         short = bool(self.gpu_short_session)
+        abort_retry_used = False
         if short and job is not None:
             _gpu_steps_note(job)
         # Each re-run must bring a mitigation the last run did not have: short
@@ -21936,10 +22947,32 @@ class WarmHelper:
         # most three runs, and only while something is left to try.
         for _attempt in range(3):
             self._set_gpu_steps(short)
+            if job is not None:
+                job["helper_warm"] = bool(self._jobs_in_proc > 0 and self.is_alive())
             try:
                 return self._run_once(job_spec, timeout=timeout)
             except RuntimeError as exc:
                 watchdog = self._metal_timeout_seen and not self.is_alive()
+                # 4.19.6: a GPU abort that is NOT the watchdog (Metal's
+                # "Internal Error", an innocent-victim or other command-buffer
+                # error), in prompt encoding. Never retried before, and the
+                # queue moved straight on to the next job, which died the same
+                # way: re-runs within ~30 s failed 29 of 32 times, starts 30 s
+                # to 5 min later passed 16 of 19. So: once, in a fresh helper,
+                # after a pause. Nothing is recorded against the setting and
+                # the error, if it comes back, is the same native one. Only
+                # while an attempt is left (Codex 4.19.6: a third-run abort
+                # waited and then fell through to "unreachable").
+                if (not watchdog and not abort_retry_used and _attempt < 2
+                        and self._crash_line in METAL_ABORT_RETRY_LINES
+                        and self._last_phase == "encode"
+                        and not self.is_alive()):
+                    abort_retry_used = True
+                    if self._abort_cooldown(job):
+                        raise
+                    if job is not None:
+                        job["gpu_abort_retry"] = True
+                    continue
                 if not watchdog:
                     raise
                 gemma = self._gemma_fallback_applies()
@@ -21959,11 +22992,13 @@ class WarmHelper:
                     if short and key and not cancelled:
                         # The store now refuses this setting for a day; say
                         # so, with the way out.
+                        _way = metal_watchdog_way((params or {}).get("mode"),
+                                                  self._last_phase)
                         raise RuntimeError(
                             f"{exc} This render already ran in short GPU steps, "
-                            f"so this size is not started again on this Mac for "
-                            f"24 hours - press Retry smaller, or pick a lower "
-                            f"quality or a shorter clip.") from exc
+                            f"so this size is not started again on this Mac "
+                            f"{metal_watchdog_pause_words(self._last_phase)}. "
+                            f"{_way}.") from exc
                     raise
                 if gemma:
                     self.gemma_max_length = self.GEMMA_FALLBACK_MAX_LENGTH
@@ -21986,12 +23021,29 @@ class WarmHelper:
                        "from now on.")
         raise RuntimeError("unreachable: the watchdog retry loop ended")
 
+    def _abort_cooldown(self, job: dict | None) -> bool:
+        """Wait METAL_ABORT_COOLDOWN_SEC before re-running after a GPU abort,
+        waking every second for a Stop. True when the job was stopped."""
+        push(f"[gpu] The graphics chip reported an error while reading the "
+             f"prompt (Metal: {self._crash_line}). Waiting "
+             f"{METAL_ABORT_COOLDOWN_SEC} s, then rendering it again once in a "
+             f"fresh engine process.")
+        deadline = time.monotonic() + METAL_ABORT_COOLDOWN_SEC
+        while time.monotonic() < deadline:
+            with LOCK:
+                if job is not None and job.get("cancel_requested"):
+                    return True
+            time.sleep(1)
+        with LOCK:
+            return bool(job is not None and job.get("cancel_requested"))
+
     def _run_once(self, job_spec: dict, timeout: float | None = None) -> dict:
         # Per-run detector state — reset here so a watchdog kill seen on an
         # earlier job can't arm the fallback for an unrelated failure.
         self._metal_timeout_seen = False
         self._past_prompt_encode = False
         self._last_phase = ""
+        self._crash_line = ""
         # Whole-run serialization so concurrent callers don't both park in
         # _read_until and grab each other's done/error events. See __init__
         # for why this is distinct from self.lock.
@@ -22041,6 +23093,8 @@ class WarmHelper:
                 raise RuntimeError(
                     f"helper timed out after {timeout:g}s waiting for a response"
                 )
+            if self.is_alive():
+                self._jobs_in_proc += 1
             return self._dispatch_run_event(ev)
 
     # 4.17.3 (fleet): "helper pipe closed without an event; returncode=None"
@@ -22099,15 +23153,18 @@ class WarmHelper:
                     # LTX2_GEMMA_MAX_LENGTH, which upstream reads in
                     # PromptEncoder.encode; see the Gemma fallback block
                     # below, which arms it automatically on a detected kill.
+                    # 4.19.2: this sentence used to QUOTE the watchdog line
+                    # ("Caused GPU Timeout Error") as an example - and the
+                    # error classifier matched the quote, so every unexplained
+                    # SIGABRT was counted as the GPU watchdog (24 of 4.19.1's
+                    # 37 "watchdog" failures: no such line, no retry). The
+                    # watchdog has its own sentence below, used only when
+                    # its line really is in the log.
                     "SIGABRT": (
-                        "C-level abort. If the log shows '[METAL] Command buffer "
-                        "execution failed: Caused GPU Timeout Error', this is the "
-                        "macOS GPU watchdog killing an over-long Metal command "
-                        "buffer (seen on M1/M2-class GPUs during prompt encoding). "
-                        "Phosphene retries prompt encoding once at a shorter "
-                        "padded length when it sees that line; if it never "
-                        "reached the panel, please open an issue with your chip "
-                        "+ macOS version and the crashlog at "
+                        "C-level abort inside the render engine; no GPU "
+                        "watchdog line reached the panel. Please open an issue "
+                        "with your chip + macOS version, the last lines of the "
+                        "Logs tab, and the crashlog at "
                         "~/Library/Logs/DiagnosticReports/python3.11_*.ips"
                     ),
                     "SIGBUS":  "memory access fault — could indicate a Metal driver issue or a bad weight file",
@@ -22116,6 +23173,15 @@ class WarmHelper:
                 # log, stop hedging — name it outright and say what we already
                 # tried. The conditional SIGABRT wording above still covers the
                 # case where the line never reached us.
+                # 4.19.2: closed words for the fleet - what the last native
+                # line said and which phase the helper had reached ("start" =
+                # before its first step line). Never the line itself.
+                _cj = _thread_job()
+                if _cj is not None:
+                    _cj["crash_line"] = self._crash_line or "none"
+                    _cj["crash_phase"] = (self._last_phase
+                                          if self._last_phase in WATCHDOG_PHASES
+                                          else "start")
                 if self._metal_timeout_seen:
                     _tried = (
                         f" Prompt encoding was already retried at "
@@ -22523,6 +23589,29 @@ def _fit_inside(w: int, h: int, target_w: int, target_h: int) -> tuple[int, int]
     return max(2, int(round(w * s))), max(2, int(round(h * s)))
 
 
+#: Every LTX `upscale` value compute_upscale_plan() can plan (or skip).
+LTX_UPSCALE_MODES = ("off", "native", "ltx_x2", "fit_720p", "fit_1080p", "x2")
+
+
+def normalize_ltx_upscale(value, quality: str | None) -> tuple[str, str]:
+    """(mode, note): an LTX export size compute_upscale_plan() knows.
+
+    FLEET (4.19.5): `unknown upscale mode: fit_360p` on an i2v job. make_job
+    took the field verbatim and compute_upscale_plan() only rejected it AFTER
+    the render - the whole generation burned, then the job failed with no
+    output. A value from an older sidecar, a Retry/Restore of such a job or an
+    API caller now falls back to the quality's own default before the render,
+    and the note says so."""
+    raw = str(value if value is not None else "").strip().lower()
+    if raw in ("", "none"):
+        return "off", ""
+    if raw in LTX_UPSCALE_MODES:
+        return raw, ""
+    fallback = "fit_720p" if quality == "balanced" else "off"
+    return fallback, (f"export size {str(value)[:40]!r} is not one this version "
+                      f"has - exporting at {fallback} instead")
+
+
 def compute_upscale_plan(w: int, h: int, mode: str | None,
                           helper_did_model_upscale: bool = False) -> dict | None:
     """Plan a panel-side ffmpeg upscale pass. Returns None when no further
@@ -22879,11 +23968,15 @@ def stop_current_job(timeout: float = 5.0, expect_id: str | None = None) -> bool
         push(f"image-kill failed: {type(e).__name__}: {e}")
     # Mux runs in its own process group outside the helper's. Kill it too,
     # otherwise ffmpeg keeps writing the (now-orphaned) output file.
+    # PermissionError as well as ProcessLookupError on every killpg below: a
+    # group whose members have all exited but are not yet reaped answers
+    # EPERM on macOS, and that escaped Stop itself (the whole-suite flake in
+    # test_review_416_ltx's Stop-during-join test, 4.18.0 -> 4.19.6).
     if mux_pgid:
         try:
             os.killpg(mux_pgid, signal.SIGTERM)
             push(f"SIGTERM sent to mux pgid {mux_pgid}")
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
     # Hailuo H3 renders live entirely outside HELPER — a `caffeinate → python →
     # ffmpeg` tree in its own process group. Without this, /stop left a 40 GiB
@@ -22893,7 +23986,7 @@ def stop_current_job(timeout: float = 5.0, expect_id: str | None = None) -> bool
         try:
             os.killpg(h3_pgid, signal.SIGTERM)
             push(f"SIGTERM sent to H3 pgid {h3_pgid}")
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
         else:
             # Same escape hatch the trainer gets: MLX can sit inside a Metal
@@ -22903,7 +23996,7 @@ def stop_current_job(timeout: float = 5.0, expect_id: str | None = None) -> bool
                 try:
                     os.killpg(pgid, signal.SIGKILL)
                     push(f"SIGKILL sent to H3 pgid {pgid} (no SIGTERM ack)")
-                except ProcessLookupError:
+                except (ProcessLookupError, PermissionError):
                     pass
             threading.Thread(
                 target=_force_kill_h3, args=(8.0, h3_pgid),
@@ -22921,7 +24014,7 @@ def stop_current_job(timeout: float = 5.0, expect_id: str | None = None) -> bool
         try:
             os.killpg(train_pgid, signal.SIGTERM)
             push(f"SIGTERM sent to training pgid {train_pgid}")
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
         else:
             # Best-effort SIGKILL fallback for trainers stuck in MLX
@@ -22933,7 +24026,7 @@ def stop_current_job(timeout: float = 5.0, expect_id: str | None = None) -> bool
                 try:
                     os.killpg(pgid, signal.SIGKILL)
                     push(f"SIGKILL sent to training pgid {pgid} (no SIGTERM ack)")
-                except ProcessLookupError:
+                except (ProcessLookupError, PermissionError):
                     pass  # SIGTERM worked
             threading.Thread(
                 target=_force_kill_after, args=(8.0, train_pgid),
@@ -23375,6 +24468,10 @@ def oneshot_plan_beats(prompt: str, seconds: int, engine: str = "ltx") -> dict:
         return {"ok": False, "error": "prompt is required"}
     if seconds not in TAKE_SECONDS:
         return {"ok": False, "error": f"seconds must be one of {list(TAKE_SECONDS)}"}
+    if planner_model_missing():
+        return gemma3_refusal("Writing the beats",
+                              "the Storyboard planner's language model, Gemma 3",
+                              storyboard_planner.DEFAULT_MODEL_PATH)
     n = max(1, seconds // TAKE_BEAT_SECONDS)
     concept = _sb_take_concept(prompt, seconds)
     eng = "h3" if (str(engine or "").lower() == "h3" and _sb_h3_available()) else "ltx"
@@ -23661,7 +24758,13 @@ def take_expects_speech(params: dict, beats: list[str] | None = None) -> bool:
     shot with no mouth in it."""
     if (params.get("character_id") or "").strip():
         return True
-    text = " ".join([str(params.get("prompt") or "")] + [str(b) for b in (beats or [])])
+    # A part is judged by ITS OWN windows when it has any. The parent prompt
+    # carries every part's lines, so reading it made a part whose beats hold no
+    # speech at all (the second half of a 30 s one shot whose dialogue sat in
+    # the first) a "spoken" part: the gate scored a mouth with nothing to follow
+    # (-0.15) and spent two more 17-minute renders retaking it (2026-10-07).
+    own = [str(b) for b in (beats or []) if str(b or "").strip()]
+    text = " ".join(own) if own else str(params.get("prompt") or "")
     return bool(re.search(r'[“"][^”"]{2,}[”"]', text))
 
 
@@ -24400,6 +25503,13 @@ def _sb_h3_cost(quality_key: str, length_key: str):
         except Exception:
             turbo = False
         minutes = cell.get("turbo_min") if turbo else cell.get("eta_min")
+        # Best on High renders lightx2v v1.3 once it is built (make_job).
+        if not turbo and cell.get("v13_min"):
+            try:
+                if h3_v13_status().get("available"):
+                    minutes = cell["v13_min"]
+            except Exception:
+                pass
         # A Draft/Standard/High cell renders Fast when it is installed
         # (make_job's default), whatever Turbo says.
         if cell.get("tristep_min") and cell.get("tristep_default"):  # Fast by default
@@ -25050,14 +26160,16 @@ def storyboard_status() -> dict:
     """Compact Storyboard snapshot for the page bootstrap.
 
     `planner_present` answers the only question that could make the feature
-    unusable — and it is almost always yes, because the planner runs on the same
-    weights /prompt/enhance already loads. Nothing is ever downloaded.
+    unusable. The planner runs on the same weights /prompt/enhance loads
+    (Gemma 3), and since 4.20 a fresh install fetches those in the background
+    after the first boot - so for a while it can be no, with
+    `planner_pack_state` saying whether it is downloading or queued.
     """
     model = ""
     present = False
     try:
         model = str(storyboard_planner.DEFAULT_MODEL_PATH or "")
-        present = bool(model) and Path(model).is_dir()
+        present = bool(model) and not planner_model_missing()
     except Exception:
         pass
     s = get_settings()
@@ -25066,6 +26178,7 @@ def storyboard_status() -> dict:
         "planner_model": model,
         "planner_model_name": Path(model).name if model else "",
         "planner_present": present,
+        "planner_pack_state": "ready" if present else deferred_pack_state("gemma"),
         "ram_help": STORYBOARD_RAM_HELP,
         "ram_status": storyboard_planner_ram_status(),
         "engine_help": STORYBOARD_ENGINE_HELP,
@@ -30829,9 +31942,13 @@ def _helper_start_failure(ready: dict | None, tail) -> str:
     msg = f"helper failed to start: {what}"
     if cause:
         msg += f" — last line: {cause[:220]}"
-    msg += (". This is nearly always the install, not the render: click Update "
-            "in Pinokio (or reinstall Phosphene) so the ltx-2-mlx folder and "
-            "its Python environment are rebuilt. The whole trace is in Logs.")
+    msg += _dist.say(
+        ". This is nearly always the install, not the render: click Update "
+        "in Pinokio (or reinstall Phosphene) so the ltx-2-mlx folder and "
+        "its Python environment are rebuilt. The whole trace is in Logs.",
+        ". This is nearly always the install, not the render: quit Phosphene "
+        "and open it again so setup can check and rebuild the engine. The "
+        "whole trace is in Logs.")
     return msg
 
 
@@ -31141,7 +32258,17 @@ A2V_SEPARATOR_INSTALL: dict = {"state": "idle", "active": False}
 # after that. OFF until __main__ turns it on (a2v_separator_boot): importing
 # the panel from a test or a gate must never pip-install into a real venv.
 # PHOSPHENE_SEPARATOR_AUTOINSTALL=0 keeps it off for a test rig.
-A2V_SEPARATOR_AUTO: dict = {"enabled": False, "attempted": False}
+A2V_SEPARATOR_AUTO: dict = {"enabled": False, "attempted": False, "attempts": 0}
+# 4.19.2 (fleet: 12 of the week's 16 separator failures were the panel's ONE
+# automatic attempt at boot, most of them the network or a timeout). After a
+# failure like that, a voice-only job that needs the separator may start one
+# more automatic attempt once the failure is A2V_SEPARATOR_RETRY_AFTER_S old -
+# a connection that dropped at boot is often back by the time someone renders.
+# At most A2V_SEPARATOR_AUTO_MAX per panel process, and never for a cause that
+# fails the same way again (a resolver conflict, a full disk).
+A2V_SEPARATOR_AUTO_MAX = 3
+A2V_SEPARATOR_RETRY_AFTER_S = 600
+A2V_SEPARATOR_TRANSIENT_CAUSES = ("network", "timeout")
 A2V_SEPARATOR_TRIGGERS = ("boot", "job", "form")
 #: How long a voice-only job waits for an install before giving up. The
 #: install's own subprocess limit; a torch-less venv downloads torch too.
@@ -31168,17 +32295,38 @@ def a2v_separator_auto_start(trigger: str) -> bool:
     with A2V_SEPARATOR_INSTALL_LOCK:
         if A2V_SEPARATOR_INSTALL.get("active"):
             return True
-        if not A2V_SEPARATOR_AUTO.get("enabled") or A2V_SEPARATOR_AUTO.get("attempted"):
+        if not A2V_SEPARATOR_AUTO.get("enabled"):
+            return False
+        if A2V_SEPARATOR_AUTO.get("attempted") and not _a2v_separator_may_retry(trigger):
             return False
     if a2v_separator_status()["ready"]:
         return False
     with A2V_SEPARATOR_AUTO_LOCK:
-        if A2V_SEPARATOR_AUTO.get("attempted"):
-            with A2V_SEPARATOR_INSTALL_LOCK:
-                return bool(A2V_SEPARATOR_INSTALL.get("active"))
+        with A2V_SEPARATOR_INSTALL_LOCK:
+            if A2V_SEPARATOR_INSTALL.get("active"):
+                return True
+            if A2V_SEPARATOR_AUTO.get("attempted") and not _a2v_separator_may_retry(trigger):
+                return False
         A2V_SEPARATOR_AUTO["attempted"] = True
+        A2V_SEPARATOR_AUTO["attempts"] = int(A2V_SEPARATOR_AUTO.get("attempts") or 0) + 1
     code, _ = a2v_separator_install_start(trigger)
     return code in (202, 409)
+
+
+def _a2v_separator_may_retry(trigger: str, now: float | None = None) -> bool:
+    """Caller holds A2V_SEPARATOR_INSTALL_LOCK. May a job start another
+    automatic attempt after the last one failed? Only for a cause that can
+    clear on its own, only once it is old enough, and only a few times."""
+    if trigger != "job":
+        return False
+    if int(A2V_SEPARATOR_AUTO.get("attempts") or 0) >= A2V_SEPARATOR_AUTO_MAX:
+        return False
+    if A2V_SEPARATOR_INSTALL.get("state") != "failed":
+        return False
+    if A2V_SEPARATOR_INSTALL.get("cause") not in A2V_SEPARATOR_TRANSIENT_CAUSES:
+        return False
+    done = float(A2V_SEPARATOR_INSTALL.get("finished_ts") or 0)
+    return (now if now is not None else time.time()) - done >= A2V_SEPARATOR_RETRY_AFTER_S
 
 
 A2V_SEPARATOR_AUTO_LOCK = threading.Lock()
@@ -31283,18 +32431,18 @@ def _a2v_separator_install_thread(trigger: str = "form") -> None:
     if error is None and not st["ready"]:
         error = "the install finished but the separator is still not importable"
         error_class = "import_failed"
+    _cause = (("timeout" if error_class == "timeout" else
+               str((_a2v_separator_record() or {}).get("cause") or ""))
+              if error else "")
     with A2V_SEPARATOR_INSTALL_LOCK:
         A2V_SEPARATOR_INSTALL.update(active=False, finished_ts=time.time(),
                                      state="failed" if error else "done",
-                                     error=error)
+                                     error=error, cause=_cause)
     push("[a2v] vocal separation " + (f"install failed: {error}" if error
                                       else "installed - Listen to the voice only is ready"))
     _analytics_separator_install(
         "failed" if error else "ok", f"panel_{trigger}", error_class,
-        ready=st["ready"], weights=st["weights"],
-        cause=("timeout" if error_class == "timeout" else
-               str((_a2v_separator_record() or {}).get("cause") or ""))
-        if error else "")
+        ready=st["ready"], weights=st["weights"], cause=_cause)
     # This run wrote the outcome record itself; mark it reported so the next
     # boot does not count it twice.
     _rec = _a2v_separator_record()
@@ -31498,6 +32646,33 @@ INPUT_MISSING_AUDIO = ("Lip-sync needs a song or a voice recording — pick one 
                        "the Audio slot first.")
 
 
+def _licence_image_cfg(engine_override: str, params: dict):
+    """The image-engine config a job would run with (for the licence check)."""
+    return _build_image_engine_config(engine_override, params)
+
+
+def job_licence_refusal(params: dict) -> dict | None:
+    """The HTTP 451 payload when this job's model needs a licence the user
+    has not accepted on this Mac yet (model_licences.py), else None.
+
+    For /queue/add, /queue/retry and /queue/batch; the worker repeats the
+    check (run_job_inner, _preflight_image_job) for every other way a job
+    can arrive - storyboards, One Shot, the API."""
+    key = model_licences.licence_for_job(params or {}, _licence_image_cfg)
+    return model_licences.refusal(STATE_DIR, key)
+
+
+def licence_refusal_for(key: str | None) -> dict | None:
+    """The same 451 payload for a named model (install routes)."""
+    return model_licences.refusal(STATE_DIR, key)
+
+
+def _raise_if_licence_missing(key: str | None) -> None:
+    ref = model_licences.refusal(STATE_DIR, key)
+    if ref:
+        raise RenderRefused("licence_required", ref["error"])
+
+
 def job_input_refusal(params: dict) -> str | None:
     """Why this job can only fail for want of an input, or None.
 
@@ -31581,6 +32756,51 @@ def job_input_refusal(params: dict) -> str | None:
         if not _exists(audio):
             return (f"audio file not found: {audio}. It was moved or deleted "
                     "after it was picked - pick it again in the Audio slot.")
+    elif m == "keyframe":
+        # 4.19.2 (fleet 4.19.1): a Keyframes job with no start image reached
+        # its turn and failed "start_image not found:" - checked here instead,
+        # the same two shapes run_job_inner accepts.
+        # On Hailuo H3 the start frame is optional (an end frame alone is the
+        # official last-frame task, h3_media_plan); on LTX both are needed.
+        free_start = str(p.get("engine") or "ltx").strip().lower() == "h3"
+        raw = str(p.get("keyframes_json") or "").strip()
+        imgs: list[str] = []
+        if raw:
+            try:
+                parsed = json.loads(raw)
+                imgs = [normalize_pasted_path(str((k or {}).get("image_path") or "").strip())
+                        for k in parsed] if isinstance(parsed, list) else []
+            except (ValueError, TypeError, AttributeError):
+                imgs = []
+            if len(imgs) < 2:
+                return ("Keyframes needs at least two pictures - add a start and "
+                        "an end frame.")
+        else:
+            imgs = [_path("start_image"), _path("end_image")]
+            if not imgs[0] and not free_start:
+                return ("Keyframes needs a start frame - drop a picture into the "
+                        "Start slot.")
+            if not imgs[1]:
+                return ("Keyframes needs an end frame - drop a picture into the "
+                        "End slot.")
+        if free_start and imgs and not imgs[0]:
+            imgs = imgs[1:]
+        for img in imgs:
+            if not img or not _exists(img):
+                return (f"A keyframe picture is no longer on disk: {img}. It was "
+                        "moved, renamed or deleted after it was picked. Pick it "
+                        "again, or choose another picture.")
+    # 4.19.2 (fleet 4.19.1): a picked LoRA that had been moved or deleted
+    # failed in the helper after its turn ("LoRA file not found"). An ABSOLUTE
+    # path must be on disk now (the pickers send absolute paths). A Hugging
+    # Face repo id, or a relative name the helper resolves from its own folder,
+    # is left to the helper.
+    for entry in (p.get("loras") or []):
+        lp = str((entry or {}).get("path") or "").strip() if isinstance(entry, dict) else ""
+        if lp.startswith("/") and not Path(lp).is_file():
+            return (f"The LoRA {Path(lp).name} is no longer on disk ({lp}). It was "
+                    "moved or deleted after it was picked - pick it again, or "
+                    "un-pick it and render again.")
     return None
 
 
@@ -31989,7 +33209,8 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                     or _qcell.get("width") or 1024)
     default_h = int((_character_quality or {}).get("height")
                     or _qcell.get("height") or 576)
-    upscale = f("upscale", "fit_720p" if quality == "balanced" else "off")
+    upscale, _upscale_note = normalize_ltx_upscale(
+        f("upscale", "fit_720p" if quality == "balanced" else "off"), quality)
     requested_upscale_method = (f("upscale_method", "lanczos") or "lanczos").strip().lower()
     if requested_upscale_method == "model":
         requested_upscale_method = "pipersr"
@@ -32177,6 +33398,11 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                         else False if _h3_tristep_raw in ("0", "false", "off", "no")
                         else None)
     _h3_tristep = False
+    # lightx2v v1.3 on Best at High: on by default wherever it can run (the
+    # resolution is below, after Fast); "0" from the API keeps the full
+    # sampler, as a Steps pin does.
+    _h3_v13_off = (f("h3_v13", "") or "").strip().lower() in ("0", "false", "off", "no")
+    _h3_v13 = False
     # Which of the runner's ONE adapter slots this render spends. H3's
     # `--lora` is a single path (`default=None`, not `action="append"` — see
     # scripts/generate_staged.py), so a user LoRA and Turbo are mutually
@@ -32211,9 +33437,13 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             # A mode the INSTALLED runner predates: render it on LTX with a
             # sentence rather than queue an argparse failure. (Add sound has no
             # LTX lane; the worker refuses it with the update sentence.)
-            push(f"Hailuo H3 can render {H3_MODE_LABELS.get(mode_in, mode_in)} once "
-                 "its runner is updated (Update in Pinokio, or 'Update Hailuo H3 "
-                 "runner') — rendering this one on LTX.")
+            push(_dist.say(
+                f"Hailuo H3 can render {H3_MODE_LABELS.get(mode_in, mode_in)} once "
+                "its runner is updated (Update in Pinokio, or 'Update Hailuo H3 "
+                "runner') — rendering this one on LTX.",
+                f"Hailuo H3 needs a newer runner to render "
+                f"{H3_MODE_LABELS.get(mode_in, mode_in)}. Updating the runner "
+                "isn't available in the Mac app yet — rendering this one on LTX."))
             _engine = "ltx"
         elif not h3_capable():
             # Same verdict the refusal raises: the floor depends on the lane,
@@ -32288,6 +33518,15 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             _h3_turbo = False
             _h3_steps = 0
             _h3_upscale = "ltx_x2"
+        # lightx2v v1.3: what Best renders on High (Text and Image) once its
+        # adapter is built. Never with Fast or Turbo, never under a Steps pin
+        # (the pin IS the way to ask for the full sampler), never where it
+        # was not validated (other canvases, the dense pass, media modes).
+        if (not _h3_v13_off and not _h3_tristep and not _h3_turbo and not _h3_steps
+                and mode_in in H3_V13_MODES and h3_available()
+                and h3_cell_takes_v13(H3_TIERS[_h3_tier])
+                and h3_v13_status()["available"]):
+            _h3_v13 = True
         # Per-window prompts, matched to the cell that will ACTUALLY render.
         # Normalising after the fallback above is the whole point: a 15 s
         # request that degraded to 5 s has one window, and three prompts on a
@@ -32300,9 +33539,10 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             # dropped with a sentence, not queued into an argparse failure.
             push("Per-window prompts need `--chain-prompts` on the installed "
                  "H3 runner, which this checkout doesn't have — rendering "
-                 "every window with the main prompt. Re-run 'Install Hailuo "
-                 "H3' from the Phosphene sidebar to update the clone; your "
-                 "weights stay.")
+                 "every window with the main prompt. " + _dist.say(
+                     "Re-run 'Install Hailuo H3' from the Phosphene sidebar to "
+                     "update the clone; your weights stay.",
+                     "Updating the Hailuo H3 runner isn't available in the Mac app yet."))
             _h3_chain_prompts = []
         # Orientation: flip the resolved cell's canvas for vertical work.
         _h3_orientation = (f("h3_orientation", H3_ORIENTATION_DEFAULT)
@@ -32422,6 +33662,9 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             # resolved above. SAME allowlist trap: leave it out and the switch
             # silently renders Best.
             "h3_tristep": _h3_tristep,
+            # lightx2v v1.3 on Best at High, resolved above. SAME allowlist
+            # trap: leave it out and Best silently renders the full sampler.
+            "h3_v13": _h3_v13,
             # Which of H3's ONE adapter slots this render spends: "turbo"
             # (default) or "user". SAME allowlist trap as every key in this
             # dict — leave `h3_lora_slot` out and the Turbo-vs-LoRA control
@@ -32459,6 +33702,10 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             # say this. SAME allowlist trap.
             "h3_extend_seconds": _safe_float(f("h3_extend_seconds", "5"), 5.0,
                                              minimum=0.5),
+            # Which H3 prompt guards run ("" = the default set, "off", "all"
+            # or a comma list — h3_prompt_guards.parse_guard_setting). SAME
+            # allowlist trap: leave it out and an API "off" silently no-ops.
+            "h3_prompt_guards": f("h3_prompt_guards", "").strip().lower(),
             "take": _take,
             # LTX-2.5 distilled schedule preset — "" (tuned default) or
             # "fast"/"vendor", already gated above to the lane that defines
@@ -32713,6 +33960,7 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         # branches on WHY the count is what it is).
         job["params"]["steps"] = int(
             H3_TRISTEP_STEPS if _h3_tristep else
+            H3_V13_STEPS if _h3_v13 else
             h3_turbo_steps() if _h3_turbo else (_h3_steps or _tier_cfg["steps"]))
         job["params"]["h3_chain_windows"] = int(_tier_cfg.get("chain_windows") or 1)
         job["params"]["h3_window_frames"] = int(
@@ -32750,6 +33998,8 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         if job["params"]["frames"] != _req_f:
             push(f"{_req_f} frames isn't on the 8k+1 grid — rendering "
                  f"{job['params']['frames']} frames.")
+        if _upscale_note:
+            push(f"[export] {_upscale_note}")
         # A distilled-lane job runs exactly 8 steps; a stray count from the
         # H3 surface, a Params restore or a Retry is clamped, never refused.
         _steps_note = clamp_distilled_steps(job["params"])
@@ -33070,7 +34320,11 @@ _PREFLIGHT_BASE_GB: dict[tuple[str, int], float] = {
     ("ideogram", 6): 24.0,
     ("ideogram", 8): 32.0,
     # FLUX.2 — distilled 4B and base 4B/9B variants
-    ("flux2", 4):      6.0,
+    # 4.19.10, measured: Klein 4B 4-bit at 1024x1024 peaks 11.5 GiB of MLX
+    # memory (mflux --low-ram changes nothing). 8 GB free is the admission
+    # line (what Auto has always been priced at): macOS compresses the rest,
+    # and 16 GB Macs complete these renders (fleet: 86 in 30 days).
+    ("flux2", 4):      8.0,
     ("flux2", 6):      8.0,
     ("flux2", 8):     12.0,
     ("flux2_edit", 4): 6.0,   # klein-edit distilled 4B
@@ -33093,6 +34347,65 @@ _PREFLIGHT_BASE_GB: dict[tuple[str, int], float] = {
 _PREFLIGHT_9B_GB = 36.0
 
 
+def _effective_image_quantize(cfg) -> int:
+    """The bit width mflux will really run at. A pre-quantized model
+    ("...-mflux-4bit") keeps its stored width whatever -q asks (mflux 0.18
+    QuantizationResolution: stored wins a conflict), so the default Klein
+    config, saved as -q 6, runs - and must be priced - at 4 bits."""
+    m = re.search(r"(?<![0-9])([3-8])-?bit", str(getattr(cfg, "mflux_model", "") or "").lower())
+    if m:
+        return int(m.group(1))
+    try:
+        return int(cfg.mflux_quantize or 6)
+    except (TypeError, ValueError):
+        return 6
+
+
+#: 4.19.10: Macs at or under this much memory render the "Auto" image engine
+#: on FLUX.2 [klein] 4B at 4-bit when the saved Auto engine cannot fit them
+#: (16 GB Macs report 16.0).
+LOW_RAM_IMAGE_GB = 16.5
+KLEIN_4B_Q4_MODEL = "Runpod/FLUX.2-klein-4B-mflux-4bit"
+
+
+def low_ram_auto_image_config(cfg, form: dict | None = None):
+    """"Auto" on a 16 GB (or smaller) Mac: FLUX.2 [klein] 4B at 4-bit.
+
+    Fleet (30 days to 2026-10-21): 170 image refusals on 26 installs with
+    16 GB. Auto is the user's saved Settings engine, and on a small Mac that
+    can be one it can never hold (Reference Edit is 18-24 GB) - the refusal
+    then told them to "pick Auto", the engine it had just refused. Here an
+    Auto engine that does not fit this Mac is replaced, for this render only
+    (the saved setting is untouched), by the 4B Klein at 4 bits (~6 GB).
+    A Klein config already fits and only has its -q set to what it runs at.
+    Reference images need an edit engine Klein is not, so a render WITH
+    references keeps the saved engine and its honest refusal."""
+    if not (0 < float(SYSTEM_RAM_GB or 0) <= LOW_RAM_IMAGE_GB):
+        return cfg
+    if getattr(cfg, "kind", "") not in ("mflux", "hidream"):
+        return cfg                       # cloud (bfl) / mock: no local memory
+    fam = (agent_image_engine._resolve_mflux_family(cfg)
+           if cfg.kind == "mflux" else "hidream")
+    model = str(getattr(cfg, "mflux_model", "") or "").lower()
+    if fam == "flux2" and "klein" in model and "9b" not in model:
+        if int(cfg.mflux_quantize or 6) != 4:
+            cfg = agent_image_engine.ImageEngineConfig(**{**cfg.__dict__, "mflux_quantize": 4})
+        return cfg
+    if _image_engine_fit(_preflight_estimate_ram_gb(cfg))[0]:
+        return cfg                       # a small engine the user chose (Z-Image Turbo)
+    if (form or {}).get("refs"):
+        return cfg
+    push(f"[image] Auto on this {SYSTEM_RAM_GB:.0f} GB Mac: FLUX.2 [klein] 4B at 4-bit "
+         f"(the saved Auto engine needs a bigger Mac; Settings keeps it)")
+    return agent_image_engine.ImageEngineConfig(**{
+        **cfg.__dict__, "kind": "mflux", "mflux_model": KLEIN_4B_Q4_MODEL,
+        "mflux_family": "flux2", "mflux_base_model": "", "mflux_quantize": 4,
+        "mflux_steps": 4, "mflux_guidance": 1.0, "mflux_preset": None,
+        "mflux_lora_paths": [], "mflux_lora_scales": [],
+        # A saved CLI override names the OLD family's executable (review).
+        "mflux_python_path": ""})
+
+
 def _preflight_estimate_ram_gb(cfg) -> float:
     """Return the best-effort RAM estimate (GB) for the given image cfg."""
     if cfg.kind == "hidream":
@@ -33100,8 +34413,11 @@ def _preflight_estimate_ram_gb(cfg) -> float:
     if cfg.kind != "mflux":
         # `mock` engine doesn't allocate; `bfl` is cloud-side.
         return 1.0
-    fam = (cfg.mflux_family or "auto").lower()
-    q = int(cfg.mflux_quantize or 4)
+    # 4.19.10: the family the engine will actually run. A config saved with
+    # family "auto" (the default Klein config, i.e. what "Auto" renders on
+    # most Macs) matched no row here and fell back to the 8 GB guess.
+    fam = agent_image_engine._resolve_mflux_family(cfg)
+    q = _effective_image_quantize(cfg)
     model = (getattr(cfg, "mflux_model", "") or "").lower()
     if fam == "flux2" and "9b" in model:
         return _PREFLIGHT_9B_GB
@@ -33188,6 +34504,26 @@ def _image_engine_fit(need_gb: float) -> tuple[bool, int]:
     return (float(SYSTEM_RAM_GB or 0) >= floor), mac_gb
 
 
+def _image_free_gb(mem: dict) -> float:
+    """Memory an image engine can have now, in GB: the kernel's available
+    memory (hostinfo.available_bytes), never less than total - used.
+
+    4.19.10 - THE WRONG "NOT ENOUGH FREE MEMORY" REFUSAL. This was
+    total - used, where "used" is active + wired + compressed pages. Active
+    pages include the file cache macOS gives back on demand, so an idle
+    16 GB Mac with a browser open read ~4 GB "free" and was refused an
+    engine that runs fine there (fleet: 170 refusals, 26 installs, 30 days).
+    The kernel's own figure is what jetsam acts on; use it."""
+    total_gb = float(mem.get("total_gb") or 0.0)
+    used_gb = float(mem.get("used_gb") or 0.0)
+    ratio_free = max(0.0, total_gb - used_gb)
+    try:
+        avail = hostinfo.available_bytes() / 1024**3
+    except Exception:                                              # noqa: BLE001
+        avail = 0.0
+    return max(ratio_free, min(avail, total_gb) if total_gb else avail)
+
+
 def _preflight_image_job(cfg, *, engine_override: str = "auto") -> None:
     """Raise RuntimeError if the host can't safely run this image cfg.
 
@@ -33199,6 +34535,10 @@ def _preflight_image_job(cfg, *, engine_override: str = "auto") -> None:
     (pass or skip) so post-mortems can tell the difference between "preflight
     rejected this" and "preflight passed and the render still died".
     """
+    # Licence first (4.19.8): Ideogram 4, FLUX.1 Krea [dev] and Bria FIBO are
+    # non-commercial models whose screen must be accepted once. Not skippable
+    # by PHOSPHENE_SKIP_PREFLIGHT - that switch is about RAM and disk.
+    _raise_if_licence_missing(model_licences.licence_for_image_cfg(cfg))
     if (os.environ.get("PHOSPHENE_SKIP_PREFLIGHT") or "").strip() in ("1", "true", "yes"):
         push(f"[preflight] skipped via PHOSPHENE_SKIP_PREFLIGHT (engine={engine_override})")
         return
@@ -33222,7 +34562,7 @@ def _preflight_image_job(cfg, *, engine_override: str = "auto") -> None:
     mem = get_memory()
     total_gb = float(mem.get("total_gb") or 0.0)
     used_gb = float(mem.get("used_gb") or 0.0)
-    free_gb = max(0.0, total_gb - used_gb)
+    free_gb = _image_free_gb(mem)
     # Two different stories, both REFUSALS (deliberate guards, not faults —
     # review 2026-09-02: 15 of the 16 "unclassified" failures on 4.9.0 were
     # this branch, on 8 GB and 24 GB Macs that had been offered an engine
@@ -33233,12 +34573,18 @@ def _preflight_image_job(cfg, *, engine_override: str = "auto") -> None:
     fits_mac, mac_gb = _image_engine_fit(need_gb)
     label = _IMAGE_ENGINE_LABELS.get(engine_override, engine_override)
     if not fits_mac:
+        # 4.19.10: "Pick Auto" was the advice even when Auto WAS this engine
+        # (the saved Settings engine). Auto now drops to Klein on a small Mac
+        # unless the render has references - say that instead.
+        way_out = ("Remove the reference images and Auto renders on FLUX.2 "
+                   "[klein] 4B, which fits here, or pick a lighter engine in "
+                   "Settings." if engine_override == "auto" else
+                   "Pick Auto (the 4B FLUX engine, fits here) or a lighter preset.")
         raise RenderRefused(
             "image_ram",
             f"Image pre-flight: {label} holds ~{need_gb:.0f} GB of weights in "
             f"memory and needs a {mac_gb} GB Mac; this Mac has "
-            f"{total_gb:.0f} GB. Pick Auto (the 4B FLUX engine, fits here) "
-            f"or a lighter preset."
+            f"{SYSTEM_RAM_GB:.0f} GB. {way_out}"
         )
     if free_gb < need_gb and HELPER.is_alive():
         # The video helper keeps its pipelines warm between jobs; on a 32 GB
@@ -33255,7 +34601,7 @@ def _preflight_image_job(cfg, *, engine_override: str = "auto") -> None:
         mem = get_memory()
         total_gb = float(mem.get("total_gb") or total_gb)
         used_gb = float(mem.get("used_gb") or used_gb)
-        free_gb = max(0.0, total_gb - used_gb)
+        free_gb = _image_free_gb(mem)
         push(f"[preflight] {free_gb:.1f} GB free after releasing the helper")
     if free_gb < need_gb:
         raise RenderRefused(
@@ -33554,65 +34900,12 @@ _TRAIN_ABORT_RX = re.compile(
 )
 
 
-def _train_phase_from_line(line: str, payload: "dict | None", current: str) -> str:
-    """Which phase the trainer is in, from the lines it prints.
-
-    The preprocessor's phase banners are plain text (they reach the panel
-    on the merged stdout/stderr pipe); a training step is a JSON event.
-    Anything else keeps the current phase. Phases: start -> text_encode ->
-    image_encode -> train.
-    """
-    if isinstance(payload, dict):
-        if (payload.get("event") or "step") in ("step", "train_progress"):
-            return "train"
-        return current
-    s = line or ""
-    if "Phase 1: encoding text captions" in s:
-        return "text_encode"
-    if "Phase 2: encoding image latents" in s:
-        return "image_encode"
-    return current
 
 
-def _train_encode_retry_wanted(rc: int, watchdog_seen: bool, phase: str,
-                               already_retried: bool) -> bool:
-    """One automatic relaunch, and only for the kill this can fix (#61):
-    SIGABRT with a Metal-watchdog signature in the log, during the caption
-    encode, not already retried. A kill during image encode or training
-    is the canvas-sized problem the existing error names; a crash without
-    the signature is not a GPU timeout at all."""
-    return (rc == -6 and bool(watchdog_seen) and phase == "text_encode"
-            and not already_retried)
 
 
-def _train_gemma_fallback_max_length() -> int:
-    """The shorter Gemma pad the relaunch uses — the same knob and default
-    (256, floor 64) as the render helper's fallback, so one env var tunes
-    both: LTX_GEMMA_FALLBACK_MAX_LENGTH."""
-    try:
-        return max(64, int(os.environ.get("LTX_GEMMA_FALLBACK_MAX_LENGTH", "256") or 256))
-    except ValueError:
-        return 256
 
 
-def _train_wipe_caption_conditions(dataset_dir: Path) -> int:
-    """Discard the caption encodings a killed run wrote, so the relaunch
-    re-encodes every caption at one length — the preprocessor skips a
-    condition file that exists, and a dataset half at 1024 tokens and half
-    at 256 would not batch. Image latents live beside them and are left
-    alone. Returns how many files went."""
-    cond = Path(dataset_dir) / "training_data" / ".precomputed" / "conditions"
-    if not cond.is_dir():
-        return 0
-    n = 0
-    for f in cond.iterdir():
-        if f.is_file() and f.name.startswith("condition_"):
-            try:
-                f.unlink()
-                n += 1
-            except OSError:
-                pass
-    return n
 
 
 #: Why a training job failed, one word (docs/ANALYTICS.md `train_error`).
@@ -33622,36 +34915,10 @@ TRAIN_ERROR_CLASSES = ("oom", "missing_file", "caption_check", "disk_full",
                        "import_error", "nan_loss", "other")
 
 
-def train_error_from_event(payload: dict) -> dict:
-    """The trainer's `error` event, its class held to the closed list."""
-    cls = str(payload.get("error_class") or "other")
-    return {
-        "stage": str(payload.get("stage") or "unknown")[:40],
-        "message": str(payload.get("message") or "")[:2000],
-        "error_class": cls if cls in TRAIN_ERROR_CLASSES else "other",
-    }
 
 
-def train_error_for_exit(rc: int, trainer_error: dict | None) -> str:
-    """The class of a trainer that exited non-zero. The trainer's own word
-    wins; a process killed by SIGKILL without one is macOS reclaiming memory
-    (jetsam), the one signal death that has a single cause."""
-    if trainer_error and trainer_error.get("error_class") in TRAIN_ERROR_CLASSES:
-        return trainer_error["error_class"]
-    if rc == -9:
-        return "oom"
-    return "other"
 
 
-def _train_release_render_memory() -> None:
-    """Stop the warm render helper before a training run (4.19.1)."""
-    try:
-        if HELPER.is_alive():
-            push("[train] releasing the render engine's memory for training "
-                 "(it reloads on the next render)")
-            HELPER.kill()
-    except Exception as e:  # never let housekeeping fail a training run
-        push(f"[train] could not release the render engine: {e}")
 
 
 def run_train_job_inner(job: dict) -> None:
@@ -33682,6 +34949,9 @@ def run_train_job_inner(job: dict) -> None:
         train_job_id = _safe_job_id(p.get("train_job_id") or "")
     except ValueError as e:
         raise RuntimeError(f"train job has invalid id: {e}")
+    _trig_problem = train_trigger_problem(p.get("trigger") or "")
+    if _trig_problem:
+        raise RuntimeError(_trig_problem)
 
     # Train type — "character" (default, voice-paired) or "style" (no voice,
     # different output naming + cache dir + sidecar kind). The branching is
@@ -34960,6 +36230,9 @@ def queue_face_fix(source_path: str, *, board_id: str = "",
     # guess is not (one measurement at 1024×576 exists, not a table).
     target_w = target_h = None
     if sw and sh:
+        qhd = upscale_output_refusal(sw, sh)
+        if qhd:
+            return {"ok": False, "code": "hardware_tier", "error": qhd}
         cap = int(tier_max_dim("i2v") or 0) or max(sw, sh) * 2
         scale = min(2.0, cap / float(max(sw, sh)))
         if scale < 1.25:
@@ -35502,10 +36775,12 @@ def run_h3_job_inner(job: dict) -> None:
     # after the whole denoise with "ffmpeg not found on PATH; use save_frames()
     # instead" (fleet, 4.11.1). Say it before spending the minutes.
     if not Path(FFMPEG).is_file():
-        raise RuntimeError(
+        raise RuntimeError(_dist.say(
             f"ffmpeg is not installed where Phosphene looks for it ({FFMPEG}). Pinokio "
             "ships it at ~/pinokio/bin/ffmpeg-env/bin/ffmpeg — reinstall Phosphene from "
-            "the Pinokio sidebar, or set LTX_FFMPEG to your ffmpeg binary.")
+            "the Pinokio sidebar, or set LTX_FFMPEG to your ffmpeg binary.",
+            f"ffmpeg isn't where Phosphene looks for it ({FFMPEG}). Quit Phosphene "
+            "and open it again so setup can find a working video encoder."))
 
     p = job["params"]
     mode = (p.get("mode") or "t2v").strip().lower()
@@ -35525,13 +36800,16 @@ def run_h3_job_inner(job: dict) -> None:
              if paths["repairable"] else
              "The Hailuo H3 pack isn't installed — ")
             + "missing: " + "; ".join(paths["missing"])
-            + (". Click 'Install Hailuo H3' in the Phosphene sidebar in "
-               "Pinokio — it is idempotent and skips every weight already on "
-               "disk, so this is a couple of minutes, NOT a 75 GB download."
-               if paths["repairable"] else
-               ". Install it from the Phosphene sidebar in Pinokio "
-               "('Install Hailuo H3'), or point LTX_H3_ROOT / LTX_H3_MODELS at "
-               "an existing checkout."))
+            + (_dist.say(
+                ". Click 'Install Hailuo H3' in the Phosphene sidebar in "
+                "Pinokio — it is idempotent and skips every weight already on "
+                "disk, so this is a couple of minutes, NOT a 75 GB download.",
+                ". Repairing Hailuo H3 isn't available in the Mac app yet.")
+               if paths["repairable"] else _dist.say(
+                ". Install it from the Phosphene sidebar in Pinokio "
+                "('Install Hailuo H3'), or point LTX_H3_ROOT / LTX_H3_MODELS at "
+                "an existing checkout.",
+                ". Hailuo H3 isn't available in the Mac app yet.")))
     if mode not in H3_MODES:
         raise RenderRefused(
             "h3_mode",
@@ -35614,9 +36892,10 @@ def run_h3_job_inner(job: dict) -> None:
                     push("[h3] per-window prompts need `--chain-prompts` on "
                          f"the installed runner ({paths['runner']}) — "
                          "rendering every window with the main prompt "
-                         "instead. Re-run 'Install Hailuo H3' from the "
-                         "Phosphene sidebar to update the clone; your weights "
-                         "stay.")
+                         "instead. " + _dist.say(
+                             "Re-run 'Install Hailuo H3' from the Phosphene "
+                             "sidebar to update the clone; your weights stay.",
+                             "Updating the Hailuo H3 runner isn't available in the Mac app yet."))
 
     # ---- user LoRA -------------------------------------------------------
     # Resolved BEFORE Turbo, deliberately: the two compete for the runner's one
@@ -35822,6 +37101,46 @@ def run_h3_job_inner(job: dict) -> None:
                 + f". Expected under {tristep_paths['dir']} — pick Best under "
                   f"Speed, or click Fast to install it (180 MB).")
         steps = H3_TRISTEP_STEPS
+    # Both speed adapters store their qkv rows in the ComfyUI order; the runner
+    # gets the per-head copy (h3_speed_adapter_for_runner). User LoRAs never
+    # pass through here.
+    if turbo:
+        turbo_paths = h3_speed_adapter_for_runner(turbo_paths, push)
+    if tristep:
+        tristep_paths = h3_speed_adapter_for_runner(tristep_paths, push)
+
+    # ---- Best at High: lightx2v v1.3 (6 forwards, video shift 6) ----------
+    # make_job resolved it; re-check here (a queued job outlives the file, a
+    # hand-edited queue entry can carry anything) and never stack it.
+    v13 = bool(p.get("h3_v13"))
+    v13_paths: dict = {}
+    if v13 and (tristep or turbo or not h3_cell_takes_v13(tier)
+                or mode not in H3_V13_MODES):
+        v13 = False
+        p["h3_v13"] = False
+        if not (tristep or turbo):
+            steps = int(p.get("h3_steps") or tier["steps"])
+        push(f"[h3] {H3_V13_NAME} runs on Best at High (Text and Image) - "
+             f"this render keeps its own sampler.")
+    v13_shift = False
+    if v13:
+        if not h3_supports_v13():
+            raise RuntimeError(
+                f"{H3_V13_NAME} needs a runner that stacks adapters: "
+                + _h3_runner_behind(H3_LORA_STACK_MARKER, paths["runner"],
+                                    "Or pin a Steps count under Best."))
+        v13_shift = h3_supports_video_shift()
+        if not v13_shift:
+            push(f"[h3] {H3_V13_NAME} at video shift 12 - this runner has no "
+                 f"--video-shift yet (shift {H3_V13_VIDEO_SHIFT} after an H3 runner update).")
+        v13_paths = h3_v13_paths()
+        if not v13_paths["files_ok"]:
+            raise RuntimeError(
+                f"The {H3_V13_NAME} adapter isn't on disk: "
+                + "; ".join(v13_paths["missing"])
+                + f". Expected under {v13_paths['dir']} - pin a Steps count "
+                  f"under Best, or get it from the Speed row.")
+        steps = H3_V13_STEPS
 
     # First-frame conditioning (Image mode). The flag landed on the runner
     # after the first public branch, so probe the INSTALLED script rather than
@@ -35867,6 +37186,25 @@ def run_h3_job_inner(job: dict) -> None:
         chain_prompts = []
     if mode == "a2v":
         prompt = h3_a2v_prompt(prompt)
+    # Prompt guards (h3_prompt_guards.py): ellipses inside <d> become , or .,
+    # and a sentence each against a line being sung (#68), rings invented on
+    # bare hands (#86) and dialogue nouns appearing on screen (#81) — only
+    # where the prompt does not already ask for the opposite. Applied to the
+    # text the runner encodes, never to p["prompt"], so Load Params gives the
+    # user back exactly what they typed. `h3_prompt_guards=off` on the job
+    # turns them off.
+    _guard_keys = h3_prompt_guards.parse_guard_setting(p.get("h3_prompt_guards"))
+    prompt, _guards_applied = h3_prompt_guards.apply_guards(prompt, mode, _guard_keys)
+    if chain_prompts:
+        _guarded_windows = []
+        for _wp in chain_prompts:
+            _gw, _ga = h3_prompt_guards.apply_guards(_wp, mode, _guard_keys)
+            _guarded_windows.append(_gw)
+            _guards_applied += [g for g in _ga if g not in _guards_applied]
+        chain_prompts = _guarded_windows
+    p["h3_prompt_guards_applied"] = list(_guards_applied)
+    if _guards_applied:
+        push("[h3] prompt guards: " + ", ".join(_guards_applied))
     mode_argv: list[str] = plan["argv"]
     if plan.get("first_frame") is not None:
         first_frame = plan["first_frame"]
@@ -35932,9 +37270,17 @@ def run_h3_job_inner(job: dict) -> None:
     # Checked here, before the LTX helper is killed and before 8 minutes of
     # GPU time, because the alternative is what the fleet saw: a TypeError
     # deep in the sampler that names a function and never names MLX.
-    _mlx_fault = h3_mlx_fault()
-    if _mlx_fault:
-        raise RuntimeError(f"H3 cannot start: {_mlx_fault}. {H3_MLX_REPAIR}")
+    # 4.19.5: and its packages have to be the set this release was tested
+    # with (h3_env_fault: old MLX, transformers refusing its own dependencies,
+    # or a venv off scripts/pinokio/h3_constraints.txt) - refused here in a
+    # second with the one-click repair, not minutes into the render.
+    _h3_busy = h3_env_busy()
+    if _h3_busy:
+        raise RuntimeError(f"H3 cannot start: {_h3_busy}.")
+    _h3_env = h3_env_fault()
+    if _h3_env:
+        raise RuntimeError(f"H3 cannot start: {_h3_env}. "
+                           f"{_dist.say(H3_ENV_REPAIR, H3_ENV_REPAIR_MAC)}")
 
     # ---- memory safety: the warm helper cannot coexist with H3 -----------
     if HELPER.is_alive():
@@ -35946,7 +37292,7 @@ def run_h3_job_inner(job: dict) -> None:
     cmd = [
         # caffeinate keeps the Mac awake for the whole render; being the
         # process-group leader means /stop's killpg takes both down together.
-        "caffeinate", "-i",
+        *hostinfo.keep_awake_prefix(),
         str(paths["python"]), str(paths["runner"]),
     ]
     # The positional prompt and `--chain-prompts` are MUTUALLY EXCLUSIVE on the
@@ -36110,6 +37456,11 @@ def run_h3_job_inner(job: dict) -> None:
         # delta on the same base layers (416 wrapped, 0 unaccounted measured
         # with a character + a style LoRA on top).
         cmd += h3_tristep_argv(tristep_paths)
+    if v13:
+        # Shift 6 + the adapter at 1.0 (alpha folded, qkv rows already in the
+        # DiT's order: no --lora-qkv-permute, so a user LoRA after it is
+        # applied exactly as trained).
+        cmd += h3_v13_argv(v13_paths, shift=v13_shift)
     if user_lora is not None and (not turbo or h3_supports_lora_stack()):
         # The SAME flag Turbo rides. On a stacking runner every `--lora` is one
         # more adapter on the same base layers, Turbo first; on the single-slot
@@ -36127,6 +37478,8 @@ def run_h3_job_inner(job: dict) -> None:
     # Pinokio's bundled binary is not on the default PATH.
     env["PATH"] = media_tool_path(env.get("PATH", ""))
     env["PYTHONUNBUFFERED"] = "1"
+    for _k, _v in hostinfo.h3_env_defaults().items():
+        env.setdefault(_k, _v)
     # FP16 VAE decode — the default (h3_vae_fp16_decode()). Passed as the runner's
     # own flag so the argv says what ran; a runner that predates the flag
     # would reject it, so that case is said out loud instead of passed.
@@ -36137,10 +37490,14 @@ def run_h3_job_inner(job: dict) -> None:
             p["h3_vae_dtype"] = "float16"
             _vae_fp16 = True
         else:
-            push("[h3] This H3 runner predates the faster FP16 video decode — "
-                 "decoding in float32 (same picture, a little slower). Press "
-                 "Update in Pinokio, or \"Update Hailuo H3 runner\" in the "
-                 "sidebar, to get it.")
+            push(_dist.say(
+                "[h3] This H3 runner predates the faster FP16 video decode — "
+                "decoding in float32 (same picture, a little slower). Press "
+                "Update in Pinokio, or \"Update Hailuo H3 runner\" in the "
+                "sidebar, to get it.",
+                "[h3] This H3 runner predates the faster FP16 video decode — "
+                "decoding in float32 (same picture, a little slower). Updating "
+                "the runner isn't available in the Mac app yet."))
 
     push(f"[h3] {tier['label']} · {width}×{height} · {frames}f · "
          f"{steps} sigma points ({steps - 1} forwards) · seed {seed}"
@@ -36228,8 +37585,11 @@ def run_h3_job_inner(job: dict) -> None:
     # promised (Fast's tristep_min when this render is running Fast, else
     # the cell's own eta_min), so the number on screen before the first
     # denoise step matches the number the user picked the render on.
+    # 4.19.11 review: a lightx2v v1.3 render seeds from the cell's v13_min
+    # (the ~15 min the chip showed), not the full sampler's eta_min (~34).
     _load_eta_seed_min = (
         (tier.get("tristep_min") if tristep and tier.get("tristep_min") is not None
+         else tier.get("v13_min") if v13 and tier.get("v13_min") is not None
          else tier.get("eta_min")) or 0.0)
     _load_eta_seed = max(0.0, float(_load_eta_seed_min)) * 60.0
     # H3-04: what one denoise forward SHOULD cost on this Mac, at this
@@ -36727,6 +38087,8 @@ def run_h3_job_inner(job: dict) -> None:
             "h3_turbo": turbo,
             # Same rule for the fast 3-step sampler (False = the shape's own).
             "h3_tristep": tristep,
+            # And for lightx2v v1.3 on Best at High.
+            "h3_v13": v13,
             "width": width, "height": height, "frames": frames, "steps": steps,
             "seed_used": seed,
             # The user's OWN reference, not the canvas crop made from it: the
@@ -36781,6 +38143,8 @@ def run_h3_job_inner(job: dict) -> None:
             "first_frame_source": ((p.get("image") or "").strip() or None)
                                   if first_frame else None,
             "turbo": ({"lora": str(turbo_paths["lora"]),
+                       "source": str(turbo_paths.get("lora_source") or ""),
+                       "qkv_rows": turbo_paths.get("qkv_rows"),
                        "adapter_version": turbo_paths["version"],
                        "fallback": turbo_paths["fallback"],
                        "scale": 1.0,
@@ -36795,9 +38159,26 @@ def run_h3_job_inner(job: dict) -> None:
                        "accounting": (metrics.get("lora_accounting")
                                       or metrics.get("w1_lora_accounting"))}
                       if turbo else None),
+            # lightx2v v1.3's provenance: the file, its source and licence,
+            # and the schedule that ran.
+            "v13": ({"lora": str(v13_paths["lora"]),
+                     "name": H3_V13_NAME,
+                     "repo": H3_V13_REPO,
+                     "revision": H3_V13_SOURCE_REVISION,
+                     "source_file": H3_V13_SOURCE_FILE,
+                     "source_sha256": H3_V13_SOURCE_SHA256,
+                     "sha256": H3_V13_SHA256,
+                     "license": H3_V13_LICENSE,
+                     "code_license": H3_V13_CODE_LICENSE,
+                     "scale": 1.0, "steps": steps,
+                     "forwards": H3_V13_FORWARDS,
+                     "video_shift": float(H3_V13_VIDEO_SHIFT) if v13_shift else 12.0}
+                    if v13 else None),
             # The fast 3-step sampler's provenance: which file, where it came from,
             # under what license, and the schedule the runner actually ran.
             "tristep": ({"lora": str(tristep_paths["lora"]),
+                         "source": str(tristep_paths.get("lora_source") or ""),
+                         "qkv_rows": tristep_paths.get("qkv_rows"),
                          "adapter_version": tristep_paths["version"],
                          "repo": H3_TRISTEP_REPO,
                          "revision": H3_TRISTEP_REVISION,
@@ -37810,6 +39191,11 @@ def run_sharp_export_job_inner(job: dict) -> None:
 def run_job_inner(job: dict) -> None:
     p = job["params"]
     mode = p["mode"]
+    # 4.19.8: a model whose licence asks for an explicit "I accept" never
+    # runs before it is given - whichever way the job arrived. Image jobs are
+    # checked again in _preflight_image_job with the config they really run.
+    _raise_if_licence_missing(
+        model_licences.licence_for_job(p, image_cfg_for=None))
     # Image jobs share the queue + worker but use a totally different
     # params shape (no width/height/frames, etc.). Dispatch to the
     # image path before any of the video-only validation runs.
@@ -37877,6 +39263,12 @@ def run_job_inner(job: dict) -> None:
         push("[accel] Boost/Turbo was retired in v4.0.5 — this render restored "
              "it from an old sidecar; running with acceleration off.")
         p["accel"] = "off"
+    # The export size is checked BEFORE the render (normalize_ltx_upscale):
+    # compute_upscale_plan() rejects an unknown one only after it - a Retry or
+    # Restore of an old job used to burn the whole generation first.
+    p["upscale"], _upscale_note = normalize_ltx_upscale(p.get("upscale"), quality)
+    if _upscale_note:
+        push(f"[export] {_upscale_note}")
 
     # The Q4 distilled lane runs a fixed 9-point sigma table — exactly 8
     # steps. Fewer used to be refused (a truncated walk leaves the clip part
@@ -37890,7 +39282,9 @@ def run_job_inner(job: dict) -> None:
     if _steps_note:
         push(f"[generation] {_steps_note}")
 
-    if p["stop_comfy"]:
+    # .get: a job built outside make_job (a New Take or Retry of a sidecar, an
+    # API restore) may not carry it - a bare KeyError reached the fleet.
+    if p.get("stop_comfy"):
         kill_comfy()
         time.sleep(1)
 
@@ -38504,6 +39898,11 @@ def run_job_inner(job: dict) -> None:
                 f"tier, and {source.name} is already {sw}×{sh}. Use a smaller "
                 "source clip.")
         up_w, up_h = ltx_floor_canvas(int(sw * scale), int(sh * scale))
+        # Above QHD the ×2 exhausted 96 GB + swap. Queue time refuses it; this
+        # catches every door that did not ask (a restored queue, a replay).
+        _qhd = upscale_output_refusal(sw, sh)
+        if _qhd:
+            raise RenderRefused("hardware_tier", _qhd)
         # The ×2 is the same clip: same frame count, same duration, same
         # sound. LTX's grid is 1+8k frames and the IC reference loader
         # rounds whatever it is given DOWN to that grid, so the render runs
@@ -38853,11 +40252,27 @@ def run_job_inner(job: dict) -> None:
         # LTX_INGREDIENTS_REF_STRENGTH for iteration; clamped to [0.0, 1.0].
         # Colorize keeps its own strength (curated default, pristine reference)
         # → byte-identical, this branch never touches it.
+        #
+        # 4.19.2 (issue #101: on 2.3 "the generated videos do not contain the
+        # reference images at all"). THE MEASUREMENTS ABOVE WERE TAKEN WITH NO
+        # ADAPTER. This lane forces Q4 and FUSED the IC-LoRA, and fusing re-
+        # quantises W + B@A back onto the int4 grid: measured on the real
+        # Ingredients adapter against real Q4 block weights (12 layers, PM hub
+        # rel4192/evidence/ing_fuse_retention.json) what survives differs from
+        # the intended delta by 0.3x-5x its own size, cosine 0.03-0.96, median
+        # ~0.2 - the adapter was mostly quantisation noise. Without it, a
+        # pinned sheet is copied (s=1.0, as measured) and a free one is
+        # forgotten (s=0.0 noises the reference tokens to pure noise at the
+        # first step - the reporter's renders). So the adapter now rides
+        # UNFUSED (the exact runtime wrapper Upscale ×2 uses on Q4), and the
+        # reference uses the official recipe's strength, 1.0
+        # (ltx-community/ltx-2.3-ingredients-distilled: video_conditioning=
+        # [(sheet, 1.0)], LoRA 1.4). The env override stays.
         try:
             ing_ref_strength = float(
-                os.environ.get("LTX_INGREDIENTS_REF_STRENGTH", "0.0"))
+                os.environ.get("LTX_INGREDIENTS_REF_STRENGTH", "1.0"))
         except (TypeError, ValueError):
-            ing_ref_strength = 0.0
+            ing_ref_strength = 1.0
         ing_ref_strength = max(0.0, min(1.0, ing_ref_strength))
         # Quality → single-stage vs two-stage. The original Ingredients recipe
         # skipped stage 2 (the refine + 2x upscale), which is exactly what gave
@@ -38891,6 +40306,9 @@ def run_job_inner(job: dict) -> None:
                 # the pinned sheet.
                 "video_conditioning": [[str(cond_mp4), ing_ref_strength]],
                 "loras": ingredients_loras,
+                # Q4 cannot hold a fused adapter (#101, see above): attach it
+                # exactly, at runtime, as Upscale ×2 does.
+                "lora_mode": "unfused",
                 # Quality-driven: Quick/Draft = single-stage (fast, dreamy);
                 # Balanced (default) / Standard / High = two-stage refine + 2x
                 # upscale (clean, full 1536x896). See ing_skip_stage_2 above.
@@ -40362,10 +41780,30 @@ def post_update_status() -> dict:
     return out
 
 
+LINUX_POST_UPDATE_NOTE = (
+    "Update on Linux: the code is pulled, but the Mac update step does not "
+    "apply here - run `bash scripts/linux/install.sh` from the app folder, "
+    "then restart the panel (docs/LINUX.md).")
+
+
 def post_update_start(trigger: str = "update_now") -> tuple[int, dict]:
     """Run post_update.sh in the background once the GPU is free."""
     if not (ROOT / POST_UPDATE_SCRIPT).is_file():
         return 200, {"ok": True, "nothing_to_do": True}
+    if _dist.is_mac_app():
+        # Inside the Mac app the app installs each update as a whole new
+        # tarball and builds its environment itself; post_update.sh is the
+        # Pinokio Update's step and must not touch the app's venv.
+        return 409, {"ok": False, "app_updates": True,
+                     "error": _dist.MAC_APP_UPDATES}
+    if not hostinfo.IS_MAC:
+        # #94 (Codex 4.19.2): post_update.sh is the Mac step - it pins
+        # mlx-metal and runs env/bin/python3.11 - and a Linux install's venv is
+        # the distro Python with the omarchy-mlx wheel. Running it would fail,
+        # and a failed post-update blocks the restart. Say what to run instead.
+        push(f"[update] {LINUX_POST_UPDATE_NOTE}")
+        return 200, {"ok": True, "nothing_to_do": True, "linux": True,
+                     "note": LINUX_POST_UPDATE_NOTE}
     with POST_UPDATE_LOCK:
         if POST_UPDATE.get("active") or POST_UPDATE.get("pending"):
             return 409, {"error": "The update is already being finished.",
@@ -40396,9 +41834,11 @@ def _post_update_thread() -> None:
     # packages being replaced. Waiting for the gate waits them out; holding
     # it refuses new ones ("busy") until the script is done.
     _GPU_LOCK.acquire()
+    gpu_gate_mark("update")
     try:
         _post_update_run()
     finally:
+        gpu_gate_unmark()
         _GPU_LOCK.release()
 
 
@@ -40551,13 +41991,15 @@ def worker_loop() -> None:
                 if not STATE["queue"] and not STATE["current"]:
                     caffeinate_off()
                 if STATE["queue"] and not STATE["paused"]:
-                    hold = _external_build_hold()
+                    hold = (_external_build_hold()
+                            or _h3_repair_hold(STATE["queue"][0]))
                     if not hold:
                         held_note = ""
                         break
                     if hold != held_note:
                         held_note = hold
-                        push(f"Queue held: {hold} is loading a large model. "
+                        push(hold if hold.startswith("Queue held:") else
+                             f"Queue held: {hold} is loading a large model. "
                              f"The next render starts when it finishes.")
                 QUEUE_COND.wait(timeout=2)
             job = STATE["queue"].pop(0)
@@ -40719,6 +42161,40 @@ _IMG_STUDIO_LOCK = threading.Lock()
 # image is fine (the queue just waits); the inline path always releases in a
 # finally, so the worker can't deadlock.
 _GPU_LOCK = threading.Lock()
+# Mac app review #11: WHO holds _GPU_LOCK, for /status. The queue's job shows
+# in `current`; the users that take the gate OUTSIDE the queue (an inline
+# image render, a character sheet, Prompt Enhance, a lyrics request, the
+# post-update script) did not show anywhere, so the Mac app's update/restart
+# gate read "idle" while one of them was running and could stop it mid-render.
+# Each of them marks the gate right after acquiring it and clears the mark
+# right before releasing it; gpu_gate_status() is what /status reports.
+_GPU_HOLDER: dict = {}
+
+
+def gpu_gate_mark(kind: str) -> None:
+    """Record the out-of-queue holder of _GPU_LOCK (call right after acquire)."""
+    global _GPU_HOLDER
+    _GPU_HOLDER = {"kind": str(kind), "since": time.time()}
+
+
+def gpu_gate_unmark() -> None:
+    """Forget the holder (call right before release)."""
+    global _GPU_HOLDER
+    _GPU_HOLDER = {}
+
+
+def gpu_gate_status() -> dict:
+    """/status `gpu`: is the GPU gate held, by what, since when.
+
+    `busy` is the gate itself, so it is true for a queued job too (with
+    holder "queue"); `outside_queue` is the case `current` cannot show."""
+    busy = _GPU_LOCK.locked()
+    holder = dict(_GPU_HOLDER) if busy else {}
+    with LOCK:
+        queued = STATE.get("current") is not None
+    kind = holder.get("kind") or ("queue" if queued else ("other" if busy else None))
+    return {"busy": bool(busy), "holder": kind, "since": holder.get("since"),
+            "outside_queue": bool(busy and kind != "queue")}
 
 
 def _video_render_active() -> bool:
@@ -40950,7 +42426,7 @@ def _build_image_engine_config(
     engine_override = (engine_override or "auto").lower()
     form = form or {}
     if engine_override == "auto":
-        return _load_agent_image_config()
+        return low_ram_auto_image_config(_load_agent_image_config(), form)
     # ===== Ideogram 4 (fp8) — typography & layout, text-in-image ===========
     # 9.3B fp8 DiT + an 8B Qwen3-VL text encoder (~28 GB on disk, gated).
     # Text-to-image ONLY — NO reference images (mflux's ideogram4 CLI has no
@@ -41401,6 +42877,7 @@ def generate_character_sheet(character_id: str, *,
             "the GPU is busy with a render or training job — character "
             "sheet generation is paused until it finishes (they'd contend "
             "for GPU memory). Try again once it completes.")
+    gpu_gate_mark("character_sheet")
     t0 = time.time()
     try:
         # Preflight inside the gate: RAM/disk numbers measured while another
@@ -41457,6 +42934,7 @@ def generate_character_sheet(character_id: str, *,
                 "refs_ignored": bool(c.get("refs_ignored", False)),
             })
     finally:
+        gpu_gate_unmark()
         _GPU_LOCK.release()
 
     # Composite + atomic swap. sheet.png is served by URL and (below) named
@@ -41843,6 +43321,7 @@ def _unique_output_path(base: Path, stem: str, ext: str = ".mp4") -> Path:
 from panel import routes_characters as _routes_characters
 from panel import routes_files as _routes_files
 from panel import routes_image as _routes_image
+from panel import routes_licences as _routes_licences
 from panel import routes_loras as _routes_loras
 from panel import routes_meta as _routes_meta
 from panel import routes_oneshot as _routes_oneshot
@@ -41855,9 +43334,9 @@ from panel import routes_train as _routes_train
 from panel import routes_drawthings as _routes_drawthings
 
 for _routes_mod in (_routes_characters, _routes_files, _routes_image,
-                    _routes_loras, _routes_meta, _routes_models, _routes_music,
+                    _routes_licences, _routes_loras, _routes_meta, _routes_models, _routes_music,
                     _routes_oneshot, _routes_queue, _routes_stats, _routes_storyboard,
-                    _routes_train, _routes_drawthings):
+                    _routes_train, _routes_drawthings, _civitai_client):
     _routes_mod.P = sys.modules[__name__]
 
 
@@ -41982,7 +43461,16 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     start = int(start_s) if start_s else 0
                     end = int(end_s) if end_s else size - 1
-                if start < 0 or end >= size or start > end:
+                    # RFC 7233 § 2.1: a last-byte-pos at or past the end means
+                    # "to the end", it is not an error. WebKit's media loader
+                    # (Safari, the Mac app's WKWebView) asks for whole chunks
+                    # and for the length it remembers from an earlier response,
+                    # so a clip that got shorter under the same URL, or a chunk
+                    # that runs past the tail, used to get 416 here and the
+                    # <video> stopped loading or seeking. Chrome happened not
+                    # to ask that way. A START past the end is still 416.
+                    end = min(end, size - 1)
+                if start < 0 or start >= size or start > end:
                     raise ValueError("range out of bounds")
             except (ValueError, IndexError):
                 # Malformed range header → 416 per RFC 7233.
@@ -42102,6 +43590,14 @@ class Handler(BaseHTTPRequestHandler):
             return False
         q = parse_qs(parsed.query)
         bid = (q.get("id") or [""])[0].strip()
+        # Not a board id (an absolute path, `..`): refused before any branch
+        # can turn it into a directory - storyboard.board_dir() says why.
+        try:
+            if bid:
+                storyboard.board_dir(STATE_DIR, bid)
+        except storyboard.StoryboardError:
+            self._json({"ok": False, "error": "no such film"}, 404)
+            return True
 
         if path == "/storyboard/edit/status":
             self._json({"ok": True, "id": bid, "prepare": _sbe_job_state(bid)})
@@ -42406,6 +43902,13 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"ok": False,
                                 "error": "Write a couple of sentences about the "
                                          "film first."}, 400)
+                    return
+                # 4.20: the planner runs on Gemma 3, which a fresh install
+                # downloads in the background after the first boot.
+                if planner_model_missing():
+                    self._json(gemma3_refusal(
+                        "The Storyboard planner", "its language model, Gemma 3",
+                        storyboard_planner.DEFAULT_MODEL_PATH), 409)
                     return
                 # Constraint 1, enforced server-side: a stale tab must not be
                 # able to start a planner while the renderer holds the memory.
@@ -43151,6 +44654,11 @@ class Handler(BaseHTTPRequestHandler):
                                 "error": "The renderer is using the memory. "
                                          "Planning can start when the queue is "
                                          "empty."}, 409)
+                    return
+                if planner_model_missing():
+                    self._json(gemma3_refusal(
+                        "The Storyboard planner", "its language model, Gemma 3",
+                        storyboard_planner.DEFAULT_MODEL_PATH), 409)
                     return
                 err = _sb_claim_planner(bid)
                 if err:
@@ -44817,6 +46325,16 @@ def _parse_progress_signals(log_lines: list[str]) -> dict:
     """
     stage1_step = stage1_total = None  # latest seen for stage 1
     stage2_step = stage2_total = None  # latest seen for stage 2
+    # Unsuffixed bars, newest first, one (step, total) per bar. The HQ lane
+    # labels stage 1 "(res2s guided)", so there an unsuffixed bar IS stage 2.
+    # The distilled lane labels NEITHER stage: its stage 1 (8 steps) and stage
+    # 2 (2 steps) are both a bare "Denoising:" bar. Reading every bare bar as
+    # stage 2 made a Balanced render at stage-1 step 4/8 say "step 12 / 16"
+    # (8 + 4 of 8 + 8) and then drop to "step 2 / 4" in stage 2 - the counter
+    # claimed 75% while the live preview was honestly still two estimates
+    # from its first meaningful frame (owner report, 2026-10-22).
+    bare_bars: list[tuple[int, int]] = []
+    _bare_prev: tuple[int, int] | None = None
     image_step = image_total = None    # latest seen for an mflux image job
     download_seen = False               # a first-run model download is in flight
     download_files = download_total = None
@@ -44843,6 +46361,12 @@ def _parse_progress_signals(log_lines: list[str]) -> dict:
                         if pit:
                             last_per_it = float(pit.group(1))
             else:
+                # Walking newest -> oldest, a bar's steps only go DOWN; a step
+                # that goes up, or a different total, is the bar before it.
+                if (_bare_prev is None or total != _bare_prev[1]
+                        or step > _bare_prev[0]):
+                    bare_bars.append((step, total))
+                _bare_prev = (step, total)
                 if stage2_step is None:
                     stage2_step, stage2_total = step, total
                     if last_per_it is None:
@@ -44881,6 +46405,17 @@ def _parse_progress_signals(log_lines: list[str]) -> dict:
             upscale_done = True
         if not pipe_loaded and "step:get_pipe done" in ln:
             pipe_loaded = True
+
+    if stage1_step is None and bare_bars:
+        # No labelled stage 1 anywhere: the bare bars are the distilled lane's
+        # stages in order. One bar so far = stage 1 still running; two = the
+        # older one was stage 1, the newest is stage 2.
+        if len(bare_bars) == 1:
+            stage1_step, stage1_total = bare_bars[0]
+            stage2_step = stage2_total = None
+        else:
+            stage1_step, stage1_total = bare_bars[1][1], bare_bars[1][1]
+            stage2_step, stage2_total = bare_bars[0]
 
     # Combine stage 1 + stage 2 into a single monotonic denoise counter.
     # If we've seen stage 2 emit a step, stage 1 is implicitly complete
@@ -44998,6 +46533,20 @@ def _compute_progress(current: dict | None, log_lines: list[str]) -> dict | None
     elapsed = max(0.0, time.time() - started)
     eta = _bucket_eta(p)
     signals = _parse_progress_signals(log_lines[-200:] if log_lines else [])
+    # Distilled lane, still in stage 1: the bar only knows its own 8 steps, so
+    # the counter would jump 8 -> 10 when stage 2 starts. The live preview's
+    # status.json carries the whole denoise (one forward per step on this
+    # lane), so count to that from the start.
+    if (signals["denoise_step"] is not None and signals["stage2_step"] is None
+            and (LTX_QUALITIES.get(p.get("quality") or "") or {}).get("pipeline") == "distilled"):
+        try:
+            _st = json.loads((live_preview_dir(live_preview_job_id(current))
+                              / "status.json").read_text())
+            _tf = int(_st.get("total_forwards") or 0)
+        except (OSError, ValueError, TypeError):
+            _tf = 0
+        if _tf > (signals["denoise_total"] or 0):
+            signals["denoise_total"] = _tf
     weights = _phase_weights(p)
     download_frac = 0.0
 
@@ -45267,6 +46816,17 @@ def _h3_preview_progress(current: dict | None) -> dict:
         _prog_windows = int((current.get("progress") or {}).get("window_total") or 1)
     except (TypeError, ValueError):
         _prog_window = _prog_windows = 1
+    if not phase and status in ("starting", "running"):
+        # A One Shot's queue job is the PARENT; the part rendering is a child
+        # (`<id>-p1`) and the Now card's progress dict is written only onto the
+        # job whose id is the queue's current one — so a take's parent never had
+        # a phase, `abortable` was False for the whole take, and Stop early never
+        # appeared on a One Shot (2026-10-08, H3 Standard 30 s). The runner's own
+        # status file says where it is: a forward still to come in this window is
+        # denoise; the last forward of a window is the decode hand-off, and the
+        # rule below already allows that one only when another window follows.
+        phase = "denoise" if forward < total else "decode"
+        _prog_window, _prog_windows = max(1, window), window_total
     try:
         remaining = max(0.0, float(st.get("eta_seconds") or 0.0))
     except (TypeError, ValueError):
@@ -45369,12 +46929,41 @@ def _resolve_cap_tier(version_id: str | None = None) -> str:
     return quant
 
 
+#: index.html marks markup only the Pinokio edition serves (Spicy mode and the
+#: CivitAI browser's "Show NSFW" pill) with these comments; in the Mac app the
+#: page leaves out everything between them (owner ruling 2026-10-22).
+_PINOKIO_ONLY_RX = re.compile(r"<!--pinokio-only-->.*?<!--/pinokio-only-->", re.S)
+_DOC_DIRECTIVE_RX = re.compile(r"^\[\[(/?)(pinokio|mac-app)\]\]$")
+
+
+def _strip_pinokio_only(markup: str) -> str:
+    return _PINOKIO_ONLY_RX.sub("", markup) if _dist.is_mac_app() else markup
+
+
+def drop_pinokio_doc_blocks(md: str) -> str:
+    """A Docs page without its [[pinokio]] ... [[/pinokio]] passages (the line
+    directives webapp/js/docs.js reads); [[mac-app]] blocks stay for the page."""
+    out, skip = [], False
+    for line in md.split("\n"):
+        m = _DOC_DIRECTIVE_RX.match(line.strip())
+        if m and m.group(2) == "pinokio":
+            skip = not m.group(1)
+            continue
+        if not skip:
+            out.append(line)
+    return "\n".join(out)
+
+
 def page(theme: str = "") -> str:
     """The served page. `theme` is the palette cookie the browser sent
     ("light" / "dark" / ""); "light" is stamped on <html> so the first paint
     is light — the module that applies Appearance runs after parse."""
     cap_tier = _resolve_cap_tier()
     bootstrap = json.dumps({
+        # Pinokio or the Mac app, and the edition label (distribution.py).
+        # The page picks its Mac-app wording and defers updates to the app
+        # from these; Pinokio reads {"distribution": "pinokio", "edition": ""}.
+        "distribution": _dist.distribution(), "edition": _dist.edition(),
         "presets": PRESETS, "aspects": aspect_presets_for_this_mac(),
         "default_image": str(REFERENCE),
         "default_audio": str(AUDIO_DEFAULT),
@@ -45476,6 +47065,11 @@ def page(theme: str = "") -> str:
     # different panel: a STATE_DIR outside the install root is by definition
     # not the install's own films. Loud badge, and the tab title changes too —
     # a background tab is a title and a favicon and nothing else.
+    # The edition label (PHOSPHENE_EDITION=pro, set by the Mac app). A label
+    # and a CSS hook (body[data-edition]) - no paid code rides on it.
+    if _dist.is_pro():
+        profile_badge += ('<span class="profile-badge edition-badge" '
+                          'title="Phosphene Pro">Pro</span>')
     is_test = not _state_dir_is_native()
     if is_test:
         profile_badge = (
@@ -45483,7 +47077,7 @@ def page(theme: str = "") -> str:
             'Its ' + SEQ_NOUN_PL + ' live in ' + html.escape(str(STATE_DIR)) + ', not in this '
             'install — nothing you do here touches your own work.">TEST PANEL</span>'
             + profile_badge)
-    return (HTML
+    return (_strip_pinokio_only(HTML)
             .replace("__SEQCAP__", SEQ_NOUN_CAP)
             .replace("__SEQS__", SEQ_NOUN_PL)
             .replace("__SEQ__", SEQ_NOUN)
@@ -45509,7 +47103,21 @@ def page(theme: str = "") -> str:
                      html.escape(boot_build_stamp()["version"]
                                  or _read_local_version() or "dev"))
             .replace("__ENGINE_RULES__", _engine_css())
-            .replace("__CAP_TIER__", cap_tier))
+            .replace("__CAP_TIER__", cap_tier)
+            # Mac app only: the distribution/edition hooks on <body>. Pinokio
+            # serves the tag exactly as before.
+            .replace('<body data-cap-tier="' + cap_tier + '"',
+                     '<body data-cap-tier="' + cap_tier + '"' + _dist_body_attrs()))
+
+
+def _dist_body_attrs() -> str:
+    """` data-distribution="mac-app" data-edition="pro"` - only what is set."""
+    out = ""
+    if _dist.is_mac_app():
+        out += ' data-distribution="mac-app"'
+    if _dist.edition():
+        out += f' data-edition="{_dist.edition()}"'
+    return out
 
 
 # The page template lives on disk at webapp/index.html (slice 2 of the
@@ -45551,9 +47159,12 @@ def _diagnose_port_busy(port: int) -> str:
         with _urlreq.urlopen(f"http://127.0.0.1:{port}/version", timeout=1.5) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         v = data.get("local_version") or data.get("local_short") or "?"
-        return (f"another phosphene panel is already running on port {port} "
-                f"(version {v}). Open it at http://127.0.0.1:{port}, or click "
-                f"Stop in Pinokio before clicking Start.")
+        return _dist.say(
+            f"another phosphene panel is already running on port {port} "
+            f"(version {v}). Open it at http://127.0.0.1:{port}, or click "
+            f"Stop in Pinokio before clicking Start.",
+            f"another Phosphene studio is already running on port {port} "
+            f"(version {v}). Quit Phosphene and open it again.")
     except Exception:
         pass
     # Step 2: try lsof to identify whatever process IS listening.
@@ -45631,15 +47242,25 @@ if __name__ == "__main__":
     # separator install already running, not refuse (4.17.4).
     a2v_separator_boot()
     threading.Thread(target=worker_loop, daemon=True).start()
-    if VERSION_CHECK_ENABLED:
+    if VERSION_CHECK_ENABLED and not _dist.is_mac_app():
         threading.Thread(target=version_check_loop, daemon=True).start()
     else:
+        # The Mac app updates the studio itself: no GitHub poll, ever.
         _detect_local_install_state()
-    # Repo-stats fetcher — appends to state/stats-data.jsonl daily so
-    # the dashboard at /stats has historic data. Data stays on disk in
-    # state/ (gitignored), never on the public repo. Skipped silently
-    # when no GitHub token is resolvable.
-    threading.Thread(target=stats_fetch_loop, daemon=True).start()
+    # Repo-stats fetcher — maintainer-only, OPT-IN (PHOSPHENE_STATS_FETCH=1;
+    # issue #106: it used to start on every install and borrow the user's
+    # `gh auth token`). Appends to state/stats-data.jsonl daily so /stats has
+    # historic data. Never in read-only stats mode, where the archive belongs
+    # to another install. Data stays on disk in state/ (gitignored).
+    if _stats_fetch_enabled() and not STATS_READONLY:
+        threading.Thread(target=stats_fetch_loop, daemon=True,
+                         name="phos-stats-fetch").start()
+    # 4.20: the packs install.js left for after Start (state/install_deferred
+    # .json). No marker - every install that did not come through a 4.20
+    # install.js, i.e. every UPDATED install - means no thread at all.
+    if deferred_fetch_enabled():
+        threading.Thread(target=deferred_fetch_loop, daemon=True,
+                         name="phos-deferred-fetch").start()
     # Anonymous usage analytics — one app_boot event plus any optional-pack
     # transitions since the last boot, then nothing until a job finishes.
     # Deliberately here in __main__ and not at import time, so `import
@@ -45711,7 +47332,10 @@ if __name__ == "__main__":
             print(f"  was requested - {_codec.get('file')}: "
                   f"{'; '.join(_codec.get('problems') or [])}", flush=True)
             print("  The codec patch may not be applied (v3.8.1 shipped exactly this,", flush=True)
-            print("  silently). Click Update in Pinokio; if it persists, reinstall.", flush=True)
+            print("  silently). " + _dist.say(
+                "Click Update in Pinokio; if it persists, reinstall.",
+                "Use Phosphene \u2192 Check for Updates\u2026; if it persists, "
+                "use Help \u2192 Report a Bug\u2026"), flush=True)
             print("-" * 64, flush=True)
     except Exception as _ie:  # noqa: BLE001 — never block boot on the scan
         print(f"model integrity scan skipped: {_ie}", flush=True)

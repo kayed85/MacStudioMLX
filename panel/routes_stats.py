@@ -40,10 +40,9 @@ def stats_page(h, parsed) -> None:
 
 @get("/stats/data")
 def stats_data(h, parsed) -> None:
-    # `range` (7d/30d/90d/all, default 30d) trims the archive server-side —
-    # see P._stats_data_for_range for the cache-per-range shape. Unknown/
-    # missing values fall back to the default rather than erroring, so an
-    # old cached page hitting this route with no ?range= still works.
+    # The whole archive, always (see P._stats_data_for_range for why it no
+    # longer trims by `range`); the page applies the range by date. `range`
+    # is still read so an old cached page's URL keeps working.
     qs = parse_qs(parsed.query)
     range_key = (qs.get("range", [P.STATS_RANGE_DEFAULT])[0] or
                  P.STATS_RANGE_DEFAULT)
@@ -88,6 +87,21 @@ def stats_usage(h, parsed) -> None:
 # block on a possibly-slow API roundtrip.
 @post("/stats/refresh")
 def stats_refresh(h, path, qs, ctype) -> None:
+    if P.STATS_READONLY:
+        # Read-only stats mode serves ANOTHER install's archive; writing it
+        # is the daily launchd job's business, never this panel's.
+        h._json({"ok": False, "readonly": True,
+                 "hint": "read-only dashboard: the archive is refreshed by "
+                         "the daily stats job, not by this panel"}, 409)
+        return
+    if not P._stats_fetch_enabled():
+        # Maintainer-only (issue #106): without PHOSPHENE_STATS_FETCH=1 this
+        # panel never reads a GitHub token or runs `gh`, not even on a click.
+        h._json({"ok": False, "disabled": True,
+                 "hint": "this panel does not fetch repo stats (maintainer "
+                         "opt-in: PHOSPHENE_STATS_FETCH=1); the archive is "
+                         "refreshed by the daily stats job"}, 409)
+        return
     threading.Thread(
         target=P._run_stats_fetch_once, daemon=True,
         name="phos-stats-manual-refresh",

@@ -193,8 +193,15 @@
        The chip SUMMARISES them: worst state wins the colour, and memory stays
        on the face because it is the one number worth a glance.
        PORTALED to <body>: <header> is overflow:hidden and would slice it —
-       the same clipping that once cut off the avatar. -->
-  <div id="healthCluster" role="group" aria-label="System health" hidden>
+       the same clipping that once cut off the avatar.
+       NO `hidden` on this div (4.19.11). It carried a stray one from the
+       duplicate v4.5.0 build (989aaf1f kept this markup, not that build's
+       intent), and nothing ever cleared it: the cluster only showed because
+       `body > header #healthCluster { display: flex }` outranked the UA's
+       [hidden] rule. When the global `[hidden] { display: none !important }`
+       landed (VC-07, v4.17.0) it won, and the memory chip vanished from every
+       install for five releases. test_health_chip_visible.py pins it. -->
+  <div id="healthCluster" role="group" aria-label="System health">
     <button type="button" id="healthChip" aria-haspopup="dialog"
             aria-expanded="false" aria-controls="healthPop"
             title="System health — click for detail">
@@ -474,6 +481,10 @@
              2.5 does the pixels. Works on any clip in Outputs. -->
         <button type="button" class="mode-chip pill-btn" data-remix="upscale" title="Upscale &amp; Face Fix — LTX-2.5 Pixel Spatial Upscaler IC-LoRA. Re-renders a clip at twice its size with real generated detail (not a filter) and keeps the face and the sound. Made for H3 drafts, works on any clip. One click from any clip: the Upscale &amp; Face Fix button under the player."><span data-i18n="remix_upscale">Upscale &amp; Face Fix</span><span class="mc-sub sub" data-i18n="remix_upscale_sub">any clip → 2× sharper · face kept</span></button>
       </div>
+      <!-- One LTX generation runs at a time (2.3 or 2.5). Filled by
+           renderLtxGenSwitch() ONLY when this install has both; empty and
+           hidden otherwise. Ingredients needs 2.3, so the switch sits with it. -->
+      <div id="ltxGenSwitch" class="eng-gen eng-gen-inline" hidden></div>
     </div>
 
     <form id="genForm">
@@ -1330,6 +1341,16 @@
               Dialogue + sound are generated jointly — write them into the prompt.
               Length is chosen here, before the render: 10 s and 15 s chain 5 s
               windows at render time, so there is no Extend afterwards.
+              <!-- MiniMax H3 licence s. IV.2 / V.5: "MiniMax H3" shown where H3
+                   is used, the licence one click away, and a way to report
+                   suspected misuse. Lives in the H3 hint, which shows exactly
+                   while H3 is the selected engine. -->
+              <span class="engine-credit" id="h3Credit">
+                <b>MiniMax H3</b> &middot;
+                <a href="#" onclick="event.preventDefault(); openLicence('h3', {readOnly: true})">Licence</a>
+                &middot;
+                <a href="https://github.com/mrbizarro/Phosphene/issues/new?title=Misuse%20report%3A%20" target="_blank" rel="noopener">Report misuse</a>
+              </span>
             </div>
             <!-- H3 SPEED — one switch above the Quality cards: ⚡ Fast (TaoMate's
                  3-step adapter, the default once installed) | ✦ Best (the shape's
@@ -1355,6 +1376,12 @@
                 </button>
               </div>
               <div class="h3-turbo-note" id="h3SpeedNote" hidden></div>
+              <!-- lightx2v v1.3 on Best at High: credit once it is in, the
+                   one click that gets it before then (_h3RenderV13Note). -->
+              <div class="h3-turbo-note h3-v13-note" id="h3V13Note" hidden>
+                <span id="h3V13NoteText"></span>
+                <button type="button" class="ghost-btn h3-v13-get" id="h3V13Get" hidden></button>
+              </div>
             </div>
             <!-- Speed — the LTX-2.5 distilled lane's REAL speed control
                  (v4.0.5), replacing the dead one above. "Fast draft" selects
@@ -3210,7 +3237,7 @@ The same wizard walks out of frame. Audio: footsteps on leaves."></textarea>
               <button type="button" class="pill-btn active" data-voice-preset="standard"><span>Standard <span class="rec-badge">250</span></span><span class="sub">~17 min wall</span></button>
               <button type="button" class="pill-btn" data-voice-preset="long"><span>Long <span class="rec-badge">500</span></span><span class="sub">~33 min wall</span></button>
             </div>
-            <div class="hint" style="margin-top:6px">Estimates assume ~30 s/step on M4 Max — measured value lives in lora-lab and may drift.</div>
+            <div class="hint" style="margin-top:6px">Estimates assume about 30 s per step on an M4 Max; slower Macs take longer.</div>
           </div>
         </div>
 
@@ -4275,12 +4302,12 @@ The last line"></textarea>
         <p class="ed-rt-sub">Background noise under the whole __SEQ__, so cuts never drop to silence.</p>
         <select class="sb-input ed-rt-pick" id="edRtVariant" aria-label="Which room tone"
                 onchange="edRtPick()"></select>
-        <label class="ed-rt-level" title="How loud the bed plays, in LUFS. Dialogue sits around −16; −27 is clearly there without competing. The render applies exactly this.">
+        <label class="ed-rt-level" title="How loud the bed plays, in LUFS. Dialogue sits around −16; −38 is a bed you stop hearing, −27 is clearly there. The render applies exactly this.">
           <span>Level</span>
-          <input type="range" id="edRtLevel" min="-45" max="-18" step="1" value="-27"
+          <input type="range" id="edRtLevel" min="-45" max="-18" step="1" value="-38"
                  aria-label="Room tone level in LUFS"
                  oninput="edRtLevelSlide(this.value)" onchange="edRtLevelCommit(this.value)">
-          <output id="edRtLevelOut">−27 LUFS</output>
+          <output id="edRtLevelOut">−38 LUFS</output>
         </label>
         <div class="ed-rt-acts">
           <button type="button" class="ghost-btn primary" id="edRtAdd" onclick="edRtApply('apply')">Add room tone</button>
@@ -4551,7 +4578,7 @@ The last line"></textarea>
         <!-- VC-18/37: secondary clip actions that don't earn a permanent icon
              slot — Sharp export (re-run the ANE upscaler on a clip already
              liked, no re-render), Use last frame (seed a fresh i2v roll from
-             where this take ended), Open in Editor, Reveal in Finder. One
+             where this take ended), Open in Editor, Reveal in Finder, Share. One
              popover, video-only (CSS/JS hide it for stills and audio). -->
         <div class="kebab-wrap" id="playerMoreWrap">
           <button id="playerMoreBtn" class="po-act" type="button"
@@ -4584,6 +4611,11 @@ The last line"></textarea>
                     title="Show this file in Finder">
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2 5 a1 1 0 0 1 1-1 h3 l1.2 1.6 H13 a1 1 0 0 1 1 1 V12 a1 1 0 0 1-1 1 H3 a1 1 0 0 1-1-1 Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
               Reveal in Finder
+            </button>
+            <button type="button" role="menuitem" onclick="kebabToggle('playerMorePop',false);shareActive()"
+                    title="Copy a one-line caption with the Phosphene link and select this file in Finder, ready to post">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 2 V10 M5 5 L8 2 L11 5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 8.5 V13 a1 1 0 0 0 1 1 H12 a1 1 0 0 0 1-1 V8.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+              Share
             </button>
           </div>
         </div>
@@ -6018,11 +6050,13 @@ The last line"></textarea>
         <button type="button" class="pill-btn" data-civitai-source="huggingface" onclick="civitaiSetSource('huggingface')" title="Search Hugging Face — a name, an author (author:someone) or an owner/repo">Hugging Face</button>
       </div>
       <div class="civitai-seg" id="civitaiFamilyRow" style="display:none" aria-label="Engine"></div>
+      <!--pinokio-only-->
       <label class="toggle-pill" id="civitaiNsfwPill" data-spicy-only hidden>
         <input type="checkbox" id="civitaiNsfw">
         <span class="toggle-dot"></span>
         <span>Show NSFW</span>
       </label>
+      <!--/pinokio-only-->
     </div>
     <!-- WHAT KIND, for the Hugging Face source: read from each repo's name and
          tags on the server; filtered here without another fetch. -->
@@ -6303,6 +6337,7 @@ The last line"></textarea>
       </div>
     </div>
 
+    <!--pinokio-only-->
     <!-- Spicy mode — gates NSFW LoRA visibility in the CivitAI browser.
          Default OFF. Turning ON requires an explicit confirm-click pattern
          so a casual visitor / kid can't toggle it by a stray click. The
@@ -6326,6 +6361,8 @@ The last line"></textarea>
       </div>
       <div class="hint" id="spicyHint" style="margin-top:8px; display:none"></div>
     </div>
+
+    <!--/pinokio-only-->
 
     <!-- Anonymous usage analytics. Default ON, one click to turn off, and
          the copy below is the whole truth about what leaves the machine —
@@ -6536,6 +6573,20 @@ The last line"></textarea>
   </div>
 </div>
 
+<!-- Per-model licence screen (4.19.8). Filled by webapp/js/licences.js from
+     GET /licences; opened when the server answers 451 licence_required, from
+     the H3 install card, and from the H3 credit line. -->
+<div id="licenceModal" class="models-modal" style="display:none"
+     role="dialog" aria-modal="true" aria-labelledby="licenceTitle">
+  <div class="models-card licence-card">
+    <div class="models-head">
+      <h2 id="licenceTitle">Model licence</h2>
+      <button class="ghost-btn" onclick="closeLicence()">Close</button>
+    </div>
+    <div class="models-hint licence-body" id="licenceBody"></div>
+  </div>
+</div>
+
 <!-- ============== MODELS MODAL ============== -->
 <!-- Opened by the "models" pill in the header. Shows per-repo download
      status from /models, with a Download button per row. Active downloads
@@ -6643,16 +6694,29 @@ The last line"></textarea>
     </div>
     <div class="models-hint">
       Opens a pre-filled GitHub issue in a new tab. Environment info, version,
-      and the last 50 log lines are filled in for you.
+      and the recent log (errors first) are filled in for you.
     </div>
     <div id="bugModalBody" style="padding: 12px 0; display:flex; flex-direction:column; gap:10px">
+      <!-- 4.19.3 (#106): a report used to go out with "What happened" empty,
+           which left nothing to act on. This box is required (at least 10
+           characters); the copy under it says why, inline, never alert(). -->
+      <label class="bug-what" for="bugWhat">
+        <span>What happened? <span class="bug-what-req">required</span></span>
+        <textarea id="bugWhat" rows="3" aria-required="true" aria-describedby="bugWhatHint"
+                  placeholder="e.g. I pressed Generate on Text to video and it stopped at 40% with &quot;helper failed to start&quot;."
+                  oninput="bugWhatInput()"></textarea>
+        <span id="bugWhatHint" class="bug-what-hint" role="status" aria-live="polite">
+          A sentence or two in your own words. The log below is attached for
+          you, but it can't tell us what you saw.
+        </span>
+      </label>
       <label style="display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted)">
         Title
         <input id="bugTitle" type="text" value="[bug] "
                style="padding:6px 9px; font-size:13px; background:rgba(140,160,220,0.04); border:1px solid var(--ph-border-soft); border-radius:6px; color:var(--text); font-family:inherit">
       </label>
       <label style="display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted)">
-        Description
+        Details (optional) and environment
         <textarea id="bugBody" rows="14"
                   style="padding:8px 10px; font-size:12px; background:rgba(140,160,220,0.04); border:1px solid var(--ph-border-soft); border-radius:6px; color:var(--text); font-family:ui-monospace,SFMono-Regular,Menlo,monospace; line-height:1.45; resize:vertical">Loading environment…</textarea>
       </label>
@@ -6883,6 +6947,7 @@ const BOOT = __BOOTSTRAP__;</script>
      script on purpose: it publishes `ABCJS` as a global for the studio module. -->
 <script src="/webapp/vendor/abcjs/abcjs-basic-min.min.js"></script>
 <script src="/webapp/js/i18n.js"></script>
+<script type="module" src="/webapp/js/licences.js"></script>
 <script type="module" src="/webapp/js/boot.js"></script>
 <script type="module" src="/webapp/js/music.js"></script>
 <script type="module" src="/webapp/js/shortcuts.js"></script>

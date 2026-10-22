@@ -33,9 +33,11 @@ Saved on this Mac only, and sent nowhere except as sign-in to the site they belo
 - **CivitAI API key** — needed to install LoRAs from CivitAI. **save & test** checks it.
 - **Hugging Face token** — needed for gated models; read access is enough.
 
+[[pinokio]]
 ## Spicy mode (adult content) {#spicy}
 
 Off by default: the CivitAI browser hides NSFW results and the **Show NSFW** switch. **Enable Spicy mode** asks for a second click, then lets you choose per search.
+[[/pinokio]]
 
 ## Appearance {#appearance}
 

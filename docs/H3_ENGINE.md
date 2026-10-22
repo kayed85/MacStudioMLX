@@ -107,6 +107,28 @@ Phosphene pins `mlx==0.31.1` — `0.31.2` regresses LTX audio by 22 dB. The H3
 port needs `mlx>=0.32`. A separate venv means installing H3 can never break LTX
 rendering, and uninstalling H3 is `rm -rf`.
 
+### Its package set is locked (4.19.5)
+
+`scripts/pinokio/h3_constraints.txt` is the H3 venv's known-good set - every
+package, exact - captured from a from-zero install and validated with H3
+renders. `scripts/pinokio/h3_deps.sh` is the one install into the venv and
+always passes it with `-c`: Install / Repair Hailuo H3 / Update Hailuo H3
+runner (`install_h3.js`), every Update (`post_update.sh` 8b) and the panel's
+`POST /h3/repair`. uv moves a package already outside the set back into it,
+so the same script is the repair. Before every H3 render the panel compares
+the packages the runner is built on (`H3_ENV_JUDGED`) with the set, plus
+transformers' own import-time dependency check, and refuses in a second with
+**Repair Hailuo H3** on the card when they disagree. Through 4.19.4 the venv
+was resolved from `requirements.txt` floors alone, so each new install got
+whatever PyPI held that day.
+
+Not judged: an `LTX_H3_PYTHON` interpreter (a developer's own), Linux
+(`scripts/linux/install_h3.sh` builds that venv with its own mlx wheel), and
+any panel started with `LTX_H3_ENV_CHECK=0` - for a dev box whose
+`LTX_H3_ROOT` is a runner checkout you manage yourself. Moving the set:
+regenerate the whole file from a from-zero install's venv, then a from-zero
+install and H3 renders on it.
+
 ---
 
 ## Paths
@@ -119,6 +141,7 @@ duplicating 75 GB.
 | `LTX_H3_ROOT` | `<install>/minimax-h3-mlx` | the engine checkout (`scripts/generate_staged.py`, `.venv/`) |
 | `LTX_H3_MODELS` | `<install>/mlx_models/hailuo-h3` | the three weight components |
 | `LTX_H3_PYTHON` | `<H3_ROOT>/.venv/bin/python3.11` → `python` | interpreter override (a checkout without its own venv) |
+| `LTX_H3_ENV_CHECK` | unset (on) | `0` stops the pre-render check of the H3 venv against `h3_constraints.txt` - for a dev checkout whose venv you manage yourself |
 | `LTX_H3_FORCE_CAPABLE` | unset | test-only: stop the UI hiding the pill on a small Mac. Does **not** make it render. |
 | `LTX_H3_DENSE_10S` | **dead — not read anywhere in the code (H3-15)** | the dense 10 s tier ("10s single pass") ships `"offered": True` unconditionally; this var does nothing. Kept documented so a future re-gate has somewhere to land, not because it currently works. |
 | `LTX_H3_WIDE_DRAFT` | unset | adds an experimental **512×288 16:9 draft** (~2 min). Off because 0.15 MP is below anything this campaign has measured — see Tiers. |
@@ -169,14 +192,16 @@ composite keys for a sidecar written before the split — **HQ → Standard**,
 they are not choices in the UI, and this table should not have kept reading
 as if they were.
 
-| Quality | Length | Geometry | Aspect | Windows | Sigma points | Wall time |
+| Quality | Length | Geometry | Aspect | Windows | Sigma points | Fleet median, M4 Max (Fast · Best) |
 |---|---|---|---|---|---|---|
-| Draft | 3s | 640×384 · 73f | 5:3 | 1 | 9 (8 forwards) | ~3 min |
-| Standard | 3s | 768×448 · 73f | 12:7 | 1 | 9 (8 forwards) | ~4-5 min |
-| Standard | 5s | 768×448 · 124f | 12:7 | 1 | 9 (8 forwards) | ~8 min |
-| **High** | **5s** | **1024×576 · 124f** | **16:9** | 1 | **16 (15 forwards)** since 2026-09-16 | **~34 min** (was ~19 at 8 forwards) |
-| Standard | 10s | 768×448 · 243f | 12:7 | **2 × 124f chained** | 9 (8 forwards) | ~17 min |
-| Standard | 15s | 768×448 · 362f | 12:7 | **3 × 124f chained** | 9 (8 forwards) | ~27 min · batch |
+| Draft | 3s | 640×384 · 73f | 5:3 | 1 | 9 (8 forwards) | 3:15 · 4:35 |
+| Standard | 3s | 768×448 · 73f | 12:7 | 1 | 9 (8 forwards) | 4:10 · 6:00 |
+| Standard | 5s | 768×448 · 124f | 12:7 | 1 | 9 (8 forwards) | 5:10 · 13:00 |
+| **High** | **5s** | **1024×576 · 124f** | **16:9** | 1 | **16 (15 forwards)** since 2026-09-16 | 12:00 · no fleet data (lab ~34 min) |
+| Standard | 10s | 768×448 · 243f | 12:7 | **2 × 124f chained** | 9 (8 forwards) | 12:40 · 24:00 |
+| Standard | 15s | 768×448 · 362f | 12:7 | **3 × 124f chained** | 9 (8 forwards) | too few fleet renders (lab ~27 min Best) |
+
+The last column is the median wall time of real renders on M4 Max Macs (any memory size), 2026-08-10 to 2026-10-20, from the anonymous `render_completed` counts — the same numbers as https://phosphene.video/benchmarks/ and the user guide (`webapp/docs/hailuo-h3.md`). The earlier single-Mac lab figures in this column (Draft 3 s ~3 min, Standard 5 s ~8 min) were faster than what users get: the fleet puts them at 3–4.5 min and 13 min.
 
 Legacy composite key → current two-axis key, for reading an old sidecar:
 
@@ -205,7 +230,7 @@ axes (the runner errors otherwise), so exact 16:9 means width `512k`, height
 
 `wide_5s` is measured, not extrapolated (the quality loop's R1 run, on the same
 M4 Max): 22,923 packed rows, 126.0 s/step, 90.5 s VAE decode, 10.71 GiB decode
-peak, **18.8 min**; the same probe put 768×448 at 9.1 min against this table's
+peak, **18.8 min**; the same probe put 768×448 at 9.1 min against the old lab table's
 ~8 min, hence the ~17-19 band. Denoise stayed at 37.6 GiB — identical to
 768×448, because the DiT weights dominate. **The retired ckpt500-EMA Turbo
 adapter measured 8.5 min on the same canvas** (3 forwards at 128.0 / 127.4 /
@@ -260,15 +285,21 @@ alpha/rank factor is external to the checkpoint; loading it at scale 1.0
 renders coloured noise. Resolution therefore uses explicit filenames, not a
 glob.
 
-The Apache-2.0 v1.0 source is
+The v1.0 source is
 [`lightx2v/Minimax-h3-Turbo`](https://huggingface.co/lightx2v/Minimax-h3-Turbo)'s
 `minimax_h3_fl2v_turbo_4step_v1.0_768p_bf16.safetensors`
 (SHA-256
 `1bdabc2e9fce20b1db563b96bcf6e46adcad4c1964f423676436bf266cc7416c`).
-It still needs the runner-layout repack. `install_h3.js` deliberately contains
-no raw-file fetch: it records the exact release-asset publication TODO and must
-gain a digest-checked fetch only after the repacked asset and its output digest
-exist.
+It is a MiniMax H3 Model Derivative, so the MiniMax H3 Community License
+applies to it. Phosphene does not host it. Since 4.19.8,
+`scripts/fetch_h3_turbo.py` (run by `install_h3.js`) fetches that file from
+LightX2V's repo at a pinned commit, verifies its digest, re-lays it out on your
+Mac into the runner layout (pure byte moves: q/k/v fused block-diagonally, the
+fc1 halves swapped, alpha/rank = 1 so nothing is rescaled) and installs it only
+when the result matches SHA-256
+`d51d626fe0845da7e5845a47c323cf3f29086d44d24cb1a4b980882488746197` - the same
+bytes as the file earlier versions downloaded. An install that already has the
+file keeps it.
 
 ### Speed: ⚡ Fast | ✦ Best — TaoMate's 3-step adapter (2026-09-17)
 
@@ -325,6 +356,83 @@ says so under itself when one of them is picked.
   version, repo, revision, sha256, source repo, license, steps, forwards,
   sigma subset, decode; plus `h3.schedule` (the sigmas the runner ran) and
   `h3.lora_accounting`. The ⓘ modal prints a Speed row.
+
+### Speed adapters run a per-head copy (2026-10-22)
+
+H3's DiT stores the fused `attn.qkv_proj` rows **per head**, `(heads, 3,
+head_dim)`. Every speed adapter Phosphene resolves — Kijai's TaoMate r19, the
+official TaoMate r128, larryvrh's v4-600 EMA, the LightX2V v1.x repack — has
+its `lora_B` rows **contiguous**, `(3, heads, head_dim)`: the layout of the
+ComfyUI/diffusers definition it was trained or converted through. (One-way
+ANOVA on row norms, q/k/v as groups: base blocks.49 per-head F 5006 vs
+contiguous 43; the adapters' B·A deltas at blocks.49 read the other way,
+TaoMate 11 vs 1897, v4 0 vs 1038.) The runner only re-orders rows under
+`--lora-qkv-permute`, which has been OFF by default since 2026-08-15 and is
+global to a run, so it would also re-order a stacked user LoRA that lora-lab
+trained in the native layout.
+
+So the panel re-orders the speed adapter itself: `h3_bake_runner_layout()`
+writes `turbo-lora/runner-layout/<same name>` with each qkv `lora_B`'s 168
+blocks of 128 rows moved into per-head order. It is a byte move of whole rows
+(dtype-agnostic, no arithmetic), byte-identical to the runner's
+`_permute_qkv_rows` on all 52 modules of the real TaoMate file, stamped in the
+file's metadata with the source's size and mtime and re-made when either
+changes, and written through a `.partial` + rename. It runs right after a Fast
+or Turbo download and, for installs that already have the file, on the first
+render (0.25 s for the 182 MB TaoMate file on an M4 Max). The downloaded, digest-pinned file is never touched.
+A runner without `--lora-qkv-permute` predates 2026-08-15 and re-orders every
+`--lora` itself, so it is handed the source file. User LoRAs never go through
+this. Provenance: `h3.tristep` / `h3.turbo` carry `lora` (the file the runner
+read), `source` and `qkv_rows` (`per-head` or `runner`).
+
+### Best on High: lightx2v v1.3 (2026-10-22)
+
+LightX2V's v1.3 768p H3 adapter (`lightx2v/Minimax-h3-Turbo` @ `30f485ed`,
+`minimax_h3_fl2v_turbo_4step_v1.3_768p_bf16.safetensors`, released 2026-10-20)
+is what Best renders on High once it is built:
+
+| High 1024×576, 124 frames, M4 Max 64 GB | forwards | wall | process peak |
+|---|---:|---:|---:|
+| Best, full sampler (shift 12) | 15 | 1950 s | 28.9 GiB |
+| Best, lightx2v v1.3 (shift 6) | 6 | 870 s | 32.8 GiB |
+
+Runner argv: `--steps 7 --lora <adapter>:1.0`, plus `--video-shift 6` on a
+runner that takes it. Shift 6 is the shift LightX2V trained its 768p adapters
+at; `--video-shift` (a runner commit not pinned yet) moves the video schedule
+only. The pinned runner (3f6c75c, any stacking runner) has no such flag and
+renders v1.3 at the default shift 12, and logs it: on the two-person dialogue
+test, shift 12 and shift 6 gave matching faces, mouths and timing (931.8 vs
+937.6 s), so an install gets v1.3 from the panel Update alone. 4.19.11 ships on
+the 3f6c75c pin; shift 6 follows if a later release moves the pin. A forward costs ~3% more
+with the runtime adapter, which the cell prices carry (`H3_V13_FORWARD_COST`).
+
+Where it runs (`h3_cell_takes_v13`, `make_job`): Best on the High canvas, Text
+and Image, every 5 s-window length. Never with Fast or Turbo, never under a
+Steps pin (the pin is the way back to the full sampler), never on Draft,
+Standard, Native, the dense pass or the media modes, none of which were
+rendered on v1.3. `h3_v13=0` on the API keeps the full sampler.
+
+**The file.** Not hosted by Phosphene (an H3 Model Derivative; MiniMax H3
+Community License on the weights, Apache-2.0 on LightX2V's code).
+`scripts/fetch_h3_v13.py` (install_h3.js, best-effort; `POST /h3/v13/install`
+from the Speed row) downloads the pinned source (sha256 `97b77570…`,
+1,383,677,808 B), then builds `lightx2v_v1.3_768p_phosphene.safetensors`
+(sha256 `45ee324a…`, 1,956,165,376 B) with the standard library only:
+
+- q/k/v fused into one block-diagonal adapter whose B rows are written in the
+  DiT's own per-head order `(heads, 3, head_dim)`. LightX2V trained against the
+  contiguous `(3, heads, head_dim)` split (row-norm grouping of the delta), and
+  the base checkpoint is per-head (row-norm ANOVA on `qkv_proj`: F 1362 vs 84 on
+  block 0). Baking the move in keeps `--lora-qkv-permute` off, so a user LoRA
+  stacked after it is applied as trained. Tensor for tensor this equals the
+  file the validation renders loaded with `--lora-qkv-permute`.
+- `ff.net.0.proj` B halves swapped to `[gate; value]`.
+- alpha/rank = 8/128 = 2^-4 folded into B as an exponent shift (exact); a
+  value that would leave bf16's normal range is refused, not rounded.
+
+Both digests are checked; a corrupt or partial build is deleted, never
+renamed into place. `test_h3_v13.py` pins script↔panel parity, the re-layout
+against an independent reference, the job rules, the argv and the prices.
 
 ### Chained windows (v3.4.1)
 
@@ -554,6 +662,42 @@ per-window prompts (`h3_chain_prompts`); a board shot carries one line per
 transcribed back word for word on the first take) is the reference render.
 
 ---
+
+### Prompt guards (2026-10-19)
+
+`h3_prompt_guards.py`, applied in `run_h3_job_inner` to the text the runner encodes (the
+main prompt and every per-window prompt; `p["prompt"]` keeps what was typed, the guards
+applied land in `h3_prompt_guards_applied`). H3 has no negative prompt, so each guard is
+one in-prompt sentence at the end of the description field, added only when the prompt
+does not already ask for the opposite, and never twice:
+
+| Guard | Against | Fires when | Default |
+|---|---|---|---|
+| `ellipsis` | ComfyUI H3 guide: ellipses hurt intelligibility | `...` / `…` inside `<d>` → `,` or `.` (the only edit to dialogue words) | on |
+| `spoken` | MiniMax-H3 #68, spoken lines sung | a `<d>` line and no singing word anywhere outside it (instrumental music does not count); not on Lip-sync | on |
+| `hands` | #86, rings invented on bare hands | hands in the description, no ring/jewellery/gloves/watch asked; not on Add sound | on |
+| `nouns` | #81, what the dialogue mentions appears | the line names content words the description does not; not on Add sound | **opt-in** |
+
+`h3_prompt_guards=off` sends the prompt verbatim; `all` adds `nouns`. The storyboard
+planner's L14 tells the LLM the same: no `...` in `<d>`, and the description names only
+what should be seen.
+
+A/B, Draft Fast (640×384, 124 f, TaoMate 3-step), T2V, same seed per pair, unguarded vs
+every guard that fires (the review folder's `work/out/ux_*`). Voice measured on
+the demucs vocal stem (pyin): a known spoken clip reads voiced 0.20 / held-note 0.08, a
+known sung one 0.90 / 0.40.
+
+| Prompt (seed) | Guards | Whisper (raw → guarded) | Vocal: voiced, held-note (raw → guarded) | Picture |
+|---|---|---|---|---|
+| pier line over a guitar score (5101) | spoken, nouns | word-perfect → word-perfect | 0.40, 0.21 → 0.39, 0.11 | same shot; neither take sung |
+| two hands, candlelit table (5102) | hands | — (no line) | — | a ring on her finger in BOTH takes |
+| umbrella line with `...` (5103) | ellipsis, spoken, nouns | word-perfect → word-perfect | 0.51, 0.16 → 0.49, 0.13 | no umbrella or train in either; the guarded take adds a red fire extinguisher |
+
+So at one seed each: no guard cost intelligibility, and the guarded voice reads further
+from singing; the hands sentence did not stop the ring; the nouns sentence did not
+change the absent objects and came with a stray red prop, which is why it is opt-in.
+None of the three failures reproduced cleanly on the unguarded side either — a
+many-seed run is what would show a rate.
 
 ## LoRAs
 

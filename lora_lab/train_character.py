@@ -588,6 +588,20 @@ def crop_and_caption(
             )
             continue
 
+    # A previous run's frames that this run did not write (ov-review D-01).
+    # The stems are renumbered 1..N every run, and the preprocess step encodes
+    # EVERY png in images_renamed_dir: remove a photo from a 12-photo dataset
+    # and re-train, and the old char_012.png was still there - "preprocess
+    # wrote 12 latents; expected 11" on every retry. A photo that failed to
+    # crop this run left its old frame behind the same way, to be trained
+    # under another photo's caption. Derived files only; the sources and the
+    # captions are untouched.
+    keep = {p.name for p in out_paths}
+    for stale in images_renamed_dir.glob("char_*.png"):
+        if stale.name not in keep:
+            stale.unlink(missing_ok=True)
+            (cropped_dir / f"{stale.stem}.jpg").unlink(missing_ok=True)
+
     emit("crop_done")
     return out_paths, out_captions
 

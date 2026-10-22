@@ -54,7 +54,8 @@ SR = 48000
 LOOP_S = 40                      # the periodic grid, seconds (bins are 1/40 Hz)
 REF_LUFS = -18.0                 # what the file is written at
 PEAK_CAP = 10 ** (-1.0 / 20)     # −1 dBFS
-DEFAULT_LEVEL = -27.0            # "not something really subtle"
+DEFAULT_LEVEL = -38.0            # a bed you stop hearing, not one you hear under every line
+                                 # (was -27, which sat only ~9 dB under the speech)
 LEVEL_MIN, LEVEL_MAX = -45.0, -18.0
 DEFAULT_VARIANT = "film"
 FALLBACK_VARIANT = "quiet_room"

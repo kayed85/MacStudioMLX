@@ -23,26 +23,30 @@
 # STOPS if either fails rather than marching on to a panel that cannot render.
 
 PY=./ltx-2-mlx/env/bin/python3.11
-# `tae` rides along: 22 MB, and it is what makes the live preview work. It is
-# a `kind: base` row, so an install without it reads INCOMPLETE — fetching it
-# here is what keeps that true rather than aspirational.
+# `tae` rides along: 22 MB, and it is what makes the live preview work from
+# the first render. (It is `kind: optional` in the registry - its absence never
+# blocks a render - but at 22 MB it is not worth deferring.)
 if $PY scripts/fetch_pack_release.py --repo-key q4_25 --repo-key gemma4_25 --repo-key tae; then
   echo 'LTX-2.5 weights ready (verified against the published manifest).'
 else
   echo '=================================================================='
+  # "error:" is what stops install.js: Pinokio 8.2 ignores the exit code and
+  # breaks only on /error:/i or /errno /i in a step's output (see
+  # install_preflight.sh). Without it a failed fetch marched on to a Start
+  # with no engine weights.
+  echo 'FATAL error: the LTX-2.5 weights did not download.'
   echo 'PHOSPHENE COULD NOT DOWNLOAD THE LTX-2.5 WEIGHTS'
   echo 'These are the default model - the panel cannot generate without them.'
   echo 'This is almost always a network problem (no connection, a VPN or'
-  echo 'proxy, or GitHub blocked) or a full disk: the two packs need 28 GB.'
+  echo 'proxy, or GitHub blocked) or a full disk: the packs need 27.5 GB.'
   echo 'Fix that, then click Install again - nothing already downloaded is'
   echo 'downloaded twice.'
   echo '=================================================================='
   exit 1
 fi
 
-# Upscale x2 adapter (0.3 GB, optional): the LTX-2.5 Pixel Spatial Upscaler
-# IC-LoRA behind Remix -> Upscale x2. Gated on the Hub, mirrored on the same
-# release. BEST-EFFORT: a miss must never fail the install - the panel offers
-# it in Settings -> Models and the mode refuses by name until it lands.
-$PY scripts/fetch_pack_release.py --repo-key ic_upscale_x2 \
-  || echo 'WARN: Upscale x2 adapter fetch failed - video still works; download it later from Settings -> Models.'
+# 4.20: the Upscale x2 adapter (0.33 GB, Upscale & Face Fix) is NOT fetched
+# here any more. It is required_files.json -> install.after_start: the panel
+# downloads it in the background after the first boot, with Gemma 3 and the
+# 2.3 IC-LoRAs. This script is the last big download before Start, so it holds
+# exactly install.before_start (test_install_deferred.py keeps the two equal).

@@ -29,6 +29,9 @@ function _wireModeGroupTabSemantics() {
 }
 
 // ====== Init ======
+// Licence screens (4.19.8): wrap fetch() first, so a 451 licence_required
+// from any later call opens the model's licence instead of a bare error.
+installLicenceGate();
 musicInit();
 _wireModeGroupTabSemantics();
 // VC-34: the Tier quick-link next to the Quality label. Tier is fixed at
@@ -62,7 +65,7 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) poll
 // click that landed mid-rewrite could be lost. A single delegated
 // listener on document survives every rewrite + costs nothing.
 document.addEventListener('click', (e) => {
-  const btn = e.target.closest('[data-action="retry"], [data-action="retry-smaller"], [data-action="dismiss"], [data-action="stop-early"], [data-action="resume"], [data-action="split"], [data-action="reopen"], [data-action="repair-engine"]');
+  const btn = e.target.closest('[data-action="retry"], [data-action="retry-smaller"], [data-action="dismiss"], [data-action="stop-early"], [data-action="resume"], [data-action="split"], [data-action="reopen"], [data-action="repair-engine"], [data-action="repair-h3"]');
   if (!btn) return;
   e.stopPropagation();
   e.preventDefault();
@@ -71,6 +74,11 @@ document.addEventListener('click', (e) => {
   // job id - the bar has none - so it is handled before the id lookup.
   if (btn.dataset.action === 'repair-engine') {
     if (typeof engineRepairStart === 'function') engineRepairStart();
+    return;
+  }
+  // 4.19.5: the same for the Hailuo H3 venv (POST /h3/repair).
+  if (btn.dataset.action === 'repair-h3') {
+    if (typeof h3RepairStart === 'function') h3RepairStart();
     return;
   }
   // A third delegated action in the same row, for the same reason the other
@@ -184,3 +192,6 @@ try { if (typeof applyAppearance === 'function') applyAppearance(); } catch (e) 
 // The player scales to leave the Outputs pane a header and a row of cards on
 // every screen (queue.js, fitStagePlayer).
 initStagePlayerFit();
+// install_step `first_use`: one report the first time anyone clicks or types
+// on the page (health.js).
+try { armFirstUseReport(); } catch (e) {}

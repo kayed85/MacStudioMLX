@@ -1,0 +1,46 @@
+# THE ENGINE VENV'S KNOWN-GOOD SET (ltx-2-mlx/env) - 4.19.4.
+#
+# Every `uv pip install` / `pip install` into the engine venv passes this file
+# with -c: install.js (scripts/pinokio/ltx_engine_env.sh, mflux_pack.sh,
+# a2v_stems_deps.sh), every Update (scripts/post_update.sh), the panel's own
+# Repair / image-engine / vocal-separation installers, install_qwen.js and
+# install_sharp.js. A constraint never installs anything by itself; it only
+# forbids a resolve from leaving these ranges - whatever else that resolve
+# was asked for. scripts/check_post_update.js fails the build if an install
+# line into the engine venv does not carry it.
+#
+# WHY (4.19.4 fleet fix). tokenizers 0.23.3 shipped on 2026-10-09. transformers
+# below 5.13 (our cap, see post_update.sh 2b) checks at import time that
+# tokenizers is >=0.22.0,<=0.23.0 and refuses to load otherwise, and every
+# render loads transformers (the Gemma prompt encoder goes through mlx_lm's
+# tokenizer). Update's `uv pip install --upgrade 'litellm>=1.83.14'` is an
+# EAGER upgrade of litellm and everything under it - litellm asks for
+# tokenizers <1.0 - so it moved tokenizers to 0.23.3 and broke every render
+# until a later step that resolves transformers happened to move it back. An
+# Update that stopped in between left the install unable to render
+# ("tokenizers>=0.22.0,<=0.23.0 is required ... but found tokenizers==0.23.3").
+#
+# Change a line here only together with the scripts that pin the same package
+# (the mlx trio: install.js, post_update.sh, ltx_engine_env.sh, mflux_pack.sh -
+# check_post_update.js holds them together) and a from-zero install + render.
+
+# transformers <5.13 (5.13.0 breaks every generation - post_update.sh 2b).
+transformers>=5.0.0,<5.13.0
+# What transformers <5.13 itself requires (no 0.23.0 final exists, so this is
+# 0.22.x - the version every install that renders today has).
+tokenizers>=0.22.0,<0.23.0
+# transformers <5.13 and mflux 0.18.0 both want huggingface-hub 1.x.
+huggingface-hub>=1.5.0,<2.0
+# The mlx pin (0.31.2 attenuates the vocoder by ~22 dB - post_update.sh step 2).
+mlx==0.31.1
+mlx-lm==0.31.1
+mlx-metal==0.31.1
+# Pillow below 13 (4.19.6). Pillow 13.0.0 (2026-10-16) made PIL/_typing.py
+# import `from numbers import _IntegralLike` at module level, leaning on Python
+# 3.15's lazy imports to never run it. This venv is Python 3.11, where it runs
+# and fails, and mflux 0.18.0 imports PIL._typing (mflux/utils/image_util.py):
+# every FLUX.2 / Qwen-Edit render on an install that resolved Pillow 13 died
+# with "ImportError: cannot import name '_IntegralLike' from 'numbers'". mflux
+# itself asks only for pillow>=12.1.1, which is the floor here. Video was not
+# affected. image_engine.mflux_env_fault() reads this line.
+pillow>=12.1.1,<13

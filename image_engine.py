@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -66,6 +67,8 @@ import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+
+import distribution as _dist   # Pinokio vs the Mac app wording
 
 
 # Active-subprocess registry — every image engine that spawns a Popen
@@ -756,6 +759,89 @@ def _resolve_mflux_bin(config: ImageEngineConfig) -> str | None:
     return shutil.which(bin_name)
 
 
+# ---- The engine venv's Pillow (4.19.6 fleet fix) ----------------------------
+# Pillow 13.0.0 shipped on 2026-10-16. Its PIL/_typing.py now imports
+# `from numbers import _IntegralLike` at module level and relies on Python
+# 3.15's lazy imports (`__lazy_modules__`) to never execute it. The engine venv
+# is Python 3.11, where the import runs and fails. mflux 0.18.0 imports
+# `from PIL._typing import StrOrBytesPath` (mflux/utils/image_util.py), so every
+# FLUX.2 / Qwen-Edit render on a venv that resolved Pillow 13 died with
+#     ImportError: cannot import name '_IntegralLike' from 'numbers'
+# Fleet 2026-10-17..19: 9 fresh 4.19.5 installs, every one installed after
+# Pillow 13 was released; video was unaffected (nothing else imports _typing).
+# mflux itself only asks for pillow>=12.1.1, so no resolver could know.
+# scripts/pinokio/engine_constraints.txt now caps Pillow below 13 for every
+# install into the engine venv and post_update.sh moves an existing 13 back.
+# This check is the in-panel half: an image job on a venv outside that range
+# stops before the subprocess, naming the cause and the way out.
+MFLUX_JUDGED_PACKAGES = ("pillow",)
+_REPO_ROOT = Path(__file__).resolve().parent     # tests point this at a fake tree
+
+
+def _engine_constraint_specs(names=MFLUX_JUDGED_PACKAGES) -> dict:
+    """{name: specifier string} for `names` from engine_constraints.txt."""
+    out: dict = {}
+    path = _REPO_ROOT / "scripts" / "pinokio" / "engine_constraints.txt"
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return out
+    for raw in lines:
+        line = raw.split("#", 1)[0].strip()
+        m = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(.*)$", line)
+        if not m:
+            continue
+        name = re.sub(r"[-_.]+", "-", m.group(1)).lower()
+        if name in names and m.group(2):
+            out[name] = m.group(2).strip()
+    return out
+
+
+def mflux_env_fault(bin_path) -> str:
+    """"" when the venv that holds `bin_path` can import mflux's image code,
+    else the reason and the way out. Judges only the panel's own venvs (the
+    bundled ltx-2-mlx/env and image-gen/env); a custom mflux binary somewhere
+    else is not ours to judge. Fails open: anything unreadable is ""."""
+    try:
+        repo_root = _REPO_ROOT
+        venv = Path(bin_path).parent.parent
+        if venv.resolve().parent.name not in ("ltx-2-mlx", "image-gen"):
+            return ""
+        if venv.resolve().parent.parent != repo_root.resolve():
+            return ""
+        if not (venv / "pyvenv.cfg").is_file():
+            return ""
+        specs = _engine_constraint_specs()
+        if not specs:
+            return ""
+        from packaging.specifiers import SpecifierSet
+        from packaging.version import Version
+        have: dict = {}
+        for site in venv.glob("lib/python*/site-packages"):
+            for d in site.iterdir():
+                if not d.name.endswith(".dist-info"):
+                    continue
+                name, _, ver = d.name[:-len(".dist-info")].rpartition("-")
+                key = re.sub(r"[-_.]+", "-", name).lower()
+                if key in specs and ver:
+                    have[key] = ver
+        for key, spec in specs.items():
+            ver = have.get(key)
+            if ver and not SpecifierSet(spec).contains(Version(ver), prereleases=True):
+                return (f"The image engine cannot start: its venv has {key.capitalize()} "
+                        f"{ver}, and mflux works only with {key.capitalize()} {spec} "
+                        f"(it stops with \"cannot import name '_IntegralLike'\"). "
+                        + _dist.say(
+                            "Press Update in Pinokio, then restart - Update puts it back "
+                            "in about a minute and keeps every model. Video renders are "
+                            "not affected.",
+                            "Report it with Help \u2192 Report a Bug\u2026 Video renders "
+                            "are not affected."))
+    except Exception:                                          # noqa: BLE001
+        return ""
+    return ""
+
+
 # ---- Backends ---------------------------------------------------------------
 def _generate_mock(prompt: str, n: int, width: int, height: int,
                    output_dir: Path, base_seed: int | None,
@@ -934,6 +1020,28 @@ def _normalize_multiref_prompt(p: str, width: int = 0, height: int = 0) -> str:
     return res
 
 
+_EXC_LINE_RX = re.compile(r"^[A-Za-z_][\w.]*(?:Error|Exception|Interrupt|Exit)\s*:\s*\S")
+_NOISE_PREFIXES = ("Traceback", 'File "', "During handling", "The above exception",
+                   "^^^", "~~~", "[", "step")
+
+
+def _subprocess_cause_line(lines) -> str:
+    """The line in a dead engine subprocess's tail that names the cause: the
+    last `SomethingError: ...` line, else the last line that is not traceback
+    scaffolding or a progress bar, else "". Same rule as the panel's
+    failure_line() (mlx_ltx_panel.py), kept here because this module is
+    imported by the panel, not the other way round."""
+    clean = [str(t).strip() for t in (lines or ()) if str(t or "").strip()]
+    for t in reversed(clean):
+        if _EXC_LINE_RX.match(t):
+            return t
+    for t in reversed(clean):
+        if (not t.startswith(_NOISE_PREFIXES) and not t[0].isdigit()
+                and "%|" not in t and "it/s]" not in t and "s/it]" not in t):
+            return t
+    return ""
+
+
 def _generate_mflux(prompt: str, n: int, width: int, height: int,
                     output_dir: Path, base_seed: int | None,
                     config: ImageEngineConfig,
@@ -995,6 +1103,12 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
             f"First-run model download is 4-34 GB to ~/.cache/huggingface "
             f"depending on family."
         )
+
+    # 4.19.6: a Pillow the engine cannot import stops HERE, in a second, with
+    # the way out - not 30 s later as an ImportError from inside mflux.
+    _env_fault = mflux_env_fault(bin_path)
+    if _env_fault:
+        raise RuntimeError(_env_fault)
 
     # qwen_edit and flux2_edit BOTH refuse to start without --image-paths
     # (mflux argparse marks it required on both edit-flavored CLIs).
@@ -1613,6 +1727,13 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
                 pass
 
     stderr_tail = "\n".join(last_lines)
+    # 4.19.4: the line that NAMES the cause goes on the error's FIRST line.
+    # The fleet keeps only that first line (scrubbed), and it used to read
+    # "mflux-generate-flux2 failed (exit 1) on batch of 1 seeds. Tail of
+    # stdout/stderr:" - two Macs, 21 FLUX.2 failures since 4.16, and not one
+    # word of why. The tail still follows in full for the user and the Logs.
+    cause = _subprocess_cause_line(last_lines)
+    cause_note = f" — last line: {cause[:220]}" if cause else ""
     # SIGTERM/SIGKILL → user hit /stop. Surface as a typed cancellation
     # so the queue worker marks the job 'cancelled' rather than 'failed'.
     if rc in (-15, 143, -9, 137):
@@ -1654,7 +1775,7 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
                 else "GPU/Metal error from MLX. Could be OOM or a kernel limit."
             )
             raise RuntimeError(
-                f"{bin_name} aborted on batch of {n} seeds (exit {rc}). {hint}\n\n"
+                f"{bin_name} aborted on batch of {n} seeds (exit {rc}){cause_note}. {hint}\n\n"
                 f"Try one of:\n"
                 f"  - Smaller engine (FLUX.2 [klein] 4B / Z-Image-Turbo) "
                 f"if you picked a 9B/edit model.\n"
@@ -1670,7 +1791,7 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
         # traceback puts the exception on its last line, and the head-slice
         # this used to take cut it off right before the message (#73).
         raise RuntimeError(
-            f"{bin_name} failed (exit {rc}) on batch of {n} seeds. "
+            f"{bin_name} failed (exit {rc}) on batch of {n} seeds{cause_note}. "
             f"Tail of stdout/stderr:\n{stderr_tail[-1200:]}"
         )
 

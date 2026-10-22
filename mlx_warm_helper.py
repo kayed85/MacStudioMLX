@@ -24,6 +24,7 @@ import math
 import os
 import random
 import sys
+import hostinfo
 
 import music_tags as _music_tags   # bare section tags, the way YuE2 reads them
 import threading
@@ -159,23 +160,10 @@ _USER_VAE_STREAMING_OVERRIDE = os.environ.get("LTX_VAE_STREAMING")
 
 def _log_memory_pressure() -> None:
     """Emit a log line with current memory stats for diagnosing GPU timeouts."""
-    try:
-        import subprocess, re
-        total = int(subprocess.run(["sysctl", "-n", "hw.memsize"],
-            capture_output=True, text=True, errors="replace", timeout=1).stdout.strip())
-        vm = subprocess.run(["vm_stat"], capture_output=True, text=True, errors="replace", timeout=1).stdout
-        m = re.search(r"page size of (\d+)", vm)
-        page_size = int(m.group(1)) if m else 16384
-        def pages(name: str) -> int:
-            mm = re.search(rf"{re.escape(name)}:\s+(\d+)", vm)
-            return int(mm.group(1)) if mm else 0
-        used_bytes = (pages("Pages active") + pages("Pages wired down")
-                      + pages("Pages occupied by compressor")) * page_size
-        used_gb = used_bytes / 1024**3
-        pct = round(used_bytes / total * 100) if total else 0
-        emit({"event": "log", "line": f"[mem] used={used_gb:.1f}G/{total/1024**3:.0f}G ({pct}%)"})
-    except Exception:
-        pass
+    mem = hostinfo.memory_usage()
+    total = mem["total"]
+    pct = round(mem["used"] / total * 100) if total else 0
+    emit({"event": "log", "line": f"[mem] used={mem['used'] / 1024**3:.1f}G/{total / 1024**3:.0f}G ({pct}%)"})
 
 
 # =============================================================================
@@ -1388,6 +1376,83 @@ def _install_video_decoder_patch() -> None:
     _VIDEO_DECODER_PATCH_INSTALLED = True
 
 
+_SPLIT_ENCODE_PATCH_INSTALLED = False
+
+
+def split_prompt_encode_wanted() -> bool:
+    """The low-memory prompt encode: on the streamed (low-RAM) path only.
+    Read at call time, so a helper's lanes and the tests see one answer."""
+    return bool(LOW_RAM_STREAM)
+
+
+def _install_split_prompt_encode_patch() -> None:
+    """4.19.10 - THE LOW-MEMORY PROMPT ENCODE (16 GB Macs).
+
+    The engine's PromptEncoder loads the text model AND the connector, then
+    encodes with both resident. On LTX-2.5 that is Gemma 4 (6.7 GB) plus the
+    connector (5.9 GB) at once - about 13 GiB, the whole render's peak once
+    the DiT streams from disk (the 2026-09-06 streaming measurement: 13.77 GiB
+    "denoise" peak with the DiT at ~0.6 GB was this phase). On a 16 GB Mac
+    that is past what is free, and the fleet's 16 GB memory failures sit in
+    exactly this phase ("encode": watchdog and jetsam, quick and balanced).
+
+    On the streamed path the encode runs in two halves instead: the text
+    model alone produces its hidden states, which are materialized, then the
+    text model is freed and the connector alone turns them into embeddings.
+    Same primitives on the same inputs in the same order, so the embeddings
+    are bit-identical (test + proof); the peak is the larger half, not the
+    sum. A second prompt (CFG lanes) loads the text model again - those lanes
+    are refused below 48 GB anyway. Off the streamed path nothing changes."""
+    global _SPLIT_ENCODE_PATCH_INSTALLED
+    if _SPLIT_ENCODE_PATCH_INSTALLED:
+        return
+    import ltx_pipelines_mlx.utils.blocks as _blocks
+    PE = _blocks.PromptEncoder
+    _orig_load, _orig_encode = PE.load, PE.encode
+
+    def _load_text_model(self):
+        if self._text_encoder is None:
+            self._text_encoder = _blocks.GemmaLanguageModel()
+            self._text_encoder.load(self.gemma_model_id)
+            _blocks.aggressive_cleanup()
+
+    def load(self):
+        if not split_prompt_encode_wanted():
+            return _orig_load(self)
+        # Text model only: the connector loads after it is gone (encode).
+        # Callers that read the tokenizer (Prompt Relay) still find it here.
+        _load_text_model(self)
+
+    def encode(self, prompt):
+        if not split_prompt_encode_wanted():
+            return _orig_encode(self, prompt)
+        import mlx.core as _mx
+        _materialize = getattr(_mx, "eval")      # MLX graph evaluation, not Python eval
+        max_length = int(os.environ.get("LTX2_GEMMA_MAX_LENGTH", "1024"))
+        self._feature_extractor = None           # never both resident
+        _load_text_model(self)
+        hidden, mask = self._text_encoder.encode_all_layers(prompt, max_length=max_length)
+        _materialize(hidden, mask)
+        self._text_encoder = None
+        _blocks.aggressive_cleanup()
+        fx = _blocks.GemmaFeaturesExtractorV2()
+        weights = _blocks.load_split_safetensors(self.model_dir / "connector.safetensors",
+                                                 prefix="connector.")
+        fx.connector.load_weights(list(weights.items()))
+        del weights
+        _blocks.aggressive_cleanup()
+        self._feature_extractor = fx
+        video, audio = fx(hidden, attention_mask=mask)
+        _materialize(video, audio)
+        del hidden, mask
+        self._feature_extractor = None
+        _blocks.aggressive_cleanup()
+        return video, audio
+
+    PE.load, PE.encode = load, encode
+    _SPLIT_ENCODE_PATCH_INSTALLED = True
+
+
 def _install_a2v_frame_rate_patch() -> None:
     """Make ``combined_image_conditionings`` tolerate the missing ``frame_rate``
     kwarg that ``a2vid_two_stage.py`` neglects to pass.
@@ -1996,6 +2061,7 @@ def get_pipe(kind: str, loras: list[dict] | None = None,
     # Repair the subclass-override-skips-fusion bug before any pipe is built.
     _install_lora_fusion_patches()
     _install_video_decoder_patch()  # fps/frame_rate kwarg shim
+    _install_split_prompt_encode_patch()  # 4.19.10 low-RAM encode
     _install_a2v_frame_rate_patch()  # A2V missing frame_rate= on combined_image_conditionings
     _install_gemma_model_not_loaded_patch()
 
@@ -2279,6 +2345,7 @@ def get_hq_pipe(model_dir: str, loras: list[dict] | None = None,
     # TI2VidTwoStagesHQPipeline.load() would still bypass _pending_loras.
     _install_lora_fusion_patches()
     _install_video_decoder_patch()  # fps/frame_rate kwarg shim
+    _install_split_prompt_encode_patch()  # 4.19.10 low-RAM encode
     _install_a2v_frame_rate_patch()  # A2V missing frame_rate= on combined_image_conditionings
 
     fp = _lora_fingerprint(loras)
@@ -2365,6 +2432,7 @@ def get_kf_pipe(model_dir: str, dev_transformer: str | None = None,
     # (reported by @oo2music in #9). The install funcs are all idempotent.
     _install_lora_fusion_patches()
     _install_video_decoder_patch()
+    _install_split_prompt_encode_patch()  # 4.19.10 low-RAM encode
     _install_a2v_frame_rate_patch()
 
     dev_name = dev_transformer or "transformer-dev.safetensors"
@@ -2428,6 +2496,7 @@ def get_a2v_pipe(model_dir: str, loras: list[dict] | None = None,
 
     _install_lora_fusion_patches()
     _install_video_decoder_patch()
+    _install_split_prompt_encode_patch()  # 4.19.10 low-RAM encode
     _install_a2v_frame_rate_patch()  # A2V missing frame_rate= on combined_image_conditionings
     fp = _lora_fingerprint(loras)
 
@@ -3396,13 +3465,7 @@ def _detect_runtime_env() -> dict:
         env["macos"] = _pf.mac_ver()[0] or None
     except Exception:
         pass
-    try:
-        import subprocess as _sp
-        _chip = _sp.run(["sysctl", "-n", "machdep.cpu.brand_string"],
-                        capture_output=True, text=True, errors="replace", timeout=3).stdout.strip()
-        env["chip"] = _chip or None
-    except Exception:
-        pass
+    env["chip"] = hostinfo.chip_brand() or None
     return env
 
 
@@ -3488,13 +3551,7 @@ def mlx_cache_limit_bytes(total_ram_bytes: int, override: str | None = None) -> 
 
 
 def _physical_ram_bytes() -> int:
-    try:
-        import subprocess as _sp
-        out = _sp.run(["sysctl", "-n", "hw.memsize"],
-                      capture_output=True, text=True, errors="replace", timeout=3).stdout.strip()
-        return int(out)
-    except Exception:
-        return 0
+    return hostinfo.total_ram_bytes()
 
 
 _MLX_CACHE_RAM_BYTES = _physical_ram_bytes()
@@ -3641,6 +3698,14 @@ for line in sys.__stdin__:
         except Exception as _exc:                          # noqa: BLE001
             emit({"event": "log",
                   "line": f"vae-decode int32 guard NOT installed: {_exc}"})
+        # 4.19.10: the low-memory prompt encode, for every lane (the IC-LoRA
+        # lanes build their pipelines without get_pipe). Inert off the
+        # streamed path.
+        try:
+            _install_split_prompt_encode_patch()
+        except Exception as _exc:                          # noqa: BLE001
+            emit({"event": "log",
+                  "line": f"low-memory prompt encode NOT installed: {_exc}"})
 
     if action == "generate":
         job_id = msg.get("id", "?")
@@ -4907,6 +4972,33 @@ for line in sys.__stdin__:
                     _scale = read_lora_reference_downscale_factor(_lp)
                     if _scale != 1:
                         pipe.reference_downscale_factor = _scale
+                # Stage 2 runs on the CLEAN distilled transformer (the
+                # reference recipe's second ledger). Fused, that reload read
+                # the file without the adapter; unfused, the reload honours
+                # _pending_loras and would carry the IC adapter into the
+                # refine too (4.19.2, Ingredients moved to unfused for #101).
+                # Bound through a WEAK reference and the class's own function
+                # (Codex 4.19.2): a wrapper holding the bound method or the
+                # pipeline itself kept a finished IC pipeline alive at module
+                # scope, next to the next render's weights.
+                if hasattr(type(pipe), "_reload_clean_transformer"):
+                    import weakref as _weakref
+                    _orig_reload = type(pipe)._reload_clean_transformer
+                    _pipe_ref = _weakref.ref(pipe)
+
+                    def _reload_without_adapters(_orig=_orig_reload, _ref=_pipe_ref):
+                        _pipe = _ref()
+                        if _pipe is None:
+                            return None
+                        _saved = getattr(_pipe, "_pending_loras", None)
+                        _pipe._pending_loras = []
+                        try:
+                            return _orig(_pipe)
+                        finally:
+                            _pipe._pending_loras = _saved
+
+                    pipe._reload_clean_transformer = _reload_without_adapters
+                    del _reload_without_adapters, _orig_reload, _pipe_ref
                 emit({"event": "log",
                       "line": f"IC-LoRA applied UNFUSED (exact runtime wrapper), "
                               f"reference downscale ×{pipe.reference_downscale_factor}"})

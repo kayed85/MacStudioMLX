@@ -62,7 +62,7 @@
 # =============================================================================
 
 ROOT="${1:-$(cd "$(dirname "$0")/.." && pwd)}"
-cd "$ROOT" || { echo "FATAL: cannot enter app root $ROOT"; exit 1; }
+cd "$ROOT" || { echo "FATAL error: cannot open the Phosphene folder ($ROOT) - check its permissions, then run Update again."; exit 1; }
 
 require() {
   local what="$1"; shift
@@ -83,9 +83,31 @@ require() {
   fi
 }
 
+# defang <cmd...> - run an OPTIONAL step with its output made safe for Pinokio.
+# Pinokio 8.2 ignores a step's exit code and ENDS the script when the output
+# matches /error:/i or /errno /i (pinokiod kernel/shells.js default `on`
+# handlers). The scripts an install runs - and the tools under them (uv, hf, git,
+# urllib) - say "FATAL error:" / "error:" / "[Errno N]" when something fails, and
+# on an optional step that must not end the Update before the codec patch, the
+# import gate and the music check have run. defang rewrites "FATAL error:" to
+# "WARN:", any other "error:" to "problem -" and "Errno " to "errno-", and hands
+# back the command's OWN exit status (pipefail), so the caller's `|| echo WARN`
+# still fires. Required steps never go through it: `require` prints its own
+# "error:" banner on purpose.
+defang() (
+  set -o pipefail
+  "$@" 2>&1 | sed -u -e 's/FATAL [Ee]rror:/WARN:/g' -e 's/[Ee][Rr][Rr][Oo][Rr]:/problem -/g' -e 's/[Ee]rrno /errno-/g'
+)
+
 PY="$ROOT/ltx-2-mlx/env/bin/python3.11"
 VENV_PY="$ROOT/ltx-2-mlx/env/bin/python"
 HF="$ROOT/ltx-2-mlx/env/bin/hf"
+# THE ENGINE VENV'S KNOWN-GOOD SET (4.19.4). EVERY uv pip install into the
+# engine venv below passes it with -c, so no step - however eager - can leave
+# the venv outside it, and an Update that stops half-way cannot strand an
+# install on a set nobody tested. The file says why each line is there.
+export EC="$ROOT/scripts/pinokio/engine_constraints.txt"   # exported: the bash -c steps read it
+[ -f "$EC" ] || { echo "FATAL error: $EC is missing - the repo pull did not land. Re-run Update."; exit 1; }
 export HF_HUB_ENABLE_HF_TRANSFER=1
 export HF_XET_HIGH_PERFORMANCE=1
 
@@ -133,7 +155,7 @@ require "the vendored engine pin move" -- bash "$ROOT/scripts/pinokio/ltx_checko
 # 2026-08-28 measurements behind holding at 0.31.1 rather than moving to
 # 0.32.x, are in scripts/check_post_update.js and install.js. Read them before
 # touching this line — and change both pins in one commit or not at all.
-require "the mlx 0.31.1 pin" -- uv pip install --python "$VENV_PY" --reinstall --no-deps 'mlx==0.31.1' 'mlx-lm==0.31.1' 'mlx-metal==0.31.1'
+require "the mlx 0.31.1 pin" -- uv pip install --python "$VENV_PY" -c "$EC" --reinstall --no-deps 'mlx==0.31.1' 'mlx-lm==0.31.1' 'mlx-metal==0.31.1'
 
 # ---- 2b. THE TRANSFORMERS CAP — the one install.js has been promising -------
 # install.js has said, since the 2026-07-10 ship-blocker, that "uv downgrades an
@@ -154,7 +176,23 @@ require "the mlx 0.31.1 pin" -- uv pip install --python "$VENV_PY" --reinstall -
 # on the SAME uv invocation as the mlx trio (exactly as install.js:268 does it)
 # so the solver cannot re-widen the cap while satisfying mlx-lm.
 require "the transformers <5.13.0 cap (5.13.0 breaks every generation)" -- \
-  uv pip install --python "$VENV_PY" 'mlx==0.31.1' 'mlx-lm==0.31.1' 'mlx-metal==0.31.1' 'transformers>=5.0.0,<5.13.0'
+  uv pip install --python "$VENV_PY" -c "$EC" 'mlx==0.31.1' 'mlx-lm==0.31.1' 'mlx-metal==0.31.1' 'transformers>=5.0.0,<5.13.0'
+
+# ---- 2c. Pillow below 13 (4.19.6) --------------------------------------------
+# Every install made after 2026-10-16 resolved Pillow 13.0.0, whose PIL/_typing
+# cannot be imported on this venv's Python 3.11 - and mflux imports it, so
+# FLUX.2 and Qwen-Edit died at start ("cannot import name '_IntegralLike'").
+# engine_constraints.txt now holds Pillow below 13; asking for the range here
+# makes uv move an installed 13.x back (12.x has the same API) and is a no-op
+# on a healthy venv. Not FATAL: video renders do not need it, and step 3 and
+# step 7 resolve Pillow under the same constraint again. Output defanged like
+# 8b (Codex 4.19.6): a uv network failure prints "error:", which Pinokio reads
+# as a failed step and would end the Update here, before the vendored reinstall
+# and the codec patch, over a best-effort step. pipefail keeps the WARN.
+( set -o pipefail
+  uv pip install --python "$VENV_PY" -c "$EC" 'pillow>=12.1.1,<13' 2>&1 \
+    | sed -u -e 's/[Ee][Rr][Rr][Oo][Rr]:/problem -/g' -e 's/[Ee]rrno /errno-/g' ) \
+  || echo 'WARN: Pillow could not be moved below 13 - image renders (FLUX.2, Qwen-Edit) may not start; re-run Update.'
 
 # ---- 3. Re-install the three vendored packages ------------------------------
 # This is what actually moves an existing user's RUNTIME: a bare git checkout
@@ -183,8 +221,8 @@ require "the transformers <5.13.0 cap (5.13.0 breaks every generation)" -- \
 # this is a no-op. It links the workspace members editable — the --reinstall
 # --no-deps pass right after replaces those links with real copies, exactly
 # as install.js does.
-require "installing the vendored packages' dependencies (mlx-arsenal and the rest)" -- bash -c 'cd "$1/ltx-2-mlx" && shift && uv pip install --python env/bin/python --build-constraints ../pip-build-constraints.txt "$@" ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx ./packages/ltx-trainer' _ "$ROOT" 'mlx==0.31.1' 'mlx-lm==0.31.1' 'mlx-metal==0.31.1' 'transformers>=5.0.0,<5.13.0'
-require "re-installing the three vendored packages" -- bash -c 'cd "$1/ltx-2-mlx" && uv pip install --python env/bin/python --reinstall --no-deps --build-constraints ../pip-build-constraints.txt ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx ./packages/ltx-trainer' _ "$ROOT"
+require "installing the vendored packages' dependencies (mlx-arsenal and the rest)" -- bash -c 'cd "$1/ltx-2-mlx" && shift && uv pip install --python env/bin/python -c "$EC" --build-constraints ../pip-build-constraints.txt "$@" ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx ./packages/ltx-trainer' _ "$ROOT" 'mlx==0.31.1' 'mlx-lm==0.31.1' 'mlx-metal==0.31.1' 'transformers>=5.0.0,<5.13.0'
+require "re-installing the three vendored packages" -- bash -c 'cd "$1/ltx-2-mlx" && uv pip install --python env/bin/python -c "$EC" --reinstall --no-deps --build-constraints ../pip-build-constraints.txt ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx ./packages/ltx-trainer' _ "$ROOT"
 
 # ---- 4. The codec patch — IMMEDIATELY after the reinstall -------------------
 # It MUST be here: step 3 overwrites site-packages, so a patch applied before
@@ -200,10 +238,10 @@ require "the codec patch (without it every render encodes 4:2:0 - blocky faces)"
 # ---- 5. Trainer transitive deps ---------------------------------------------
 # ltx-trainer went in with --no-deps above, so pyyaml/pydantic/tqdm/rich were
 # never resolved; the trainer subprocess dies at `import yaml` without them.
-( cd "$ROOT/ltx-2-mlx" && uv pip install --python env/bin/python 'pyyaml>=6.0' 'pydantic>=2.0' 'tqdm>=4.65' 'rich>=13.0' )
+( cd "$ROOT/ltx-2-mlx" && uv pip install --python env/bin/python -c "$EC" 'pyyaml>=6.0' 'pydantic>=2.0' 'tqdm>=4.65' 'rich>=13.0' )
 # pywebpush signs the closed-tab completion alerts (Settings → Completion
 # alerts). Optional: the panel offers the button only when it imports.
-( cd "$ROOT/ltx-2-mlx" && uv pip install --python env/bin/python 'pywebpush>=2.0' )
+( cd "$ROOT/ltx-2-mlx" && uv pip install --python env/bin/python -c "$EC" 'pywebpush>=2.0' )
 
 # ---- 6. Optional runtime packages -------------------------------------------
 # mlx-vlm --no-deps on purpose (its default deps fight our mflux/transformers/
@@ -216,11 +254,20 @@ require "the codec patch (without it every render encodes 4:2:0 - blocky faces)"
 # huggingface-hub<1.0.0, which pip refuses to resolve against our >=1.5.0 floor
 # (ResolutionImpossible — the "blue screen error flashing for a second every
 # update"), while uv installs both and leaves it warned-but-functional.
-( cd "$ROOT/ltx-2-mlx" && uv pip install --python env/bin/python --no-deps 'mlx-vlm==0.4.4' )
-uv pip install --python "$VENV_PY" --upgrade 'hf_transfer>=0.1.6'
-uv pip install --python "$VENV_PY" --upgrade certifi
-uv pip install --python "$VENV_PY" --upgrade 'litellm>=1.83.14'
-uv pip install --python "$VENV_PY" --upgrade 'huggingface-hub>=1.5.0,<2.0' 'smolagents>=1.24.0'
+( cd "$ROOT/ltx-2-mlx" && uv pip install --python env/bin/python -c "$EC" --no-deps 'mlx-vlm==0.4.4' )
+uv pip install --python "$VENV_PY" -c "$EC" --upgrade 'hf_transfer>=0.1.6'
+uv pip install --python "$VENV_PY" -c "$EC" --upgrade certifi
+# NOT --upgrade (4.19.4). uv's --upgrade is EAGER: it re-resolves every package
+# under litellm to its newest release, and litellm accepts tokenizers <1.0 - so
+# on 2026-10-09 this line moved tokenizers to 0.23.3, which transformers <5.13
+# refuses to import with, and every render failed until step 7 happened to
+# resolve transformers and move it back. An Update that stopped in between
+# (Pinokio stops a run on an "error:" line, a dropped connection, a closed
+# window) left the install unable to render. The floors below still install or
+# raise litellm / smolagents when they are missing or too old; -c "$EC" holds
+# the rest of the venv where it is.
+uv pip install --python "$VENV_PY" -c "$EC" 'litellm>=1.83.14'
+uv pip install --python "$VENV_PY" -c "$EC" 'huggingface-hub>=1.5.0,<2.0' 'smolagents>=1.24.0'
 
 # ---- 7. The mflux image-engine pack (Ideogram 4 + Qwen-Edit) ----------------
 # STANDARD since 2026-06-13, for every user — this is what unblocked Ideogram 4
@@ -229,9 +276,9 @@ uv pip install --python "$VENV_PY" --upgrade 'huggingface-hub>=1.5.0,<2.0' 'smol
 # resolves and then the version locks. BEST-EFFORT: video is unaffected if it
 # fails, and the panel offers a one-click reinstall.
 echo 'Installing/refreshing the mflux image-engine pack (Ideogram 4 + Qwen-Edit)…'
-( uv pip install --python "$VENV_PY" 'mflux==0.18.0' \
-  && uv pip install --python "$VENV_PY" --reinstall --no-deps 'mflux==0.18.0' \
-  && uv pip install --python "$VENV_PY" 'mlx-teacache==0.4.1' ) \
+( uv pip install --python "$VENV_PY" -c "$EC" 'mflux==0.18.0' \
+  && uv pip install --python "$VENV_PY" -c "$EC" --reinstall --no-deps 'mflux==0.18.0' \
+  && uv pip install --python "$VENV_PY" -c "$EC" 'mlx-teacache==0.4.1' ) \
   || echo 'WARN: mflux image-engine install hit an error — video is unaffected; re-run Update, or use the Reinstall image engines action, to retry.'
 
 # The FBCache patch has to follow the step that installs what it patches.
@@ -261,7 +308,7 @@ PHOSPHENE_SEPARATOR_VIA=update bash "$ROOT/scripts/pinokio/a2v_stems_deps.sh" "$
 # reclaim. A self-heal must not conjure the thing it heals.
 if [ -d "$ROOT/mlx_models/ltx-2.3-mlx-q4" ]; then
   echo 'Ensuring the Q4 spatial upscaler is present (mosaic fix)…'
-  "$HF" download dgrauet/ltx-2.3-mlx-q4 --local-dir "$ROOT/mlx_models/ltx-2.3-mlx-q4" --include 'spatial_upscaler_x2_v1_1.safetensors' \
+  defang "$HF" download dgrauet/ltx-2.3-mlx-q4 --local-dir "$ROOT/mlx_models/ltx-2.3-mlx-q4" --include 'spatial_upscaler_x2_v1_1.safetensors' \
     || echo 'WARN: spatial upscaler fetch failed — open the panel and click Repair to retry (fixes the mosaic).'
 else
   echo 'LTX-2.3 is not installed — skipping its spatial-upscaler self-heal (install it from Settings → Models if you want to train a character).'
@@ -274,7 +321,7 @@ fi
 # read-only HF token), hence the fetcher rather than `hf download`. It verifies
 # what it already has, so the steady state is a read pass.
 echo 'Ensuring the LTX-2.5 weights are present (default generation)…'
-"$PY" "$ROOT/scripts/fetch_pack_release.py" --repo-key q4_25 --repo-key gemma4_25 --repo-key tae \
+defang "$PY" "$ROOT/scripts/fetch_pack_release.py" --repo-key q4_25 --repo-key gemma4_25 --repo-key tae \
   || echo 'WARN: LTX-2.5 weight fetch failed — open the panel, go to Models, and click Download for the LTX 2.5 rows to retry. It resumes.'
 
 # The three IC-LoRAs the optional modes need. Colorize + Control are un-gated
@@ -282,15 +329,15 @@ echo 'Ensuring the LTX-2.5 weights are present (default generation)…'
 # BYTE-IDENTICAL gated file un-gated — and --include is CRITICAL there because
 # that repo is ~708 GB.
 echo 'Ensuring the Colorize IC-LoRA is present (restore mode, optional)…'
-"$HF" download DoctorDiffusion/LTX-2.3-IC-LoRA-Colorizer --local-dir "$ROOT/mlx_models/loras/ic" --include 'LTX-2.3-22b-IC-LoRA-Colorizer-0.9.safetensors' \
+defang "$HF" download DoctorDiffusion/LTX-2.3-IC-LoRA-Colorizer --local-dir "$ROOT/mlx_models/loras/ic" --include 'LTX-2.3-22b-IC-LoRA-Colorizer-0.9.safetensors' \
   || echo 'WARN: Colorize IC-LoRA fetch failed — the Colorize mode will fetch it on first use, or click Repair.'
 
 echo 'Ensuring the Ingredients IC-LoRA is present (multi-reference mode, optional)…'
-"$HF" download DeepBeepMeep/LTX-2 --local-dir "$ROOT/mlx_models/loras/ic" --include 'ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors' \
+defang "$HF" download DeepBeepMeep/LTX-2 --local-dir "$ROOT/mlx_models/loras/ic" --include 'ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors' \
   || echo 'WARN: Ingredients IC-LoRA fetch failed — the Ingredients mode will fetch it on first use, or click Repair.'
 
 echo 'Ensuring the Control IC-LoRA is present (Union, control mode, optional)…'
-"$HF" download Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control --local-dir "$ROOT/mlx_models/loras/ic" --include 'ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors' \
+defang "$HF" download Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control --local-dir "$ROOT/mlx_models/loras/ic" --include 'ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors' \
   || echo 'WARN: Control IC-LoRA fetch failed — the Control mode will fetch it on first use, or click Repair.'
 
 # ---- 8b. H3 compact (Q8) engine — the memory-halving default (optional) ----
@@ -326,10 +373,30 @@ if { [ -f "$H3_MODELS_ROOT/models/$H3_DIT_REL" ] || [ -f "$H3_MODELS_ROOT/$H3_DI
   # sat on the old branch and this step built against that forever. Move the
   # checkout to the pin first (the same move the H3 installer makes).
   echo 'Ensuring the H3 engine checkout is on the pinned branch…'
-  bash "$ROOT/scripts/pinokio/h3_checkout.sh" "$H3_CHECKOUT" \
+  defang bash "$ROOT/scripts/pinokio/h3_checkout.sh" "$H3_CHECKOUT" \
     || echo 'WARN: could not move the H3 checkout to its pinned branch — the Q8 build below may not run; re-run the H3 engine Install to retry.'
+  # 4.19.5: THE H3 VENV'S KNOWN-GOOD SET. Through 4.19.4 the H3 venv was the
+  # one engine venv with no lock (requirements.txt floors only), so whatever
+  # PyPI held on the day decided what a new H3 install ran. h3_deps.sh is the
+  # one install into that venv: it resolves under h3_constraints.txt, and uv
+  # MOVES anything already outside the set back into it - so this is the step
+  # that repairs a drifted H3 venv on Update (a 4.19.4 install that resolved a
+  # newer transformers / mlx-vlm / tokenizers, a stray pip install). Run
+  # whether or not the pin move above worked: a venv off its set is its own
+  # fault. Best-effort like the rest of H3 here - LTX renders do not depend on
+  # it, the panel refuses an H3 render on a venv off its set and offers the
+  # same repair in one click (POST /h3/repair). Its output goes through the
+  # same "error:" defang as 8c: h3_deps.sh (and uv, on a network failure)
+  # print "error:", which Pinokio 8.2.0 reads as a failed step and would end
+  # the Update here - before the LTX import gate - over an optional engine.
+  # pipefail so the WARN still fires on h3_deps.sh's own exit code.
+  if "$H3_CHECKOUT/.venv/bin/python" -c 'import sys' >/dev/null 2>&1; then
+    echo 'Ensuring the H3 venv is on its known-good set (repairs a drifted one)…'
+    defang bash "$ROOT/scripts/pinokio/h3_deps.sh" "$H3_CHECKOUT" \
+      || echo 'WARN: the H3 venv could not be put on its known-good set — press Repair Hailuo H3 in the panel, or run "Update Hailuo H3 runner" from the sidebar.'
+  fi
   echo 'Ensuring the H3 compact (Q8) engine is built (halves H3 render memory)…'
-  ( cd "$H3_CHECKOUT" && bash "$ROOT/scripts/pinokio/h3_build_q8.sh" "$ROOT" ) \
+  ( cd "$H3_CHECKOUT" && defang bash "$ROOT/scripts/pinokio/h3_build_q8.sh" "$ROOT" ) \
     || echo 'WARN: H3 Q8 build failed — H3 keeps the full bf16 engine for now; re-run the H3 engine Install to retry.'
 fi
 
@@ -397,20 +464,28 @@ echo 'Trim done.'
 # could never install a missing `mlx_arsenal`, so it failed the same way every
 # time (INST-03). mlx_arsenal is imported explicitly because the package roots
 # import without it — the failure used to surface only at Generate.
+# 4.19.4: and transformers, through the module every render loads it from
+# (the Gemma prompt encoder reaches it via mlx_lm.tokenizer_utils). transformers
+# checks its own dependency versions AT IMPORT and refuses to load on a
+# mismatch - tokenizers 0.23.3 under transformers <5.13 was exactly that, and
+# every render on the install failed with "tokenizers>=0.22.0,<=0.23.0 is
+# required ... but found tokenizers==0.23.3". The repair below resolves
+# transformers under -c "$EC", which moves tokenizers back into range, so an
+# install that already has the bad set is fixed by this Update.
 echo 'Verifying the render engine actually imports…'
-if ! "$PY" -c "import ltx_core_mlx; import ltx_pipelines_mlx; import mlx; import mlx_arsenal" 2>/dev/null; then
+if ! "$PY" -c "import ltx_core_mlx; import ltx_pipelines_mlx; import mlx; import mlx_arsenal; import transformers; import mlx_lm.tokenizer_utils" 2>/dev/null; then
   echo 'Render engine did not import — repairing the vendored packages once…'
-  ( cd "$ROOT/ltx-2-mlx" && uv pip install --python env/bin/python \
+  ( cd "$ROOT/ltx-2-mlx" && uv pip install --python env/bin/python -c "$EC" \
       --build-constraints ../pip-build-constraints.txt \
       'mlx==0.31.1' 'mlx-lm==0.31.1' 'mlx-metal==0.31.1' 'transformers>=5.0.0,<5.13.0' \
       ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx ./packages/ltx-trainer \
-    && uv pip install --python env/bin/python --reinstall \
+    && uv pip install --python env/bin/python -c "$EC" --reinstall \
       --no-deps --build-constraints ../pip-build-constraints.txt \
       ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx ./packages/ltx-trainer \
     && "$PY" "$ROOT/patch_ltx_codec.py" ) \
     || true
 fi
-require "the render engine import gate" -- "$PY" -c "import ltx_core_mlx, ltx_pipelines_mlx, mlx, mlx_arsenal"
+require "the render engine import gate" -- "$PY" -c "import ltx_core_mlx, ltx_pipelines_mlx, mlx, mlx_arsenal, transformers, mlx_lm.tokenizer_utils"
 
 # Music is independent of LTX. Update only an installed checkout; never pull
 # an 11 GB pack as a side effect of an ordinary panel update.
@@ -418,10 +493,12 @@ MUSIC_CHECKOUT="${LTX_MUSIC_ROOT:-$ROOT/yue2-mlx}"
 MUSIC_MODELS_ROOT="${LTX_MUSIC_MODELS:-$ROOT/mlx_models/yue2}"
 if [ -d "$MUSIC_CHECKOUT/.git" ] && [ -f "$MUSIC_CHECKOUT/.venv/pyvenv.cfg" ]; then
   echo 'Checking the pinned YuE2 engine and installed music pack…'
-  if bash "$ROOT/scripts/pinokio/music_checkout.sh" "$MUSIC_CHECKOUT" \
-     && bash "$ROOT/scripts/pinokio/music_venv.sh" "$MUSIC_CHECKOUT" \
-     && bash "$ROOT/scripts/pinokio/music_sync.sh" "$MUSIC_CHECKOUT" \
-     && "$MUSIC_CHECKOUT/.venv/bin/python" "$ROOT/scripts/pinokio/music_fetch.py" --models "$MUSIC_MODELS_ROOT" --check; then
+  # Optional on Update (the WARN below), so every script goes through `defang`:
+  # music_checkout / music_venv / music_sync print "FATAL error:" for Install.
+  if defang bash "$ROOT/scripts/pinokio/music_checkout.sh" "$MUSIC_CHECKOUT" \
+     && defang bash "$ROOT/scripts/pinokio/music_venv.sh" "$MUSIC_CHECKOUT" \
+     && defang bash "$ROOT/scripts/pinokio/music_sync.sh" "$MUSIC_CHECKOUT" \
+     && defang "$MUSIC_CHECKOUT/.venv/bin/python" "$ROOT/scripts/pinokio/music_fetch.py" --models "$MUSIC_MODELS_ROOT" --check; then
     echo 'YuE2 engine and weights verified.'
   else
     echo 'WARN: YuE2 needs repair. Run Repair the music engine from the sidebar; intact weights are kept.'

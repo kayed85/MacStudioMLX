@@ -214,6 +214,10 @@ def post_train_start(h, path, qs, ctype) -> None:
                      f"(got {train_type!r})"
         }, 400)
         return
+    _trig_problem = P.train_trigger_problem(
+        (form.get("trigger", [""])[0] or "").strip())
+    if _trig_problem:
+        h._json({"error": _trig_problem}, 400); return
     # If the user opted into voice training, a clip must exist on
     # disk before we queue the job — defensive guard so the worker
     # doesn't have to fail mid-flight. The Train tab also disables
@@ -491,6 +495,11 @@ def post_train_auto_caption(h, path, qs, ctype) -> None:
     trigger = (form.get("trigger", [""])[0] or train_job_id).strip()
     if not trigger:
         h._json({"error": "trigger required"}, 400); return
+    # 4.20: captioning runs on Gemma 3, which a fresh install downloads in the
+    # background after the first boot.
+    if P.enhance_model_missing():
+        h._json(P.gemma3_refusal("Auto-caption", "its language model, Gemma 3", P.GEMMA),
+                409); return
 
     # Refuse if another captioning is in flight — two Gemmas in
     # RAM at the same time would push us into swap.
@@ -913,6 +922,15 @@ def post_train_upload_bundle(h, path, qs, ctype) -> None:
         stem_to_saved: dict[str, str] = {}
         for stem in accepted_stems:
             info, ext = images_by_stem[stem]
+            # Sizes are checked from the ZIP's own directory BEFORE reading
+            # (ov-review D-03): zf.read() inflates the whole entry in memory,
+            # so a small archive declaring a multi-GB entry took the panel
+            # down before any limit below could look at it.
+            if info.file_size > P.TRAIN_MAX_BYTES_PER_IMAGE:
+                unpaired_warnings.append(
+                    f"{info.filename} is larger than "
+                    f"{P.TRAIN_MAX_BYTES_PER_IMAGE // (1024 * 1024)} MB - skipped")
+                continue
             try:
                 data = zf.read(info)
             except (KeyError, RuntimeError) as e:
@@ -930,6 +948,10 @@ def post_train_upload_bundle(h, path, qs, ctype) -> None:
         # Pass 2 — captions. Write under saved stem when paired,
         # otherwise under original stem (parked).
         for stem, info in captions_by_stem.items():
+            if info.file_size > P.TRAIN_CAPTION_MAX_BYTES:
+                unpaired_warnings.append(
+                    f"{stem}.txt exceeds {P.TRAIN_CAPTION_MAX_BYTES} bytes — skipped")
+                continue
             try:
                 data = zf.read(info)
             except (KeyError, RuntimeError) as e:

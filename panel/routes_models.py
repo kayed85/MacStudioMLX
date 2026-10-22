@@ -33,19 +33,41 @@ def post_models_download(h, path, qs, ctype) -> None:
     # A GitHub-release-mirrored pack does not go through `hf` at all
     # (scripts/fetch_pack_release.py is stdlib-only), so a missing hf
     # binary must not block the one lane that never needed it.
+    # Mac app: the app is fetching this pack itself (app_models.json). Two
+    # fetchers writing (or a repair deleting) one folder is not safe - refuse.
+    if P.app_models_owns(repo):
+        h._json({"error": "This model is already downloading in the background.",
+                 "app_downloading": True}, 409); return
     if P.HF_BIN is None and (repo.get("mirror") or {}).get("kind") != "github-release":
         h._json({"error": "hf binary not found. Reinstall Phosphene "
                              "or install huggingface_hub>=1.0 in the venv."}, 500); return
     with P.DOWNLOAD_LOCK:
-        if P.DOWNLOAD["active"]:
-            h._json({"error": f"another download is in progress: "
-                                 f"{P.DOWNLOAD['repo_id']}. Wait for it to finish "
-                                 f"(or click Cancel)."}, 409); return
-        P.DOWNLOAD["active"] = True
-        P.DOWNLOAD["key"] = key
-        P.DOWNLOAD["repo_id"] = repo["repo_id"]
-        P.DOWNLOAD["started_ts"] = P.time.time()
-        P.DOWNLOAD["last_line"] = "starting…"
+        busy = P.DOWNLOAD["active"]
+        busy_key = P.DOWNLOAD.get("key")
+        busy_bg = bool(P.DOWNLOAD.get("background"))
+        busy_repo = P.DOWNLOAD.get("repo_id")
+        if not busy:
+            P.DOWNLOAD["active"] = True
+            P.DOWNLOAD["background"] = False
+            P.DOWNLOAD["key"] = key
+            P.DOWNLOAD["repo_id"] = repo["repo_id"]
+            P.DOWNLOAD["started_ts"] = P.time.time()
+            P.DOWNLOAD["last_line"] = "starting…"
+    if busy:
+        # 4.20: the background fetcher holds the slot after a fresh install. A
+        # click for the pack it is fetching is already being served, and a
+        # click for one queued behind it moves that one to the front - the
+        # user asked for it, a 409 would only make them wait without saying so.
+        if busy_bg and busy_key == key:
+            h._json({"ok": True, "key": key, "already": True,
+                     "note": "Already downloading in the background."}); return
+        if busy_bg and P.deferred_prioritize(key):
+            h._json({"ok": True, "key": key, "queued": True,
+                     "note": "Queued next - it starts when the current background "
+                             "download finishes."}, 202); return
+        h._json({"error": f"another download is in progress: "
+                             f"{busy_repo}. Wait for it to finish "
+                             f"(or click Cancel)."}, 409); return
     P.threading.Thread(target=P._download_thread, args=(repo,), daemon=True).start()
     h._json({"ok": True, "key": key, "repo_id": repo["repo_id"]}); return
 
@@ -116,6 +138,10 @@ def post_models_remove(h, path, qs, ctype) -> None:
         if busy_key == key:
             h._json({"error": "A download is using that folder — "
                                  "cancel it first."}, 409); return
+        if P.app_models_owns(repo):
+            h._json({"error": "This model is downloading in the background — "
+                              "try again when it finishes.",
+                     "app_downloading": True}, 409); return
         addon_key = P.model_version().get("hq_addon_repo_key")
         if key == addon_key:
             # The add-on has no directory of its own: delete exactly the
@@ -137,7 +163,7 @@ def post_models_remove(h, path, qs, ctype) -> None:
             # three. When the directory is shared, delete exactly this
             # repo's own declared files — the same rule the HQ add-on
             # branch above follows, and for the same reason.
-            p = P.ROOT / repo["local_dir"]
+            p = P.repo_dir(repo)
             shared = sum(1 for o in P._repos()
                          if str(o.get("local_dir")) == str(repo.get("local_dir"))) > 1
             if shared:
@@ -146,6 +172,31 @@ def post_models_remove(h, path, qs, ctype) -> None:
                 targets.append(p)
             label = repo.get("name") or key
 
+    # 4.19.10 (review): another process may be WRITING one of these folders
+    # (the Mac app's own download, a second studio). Take each folder's
+    # one-writer lock (scripts/fetch_pack_release.py) before deleting, and
+    # hold it until done, so no fetcher can be mid-write in what goes.
+    locks = []
+    for folder in dict.fromkeys(t if t.is_dir() else t.parent for t in targets):
+        fd = P.pack_folder_lock(folder)
+        if fd is None:
+            P.pack_folder_unlock(locks)
+            h._json({"error": "This model is downloading right now — try again "
+                              "when it finishes."}, 409); return
+        locks.append(fd)
+    try:
+        freed = _remove_targets(h, targets)
+    finally:
+        P.pack_folder_unlock(locks)
+    if freed is None:
+        return
+    P.push(f"[storage] removed {label} — {P._fmt_gb(freed)} freed")
+    h._json({"ok": True, "freed": freed, "freed_label": P._fmt_gb(freed),
+                "label": label}); return
+
+
+def _remove_targets(h, targets) -> int | None:
+    """Delete the resolved targets; None after answering a 500."""
     freed = 0
     for t in targets:
         try:
@@ -157,10 +208,8 @@ def post_models_remove(h, path, qs, ctype) -> None:
                 t.unlink()
         except OSError as exc:
             P.push(f"[storage] could not remove {t}: {exc}")
-            h._json({"error": f"could not remove {t.name}: {exc}"}, 500); return
-    P.push(f"[storage] removed {label} — {P._fmt_gb(freed)} freed")
-    h._json({"ok": True, "freed": freed, "freed_label": P._fmt_gb(freed),
-                "label": label}); return
+            h._json({"error": f"could not remove {t.name}: {exc}"}, 500); return None
+    return freed
 
 
 @post("/models/cancel")
@@ -233,6 +282,11 @@ def post_models_repair(h, path, qs, ctype) -> None:
     if not bad:
         h._json({"ok": True, "nothing_to_repair": True,
                     "note": f"no corrupt files detected for {key!r}"}); return
+    # Mac app: the app is fetching this pack itself (app_models.json). Two
+    # fetchers writing (or a repair deleting) one folder is not safe - refuse.
+    if P.app_models_owns(repo):
+        h._json({"error": "This model is already downloading in the background.",
+                 "app_downloading": True}, 409); return
     if P.HF_BIN is None and (repo.get("mirror") or {}).get("kind") != "github-release":
         h._json({"error": "hf binary not found. Reinstall Phosphene."}, 500); return
     # CLAIM THE SLOT FIRST, delete second. This deleted the files and only
@@ -247,6 +301,21 @@ def post_models_repair(h, path, qs, ctype) -> None:
         P.DOWNLOAD["repo_id"] = repo["repo_id"]
         P.DOWNLOAD["started_ts"] = P.time.time()
         P.DOWNLOAD["last_line"] = "repairing…"
+    # 4.19.10 (review): never delete files another process is writing (the
+    # Mac app's own download): take the pack folder's one-writer lock for the
+    # deletion, and give the slot back when it is held.
+    target = P.Q8_LOCAL_PATH if key == "q8" else P.repo_dir(repo)
+    locks = []
+    for folder in dict.fromkeys([P.Path(target), P.repo_dir(repo)]):
+        fd = P.pack_folder_lock(folder)
+        if fd is None:
+            P.pack_folder_unlock(locks)
+            with P.DOWNLOAD_LOCK:
+                P.DOWNLOAD.update({"active": False, "key": None, "repo_id": None,
+                                   "started_ts": None})
+            h._json({"error": "This model is downloading right now — try again "
+                              "when it finishes."}, 409); return
+        locks.append(fd)
     # The deep-check findings for this repo are CONSUMED by this repair. They
     # carry no file identity, so left in place a second Repair — after this
     # one had fetched good copies — would delete the now-valid files again.
@@ -255,17 +324,20 @@ def post_models_repair(h, path, qs, ctype) -> None:
         _dv = P._DEEP_VERIFY.get("result")
         if isinstance(_dv, dict) and _dv.get("bad"):
             _dv["bad"] = [b for b in _dv["bad"] if b.get("repo") != key]
-    target = P.Q8_LOCAL_PATH if key == "q8" else (P.ROOT / repo["local_dir"])
     deleted = []
-    for fname in bad:
-        for cand in {P.Path(target) / fname, P.ROOT / repo["local_dir"] / fname}:
-            try:
-                if cand.exists():
-                    cand.unlink()
-                    if fname not in deleted:
-                        deleted.append(fname)
-            except OSError:
-                pass
+    try:
+        for fname in bad:
+            for cand in {P.Path(target) / fname, P.repo_dir(repo) / fname}:
+                try:
+                    if cand.exists():
+                        cand.unlink()
+                        if fname not in deleted:
+                            deleted.append(fname)
+                except OSError:
+                    pass
+    finally:
+        # Released before the download starts: its fetcher takes the same lock.
+        P.pack_folder_unlock(locks)
     with P._INTEGRITY_LOCK:           # bust the cache so the next scan re-checks
         P._INTEGRITY_CACHE["ts"] = 0.0
     P.push(f"[repair] {key}: deleted {len(deleted)} corrupt/partial file(s) "
@@ -318,6 +390,10 @@ def post_music_install(h, path, qs, ctype) -> None:
         return
     _body, form = _rb
     kind = "repair" if (form.get("kind", [""])[0] or "") == "repair" else "install"
+    # 4.19.8: YuE2's weights are CC BY-NC 4.0 - its licence screen first.
+    _lic = P.licence_refusal_for("yue2")
+    if _lic:
+        h._json(_lic, 451); return
     code, payload = P.music_install_start(kind)
     h._json(payload, code); return
 
@@ -353,10 +429,27 @@ def post_engine_repair(h, path, qs, ctype) -> None:
     h._json(payload, code); return
 
 
+@post("/h3/repair")
+def post_h3_repair(h, path, qs, ctype) -> None:
+    # 4.19.5: "Repair Hailuo H3" on an H3 failure card. Re-runs ONLY
+    # scripts/pinokio/h3_deps.sh - the H3 venv's packages at the known-good set
+    # (scripts/pinokio/h3_constraints.txt), the same install Install and Update
+    # run - in the background; progress rides /status.h3_env. No weights, no
+    # Stop: the panel never imports the H3 venv.
+    _rb = h._read_form_body()
+    if _rb is None:
+        return
+    code, payload = P.h3_env_repair_start()
+    h._json(payload, code); return
+
+
 @post("/music/cover/install")
 def post_music_cover_install(h, path, qs, ctype) -> None:
     # The opt-in ~2.8 GB that lets YuE2 read a score off a real recording.
     # Separate from /music/install because the engine works without it.
+    _lic = P.licence_refusal_for("yue2")
+    if _lic:
+        h._json(_lic, 451); return
     code, payload = P.music_cover_fetch_start()
     h._json(payload, code); return
 
@@ -374,6 +467,9 @@ def post_music_lora_fetch(h, path, qs, ctype) -> None:
     # The opt-in ~210 MB that makes Instrumental a real adapter instead of a
     # prompt convention. Separate from /music/install: the engine writes songs
     # without it, and a user who never asks for one never pays for it.
+    _lic = P.licence_refusal_for("yue2")
+    if _lic:
+        h._json(_lic, 451); return
     code, payload = P.music_lora_fetch_start()
     h._json(payload, code); return
 

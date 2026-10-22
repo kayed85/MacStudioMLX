@@ -49,6 +49,38 @@ function updateModelsCard(s) {
     return;
   }
 
+  // ----- 4.20: the post-install background downloads ----------------------
+  // A fresh install starts with the renderer only; Gemma 3 and the IC-LoRAs
+  // follow in the background. That is not a problem to fix, so the card says
+  // so calmly: you can render now, this is what is arriving and what it
+  // unlocks. Cancel skips that one pack (Settings -> Models still offers it).
+  const bgq = s.deferred_downloads || {};
+  if (dl && dl.background) {
+    card.style.display = '';
+    card.classList.add('state-downloading');
+    icon.textContent = '↓';
+    const rest = Math.max(0, (bgq.pending || []).length - 1);
+    title.textContent = `Finishing setup in the background — you can render now`;
+    sub.textContent = `Downloading ${dl.name || dl.key}${dl.size_gb ? ` (~${dl.size_gb} GB)` : ''}`
+      + (rest ? ` · ${rest} more after this (${bgq.left_gb} GB left in all)` : '')
+      + ' · resumes if interrupted';
+    progress.style.display = '';
+    const m = (dl.last_line || '').match(/\b(\d{1,3})%/);
+    fill.style.width = m ? `${Math.min(100, parseInt(m[1]))}%` : '15%';
+    last.textContent = dl.last_line || 'starting…';
+    actions.innerHTML = `<button class="ghost" onclick="cancelDownload()">Skip this one</button>`;
+    return;
+  }
+  if (!dl && bgq.state === 'waiting_disk' && bgq.message && baseOk) {
+    card.style.display = '';
+    card.classList.add('state-warn');
+    icon.innerHTML = '<svg class="ph" aria-hidden="true"><use href="#ph-download-simple"/></svg>';
+    title.textContent = 'Background downloads paused — the disk is nearly full';
+    sub.textContent = bgq.message;
+    actions.innerHTML = `<button class="ghost" onclick="openModelsModal()">Models</button>`;
+    return;
+  }
+
   // ----- Active download takes precedence over everything ------------------
   if (dl) {
     card.style.display = '';
@@ -80,6 +112,24 @@ function updateModelsCard(s) {
     card.classList.add('state-missing');
     icon.innerHTML = '<svg class="ph" aria-hidden="true"><use href="#ph-warning-fill"/></svg>';
     title.textContent = 'Base models needed before you can render';
+    // Mac app: the app is fetching the base set itself (app_models.json).
+    // Say so and offer no second Download - two fetchers on one pack is not
+    // safe, and the server refuses it anyway. Absent under Pinokio.
+    const appDl = s.app_models;
+    if (appDl && appDl.active) {
+      const gb = (b) => (Number(b || 0) / 1e9).toFixed(1);
+      const amount = appDl.total_bytes ? `${gb(appDl.done_bytes)} of ${gb(appDl.total_bytes)} GB` : '';
+      sub.textContent = appDl.state === 'paused'
+        ? 'Download paused'
+        : `Base models are downloading${amount ? ` (${amount})` : ''}. You can render when they\u2019re ready.`;
+      if (appDl.total_bytes) {
+        progress.style.display = '';
+        fill.style.width = `${Math.min(100, Math.round(100 * appDl.done_bytes / appDl.total_bytes))}%`;
+        last.textContent = '';
+      }
+      actions.innerHTML = '';
+      return;
+    }
     const missingList = s.base_missing || [];
     const missing = missingList.length;
     // REGISTRY-DRIVEN, for the ACTIVE generation. `base_missing` is already
@@ -110,7 +160,7 @@ function updateModelsCard(s) {
     const baseNeedsHf = pBase ? (pBase.needs_hf !== false) : true;
     actions.innerHTML = ((s.hf_available ?? true) || !baseNeedsHf)
       ? `<button onclick="startDownload('${escapeHtml(pBase ? pBase.key : 'q4')}')">Download ${escapeHtml(pBase ? pBase.name : 'base')} (${escapeHtml(pBase ? pBase.size : '?')})</button>`
-      : `<button disabled title="hf binary not found — reinstall via Pinokio">hf missing</button>`;
+      : `<button disabled title="${escapeHtml(distText('hf binary not found — reinstall via Pinokio', 'hf not found — quit Phosphene and open it again to rerun setup'))}">hf missing</button>`;
     return;
   }
 
@@ -451,7 +501,9 @@ function openTierModal() {
     // Replace the loading state with a visible error so the modal doesn't
     // look "broken" with empty content.
     document.getElementById('tierModalBlurb').innerHTML =
-      '<div style="color: var(--danger, #f85149)">Could not load tier info — the panel server may have stopped responding. Check the Pinokio terminal and restart the panel if needed.</div>';
+      '<div style="color: var(--danger, #f85149)">' + distText(
+        'Could not load tier info — the panel server may have stopped responding. Check the Pinokio terminal and restart the panel if needed.',
+        'Could not load tier info — the studio server may have stopped responding. Check the logs with Help \u2192 Open Logs Folder and use Studio \u2192 Restart Engine if needed.') + '</div>';
     document.getElementById('tierCapsList').innerHTML = '';
     console.error('tier modal fetch failed:', err);
   });
@@ -465,6 +517,71 @@ function closeTierModal() { document.getElementById('tierModal').style.display =
 // and opens the URL in a new tab. Stays purely in the panel — no auth,
 // no API hit, the user reviews the issue body in GitHub before posting.
 let _bugCtxCache = null;
+// 4.19.3 (#106): the report must say what went wrong. Issue #106 arrived
+// with "What happened" and "Expected" empty and one unrelated log line —
+// nothing to act on. The required box above the details is checked here,
+// with inline copy (never alert()), and the server checks it again.
+const BUG_WHAT_MIN = 10;
+const BUG_WHAT_HINT = "A sentence or two in your own words. The log below is "
+  + "attached for you, but it can't tell us what you saw.";
+const BUG_WHAT_SHORT = 'Please tell us what went wrong in a sentence or two '
+  + '(at least ' + BUG_WHAT_MIN + ' characters), e.g. "The render stopped at '
+  + '40% and the card says helper failed." Without it we can\'t tell what to fix.';
+// The person's own text, line breaks kept; any line that starts with "#"
+// is escaped so it can't become a heading that ends the section early
+// (Codex, 4.19.3).
+function bugWhatText() {
+  const el = document.getElementById('bugWhat');
+  const raw = el ? String(el.value || '').replace(/\r\n?/g, '\n').trim() : '';
+  return raw.replace(/^([ \t]*)#/gm, '$1\\#');
+}
+// Counted with whitespace collapsed, the same way the server counts.
+function bugWhatOk() {
+  const el = document.getElementById('bugWhat');
+  return (el ? String(el.value || '') : '').replace(/\s+/g, ' ').trim().length >= BUG_WHAT_MIN;
+}
+function bugWhatShow(invalid) {
+  const el = document.getElementById('bugWhat');
+  const hint = document.getElementById('bugWhatHint');
+  const wrap = el && el.closest('.bug-what');
+  if (wrap) wrap.classList.toggle('is-invalid', !!invalid);
+  if (el) el.setAttribute('aria-invalid', invalid ? 'true' : 'false');
+  if (hint) hint.textContent = invalid ? BUG_WHAT_SHORT : BUG_WHAT_HINT;
+}
+// Clears the warning as soon as the text is long enough; never shows it
+// while someone is still typing their first words.
+function bugWhatInput() {
+  const wrap = document.getElementById('bugWhat')?.closest('.bug-what');
+  if (wrap && wrap.classList.contains('is-invalid') && bugWhatOk()) bugWhatShow(false);
+}
+// Put the box's text under "## What happened" in the issue body: into an
+// existing heading if the person kept one, else before "## Expected" /
+// "## Logs", else at the end.
+function bugComposeBody(body, what) {
+  if (!what) return body;
+  const head = /^##[ \t]*What happened[ \t]*$/mi;
+  const m = head.exec(body);
+  if (m) {
+    const at = m.index + m[0].length;
+    return body.slice(0, at) + '\n\n' + what + '\n' + body.slice(at);
+  }
+  const sec = '## What happened\n\n' + what + '\n\n';
+  for (const re of [/^##[ \t]*Expected/mi, /^##[ \t]*Logs/mi]) {
+    const k = body.search(re);
+    if (k >= 0) return body.slice(0, k) + sec + body.slice(k);
+  }
+  return body.replace(/\s*$/, '\n\n') + sec;
+}
+// "[bug] " alone is no title: use the first line of what happened.
+function bugComposeTitle(title, what) {
+  const t = (title || '').trim();
+  if (t && !/^\[bug\]$/i.test(t)) return t;
+  const line = String(what || '').split('\n').map(x => x.replace(/^[\s\\#]+/, '').trim())
+    .find(Boolean) || '';
+  if (!line) return '[bug] (untitled)';
+  const first = line.length > 72 ? line.slice(0, 71).replace(/\s+\S*$/, '') + '…' : line;
+  return '[bug] ' + first;
+}
 async function openBugModal() {
   const modal = document.getElementById('bugModal');
   modal.style.display = 'flex';
@@ -476,17 +593,24 @@ async function openBugModal() {
   const submitBtn = document.getElementById('bugSubmitBtn');
   // Clear stale state in case the user opens twice in a row.
   titleEl.value = '[bug] ';
+  const whatEl = document.getElementById('bugWhat');
+  if (whatEl) whatEl.value = '';
+  bugWhatShow(false);
   bodyEl.value = 'Loading environment…';
   statusEl.textContent = '';
   submitBtn.disabled = false;
   submitBtn.textContent = 'Open GitHub issue';
+  // A finished report rewires this button to "Done — close"; without this
+  // the NEXT report's "Open GitHub issue" just closed the dialog.
+  submitBtn.onclick = submitBugReport;
   try {
     const r = await fetch('/panel/bug-context');
     if (!r.ok) throw new Error('bug-context: ' + r.status);
     _bugCtxCache = await r.json();
   } catch (err) {
     bodyEl.value = '## Environment\n- (server context unavailable: ' + err + ')\n\n'
-      + '## What I was doing\n\n\n## What happened\n\n\n## Expected\n\n';
+      + '## What I was doing\n\n\n## Expected\n\n';
+    setTimeout(() => document.getElementById('bugWhat')?.focus(), 50);
     crashRow.style.display = 'none';
     return;
   }
@@ -500,9 +624,6 @@ async function openBugModal() {
 - Mac: ${c.hwModel || 'unknown'} · ${c.ramGB || '?'} GB RAM
 
 ## What I was doing
-
-
-## What happened
 
 
 ## Expected
@@ -525,17 +646,9 @@ ${tail}
   } else {
     crashRow.style.display = 'none';
   }
-  // Focus the "What I was doing" line for the user to start typing.
-  // Place caret right after the heading.
-  setTimeout(() => {
-    bodyEl.focus();
-    const marker = '## What I was doing\n';
-    const idx = bodyEl.value.indexOf(marker);
-    if (idx >= 0) {
-      const pos = idx + marker.length;
-      bodyEl.setSelectionRange(pos, pos);
-    }
-  }, 50);
+  // Focus the required "What happened?" box — the one thing only the
+  // person filing the report can supply.
+  setTimeout(() => document.getElementById('bugWhat')?.focus(), 50);
 }
 function closeBugModal() {
   document.getElementById('bugModal').style.display = 'none';
@@ -546,8 +659,9 @@ function closeBugModal() {
 // server-side the same way (see get_panel_bug_context).
 async function copyBugDiagnostics() {
   const statusEl = document.getElementById('bugStatus');
-  const title = document.getElementById('bugTitle').value.trim() || '[bug] (untitled)';
-  const body = document.getElementById('bugBody').value;
+  const what = bugWhatText();
+  const title = bugComposeTitle(document.getElementById('bugTitle').value, what);
+  const body = bugComposeBody(document.getElementById('bugBody').value, what);
   try {
     await navigator.clipboard.writeText(title + '\n\n' + body);
     if (statusEl) statusEl.textContent = 'Copied — paste it anywhere (a forum post, a DM, a translated message).';
@@ -558,8 +672,16 @@ async function copyBugDiagnostics() {
 async function submitBugReport() {
   const submitBtn = document.getElementById('bugSubmitBtn');
   const statusEl = document.getElementById('bugStatus');
-  const title = document.getElementById('bugTitle').value.trim() || '[bug] (untitled)';
-  const body = document.getElementById('bugBody').value;
+  if (!bugWhatOk()) {
+    // Inline, next to the box, and focus it: no pop-up dialog, nothing sent.
+    bugWhatShow(true);
+    statusEl.textContent = '';
+    document.getElementById('bugWhat')?.focus();
+    return;
+  }
+  const what = bugWhatText();
+  const title = bugComposeTitle(document.getElementById('bugTitle').value, what);
+  const body = bugComposeBody(document.getElementById('bugBody').value, what);
   const includeCrashEl = document.getElementById('bugCrashCheck');
   const includeCrash = includeCrashEl && document.getElementById('bugCrashRow').style.display !== 'none'
     ? !!includeCrashEl.checked : false;
@@ -570,9 +692,18 @@ async function submitBugReport() {
     const r = await fetch('/panel/bug-report', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title, body, includeCrashReports: includeCrash }),
+      body: JSON.stringify({ title, body, whatHappened: what, includeCrashReports: includeCrash }),
     });
     const data = await r.json();
+    if (data && data.field === 'what_happened') {
+      // Server backstop agreed the description is missing: same inline copy.
+      bugWhatShow(true);
+      statusEl.textContent = '';
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Open GitHub issue';
+      document.getElementById('bugWhat')?.focus();
+      return;
+    }
     if (!r.ok || !data.issueUrl) throw new Error(data.error || ('HTTP ' + r.status));
     // Open the issue in a new tab. noopener for safety.
     window.open(data.issueUrl, '_blank', 'noopener');
@@ -1085,7 +1216,7 @@ function renderSpicyState(isOn) {
   const badge = document.getElementById('spicyStateBadge');
   const btn = document.getElementById('spicyToggleBtn');
   const hint = document.getElementById('spicyHint');
-  if (!badge || !btn) return;
+  if (!badge || !btn || !hint) return;      // not served in the Mac app
   badge.classList.remove('on', 'armed');
   if (_spicyArmed) {
     badge.textContent = 'ARMED';
@@ -1461,7 +1592,7 @@ Object.assign(globalThis, {
   appearanceGet, applyAppearance, setAppearance,
   renderNotifyState, toggleNotify, askNotifyPermission,
   updateModelsCard, dismissModelsCard, applyTierGates, openTierModal,
-  closeTierModal, openBugModal, closeBugModal, submitBugReport, copyBugDiagnostics,
+  closeTierModal, openBugModal, closeBugModal, submitBugReport, copyBugDiagnostics, bugWhatInput,
   openSettingsModal, toggleAnalytics, saveAnalyticsKey, clearAnalyticsKey,
   toggleSpicyMode, onTokenInput, toggleTokenVisibility, testToken,
   clearToken, closeSettingsModal, applySettings, _applyHdrPillAvailability,

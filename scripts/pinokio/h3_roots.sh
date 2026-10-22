@@ -55,16 +55,31 @@ h3_flat_missing() {
     || echo "upstream-meta/FL2VA/text_encoder/config.json"
 }
 
-# The install's weights step. Run from the H3 checkout (RH3 cds there).
+# Enter the H3 checkout - the `cd` every install_h3.js step used to do inline.
+# A missing folder (the clone step before it failed: no network, a full disk)
+# used to end the `&&` chain in silence and the step "succeeded" having done
+# nothing. Pinokio 8.2 ignores a shell.run exit code and stops a script only when
+# the step's OUTPUT matches /error:/i or /errno /i, so the refusal says
+# "FATAL error:" in plain words.
+h3_enter() {
+  cd "$H3_CHECKOUT" 2>/dev/null && return 0
+  echo "FATAL error: the Hailuo H3 engine folder is missing ($H3_CHECKOUT) - its download did not finish. Check your internet connection and free disk space, then click Install again."
+  return 1
+}
+
+# The install's weights step. Run from the H3 checkout (RH3 enters it).
 h3_fetch_weights() {
   local m
   if [ "$H3_FLAT" != 1 ]; then
-    .venv/bin/python scripts/download_selected.py --root "$H3_MODELS_ROOT"
-    return $?
+    if ! .venv/bin/python scripts/download_selected.py --root "$H3_MODELS_ROOT"; then
+      echo "FATAL error: the Hailuo H3 model files (~75 GB) did not finish downloading - the lines above say why (usually the internet connection or a full disk). Click Install again: what is already downloaded is kept and not fetched twice."
+      return 1
+    fi
+    return 0
   fi
   m="$(h3_flat_missing)"
   if [ -n "$m" ]; then
-    echo "error: the flat H3 weights tree at $H3_MODELS_ROOT is missing:" $m \
+    echo "FATAL error: the flat H3 weights tree at $H3_MODELS_ROOT is missing:" $m \
       "- complete it, or unset LTX_H3_MODELS so Install can download into its own folder."
     return 1
   fi

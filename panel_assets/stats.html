@@ -12,8 +12,9 @@
 
     Served BY THE PANEL at http://127.0.0.1:8199/stats. The HTML
     template lives at panel_assets/stats.html and is read at request
-    time; the JSONL data is appended daily by the panel's
-    stats_fetch_loop background thread and persisted at
+    time; the JSONL data is appended daily by the maintainer's launchd
+    job (or by the panel's stats_fetch_loop, opt-in only with
+    PHOSPHENE_STATS_FETCH=1) and persisted at
     state/stats-data.jsonl (gitignored — never on the public repo).
     Both endpoints are 127.0.0.1-only.
 
@@ -1242,9 +1243,9 @@
            in renderFunnel(). This is what "how many actual users" means. -->
       <div id="alltime-hero" style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:0 0 16px">
         <div style="background:rgba(63,185,80,0.06);border:1px solid rgba(63,185,80,0.28);border-radius:12px;padding:16px 18px">
-          <div style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)">Estimated users <span style="color:#3fb950;opacity:.85">· all-time</span></div>
+          <div style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)" title="Installs that finished at least one render, all time, from the in-app analytics (the maintainer's own machines excluded). Our best count of real people: one person with two installs counts twice, and a check on 2026-10-14 put that overlap at about 3%.">Users · installs that rendered <span style="color:#3fb950;opacity:.85">· all-time</span></div>
           <div id="ath-users" style="font-size:34px;font-weight:680;color:var(--text);line-height:1.05;margin-top:5px">—</div>
-          <div id="ath-users-sub" style="font-size:11.5px;color:var(--muted);margin-top:4px">distinct installs · since first archive</div>
+          <div id="ath-users-sub" style="font-size:11.5px;color:var(--muted);margin-top:4px">from in-app analytics · loading…</div>
         </div>
         <div style="background:rgba(63,185,80,0.06);border:1px solid rgba(63,185,80,0.28);border-radius:12px;padding:16px 18px">
           <div style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)">Total clones <span style="color:#3fb950;opacity:.85">· all-time</span></div>
@@ -1295,9 +1296,9 @@
             <div class="sub" id="ck-total-sub">in range</div>
           </div>
           <div class="clones-kpi">
-            <div class="lbl">est. distinct installers</div>
+            <div class="lbl">daily unique cloners, summed</div>
             <div class="val" id="ck-est">—</div>
-            <div class="sub" title="Heuristic: sum of daily uniques ÷ ~1.7 (avg clones per real person; v2→v3 reinstall pattern). Lower bound, real number is somewhere between this and the sum of uniques.">heuristic ÷1.7 · ?</div>
+            <div class="sub" title="GitHub only publishes unique cloners per day. Summed over the range this is an UPPER bound on distinct cloners: one person cloning on 3 days counts 3 times. For users, read the Usage section (installs that rendered).">upper bound · not users</div>
           </div>
           <div class="clones-kpi">
             <div class="lbl">retry pressure</div>
@@ -1512,7 +1513,7 @@
           <thead><tr>
             <th>Tag</th>
             <th>Published</th>
-            <th class="num">Downloads</th>
+            <th class="num" title="Downloads of files attached to the release. Code releases ship as git tags (Pinokio pulls them) and carry no files: those read source-only.">Downloads</th>
             <th class="num">Relative</th>
           </tr></thead>
           <tbody></tbody>
@@ -1523,8 +1524,11 @@
 
     <footer>
       Data lives at <code>state/stats-data.jsonl</code> on your Mac —
-      never on the public repo. The panel refreshes it once a day in
-      the background via <code>scripts/fetch_repo_stats.py</code>.
+      never on the public repo. A daily launchd job
+      (<code>com.mrbizarro.phosphene-stats-fetch</code>) appends to it via
+      <code>scripts/fetch_repo_stats.py</code> whether or not a panel is
+      running. A panel fetches too only when started with
+      <code>PHOSPHENE_STATS_FETCH=1</code>.
       <br>
       The GitHub Traffic API only retains 14 days of clones / views /
       referrers / paths; this archive is how we keep the history.
@@ -1642,12 +1646,55 @@
   function sum(arr) { return arr.reduce((a, b) => a + (Number(b) || 0), 0); }
   function avg(arr) { return arr.length ? sum(arr) / arr.length : 0; }
 
-  /** Slice rows by period. period ∈ {'7','30','90','365','all'}. */
+  /** Rows whose date falls in the last `period` days (by DATE, not by row
+   * count: the archive has gaps, and "the last 30 rows" was 43 days once a
+   * fetch had been skipped for two weeks). period ∈ {'7','30','90','all'}. */
   function sliceByPeriod(rows, period) {
     if (period === 'all' || !period) return rows;
     const n = parseInt(period, 10);
     if (!Number.isFinite(n) || n <= 0) return rows;
-    return rows.slice(-n);
+    const cutoff = isoDaysAgo(n);
+    return rows.filter(r => (r.date || '') >= cutoff);
+  }
+
+  /** UTC YYYY-MM-DD for `n` days before `fromIso` (default: today, UTC). */
+  function isoDaysAgo(n, fromIso) {
+    const base = fromIso ? new Date(fromIso + 'T00:00:00Z') : new Date();
+    const t = base.getTime() - n * 86_400_000;
+    return new Date(t).toISOString().slice(0, 10);
+  }
+
+  /** The last row dated ON OR BEFORE `iso` (rows sorted ascending), or null.
+   * Deltas ask "what was it N days ago", and with gaps in the archive the
+   * row N places back is not N days back. */
+  function rowOnOrBefore(rows, iso) {
+    let hit = null;
+    for (const r of rows) {
+      if ((r.date || '') <= iso) hit = r; else break;
+    }
+    return hit;
+  }
+
+  /** Cumulative count on `iso` from a {date,count} cumulative timeline
+   * (stars_timeline / forks_timeline: GitHub's full history, carried
+   * forward over days with no change). 0 before its first entry; null
+   * when there is no timeline. */
+  function cumAt(timeline, iso) {
+    if (!Array.isArray(timeline) || !timeline.length) return null;
+    let v = 0;
+    for (const p of timeline) {
+      if ((p.date || '') <= iso) v = p.count; else break;
+    }
+    return v;
+  }
+
+  /** {date,count} point for exactly `iso` in a daily series, or null. */
+  function pointOn(series, iso) {
+    for (let i = series.length - 1; i >= 0; i--) {
+      if (series[i].date === iso) return series[i];
+      if (series[i].date < iso) break;
+    }
+    return null;
   }
 
   /** Slice a {date,count} timeline by period (matches sliceByPeriod). */
@@ -1693,43 +1740,11 @@
   //  more granularity than the row history alone gives us.
   // ===================================================================
 
-  /** Returns [{date,count,uniques}] for clones, preferring the window. */
-  function clonesSeries(rows) {
-    if (!rows.length) return [];
-    const last = rows[rows.length - 1];
-    const win = Array.isArray(last.clones_window) ? last.clones_window : null;
-    // Build a map from row history first, then overlay the window so
-    // window dates win when both exist.
-    const map = new Map();
-    for (const r of rows) {
-      if (!r.date) continue;
-      map.set(r.date, { date: r.date, count: r.clones?.count ?? 0, uniques: r.clones?.uniques ?? 0 });
-    }
-    if (win) {
-      for (const p of win) {
-        if (!p.date) continue;
-        map.set(p.date, { date: p.date, count: p.count ?? 0, uniques: p.uniques ?? 0 });
-      }
-    }
-    return [...map.values()].sort((a, b) => a.date < b.date ? -1 : 1);
-  }
-  function viewsSeries(rows) {
-    if (!rows.length) return [];
-    const last = rows[rows.length - 1];
-    const win = Array.isArray(last.views_window) ? last.views_window : null;
-    const map = new Map();
-    for (const r of rows) {
-      if (!r.date) continue;
-      map.set(r.date, { date: r.date, count: r.views?.count ?? 0, uniques: r.views?.uniques ?? 0 });
-    }
-    if (win) {
-      for (const p of win) {
-        if (!p.date) continue;
-        map.set(p.date, { date: p.date, count: p.count ?? 0, uniques: p.uniques ?? 0 });
-      }
-    }
-    return [...map.values()].sort((a, b) => a.date < b.date ? -1 : 1);
-  }
+  /** Per-day clones / views. Both are the stitched all-snapshot series —
+   * see trafficSeriesAllTime for why a row's top-level `clones` field is
+   * never filed under the row's own date. */
+  function clonesSeries(rows) { return clonesSeriesAllTime(rows); }
+  function viewsSeries(rows)  { return viewsSeriesAllTime(rows); }
 
   /**
    *  All-time clones series. Unlike clonesSeries() which only overlays the
@@ -1740,25 +1755,24 @@
    *  (their counts for a given day are more recently confirmed by GitHub).
    *  Returns [{date,count,uniques}] sorted ascending.
    */
-  function clonesSeriesAllTime(rows) {
+  function clonesSeriesAllTime(rows) { return trafficSeriesAllTime(rows, 'clones'); }
+  function viewsSeriesAllTime(rows)  { return trafficSeriesAllTime(rows, 'views'); }
+
+  /** The stitched per-day series for 'clones' or 'views': the UNION of every
+   * snapshot's 14-day window, later snapshots winning. Only window entries
+   * count. A row's top-level `clones`/`views` field is NOT a reading for the
+   * row's own date — it is the last entry of that row's window, i.e. a day or
+   * more earlier — and filing it under the row's date double-counted it and
+   * invented traffic for days GitHub never reported (Sep 24-28 2026 showed
+   * Sep 23's 93 clones five times over). */
+  function trafficSeriesAllTime(rows, kind) {
     if (!rows.length) return [];
     const map = new Map();
+    const key = kind === 'views' ? 'views_window' : 'clones_window';
     for (const r of rows) {
-      // 1. Each row's top-level clones field reflects the day-1 fetch for
-      //    that row's date (one data point per snapshot).
-      if (r.date && r.clones) {
-        // Don't overwrite a window-sourced point if it's already there.
-        if (!map.has(r.date)) {
-          map.set(r.date, {
-            date: r.date,
-            count: r.clones.count ?? 0,
-            uniques: r.clones.uniques ?? 0,
-          });
-        }
-      }
-      // 2. The rolling 14-day window in each snapshot — union all of them.
-      //    Later snapshots win (more recent GitHub data for the same date).
-      const win = Array.isArray(r.clones_window) ? r.clones_window : null;
+      // The rolling 14-day window in each snapshot — union all of them.
+      // Later snapshots win (more recent GitHub data for the same date).
+      const win = Array.isArray(r[key]) ? r[key] : null;
       if (win) {
         for (const p of win) {
           if (!p.date) continue;
@@ -1768,6 +1782,18 @@
             uniques: p.uniques ?? 0,
           });
         }
+      }
+    }
+    // Days only a DISCARDED same-day copy of a snapshot had (merged in from
+    // other state dirs on 2026-10-14, kept on the surviving row as
+    // `recovered_traffic`). Filled only where no window has the day.
+    const rkey = kind === 'views' ? 'views' : 'clones';
+    for (const r of rows) {
+      const extra = r.recovered_traffic && Array.isArray(r.recovered_traffic[rkey])
+        ? r.recovered_traffic[rkey] : [];
+      for (const p of extra) {
+        if (!p.date || map.has(p.date)) continue;
+        map.set(p.date, { date: p.date, count: p.count ?? 0, uniques: p.uniques ?? 0 });
       }
     }
     return [...map.values()].sort((a, b) => a.date < b.date ? -1 : 1);
@@ -1818,61 +1844,95 @@
       return;
     }
     const last = rows[rows.length - 1];
-    const prev = rows.length > 1 ? rows[rows.length - 2] : {};
-    const wkIdx = rows.length - 8;
-    const week = wkIdx >= 0 ? rows[wkIdx] : null;
+    // Deltas by DATE: d/d is the snapshot from the day before, w/w the one
+    // from 7 days before (or the latest one older than that). Row-index
+    // arithmetic used to compare against whatever sat 1 or 7 places back,
+    // which after a skipped fortnight was weeks away.
+    const prev = rowOnOrBefore(rows, isoDaysAgo(1, last.date)) || {};
+    const week = rowOnOrBefore(rows, isoDaysAgo(7, last.date));
 
     // "vs N days ago" — only for ranges longer than a week (7d duplicates
     // w/w; 'all' has no meaningful prior point to compare a single day
     // to), and only when the archive actually reaches back that far.
     const rangeDays = (globalRange !== 'all' && globalRange !== '7')
       ? parseInt(globalRange, 10) : null;
-    const rangeIdx = rangeDays ? rows.length - 1 - rangeDays : -1;
-    const rangeRow = rangeIdx >= 0 ? rows[rangeIdx] : null;
+    const rangeRow = rangeDays ? rowOnOrBefore(rows, isoDaysAgo(rangeDays, last.date)) : null;
     const rangeLabel = rangeRow && rangeDays ? `${rangeDays}d` : null;
 
     // 30-day sparkline series (best-effort — uses raw rows).
     const sparkRows = rows.slice(-30);
     const sparkOf = pick => sparkRows.map(pick);
-    // Clones+views sparks use the per-day series (window-aware).
-    const clonesS = clonesSeries(rows).slice(-30);
-    const viewsS  = viewsSeries(rows).slice(-30);
+    // Clones + views: ONE daily series stitched from every snapshot's
+    // 14-day window (later snapshots win). The tile shows its newest day —
+    // GitHub reports traffic ~1-2 days late, so that is "the latest day
+    // GitHub has published", never "today" — with deltas against the day
+    // before and the same weekday a week earlier IN THAT SERIES. The old
+    // tile read each snapshot's own last entry, so when GitHub's window
+    // stalled (Sep 25-29 all ended on Sep 23) the tile and its deltas froze.
+    const cAll = clonesSeriesAllTime(rows);
+    const vAll = viewsSeriesAllTime(rows);
+    const cLast = cAll[cAll.length - 1] || null;
+    const vLast = vAll[vAll.length - 1] || null;
+    const cDay = cLast ? cLast.date : null;
+    const vDay = vLast ? vLast.date : null;
+    const clonesS = cAll.slice(-30);
+    const viewsS  = vAll.slice(-30);
+    // Value of stars/forks N days before the latest snapshot: the GitHub
+    // timeline when the snapshot has one, else the snapshot on/before then.
+    const histAt = (kind, n) => {
+      const iso = isoDaysAgo(n, last.date);
+      const v = cumAt(last[kind + '_timeline'], iso);
+      if (v != null) return v;
+      const r = rowOnOrBefore(rows, iso);
+      return r ? r[kind] : null;
+    };
+    const shortDay = iso => iso ? new Date(iso + 'T00:00:00Z').toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' }) : '—';
 
     // Health pulse — synthesized.
     const pulse = computeHealthPulse(rows);
 
     const cards = [
+      // Stars / forks deltas come from the GitHub-side timelines (every
+      // star and fork with its date), not from our snapshots: with a gap in
+      // the archive, "the snapshot before today" was 15 days old and d/d
+      // read +16 stars.
       {
         key: 'stars', label: 'Stars',
-        title: 'Total GitHub stars on the repo right now.',
-        value: last.stars, yday: prev.stars, wk: week?.stars,
-        rangeAgo: rangeRow?.stars,
+        title: 'Total GitHub stars on the repo right now. d/d and w/w from GitHub\'s own star dates.',
+        value: last.stars,
+        yday: histAt('stars', 1), wk: histAt('stars', 7),
+        rangeAgo: rangeDays ? histAt('stars', rangeDays) : null,
         spark: sparkOf(r => r.stars), color: C.accent,
       },
       {
         key: 'forks', label: 'Forks',
-        title: 'Copies of the repo other GitHub accounts have made.',
-        value: last.forks, yday: prev.forks, wk: week?.forks,
-        rangeAgo: rangeRow?.forks,
+        title: 'Copies of the repo other GitHub accounts have made. d/d and w/w from GitHub\'s own fork dates.',
+        value: last.forks,
+        yday: histAt('forks', 1), wk: histAt('forks', 7),
+        rangeAgo: rangeDays ? histAt('forks', rangeDays) : null,
         spark: sparkOf(r => r.forks), color: C.purple,
       },
       {
-        key: 'clones', label: 'Clones · today', hero: true,
-        title: 'git clones of the repo today (GitHub Traffic API). The '
-          + 'closest signal we have to "how many people installed today" '
-          + '— it also counts CI, re-clones after a failed install, etc.',
-        value: last.clones?.count,
-        yday: prev.clones?.count, wk: week?.clones?.count,
-        rangeAgo: rangeRow?.clones?.count,
+        key: 'clones', label: `Clones · ${shortDay(cDay)}`, hero: true,
+        title: `git clones of the repo on ${cDay || '—'} (UTC), the latest day `
+          + 'GitHub\'s Traffic API has published — it reports a day or two late, '
+          + 'and a day\'s count can still rise for ~48 h. Counts CI and re-clones '
+          + 'after a failed install too. d/d = the day before; w/w = 7 days earlier.',
+        value: cLast ? cLast.count : null,
+        yday: cDay ? pointOn(cAll, isoDaysAgo(1, cDay))?.count : null,
+        wk: cDay ? pointOn(cAll, isoDaysAgo(7, cDay))?.count : null,
+        rangeAgo: (cDay && rangeDays) ? pointOn(cAll, isoDaysAgo(rangeDays, cDay))?.count : null,
         spark: clonesS.map(p => p.count), color: C.pink,
         sparkGradient: true,
       },
       {
-        key: 'views', label: 'Views · today',
-        title: 'Page views on the repo today (GitHub Traffic API).',
-        value: last.views?.count,
-        yday: prev.views?.count, wk: week?.views?.count,
-        rangeAgo: rangeRow?.views?.count,
+        key: 'views', label: `Views · ${shortDay(vDay)}`,
+        title: `Page views on the repo on ${vDay || '—'} (UTC), the latest day `
+          + 'GitHub has published. d/d = the day before; w/w = 7 days earlier.',
+        value: vLast ? vLast.count : null,
+        yday: vDay ? pointOn(vAll, isoDaysAgo(1, vDay))?.count : null,
+        wk: vDay ? pointOn(vAll, isoDaysAgo(7, vDay))?.count : null,
+        rangeAgo: (vDay && rangeDays) ? pointOn(vAll, isoDaysAgo(rangeDays, vDay))?.count : null,
         spark: viewsS.map(p => p.count), color: C.amber,
       },
       {
@@ -1964,10 +2024,11 @@
     let starsLast7 = null;
     if (rows.length >= 2) {
       const last = rows[rows.length - 1];
-      const idx = Math.max(0, rows.length - 8);
-      const past = rows[idx];
-      if (last.stars != null && past?.stars != null) {
-        starsLast7 = last.stars - past.stars;
+      const iso7 = isoDaysAgo(7, last.date);
+      const fromTl = cumAt(last.stars_timeline, iso7);
+      const past = fromTl != null ? fromTl : rowOnOrBefore(rows, iso7)?.stars;
+      if (last.stars != null && past != null) {
+        starsLast7 = last.stars - past;
       }
     }
 
@@ -2107,21 +2168,28 @@
         </div>`;
     }).join('');
 
-    // All-time install / user headline — the number GitHub can't show.
-    // clonesSeriesAllTime() unions EVERY snapshot's 14-day window into one
-    // continuous history, so we recover the full record beyond GitHub's
-    // 14-day cutoff. est users = sum of daily unique IPs ÷ 1.7 (reinstall
-    // pattern); the true count sits between this and the raw unique sum.
+    // All-time clones — the number GitHub can't show (it only keeps 14
+    // days). clonesSeriesAllTime() unions EVERY snapshot's window, and the
+    // page always holds the WHOLE archive (the server no longer trims it by
+    // range), so this is the same number on every range chip. Days the
+    // archive never captured are counted and named, not papered over.
+    //
+    // The users tile next to it is filled by renderUsage() from the fleet:
+    // installs that finished a render. It used to be "sum of daily unique
+    // clone IPs ÷ 1.7" — a guess with a made-up divisor, summed only over
+    // the rows the range trim left (971 on the 7-day view), that counted one
+    // person cloning on three days as three.
     const _at = clonesSeriesAllTime(rows);
     const _atClones = _at.reduce((a, p) => a + (p.count || 0), 0);
-    const _atUniq   = _at.reduce((a, p) => a + (p.uniques || 0), 0);
-    const _atUsers  = _atUniq > 0 ? Math.round(_atUniq / 1.7) : 0;
     const _setTxt = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
-    _setTxt('ath-users', fmt(_atUsers));
     _setTxt('ath-clones', fmt(_atClones));
     if (_at.length) {
-      _setTxt('ath-users-sub', `≈ distinct installs · ${_atUniq.toLocaleString()} unique IPs since ${_at[0].date}`);
-      _setTxt('ath-clones-sub', `${_at.length} days archived · GitHub only keeps 14`);
+      const first = _at[0].date, lastD = _at[_at.length - 1].date;
+      const span = Math.round((Date.parse(lastD) - Date.parse(first)) / 86_400_000) + 1;
+      const missing = Math.max(0, span - _at.length);
+      _setTxt('ath-clones-sub', `${_at.length} days archived since ${first}`
+        + (missing ? ` · ${missing} day${missing === 1 ? '' : 's'} never captured` : '')
+        + ' · GitHub only keeps 14');
     }
   }
 
@@ -2315,13 +2383,11 @@
     const totalUniques = rangeSeries.reduce((a, p) => a + (p.uniques || 0), 0);
     const dayCount = rangeSeries.length;
 
-    // Heuristic from the v2→v3 reinstall pattern analysis: each unique
-    // IP that clones today might be a person who'll clone again on a
-    // future day (Reset → Install cycle), or another machine. So the
-    // sum-of-daily-uniques OVER-counts the real number of distinct
-    // people. Dividing by ~1.7 is the central estimate from earlier
-    // analysis. Real number is somewhere between (sum/1.7) and sum.
-    const estInstallers = totalUniques > 0 ? Math.round(totalUniques / 1.7) : 0;
+    // GitHub publishes unique cloners PER DAY only, so the most this
+    // archive can honestly say is the sum of those: an upper bound on
+    // distinct cloners (one person cloning on 3 days counts 3x). The old
+    // tile divided it by a made-up 1.7 and called it "installers".
+    const estInstallers = totalUniques;
 
     // Retry pressure — across the range, weighted properly: total
     // clones / total uniques. >1.5 = people are re-cloning a lot.
@@ -2911,14 +2977,27 @@
         sub: 'completed' + (m.first_day || (!isFleet && firstDay)
              ? ' · since ' + (m.first_day || firstDay) : ''),
         title: 'Renders completed on THIS Mac only, all time.' },
-      { label: isFleet ? 'Total installs' : 'Installs',
+      // THE USER NUMBERS (2026-10-14) — one definition each, the same words
+      // everywhere on the page. An "install" is one anonymous install id.
+      { label: 'Installs that rendered',
+        value: isFleet ? fmt(t.rendered_installs) : '—',
+        sub: isFleet ? 'all time · finished ≥1 render · ' + since : fleetSub,
+        hero: true, warn: !isFleet,
+        title: 'Installs that finished at least one render, all time. The best count of real users we have: '
+          + 'an install that never rendered is a failed install, a reinstall that got a new id, or a test boot. '
+          + (u.owner_excluded ? 'The maintainer\'s own machines are excluded.' : 'Owner exclusion list not configured — the maintainer\'s own machines are INCLUDED.') },
+      { label: 'Installs that opened the app',
         value: isFleet ? fmt(t.total_installs) : '—',
-        sub: isFleet ? 'ever booted · ' + since : fleetSub,
-        title: 'Distinct machines that have ever booted the panel with analytics on, all time.' },
-      { label: isFleet ? 'Active installs' : 'Active this range',
+        sub: isFleet
+          ? (t.never_rendered_installs != null ? fmt(t.never_rendered_installs) + ' never rendered · ' : '') + 'all time'
+          : fleetSub,
+        title: 'Every install that ever opened Phosphene with analytics on, all time — including the ones that never finished a render. Always bigger than "installs that rendered"; the gap is failed installs, reinstalls and one-off opens.' },
+      { label: globalRange === '7' ? 'Weekly active installs' : `Active installs · ${rangeTxt}`,
         value: fmt(t.active_in_range) + pctDeltaHtml(d.active_in_range_pct),
-        sub: (isFleet ? 'unique installs' : 'this machine') + ' · ' + rangeTxt,
-        title: `Distinct installs that booted the panel in the selected range (${rangeTxt}), vs the same-length period before it.` },
+        sub: globalRange === '7'
+          ? 'opened the app in the last 7 days'
+          : `opened the app in the last ${rangeTxt}` + (t.weekly_active_installs != null ? ` · weekly ${fmt(t.weekly_active_installs)}` : ''),
+        title: `Installs that opened Phosphene at least once in the selected range (${rangeTxt}), vs the same-length period before it. "Weekly active" is this number for 7 days; the growth chart's weekly line uses the same 7-day windows, so its last point equals it.` },
       { label: 'Renders', value: fmt(t.renders_in_range) + pctDeltaHtml(d.renders_in_range_pct),
         sub: 'completed + failed · ' + rangeTxt + ' · ' + (isFleet ? 'all installs' : 'this machine'),
         title: `Renders (successful and failed) in the selected range, vs the same-length period before it.` },
@@ -2945,23 +3024,48 @@
 
     renderUsageGrowth(u.growth || {}, isFleet, rangeTxt);
 
+    // The GitHub section's users tile reads the same fleet number.
+    const athU = document.getElementById('ath-users');
+    const athS = document.getElementById('ath-users-sub');
+    if (athU) athU.textContent = isFleet ? fmt(t.rendered_installs) : '—';
+    if (athS) athS.textContent = isFleet
+      ? `from in-app analytics · ${fmt(t.total_installs)} opened the app, ${fmt(t.never_rendered_installs)} never rendered`
+        + (u.owner_excluded ? ' · owner excluded' : ' · owner NOT excluded')
+      : fleetSub;
+
     // Pack-flip alert — the H3-vanished detector. Any true→false
     // transition on any pack counts; h3 is called out by name because
     // it is the one that has actually bitten a user.
+    // Counted per INSTALL, split by what happened next. The old line counted
+    // EVENTS ("H3 went from installed to missing 8x"): a pack missing at one
+    // launch and back at the next is a launch that landed mid-Update, not a
+    // broken install, and 6 of those 8 were exactly that. Only "still
+    // missing after reopening" is the broken-install signal.
     const flips = u.pack_flips || {};
-    const lost = Number(flips.h3_lost) || 0;
-    const others = (Array.isArray(flips.rows) ? flips.rows : [])
-      .filter(r => r.from && !r.to && r.pack !== 'h3')
-      .reduce((a, r) => a + (Number(r.count) || 0), 0);
+    const losses = flips.losses || {};
+    const PACK_NAMES = { h3: 'H3', q8: 'Q8', sharp: 'Sharp upscale', qwen: 'Qwen image' };
+    const lossPacks = Object.keys(losses).sort((a, b) => (a === 'h3' ? -1 : b === 'h3' ? 1 : a < b ? -1 : 1));
+    const stillMissing = lossPacks.reduce((a, k) => a + (Number(losses[k].still_missing) || 0), 0);
     const alert = $('#usage-packflip');
     if (alert) {
-      const total = lost + others;
-      alert.classList.toggle('is-clear', total === 0);
-      alert.innerHTML = total === 0
-        ? `<span class="n">0</span><span>optional-pack regressions in ${escapeHtml(rangeTxt)}.</span>`
-        : `<span class="n">${fmt(total)}</span><span>optional-pack regression${total === 1 ? '' : 's'} in ${escapeHtml(rangeTxt)}`
-          + (lost ? ` — <strong>H3 went from installed to missing ${fmt(lost)}×</strong>` : '')
-          + `. A pack that disappears between boots is a broken install, not a user choice.</span>`;
+      if (!lossPacks.length) {
+        alert.classList.add('is-clear');
+        alert.innerHTML = `<span class="n">0</span><span>installs lost an optional pack in ${escapeHtml(rangeTxt)}.</span>`;
+      } else {
+        alert.classList.toggle('is-clear', stillMissing === 0);
+        const parts = lossPacks.map(k => {
+          const b = losses[k];
+          const bits = [];
+          if (b.recovered) bits.push(`${fmt(b.recovered)} had it back by a later launch`);
+          if (b.still_missing) bits.push(`<strong>${fmt(b.still_missing)} still missing after reopening</strong>`);
+          if (b.not_seen_since) bits.push(`${fmt(b.not_seen_since)} not opened since`);
+          if (b.unconfirmed) bits.push(`${fmt(b.unconfirmed)} not checked (query failed)`);
+          return `${escapeHtml(PACK_NAMES[k] || k)} went missing on ${fmt(b.installs)} install${b.installs === 1 ? '' : 's'} (${bits.join(', ')})`;
+        });
+        alert.innerHTML = `<span class="n">${fmt(stillMissing)}</span><span>install${stillMissing === 1 ? '' : 's'} with a pack still missing · ${escapeHtml(rangeTxt)}. `
+          + parts.join('; ') + '. '
+          + 'Missing at one launch and back at the next is a launch during an Update, not a broken install; only "still missing after reopening" is.</span>';
+      }
     }
 
     renderErrorGroups(u, rangeTxt);
@@ -3127,8 +3231,10 @@
     const sub = $('#usage-growth-sub');
     if (sub) {
       const first = weeks[0], now = weeks[weeks.length - 1];
+      // Weekly active = installs that opened the app in a 7-day window; the
+      // windows end now, so the last value is the "Weekly active" tile.
       const wau = (first && now && weeks.length > 1)
-        ? ` · weekly active ${fmt(first.installs)} → ${fmt(now.installs)} over ${weeks.length} weeks` : '';
+        ? ` · weekly active ${fmt(first.installs)} → ${fmt(now.installs)} (7-day windows ending ${first.week} → ${now.week})` : '';
       const rt = rangeTxt || '30d';
       sub.textContent = (isFleet ? `installs, all time · renders per day, ${rt}` : `this machine · renders per day, ${rt}`) + wau;
     }
@@ -3291,6 +3397,10 @@
     }
     body.innerHTML = sorted.map((r, idx) => {
       const isPack = String(r.tag || '').startsWith('weights-') && r.pack_downloads != null;
+      // A code tag with no attached files is "source-only": people get it by
+      // Pinokio's git pull, which GitHub does not count as a download. A
+      // bare "0" read as "nobody installed 4.19".
+      const sourceOnly = !isPack && !(Number(r.asset_count) > 0);
       const w = Math.max(2, (shown(r) / max) * 100);
       const when = r.published_at ? new Date(r.published_at) : null;
       const whenStr = (when && Number.isFinite(when.getTime()))
@@ -3300,7 +3410,9 @@
         <td class="mono" style="color:var(--muted)">${escapeHtml(whenStr)}</td>
         <td class="num" title="${escapeAttr(isPack
             ? `≈${fmt(r.pack_downloads)} complete downloads of the base pack (median per file). Per pack: ${Object.entries(r.packs || {}).map(([k, v]) => `${k} ≈${fmt(v)}`).join(', ') || '—'}. ${fmt(r.asset_count)} files, ${fmt(r.total_downloads)} file downloads in total — each install fetches every file of its pack.`
-            : fmt(r.total_downloads))}">${escapeHtml(isPack ? `≈${fmtShort(r.pack_downloads)} packs` : fmtShort(r.total_downloads || 0))}</td>
+            : sourceOnly
+              ? 'No files attached to this release: Phosphene installs and updates by git (Pinokio), which GitHub does not count as release downloads. Installs per version are in Usage → Versions.'
+              : `${fmt(r.total_downloads)} downloads of ${fmt(r.asset_count)} attached file${Number(r.asset_count) === 1 ? '' : 's'}`)}">${isPack ? escapeHtml(`≈${fmtShort(r.pack_downloads)} packs`) : sourceOnly ? '<span style="color:var(--muted)">source-only</span>' : escapeHtml(fmtShort(r.total_downloads || 0))}</td>
         <td class="num" style="width:30%">
           <span class="row-bar gradient" style="width:100%"><i style="--w:${w}%"></i></span>
         </td>
@@ -3323,12 +3435,18 @@
       const d = new Date(last.fetched_at);
       return Number.isFinite(d.getTime()) ? d.toString() : last.fetched_at;
     })();
+    // A stale archive must SAY so. When the daily fetch stopped (Sep 29 →
+    // Oct 14 2026) this line read "last refresh 2w ago" in grey and every
+    // number below it looked current.
+    const ageH = (Date.now() - new Date(last.fetched_at).getTime()) / 3_600_000;
+    const stale = Number.isFinite(ageH) && ageH > 36;
     meta.innerHTML = `
-      refreshed every 24h · <strong>${rows.length}</strong> ${rows.length === 1 ? 'snapshot' : 'snapshots'} ·
+      fetched daily · <strong>${rows.length}</strong> ${rows.length === 1 ? 'snapshot' : 'snapshots'} since ${escapeHtml(rows[0].date || '—')} ·
       last refresh
-      <strong title="${escapeAttr(last.fetched_at)} (UTC)&#10;${escapeAttr(localStr)} (local)">
+      <strong title="${escapeAttr(last.fetched_at)} (UTC)&#10;${escapeAttr(localStr)} (local)"${stale ? ' style="color:var(--danger)"' : ''}>
         ${escapeHtml(dayAgo(last.fetched_at))}
       </strong>
+      ${stale ? `<span class="stale-warn" role="status" style="color:var(--danger)"> · GitHub numbers are ${Math.floor(ageH / 24)} days old — the daily fetch has not run (launchd job com.mrbizarro.phosphene-stats-fetch; log in notes/stats/fetch.log). Traffic older than 14 days is lost for good each day it doesn't.</span>` : ''}
     `;
   }
 

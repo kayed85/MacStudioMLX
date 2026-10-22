@@ -105,7 +105,7 @@ token).
      noun seams substituted by the `/webapp/` route (same values and
      order as `page()`), because module files never pass through
      `page()`.
-   - `scripts/lint_webapp.mjs` (run by release_gates when eslint is
+   - `scripts/lint_webapp.mjs` (run by the release gates when eslint is
      installed, `npm install` first) enforces no-undef/no-redeclare
      with the real scope model plus a cross-file duplicate-publish
      check; `test_no_duplicate_defs.py` forbids the same top-level
@@ -132,8 +132,8 @@ token).
    handlers open with `h._read_form_body()` (the shared guarded read);
    multipart handlers read their own stream and must NOT call it.
 
-Every slice ships as its own small commit with
-`bash scripts/release_gates.sh --fast` green before the next starts.
+Every slice ships as its own small commit with the gates green before
+the next starts.
 
 ## How the server half and the client half talk
 
@@ -222,22 +222,19 @@ their directory — a `..` in the URL cannot escape.
 
 ## The pre-change checklist
 
-CLAUDE.md carries THE STRUCTURE LAW (the numbered one-home-per-change
-rules); this is the mechanical routine that goes with it. For any change
-to panel code, frontend or server:
+The rule above is one home per change. For any change to panel code,
+frontend or server, this is the routine that goes with it:
 
 ```bash
-# while working — cheap, instant, catches the module-scope mistakes
+# while working: cheap, instant, catches the module-scope mistakes
+# (`npm install` once first: the lint needs eslint)
 node scripts/lint_webapp.mjs
 
-# the suites nearest your change (they auto-run in the gates too)
-./ltx-2-mlx/env/bin/python3.11 -m unittest test_panel_assets test_routes test_no_duplicate_defs
+# launcher scripts: line length and stop words
+node scripts/check_pinokio_scripts.js
 
-# before EVERY commit — must exit 0; key the commit on ITS exit code
-bash scripts/release_gates.sh --fast
-
-# before promoting anything — the full battery, no skips accepted
-bash scripts/release_gates.sh
+# Python you touched still compiles
+python3 -m py_compile mlx_ltx_panel.py mlx_warm_helper.py panel/*.py
 ```
 
 And the reload rules while iterating: CSS or JS → hard-refresh the
@@ -246,11 +243,9 @@ panel, then hard-refresh.
 
 ## Gates that guard this structure
 
-- `test_panel_assets.py` — webapp/ files exist, are served correctly,
-  the dynamic CSS seam substitutes, no `<style>` returns to the page,
-  the inline `<script>` stays exactly one line (the BOOT seam), and no
-  markup creeps into the server Python.
-- `test_no_duplicate_defs.py` — no duplicate JS function declarations
-  or HTML ids in the page (the built-twice incident's tombstone).
-- `bash scripts/release_gates.sh --fast` — the whole battery; must be
-  green after every slice.
+The test suite and the release gates are maintained privately (see
+`CONTRIBUTING.md`); the maintainers run them on every change before it
+ships. Among them: the webapp files are served correctly, the inline
+`<script>` stays exactly one line (the BOOT seam), no markup creeps into
+the server Python, no JS function or HTML id is declared twice, and no
+route goes back into a `do_GET`/`do_POST` chain.

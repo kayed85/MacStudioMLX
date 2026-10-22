@@ -352,14 +352,57 @@ function osToggle(name, value) {
   // at all — the price shown must follow the switch, not the last fetch.
   if (name === 'retake') { osEstimate(); }
 }
+// A sentence ends at . ! or ? followed by whitespace — and a spoken line ends
+// INSIDE its closing quote ("Now that's good coffee."), which a plain
+// `(?<=[.!?])\s+` look-behind never saw, so a whole exchange of dialogue stayed
+// glued to the sentence before it and landed in one five-second window. Nothing
+// splits inside a quote either: "Deal. But you're choosing the table." is one line.
+function osSentences(text) {
+  const out = [];
+  let cur = '', inQuote = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    cur += c;
+    if (c === '"') inQuote = !inQuote;
+    else if (c === '“') inQuote = true;
+    else if (c === '”') inQuote = false;
+    const next = text[i + 1];
+    if (!inQuote && next !== undefined && /\s/.test(next) && /[.!?]["”]?$/.test(cur)) {
+      if (cur.trim()) out.push(cur.trim());
+      cur = '';
+    }
+  }
+  if (cur.trim()) out.push(cur.trim());
+  return out;
+}
+// A first "sentence" that is only trigger words ("bgctrn, bizarrotrn.") says nothing
+// to act out: left alone it becomes the whole first window — five seconds of
+// nothing for the model to invent sound for. It rides with the sentence after it.
+function osJoinTriggerLine(sents) {
+  const first = sents[0] || '';
+  // words and commas only, and at least a comma, digit or underscore — so a plain
+  // one-word sentence ("Silence.") stays a beat of its own
+  if (sents.length > 1 && /^[\w-]+(?:,\s*[\w-]+)*[.!?]?$/.test(first) && /,|\d|_/.test(first)) {
+    return [first + ' ' + sents[1], ...sents.slice(2)];
+  }
+  return sents;
+}
 function osSplitPrompt() {
   const prompt = String((osEl('osPrompt') || {}).value || '');
-  const sents = prompt.split(/(?<=[.!?])\s+/).map(x => x.trim()).filter(Boolean);
+  const sents = osJoinTriggerLine(osSentences(prompt));
   const n = OS.seconds / 5;
   const out = [];
   for (let i = 0; i < n; i++) out.push(sents[i] || '');
   while (out.length && !out[out.length - 1]) out.pop();
   osSetBeats(out);
+  // Sentences past the last window used to vanish without a word — a second
+  // part's dialogue pasted after the first part's simply never rendered.
+  const left = sents.length - n;
+  const hint = osEl('osBeatsHint');
+  if (left > 0 && hint) {
+    hint.textContent = `${n} lines of 5 s · ${left} sentence${left === 1 ? '' : 's'} did not fit and ${left === 1 ? 'was' : 'were'} left out`
+      + ' — shorten the prompt or write the beats yourself';
+  }
 }
 async function osPlanBeats() {
   const btn = osEl('osPlanBtn'), hint = osEl('osBeatsHint');
@@ -371,7 +414,7 @@ async function osPlanBeats() {
     const r = await fetch('/oneshot/plan', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ prompt, seconds: OS.seconds, engine: OS.engine }) });
     const d = await r.json();
-    if (!d.ok) throw new Error(d.error || 'the planner did not answer');
+    if (!d.ok) { (typeof packNeededToast === 'function' && packNeededToast(d)); throw new Error(d.error || 'the planner did not answer'); }
     osSetBeats(d.beats || []);
   } catch (e) {
     if (hint) hint.textContent = `could not write the beats: ${e.message || e}`;

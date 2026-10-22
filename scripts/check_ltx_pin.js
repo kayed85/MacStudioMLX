@@ -191,10 +191,40 @@ if (/git pull --ff-only \s*\$/.test(updCode)) {
 //    success while staying on stale code" hangs off this one guard: $UPSTREAM is
 //    the LOCAL tracking ref, so resetting to it after a failed fetch is a no-op
 //    that exits 0 and lets post_update run against the old tree.
-if (!/git fetch[^\n]*\|\|[^\n]*exit 1/.test(updCode)) {
-  fail("update.js does not make a failed `git fetch` fatal. Without it a network or auth failure becomes: failed fetch -> failed pull -> 'successful' reset onto the stale tracking ref -> post_update against old code -> Update reports success.")
+//    The fetch logic lives in scripts/pinokio/update_fetch.sh since the #114
+//    fix (its echoed `echo 'FATAL error:'` tripped Pinokio 8.2's matcher on the
+//    success path); update.js dispatches `bash scripts/pinokio/update_fetch.sh`.
+//    So look for the guard where it now is, falling back to update.js for an
+//    older tree being mutation-tested through the optional argv[2] path.
+const fetchScript = path.join(root, "scripts/pinokio/update_fetch.sh")
+const fetchCode = /update_fetch\.sh/.test(updCode) && fs.existsSync(fetchScript)
+  ? fs.readFileSync(fetchScript, "utf8")
+  : updCode
+if (!/git fetch/.test(fetchCode) || !/git fetch[^\n]*\|\|[\s\S]*?exit 1/.test(fetchCode)) {
+  fail("the update does not make a failed `git fetch` fatal. Without it a network or auth failure becomes: failed fetch -> failed pull -> 'successful' reset onto the stale tracking ref -> post_update against old code -> Update reports success.")
 } else {
   ok("a failed fetch aborts the update")
+}
+
+// 2b. THE #114 CRASH CLASS: no update dispatch may carry "error:"/"errno " or a
+//     newline in the TEXT Pinokio echoes before the step runs. Pinokio 8.2
+//     stops a shell.run step when its OUTPUT matches /error:/i or /errno /i and
+//     ignores the exit code; the interactive shell echoes the command first, so
+//     a literal "FATAL error:" in a dispatch (even in a branch not taken, even
+//     on the success path) detaches the shell mid-echo — exactly what killed
+//     Update in #114. A failure message we DO want Pinokio to act on belongs in
+//     a scripts/pinokio/*.sh file (printed at runtime on real failure) or behind
+//     scripts/pinokio/must.sh, never inline in the dispatch. Newlines are banned
+//     for the same reason: a `"\n"`-joined message is a multi-line echo.
+const unsafeDispatch = (require(updatePath).run || [])
+  .filter((st) => st.method === "shell.run" && st.params && st.params.message != null)
+  .map((st) => st.params.message)
+  .map((m) => Array.isArray(m) ? m.join("\n") : String(m))
+  .find((m) => /[\r\n]/.test(m) || /error:|errno /i.test(m))
+if (unsafeDispatch !== undefined) {
+  fail(`an update.js dispatch carries "error:"/"errno " or a newline in the text Pinokio echoes, which trips its 8.2 stop-matcher on the success path (the #114 crash). Move the failure message into a scripts/pinokio/*.sh file or behind must.sh.\n      ${unsafeDispatch.slice(0, 90).replace(/\n/g, "\\n")}`)
+} else {
+  ok("no update dispatch echoes \"error:\"/\"errno \" or a newline (the #114 crash class)")
 }
 
 // 3+4. THE DESTRUCTIVE PATH IS ASSERTED BY BEHAVIOUR, NOT BY STRINGS.

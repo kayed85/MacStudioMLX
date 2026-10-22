@@ -14,9 +14,22 @@ Exit 0 = the file is in place and verified. Non-zero = nothing placed.
 """
 import hashlib
 import os
+import re
 import sys
 import tempfile
 import urllib.request
+
+
+
+def _plain(text) -> str:
+    """An exception's text with Pinokio's two stop words defused.
+
+    The draft decoder is OPTIONAL (drafts fall back to the full decoder).
+    Pinokio 8.2 ends an install when a step's output matches /error:/i or
+    /errno /i, and a dropped connection reads "<urlopen error [Errno 8] ...>".
+    """
+    return re.sub(r"(?i)errno ", "errno-", re.sub(r"(?i)error:", "problem -", str(text)))
+
 
 EXPECTED_SHA256 = "4fd022bfcab08772fe0536b17ea1a3bbb5625be11e397868d1c5d891863d4c13"
 EXPECTED_BYTES = 22709752
@@ -46,7 +59,7 @@ def main() -> int:
             with urllib.request.urlopen(url, timeout=120) as r:
                 data = r.read()
         except Exception as exc:                                  # noqa: BLE001
-            print(f"  failed: {exc}")
+            print(f"  failed: {_plain(exc)}")
             continue
         digest = hashlib.sha256(data).hexdigest()
         if len(data) != EXPECTED_BYTES or digest != EXPECTED_SHA256:
@@ -59,7 +72,10 @@ def main() -> int:
         os.replace(tmp, target)
         print("TAE draft decoder ready (verified sha256)")
         return 0
-    print("ERROR: could not fetch a verified TAE draft decoder from any source; "
+    # "WARN:", not "ERROR:": Pinokio 8.2 stops an install on /error:/i in a
+    # step's output, and a missing PREVIEW decoder is not worth the install -
+    # it used to end Install Hailuo H3 here, before the compact Q8 build.
+    print("WARN: could not fetch a verified TAE draft decoder from any source; "
           "drafts will fall back to the full decoder. Re-run 'Install Hailuo H3' "
           "later.", file=sys.stderr)
     return 1

@@ -53,24 +53,50 @@
  * ---------------------------------------------------------------------------
  * THE RULE
  * ---------------------------------------------------------------------------
- * Every dispatch <= 500 chars, measured the way @Morac2 measured it: the
+ * Every dispatch <= 350 chars, measured the way @Morac2 measured it: the
  * message content, before Pinokio prepends its conda activation.  Anything
  * bigger belongs in scripts/pinokio/ and becomes one short `bash ...` line.
+ * (4.20: the ceiling was 500 while six dispatches sat between 350 and 498.
+ * They are all gone - the worst is update.js's 313 - so the gate now holds the
+ * line the field bisection actually supports.)
+ *
+ * ---------------------------------------------------------------------------
+ * THE SECOND RULE (4.20): A FAILING STEP MUST BE ABLE TO STOP THE INSTALL
+ * ---------------------------------------------------------------------------
+ * Pinokio 8.2 IGNORES a shell.run step's exit code.  The kernel's default `on`
+ * handlers end a script only when the step's OUTPUT matches /error:/i or
+ * /errno /i (pinokiod kernel/shells.js; "error:...triton" exempt).  So an
+ * `exit 1` that prints neither word marches on: a refused 75 GB H3 download
+ * started anyway, a failed engine checkout went on to a 37 GB download, and a
+ * failed LTX-2.5 fetch ended in "Phosphene is ready" with no weights.
+ *
+ * The convention (5b18448): every real failure prints ONE line
+ *       FATAL error: <plain reason + what to do>
+ * and every OPTIONAL failure prints neither word (post_update.sh `defang`s
+ * them).  This gate holds both ends, for install.js, install_h3.js,
+ * install_music.js and update.js:
+ *   1. every dispatch is a benign command, an optional `|| echo` step, an
+ *      inline FATAL, a `must.sh` wrapper, or a call to a scripts/pinokio script
+ *      that CAN print "FATAL error:" - or a script on OPTIONAL_SCRIPTS below;
+ *   2. in every FATAL-capable script, every non-zero `exit` is preceded (same
+ *      line, or the 16 lines before) by a "FATAL error:" line, or says why not
+ *      with a `fatal-ok:` comment;
+ *   3. an optional `|| echo` message never says "error:" / "errno ";
+ *   4. in post_update.sh a FATAL-capable script is either `require`d or goes
+ *      through `defang` - never bare, or an optional step would end the Update.
+ * test_fatal_install_paths.py runs the failure and success paths themselves.
  *
  * Run: node scripts/check_pinokio_scripts.js      exit 0 = PASS
  */
+const fs = require("fs")
 const path = require("path")
 
 // The evidence, and nothing beyond it:
 //   proven to HANG   764 (@Morac2, #50) and 1,417 (@davidaircloud, #50 / #56)
-//   proven to WORK   ~373 (@Morac2's own bisection) and every dispatch this
-//                    repo has shipped, the largest of which is 498 (update.js
-//                    step 11, in every release since it landed)
-// 500 sits just above the proven-working band and well under the proven-hanging
-// one. 350 would be the ideal target but would fail six dispatches that
-// demonstrably work for everyone today, and churning those in a hotfix buys
-// risk, not safety. Tighten toward 350 in a feature release, not here.
-const MAX_DISPATCH = 500
+//   proven to WORK   ~373 (@Morac2's own bisection)
+// 350 is the target the field bisection supports (skill: phosphene-release,
+// gotcha 5). Every dispatch in the repo is under it.
+const MAX_DISPATCH = 350
 
 const SCRIPTS = [
   "install.js", "update.js", "install_h3.js", "install_music.js", "install_qwen.js",
@@ -152,6 +178,149 @@ for (const name of SCRIPTS) {
     }
   }
 }
+
+// ===========================================================================
+// THE SECOND RULE - a failing step must be able to stop the install
+// ===========================================================================
+// See the header. Pinokio 8.2 stops a script only on /error:/i or /errno /i in
+// a step's output; the stop words below are the kernel's own.
+const STOP_WORDS = /error:|errno /i
+const FATAL_LANES = ["install.js", "install_h3.js", "install_music.js", "update.js"]
+
+// Scripts a lane may call that deliberately CANNOT stop it (best-effort steps
+// that defang their own output). Anything not here must print "FATAL error:".
+const OPTIONAL_SCRIPTS = {
+  "mflux_pack.sh": "image-engine pack: best-effort, the panel offers a one-click reinstall",
+  "a2v_stems_deps.sh": "vocal separation: best-effort, the Lip-sync form offers Install",
+}
+
+// Python scripts that print their own "FATAL error:" line on failure (so the
+// dispatch needs no wrapper). The gate reads the file to make sure they do.
+const FATAL_PYTHON = ["scripts/pinokio/music_fetch.py"]
+
+// Inline dispatches with no script behind them that are allowed to carry no
+// FATAL of their own, and why. Everything else needs one of the forms in the
+// header.
+const BENIGN_INLINE = [
+  [/^\s*echo\b/, "prints a line"],
+  [/^\s*df\b/, "prints free space"],
+  [/\bgit clone\b[^\n]*ltx-2-mlx\b/, "install.js stops on the notify (next: null) right after this clone when ltx-2-mlx/.git is missing"],
+  [/\bgit clone\b[^\n]*minimax-h3-mlx\b/, "the next step's h3_enter prints FATAL when the clone did not land"],
+  [/h3_roots\.sh && h3_enter && git rev-parse\b/, "prints the engine's short SHA"],
+  [/install_plan\.py defer\b[^\n]*\|\| echo\b/, "queues the background extras; never fails the install"],
+]
+
+const read = (rel) => fs.readFileSync(path.join(root, rel), "utf8")
+const codeLines = (text) => text.split("\n").map((t, i) => ({ n: i + 1, t }))
+  .filter((l) => l.t.trim() && !l.t.trim().startsWith("#"))
+
+const scriptInfo = {}
+function infoFor(rel) {
+  if (scriptInfo[rel]) return scriptInfo[rel]
+  let text = ""
+  try { text = read(rel) } catch (e) { return (scriptInfo[rel] = { missing: true }) }
+  const code = codeLines(text)
+  const fatalIdx = code.filter((l) => /\bFATAL error:/.test(l.t)).map((l) => l.n)
+  const bad = []
+  // Each non-zero exit is covered by ONE "FATAL error:" line - on the same line
+  // or among the 16 before it - and a FATAL line covers only the next exit, so
+  // a new silent `exit 1` cannot hide behind an old banner.
+  let pending = null
+  for (const l of code) {
+    if (/\bFATAL error:/.test(l.t)) pending = l.n
+    if (!/\bexit\s+(?:[1-9]|"\$)/.test(l.t)) continue
+    const ok = (pending !== null && l.n - pending <= 16) ||
+      text.split("\n").slice(Math.max(0, l.n - 5), l.n).some((x) => /fatal-ok:/.test(x))
+    if (ok) pending = null
+    else bad.push(l.n)
+  }
+  return (scriptInfo[rel] = { text, fatal: fatalIdx.length > 0, bad,
+                              defangs: /problem -/.test(text) })
+}
+
+let fatalChecked = 0
+for (const lane of FATAL_LANES) {
+  const mod = require(path.join(root, lane))
+  for (const { step, trail } of walk(mod.run, [])) {
+    for (const cmd of dispatches(step.params)) {
+      fatalChecked++
+      const where = `${lane} [${trail.join(".")}]`
+      const first = cmd.slice(0, 90).replace(/\n/g, "\\n")
+      // an optional `|| echo` message must never carry a stop word
+      for (const m of cmd.matchAll(/\|\|\s*echo\s+(['"])([\s\S]*?)\1/g)) {
+        if (STOP_WORDS.test(m[2])) failures.push(`${where}: an optional "|| echo" message says "error:"/"errno " - Pinokio would end the install on a failure the step calls harmless\n      ${m[2].slice(0, 80)}`)
+      }
+      if (/\bmust\.sh\b/.test(cmd)) {
+        const reason = (/must\.sh\s+(['"])([\s\S]*?)\1/.exec(cmd) || [])[2] || ""
+        if (!reason) failures.push(`${where}: must.sh needs a quoted reason first\n      ${first}`)
+        else if (STOP_WORDS.test(reason)) failures.push(`${where}: a must.sh reason must not say "error:"/"errno " (must.sh adds the FATAL line itself)\n      ${reason.slice(0, 80)}`)
+        continue
+      }
+      if (/\bFATAL error:/.test(cmd)) continue                        // inline FATAL
+      const refs = [...cmd.matchAll(/scripts\/(?:pinokio\/)?([\w.-]+\.sh)/g)].map((m) => m[0])
+      const rels = [...new Set(refs.map((r) => "scripts/" + r.replace(/^scripts\//, "")))]
+      if (/h3_roots\.sh/.test(cmd)) rels.push("scripts/pinokio/h3_roots.sh")
+      const calls = rels.filter((r) => !/h3_roots\.sh$/.test(r))
+      let ok = false
+      // a python script that owns its own FATAL line (checked, not trusted)
+      for (const py of FATAL_PYTHON) {
+        if (cmd.includes(py)) {
+          if (!/FATAL error:/.test(read(py))) failures.push(`${where}: ${py} is listed as printing "FATAL error:" but does not`)
+          ok = true
+        }
+      }
+      if (calls.length) {
+        // every script it calls must be FATAL-capable or declared optional
+        ok = true
+        for (const rel of calls) {
+          const base = path.basename(rel)
+          const inf = infoFor(rel)
+          if (inf.missing) { failures.push(`${where}: calls ${rel}, which does not exist`); ok = true; continue }
+          if (OPTIONAL_SCRIPTS[base]) {
+            if (inf.fatal) failures.push(`${where}: ${rel} is listed OPTIONAL but prints "FATAL error:" - it would stop the install`)
+            if (!inf.defangs) failures.push(`${rel}: listed OPTIONAL but does not defang its output ("problem -")`)
+            continue
+          }
+          if (!inf.fatal) { failures.push(`${where}: calls ${rel}, which has NO "FATAL error:" path - Pinokio 8.2 ignores its exit code, so a failure there would let the install march on. Print "FATAL error: <reason + what to do>", or list it in OPTIONAL_SCRIPTS with a reason`); ok = true }
+        }
+      }
+      if (/h3_roots\.sh/.test(cmd) && /\bh3_enter\b|\bh3_fetch_weights\b/.test(cmd)) {
+        const inf = infoFor("scripts/pinokio/h3_roots.sh")
+        if (!/h3_enter\(\)[\s\S]*?FATAL error:/.test(inf.text) || !/h3_fetch_weights\(\)[\s\S]*?FATAL error:/.test(inf.text)) {
+          failures.push(`${where}: uses h3_enter/h3_fetch_weights but scripts/pinokio/h3_roots.sh does not print FATAL error: in both`)
+        }
+        ok = true
+      }
+      if (!ok) ok = BENIGN_INLINE.some(([re]) => re.test(cmd))
+      if (!ok && /\|\|\s*echo\b/.test(cmd)) ok = true                // optional: a WARN, checked above
+      if (!ok) failures.push(`${where}: this dispatch has no way to stop the install - Pinokio 8.2 ignores its exit code. Wrap it: bash scripts/pinokio/must.sh '<reason + what to do>' <command>, or put it in a script that prints "FATAL error: ..."\n      starts: ${first}`)
+    }
+  }
+}
+// every FATAL-capable script: no silent non-zero exit
+for (const [rel, inf] of Object.entries(scriptInfo)) {
+  if (inf.missing || !inf.fatal) continue
+  for (const n of inf.bad) failures.push(`${rel}:${n}: a non-zero exit with no "FATAL error:" line in the 16 lines before it (or a "fatal-ok: <why>" comment) - Pinokio 8.2 would not stop on it`)
+}
+
+// post_update.sh: a FATAL-capable script is `require`d or `defang`ed, never bare
+{
+  const pu = codeLines(read("scripts/post_update.sh"))
+  let seen = 0
+  for (const l of pu) {
+    for (const m of l.t.matchAll(/scripts\/pinokio\/([\w.-]+\.sh)/g)) {
+      const rel = "scripts/pinokio/" + m[1]
+      const inf = infoFor(rel)
+      if (inf.missing || !inf.fatal) continue
+      seen++
+      if (!/^\s*require\b/.test(l.t) && !/\bdefang\b/.test(l.t)) {
+        failures.push(`scripts/post_update.sh:${l.n}: runs ${m[1]} (it can print "FATAL error:") neither through require nor defang - an optional step's failure would end the Update`)
+      }
+    }
+  }
+  fatalChecked += seen
+}
+console.log(`FATAL coverage: ${fatalChecked} calls checked across ${FATAL_LANES.length} lanes + post_update.sh`)
 
 console.log(`${count} dispatches across ${steps} shell.run steps in ${SCRIPTS.length} scripts`)
 console.log(`worst dispatch: ${worst} chars (limit ${MAX_DISPATCH})  ${worstWhere}`)

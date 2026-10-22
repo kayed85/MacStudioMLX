@@ -1525,7 +1525,7 @@ def room_tone_track(edit) -> tuple[int, dict] | None:
     return None
 
 
-def room_tone_new_track(facts: dict, film_len: float, *, level: float = -27.0,
+def room_tone_new_track(facts: dict, film_len: float, *, level: float = -38.0,
                         track_id: str = "") -> dict:
     """A room-tone track from `room_tone.make_bed`'s facts: one locked strip
     from the film's first second to its last, the fader set for `level`."""

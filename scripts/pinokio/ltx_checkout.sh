@@ -10,6 +10,14 @@
 # individually load-bearing and reports for itself; the final `git rev-parse`
 # is what the caller sees.
 #
+# HOW A FAILURE STOPS THE INSTALL (4.20). Pinokio 8.2 ignores a shell.run step's
+# exit code; it stops a script only when the step's OUTPUT matches /error:/i or
+# /errno /i (pinokiod kernel/shells.js default `on` handlers). The three
+# refusals below used to print "FATAL: ..." - no "error:" - so install.js went
+# straight on to the venv and the 37 GB download with the engine on the wrong
+# commit or not on disk at all. They print "FATAL error:" now. Update calls this
+# through post_update.sh's `require`, which stops the Update either way.
+#
 # =============================================================================
 # THE PIN — and why it lives HERE and not in update.js
 # =============================================================================
@@ -70,13 +78,16 @@ LTX_PIN="v0.14.19+ltx25.7"
 LTX_FORK_URL="https://github.com/mrbizarro/ltx-2-mlx.git"
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-cd "$ROOT/ltx-2-mlx" || { echo "FATAL: no vendored ltx-2-mlx tree at $ROOT/ltx-2-mlx"; exit 1; }
+cd "$ROOT/ltx-2-mlx" || { echo "FATAL error: the video engine folder is missing ($ROOT/ltx-2-mlx) - its download did not finish. Click Install again (or Update again) with a working internet connection."; exit 1; }
 
 echo "vendored engine -> $LTX_PIN"
 
 # Upstream's own tags, for `git describe`. Best-effort: the pin does not live
 # here and dgrauet being unreachable must not stop an Update.
-git fetch --tags origin || echo "WARN: could not reach origin for upstream tags (not fatal - the pin lives on the fork)"
+# Its own output is defanged: git can print an "error:" line (RPC failed, ...) for
+# a network blip, and that must not stop an install that does not need the tags.
+git fetch --tags origin 2>&1 | sed -u -e 's/[Ee]rror:/problem -/g' -e 's/[Ee]rrno /errno-/g'
+[ "${PIPESTATUS[0]}" -eq 0 ] || echo "WARN: could not reach origin for upstream tags (not fatal - the pin lives on the fork)"
 
 # An existing install has only dgrauet as `origin`, so the fork remote is added
 # when absent — and its URL is RESET every run. `get-url || add` alone can never
@@ -96,8 +107,7 @@ git remote set-url fork "$LTX_FORK_URL"
 # check out; carrying on would either fail obscurely or, worse, succeed against
 # a stale local tag. An Update that stops here has changed nothing.
 if ! git fetch fork "+refs/tags/$LTX_PIN:refs/tags/$LTX_PIN"; then
-  echo "FATAL: could not fetch the vendored engine pin '$LTX_PIN' from $LTX_FORK_URL."
-  echo "       Nothing has been changed. Check your connection and re-run."
+  echo "FATAL error: could not download the video engine version Phosphene needs ($LTX_PIN from $LTX_FORK_URL). Nothing was changed - check your internet connection (a VPN, proxy or blocked GitHub is the usual cause), then click Install again, or Update again."
   exit 1
 fi
 
@@ -137,7 +147,7 @@ else
 fi
 
 if ! git checkout "$LTX_PIN"; then
-  echo "FATAL: could not check out the vendored engine pin '$LTX_PIN'."
+  echo "FATAL error: could not switch the video engine to the version Phosphene needs ($LTX_PIN) - the lines above say why. Click Install again, or Update again; if it repeats, report those lines."
   exit 1
 fi
 
@@ -148,7 +158,7 @@ fi
 WANT="$(git rev-parse "$LTX_PIN^{commit}")"
 GOT="$(git rev-parse HEAD)"
 if [ "$WANT" != "$GOT" ]; then
-  echo "FATAL: HEAD is $GOT but the pin '$LTX_PIN' is $WANT."
+  echo "FATAL error: the video engine is on the wrong version ($GOT, not $LTX_PIN = $WANT) - click Install again, or Update again; if it repeats, report this line."
   exit 1
 fi
 echo "vendored engine at $LTX_PIN ($(git rev-parse --short HEAD))"

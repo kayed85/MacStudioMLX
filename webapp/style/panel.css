@@ -164,6 +164,15 @@
       letter-spacing: 0.12em;
       cursor: help;
     }
+    /* Edition label (PHOSPHENE_EDITION=pro, set by the Mac app): the brand
+       violet, quieter than DEV/TEST - it states what this is, it does not
+       warn. A label only; body[data-edition] is the hook for anything more. */
+    .profile-badge.edition-badge {
+      background: rgba(139,92,246,0.16);
+      color: #b69cff;
+      border-color: rgba(139,92,246,0.5);
+      cursor: default;
+    }
     /* Phosphene 2.0 release badge — sits next to the wordmark logo so
        users immediately know they're on the major version bump. Brand
        violet vs the DEV badge's amber so they don't visually clash when
@@ -400,9 +409,19 @@
        overflow:hidden — the compaction rule above still targeted the
        retired span.pill markup. Show the percentage alone; the full text
        stays in the title and the pop-over (review 2026-09-02). */
+    /* max-width: none (4.19.11): the 22ch cap above is measured in the
+       face's OWN font, and font-size 0 makes 22ch = 0 px, so the ::after
+       percentage was clipped to nothing and the chip showed a bare dot.
+       It landed (664f714) 45 minutes after the chip vanished behind its
+       stray `hidden` (048464f), so nobody ever saw it. The short text is
+       a few characters; it needs no cap.
+       font-variant-numeric: normal on the face: WebKit (Safari, the Mac
+       app) does not scale TABULAR digits by font-size 0, so the hidden
+       "49/64 GB · 77%" still took ~50 px and pushed the percentage right.
+       The ::after gets tabular-nums back for itself. */
     @media (max-width: 1400px) {
-      #healthChip .hc-face { font-size: 0; }
-      #healthChip .hc-face::after { content: attr(data-short); font-size: 11.5px; }
+      #healthChip .hc-face { font-size: 0; max-width: none; font-variant-numeric: normal; }
+      #healthChip .hc-face::after { content: attr(data-short); font-size: 11.5px; font-variant-numeric: tabular-nums; }
     }
     /* SYS-38: the branch + short SHA + commit date ("HEAD · 70665d3
        (2026-09-28)") is developer build detail — useful for self-
@@ -473,6 +492,13 @@
       border-color: var(--border);
     }
     .pill-dev:hover { color: var(--text); }
+    /* Mac app — the app updates the studio, so the pill only names the
+       build (version · commit). Quiet, like dev: it is a label, not a CTA. */
+    .pill-app {
+      color: var(--muted);
+      border-color: var(--border);
+    }
+    .pill-app:hover { color: var(--text); }
     /* Checking — first /version poll hasn't completed yet. Same look as
        dev (muted) so the pill doesn't flash colours in the first 30s of
        boot before the GitHub fetch lands. */
@@ -6133,6 +6159,9 @@
     .pill-btn:disabled, .pill-btn.disabled {
       opacity: 0.45; cursor: not-allowed; pointer-events: none;
     }
+    /* Unavailable on this generation, but one click switches to one that can. */
+    .pill-btn.needs-switch { opacity: 0.6; cursor: pointer; }
+    .pill-btn.needs-switch:hover { opacity: 0.9; }
 
     /* Quality pills (Y1.013) — richer than the standard pill-btn so each
        button can carry: name, dimensions+time, model+tier requirement.
@@ -7260,9 +7289,11 @@
     .player-wrap .live-stage-image {
       position: absolute; inset: 0;
       width: 100%; height: 100%; object-fit: contain;
-      transition: opacity 180ms ease;
+      transition: opacity 180ms ease, filter .6s ease;
     }
     .player-wrap.live-stage.is-aborting .live-stage-image { opacity: .58; }
+    /* A rough estimate (before the server's `meaningful`): shown, softened. */
+    .player-wrap .live-stage-image.is-forming { filter: blur(6px) saturate(.85); opacity: .82; }
     .live-stage-warming {
       position: absolute; inset: 0;
       display: flex; flex-direction: column;
@@ -8439,6 +8470,7 @@
     }
     .now-thumb[hidden] { display: none; }
     .now-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .now-thumb.is-forming img { filter: blur(3px) saturate(.85); opacity: .82; }
     /* WARMING — the estimates so far are still essentially noise, so there is
        nothing worth showing and nothing worth judging. A placeholder that
        breathes, flattened by the global prefers-reduced-motion rule. */
@@ -10523,6 +10555,30 @@
     .eng-opt-top { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
     .eng-opt-sub { font-size: 11.5px; color: var(--ink-500, #98a0b3); line-height: 1.35; }
     .eng-tick { width: 13px; height: 13px; color: var(--eng-accent, currentColor); flex: 0 0 auto; margin-top: 3px; }
+    /* LTX generation switch: a footer row inside the engine menu. */
+    #engineMenu .eng-gen {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px;
+      margin-top: 4px; padding: 8px 10px 6px;
+      border-top: 1px solid var(--line, #262a33);
+    }
+    .eng-gen-label { font-size: 11.5px; font-weight: 600; color: var(--ink-500, #98a0b3); }
+    .eng-gen-btns { display: inline-flex; gap: 4px; }
+    .eng-gen-btn {
+      padding: 3px 10px; border-radius: 7px; cursor: pointer;
+      border: 1px solid var(--line, #262a33); background: transparent;
+      color: var(--ink, #e8eaf0); font-size: 12px; font-weight: 600;
+    }
+    .eng-gen-btn:hover { background: rgba(255,255,255,.05); }
+    .eng-gen-btn.active {
+      cursor: default; color: var(--eng-accent, currentColor);
+      background: var(--eng-dim, rgba(255,255,255,.07));
+      border-color: var(--eng-soft, var(--line, #262a33));
+    }
+    /* Same switch, placed under the Remix chips instead of in the menu. */
+    #ltxGenSwitch.eng-gen-inline { margin-top: 9px; padding: 8px 0 0; border-top: 1px solid var(--line, #262a33); display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+    #ltxGenSwitch[hidden] { display: none; }
+    #ltxGenSwitch .eng-gen-note { flex: 1 1 auto; }
+    .eng-gen-note { flex: 1 0 100%; font-size: 11px; color: var(--ink-500, #98a0b3); line-height: 1.35; }
     /* Inert = real but unreachable right now; still listed, visibly muted. */
     .eng-opt.inert { opacity: .58; }
     .eng-opt.needs-install .eng-badge.offer { color: var(--eng-accent, currentColor); }
@@ -10547,7 +10603,9 @@
       body > header #healthCluster > span.pill svg { width: 12px; height: 12px; }
     }
     body > header .brand img {
-      /* Phosphene brand mark — the rings + wordmark composed as ONE wide
+      /* (4.19.11: this img is now the WORDMARK only, 825x228; the rings are
+         .ph-mark below. The history of the banner it replaced:)
+         Phosphene brand mark — the rings + wordmark composed as ONE wide
          banner (1291×392, transparent bg). Replaces the previous setup
          where the small ring mark (`phosphene_brand.png`) was injected
          via `content: url()` and the wordmark text was added via
@@ -10567,6 +10625,119 @@
       filter:
         drop-shadow(0 0 14px rgba(255, 95, 168, 0.55))
         drop-shadow(0 0 6px rgba(79, 214, 255, 0.35));
+    }
+    /* THE MARK TURNS, SLOWLY (4.19.11) — phosphene.video's mark, in the app.
+       The banner PNG used to carry the rings; now the rings are six layered
+       <svg> boxes (index.html) and the img above is only the wordmark.
+       Each ring turns the opposite way from its neighbour (40-140 s a turn,
+       inner rings a little faster, so every rim moves at about the same
+       ~1.7 px/s), each breathes into a slight oval, the hue drifts, the
+       centre glows.
+
+       WHAT IT COSTS, MEASURED (Chrome 1600x900 @2x, CDP trace + ps, only
+       the mark animating; docs/STATE.md 2026-10-22 has the table):
+       - Only transform, opacity and one hue filter animate, all on HTML
+         boxes, so no frame repaints or re-lays-out anything: the trace's
+         Paint count is the page's own idle number. Do not animate anything
+         INSIDE the <svg>s, and put no filter/shadow on a ring: either turns
+         every frame into a repaint. The glow is a static gradient
+         (.ph-mark-halo) for the same reason.
+       - Even compositor-only, a 60 fps animation keeps Chrome's GPU and
+         browser processes at ~+9% of a core. The motion is so slow (a rim
+         moves ~0.17 px per 0.1 s) that 10 updates a second look identical,
+         so every animation is STEPPED on one shared 0.1 s grid: durations
+         are whole multiples of 0.1 s per keyframe segment, delays are whole
+         seconds, and steps(N) per segment = segment seconds x 10. Off-grid
+         values would make the six rings tick at different moments and
+         bring the frame rate back up. Cost: ~+3% of a core, no paint.
+       - It turns ALL the time, renders included (owner, 2026-10-22: the
+         mark must never look stopped). Do not add a pause-while-rendering
+         rule back: the step grid is what keeps it cheap.
+       - A hidden tab / hidden app window stops the animation on its own.
+       test_logo_mark_motion.py pins all of this. */
+    body > header .ph-mark {
+      position: relative;
+      display: block;
+      flex: none;
+      width: 78px;
+      height: 78px;
+      animation: ph-mk-hue 48s steps(120) infinite alternate;
+    }
+    .ph-mark > span { position: absolute; inset: 0; display: block; }
+    .ph-mark .ph-mark-halo {
+      inset: -12px;
+      border-radius: 50%;
+      background: radial-gradient(circle closest-side,
+        rgba(255, 95, 168, 0.13) 0%, rgba(177, 74, 255, 0.06) 55%,
+        rgba(79, 214, 255, 0.035) 80%, rgba(79, 214, 255, 0) 100%);
+    }
+    .ph-mk-spin {
+      display: block;
+      width: 100%;
+      height: 100%;
+      overflow: visible;
+      fill: none;
+      stroke-width: 2.1;
+      stroke-linecap: round;
+      animation: ph-mk-turn var(--t) steps(var(--n)) infinite var(--dir);
+    }
+    /* --n = --t x 10 (one step per 0.1 s). */
+    .ph-mk-s0 { --t: 40s;  --n: 400;  --dir: normal; }
+    .ph-mk-s1 { --t: 52s;  --n: 520;  --dir: reverse; }
+    .ph-mk-s2 { --t: 66s;  --n: 660;  --dir: normal; }
+    .ph-mk-s3 { --t: 84s;  --n: 840;  --dir: reverse; }
+    .ph-mk-s4 { --t: 108s; --n: 1080; --dir: normal; }
+    .ph-mk-s5 { --t: 140s; --n: 1400; --dir: reverse; }
+    /* Breathe: 4 equal segments, so --b is a multiple of 0.4 s and
+       --n = --b / 4 x 10 (steps per segment); --bd whole seconds. */
+    .ph-mk-morph { animation: ph-mk-breathe var(--b) steps(var(--n)) var(--bd) infinite alternate; }
+    .ph-mk-m0 { --b: 8.8s;  --n: 22; --bd: 0s; }
+    .ph-mk-m1 { --b: 10.8s; --n: 27; --bd: -3s; }
+    .ph-mk-m2 { --b: 12.8s; --n: 32; --bd: -7s; }
+    .ph-mk-m3 { --b: 10s;   --n: 25; --bd: -2s; }
+    .ph-mk-m4 { --b: 14s;   --n: 35; --bd: -9s; }
+    .ph-mk-m5 { --b: 12s;   --n: 30; --bd: -5s; }
+    .ph-mark .ph-mark-core {
+      inset: auto;
+      left: calc(50% - 4px);
+      top: calc(50% - 4px);
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: radial-gradient(circle closest-side,
+        #f8e24e 0%, #f8e24e 42%, rgba(248, 226, 78, 0.35) 62%, rgba(248, 226, 78, 0) 100%);
+      animation: ph-mk-glow 6s steps(15) infinite alternate;
+    }
+    @keyframes ph-mk-turn { to { transform: rotate(360deg); } }
+    /* The site's breathe (wide, then tall, then round), as 4 equal
+       segments; the glow and hue follow an eased (cosine) curve the same
+       way, since a stepped segment is linear. */
+    @keyframes ph-mk-breathe {
+      0%   { transform: scale(1, 1); }
+      25%  { transform: scale(1.03, 0.978) rotate(3.5deg); }
+      50%  { transform: scale(1.002, 1.004) rotate(0.5deg); }
+      75%  { transform: scale(0.976, 1.03) rotate(-3deg); }
+      100% { transform: scale(1.015, 1.015); }
+    }
+    @keyframes ph-mk-glow {
+      0%   { transform: scale(0.85);  opacity: 0.85; }
+      25%  { transform: scale(0.894); opacity: 0.872; }
+      50%  { transform: scale(1);     opacity: 0.925; }
+      75%  { transform: scale(1.106); opacity: 0.978; }
+      100% { transform: scale(1.15);  opacity: 1; }
+    }
+    @keyframes ph-mk-hue {
+      0%   { filter: hue-rotate(-14deg) saturate(1); }
+      25%  { filter: hue-rotate(-9.3deg) saturate(1.022); }
+      50%  { filter: hue-rotate(2deg) saturate(1.075); }
+      75%  { filter: hue-rotate(13.3deg) saturate(1.128); }
+      100% { filter: hue-rotate(18deg) saturate(1.15); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      body > header .ph-mark,
+      .ph-mark .ph-mk-morph,
+      .ph-mark .ph-mk-spin,
+      .ph-mark .ph-mark-core { animation: none !important; }
     }
     /* (previous `.brand::after { content: 'Phosphene' }` removed
        2026-05-19 — wordmark text is now baked into the banner PNG so
@@ -11674,6 +11845,51 @@ body[data-workflow="oneshot"] #audioSectionTab { display: none !important; }
 .po-ls-ok { color: #3fb950; }
 .po-ls-mid { color: #d29922; }
 .po-ls-bad { color: #f85149; }
+/* W6 (2026-10-19): a SILENT clip offers Add sound where the user already looks —
+   a small always-visible pill on its gallery card (only silent clips carry it,
+   so it marks them instead of cluttering every card) and one line in the
+   player's meta strip, with the Add sound action highlighted. queue.js:
+   addSoundOffer / syncPlayerSoundOffer. */
+.car-card .car-add-sound {
+  position: absolute; left: 6px; bottom: 6px; z-index: 4;
+  /* The panel's base `button` rule is full width; a pill is its label. */
+  width: auto; max-width: calc(100% - 12px); overflow: hidden; text-overflow: ellipsis;
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px 2px 6px;
+  border: 1px solid rgba(255,255,255,0.18);
+  border-radius: 999px;
+  background: rgba(0, 4, 18, 0.72);
+  color: rgba(255,255,255,0.9);
+  font-size: 11px; font-weight: 500; line-height: 16px;
+  white-space: nowrap; cursor: pointer;
+  transition: background var(--t-fast), border-color var(--t-fast), color var(--t-fast);
+}
+.car-card .car-add-sound .ph { width: 12px; height: 12px; }
+.car-card .car-add-sound:hover,
+.car-card .car-add-sound:focus-visible {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.po-sound-offer { display: inline-flex; align-items: center; gap: 6px; }
+.po-silent { white-space: nowrap; color: rgba(255,255,255,0.78); }
+.po-silent-add {
+  pointer-events: auto; width: auto;
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 1px 7px 1px 5px;
+  border: 1px solid rgba(88,166,255,0.45);
+  border-radius: 999px;
+  background: rgba(47,129,247,0.16);
+  color: #fff;
+  font: inherit; cursor: pointer;
+}
+.po-silent-add .ph { width: 12px; height: 12px; }
+.po-silent-add:hover, .po-silent-add:focus-visible { background: var(--accent); border-color: var(--accent); }
+.po-act.po-act-suggest {
+  border-color: rgba(88,166,255,0.55);
+  background: rgba(47,129,247,0.16);
+  color: #fff;
+}
 .os-log { margin: 0; white-space: pre-wrap; font-family: var(--ph-font-mono); font-size: 11px; line-height: 1.4; color: var(--muted); max-height: 9em; overflow: auto; }
 
     /* ======================================================================
@@ -12728,3 +12944,56 @@ body[data-engine="h3"][data-vmode="v2a"] #h3LengthLabel { display: none !importa
 #a2vH3QualityGroup .pill-btn { align-items: center; text-align: center; }
 #mvOneShotDetails:not([data-a2v-engine="h3"]) .a2v-h3-only { display: none !important; }
 #mvOneShotDetails[data-a2v-engine="h3"] .a2v-ltx-only { display: none !important; }
+
+/* ---- Bug report: the required "What happened?" box (4.19.3, #106) ------- */
+#bugModal .bug-what { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+#bugModal .bug-what > span:first-child { color: var(--text); font-weight: 600; font-size: 12.5px; }
+#bugModal .bug-what-req { font-weight: 400; color: var(--muted); font-size: 11px; margin-left: 6px; }
+#bugModal .bug-what textarea {
+  padding: 8px 10px; font-size: 13px; line-height: 1.45; resize: vertical; min-height: 56px;
+  background: rgba(140,160,220,0.04); border: 1px solid var(--ph-border-soft); border-radius: 6px;
+  color: var(--text); font-family: inherit;
+}
+#bugModal .bug-what textarea:focus { outline: none; border-color: var(--accent-bright, #7e98ff); }
+#bugModal .bug-what-hint { font-size: 11.5px; line-height: 1.4; color: var(--muted); }
+#bugModal .bug-what.is-invalid textarea { border-color: var(--danger, #f85149); }
+#bugModal .bug-what.is-invalid .bug-what-hint { color: var(--danger, #f85149); }
+
+/* Per-model licence screen (4.19.8, webapp/js/licences.js). Layered on the
+   .models-modal scaffold; the body text is the user's to read, so it is
+   full-size here, not the scaffold's muted hint size. */
+.licence-card { width: min(600px, 92vw); }
+.licence-body { font-size: 13px; color: var(--fg, #d8e0ee); line-height: 1.5; }
+.licence-head { display: flex; align-items: center; gap: 10px; margin: 4px 0 8px; flex-wrap: wrap; }
+.licence-model { font-weight: 600; }
+.licence-badge {
+  font-size: 11px; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--border, #2a3140); color: var(--muted);
+}
+.licence-badge.nc { border-color: rgba(210,153,34,0.55); color: #e3b341; }
+.licence-summary { margin: 0 0 8px; }
+.licence-territory {
+  margin: 0 0 8px; padding: 8px 10px; border-radius: 8px;
+  background: rgba(210,153,34,0.08); border: 1px solid rgba(210,153,34,0.35);
+}
+.licence-terms { margin: 0 0 10px; padding-left: 18px; }
+.licence-terms li { margin: 2px 0; }
+.licence-meta { font-size: 12px; color: var(--muted); margin: 0 0 6px; }
+.licence-meta a, .engine-credit a { color: var(--accent-bright); }
+.licence-accepted { font-size: 12px; color: rgba(63,185,80,0.9); margin: 6px 0; }
+.licence-check {
+  display: flex; gap: 8px; align-items: flex-start; justify-content: flex-start;
+  text-align: left; margin: 12px 0 10px; cursor: pointer;
+}
+.licence-check input[type="checkbox"] { flex: 0 0 auto; width: auto; margin: 3px 0 0; }
+.licence-check span { flex: 1 1 auto; }
+.licence-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.licence-error { color: #f0817a; font-size: 12px; margin: 8px 0 0; }
+.engine-credit { display: block; margin-top: 6px; font-size: 11px; color: var(--muted); }
+[data-licence-status] { color: var(--muted); }
+[data-licence-status].ok { color: rgba(63,185,80,0.9); }
+
+/* lightx2v v1.3 note under the H3 Speed switch (engines.js _h3RenderV13Note). */
+.h3-speed .h3-v13-note { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.h3-speed .h3-v13-note .h3-v13-get { padding: 2px 10px; font-size: 12px; }
+.h3-speed .h3-v13-note .h3-v13-get[hidden] { display: none !important; }

@@ -10,6 +10,14 @@ module.exports = {
     { method: "notify", params: {
       html: "<b>Installing YuE2 (the music engine, ~11 GB).</b><br>Writes a full song — vocals, arrangement and all — from lyrics and a style description, and sits beside LTX and Hailuo H3 as a peer. Supports 16 GB+ Apple Silicon Macs (4-bit/8-bit MLX). Resumable if interrupted."
     } },
+    // Pinokio 8.2 ignores a step's exit code and stops only on /error:/i or
+    // /errno /i in its output: every script here (and music_fetch.py, in its
+    // fetch mode) prints a "FATAL error:" line when it fails, which is what
+    // ends this install. scripts/check_pinokio_scripts.js holds that.
+    // 4.19.8: YuE2's licence (CC BY-NC 4.0 + the individual-creator
+    // permission) is accepted in the panel first; a NEW install stops here
+    // until it is. An install that already has the weights continues.
+    { method: "shell.run", params: { message: "bash scripts/pinokio/music_licence_gate.sh" } },
     { method: "shell.run", params: { message: "bash scripts/pinokio/music_preflight.sh" } },
     { method: "shell.run", params: { message: "bash scripts/pinokio/music_clone.sh" } },
     // Both lanes read and validate engine_pin.txt.
