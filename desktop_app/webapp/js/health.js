@@ -31,10 +31,33 @@ async function refreshVersionPill() {
   } catch (e) {
     return;             // network blip; don't blow away last good state
   }
+  // Reconcile the client-only restart flag against the server's authoritative
+  // state. _versionRestartPending is set after a pull that moved the tree
+  // (~line 791) and lives purely in this page's memory: nothing ever cleared
+  // it, and Pinokio reuses the same webview across an app Stop -> Start, so
+  // the flag — and the "Restart Phosphene" pill — outlived the restart that
+  // was supposed to satisfy it. Users could only escape it by quitting
+  // Pinokio entirely (the page finally torn down and reloaded), reported on
+  // the back of issue #114. Once a pull has moved the tree the running
+  // process reports stale_process=true until it restarts, so the flag can
+  // only coexist with a healthy, current process AFTER the restart actually
+  // happened — either this same page now polling the new process, or a fresh
+  // server that no longer remembers the pull. Clear it then. We only touch
+  // the client PULL flag; the server's own stale_process pill (a promote
+  // landing under a long-lived panel) is untouched and still shows.
+  if (_versionRestartPending && _versionState
+      && !_versionState.stale_process
+      && !(((_versionState.behind_by) | 0) > 0)) {
+    _versionRestartPending = false;
+  }
   renderVersionPill();
   try { _ubRender(_versionState); } catch (e) {}
   try { _maybeShowUpdateModal(_versionState); } catch (e) {}
   try { _maybeShowBroadcastModal(_versionState); } catch (e) {}
+}
+
+function _phEsc(t) {
+  return String(t).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 }
 
 function _versionDisplayLabel(s) {
@@ -63,8 +86,22 @@ function renderVersionPill() {
   const local = _versionDisplayLabel(s);
   const remote = _versionRemoteLabel(s);
   // Reset every state class; exactly one is added below.
-  pill.classList.remove('pill-update','pill-current','pill-dev','pill-checking','pill-restart','pill-busy');
+  pill.classList.remove('pill-update','pill-current','pill-dev','pill-checking','pill-restart','pill-busy','pill-app');
   pill.style.display = '';
+
+  // The Mac app updates the studio itself (Phosphene -> Check for Updates...)
+  // and installs it from a release tarball: no git, nothing to pull, no
+  // GitHub poll. The pill names the build - version and the commit the
+  // tarball shipped - and a click copies it for a bug report.
+  if (isMacApp() || s.app_updates) {
+    pill.classList.add('pill-app');
+    const sha = s.local_short || '';
+    pill.innerHTML = _phEsc(local) + (sha ? `<span class="vp-detail"> · ${_phEsc(sha)}</span>` : '');
+    pill.title = `Phosphene ${_versionBuildLabel(s.local_version, s.local_short)}. `
+      + 'To update, use Phosphene \u2192 Check for Updates\u2026'
+      + '\nClick to copy your build details for a bug report.';
+    return;
+  }
 
   // Pill text leads with the MEANING of the state, not the version code.
   // Earlier build showed bare "Y1.005" which read as a label rather than
@@ -230,9 +267,30 @@ function _uiEvent(event, props) {
   } catch (_) {}
 }
 
+// install_step `first_use` (growth pass, 2026-10-19): the first click or key
+// press anyone makes on this page, once per install, ever. Pinokio auto-runs
+// Start when the ~37 GB install finishes, so a panel can boot with nobody in
+// front of it; this is what tells "nobody ever looked" from "looked and left".
+// A hover or a scroll is not a person deciding to use the app, so only
+// pointerdown/keydown count. At most one localhost POST per page load; the
+// SERVER owns once-per-install (_analytics_install_step), deliberately not
+// localStorage: every install on a Mac is served from the same origin, so a
+// browser-side flag would silence a reinstall's new install id for good.
+function armFirstUseReport() {
+  const opts = {capture: true, passive: true};
+  const fire = () => {
+    document.removeEventListener('pointerdown', fire, opts);
+    document.removeEventListener('keydown', fire, opts);
+    _uiEvent('install_step', {step: 'first_use'});
+  };
+  document.addEventListener('pointerdown', fire, opts);
+  document.addEventListener('keydown', fire, opts);
+}
+
 function _maybeShowUpdateModal(st) {
   if (window._updModalShownThisLoad || window._phModalOpen) return;
   if (!st || st.error || st.suppress_reason || !st.checked_ts) return;
+  if (isMacApp() || st.app_updates) return;     // the app owns updates
   if ((st.behind_by | 0) <= 0 || _versionRestartPending) return;
   const remote = st.remote_version || st.remote_short || 'a new version';
   const local = st.local_version || st.local_short || 'your build';
@@ -299,7 +357,9 @@ window._ubStarSettings = null;
 function _ubRender(s) {
   const el = document.getElementById('updateBanner');
   if (!el) return;
-  const behind = (s && !s.error && s.checked_ts && (s.behind_by | 0) > 0);
+  // Never under the Mac app: its own updater (Sparkle) owns updates.
+  const behind = !isMacApp() && !(s && s.app_updates)
+    && (s && !s.error && s.checked_ts && (s.behind_by | 0) > 0);
   const remote = (s && (s.remote_version || s.remote_short)) || '';
   // A pull already happened this session — the banner's job is done, the
   // restart pill takes over from here.
@@ -621,11 +681,26 @@ async function panelRestart() {
       if (r.ok) { location.reload(); return true; }
     } catch (e) { /* still down */ }
   }
-  phosToast('Panel did not come back within 60s — start it from Pinokio.', 'error');
+  phosToast(distText('Panel did not come back within 60s — start it from Pinokio.',
+                     'The studio did not come back within 60s — use Studio \u2192 Restart Engine.'), 'error');
   return false;
 }
 
+// The pill's click inside the Mac app: never a git pull. Name the build (for a
+// bug report) and point at the app's own updater.
+async function _appVersionPillClick() {
+  const s = _versionState || {};
+  const debug = `Phosphene ${s.local_version || '?'} · mac-app`
+    + (phEdition() ? ` · ${phEdition()}` : '')
+    + ` · ${s.local_short || 'sha?'}`;
+  let copied = false;
+  try { await navigator.clipboard.writeText(debug); copied = true; } catch (e) {}
+  phosToast((copied ? `Copied "${debug}". ` : `${debug}. `)
+    + 'To update, use Phosphene \u2192 Check for Updates\u2026', 'info');
+}
+
 async function versionPillClick() {
+  if (isMacApp() || (_versionState || {}).app_updates) return _appVersionPillClick();
   if (_versionRestartPending) {
     const s = _versionState || {};
     const _pu = s.post_update || {};
@@ -722,6 +797,10 @@ async function versionDoRefresh() {
 
 async function versionDoPull(opts) {
   opts = opts || {};
+  if (isMacApp()) {               // the server refuses it too (409 app_updates)
+    phosToast('To update Phosphene, use Phosphene \u2192 Check for Updates\u2026', 'info');
+    return;
+  }
   const s = _versionState || {};
   const target = _versionRemoteLabel(s);
   const local = _versionDisplayLabel(s);
@@ -935,7 +1014,7 @@ setInterval(refreshVersionPill, 5 * 60 * 1000);
 // Inline handlers in the markup and the other files resolve these through
 // the global scope; everything NOT listed here is private to this module.
 Object.assign(globalThis, {
-  renderVersionPill, updateHealthChip, versionPillClick, _uiEvent,
+  renderVersionPill, updateHealthChip, versionPillClick, _uiEvent, armFirstUseReport,
   // SYS-19: closeHealthPop wasn't published -- openTierModal (settings.js)
   // and openModelsModal (preview.js) need it so clicking a health-popover
   // row closes the popover before its modal opens on top of it.

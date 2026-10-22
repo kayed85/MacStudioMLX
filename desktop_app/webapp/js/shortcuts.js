@@ -90,7 +90,7 @@ const SHORTCUTS = [
     label: 'Move the selected output to the Trash — asks first, like the trash button on the card',
     run: () => shortcutTrashOutput() },
   { id: 'outputs.newtake', scope: 'outputs', combos: ['r'], owner: 'shortcuts.js',
-    label: 'New take — queue another render of the selected output, same recipe, a fresh seed (VC-03)',
+    label: 'New take — queue another render of the selected output, same recipe, a fresh seed',
     run: () => shortcutNewTake() },
 
   // ---- the Editor: keys ---------------------------------------------------------

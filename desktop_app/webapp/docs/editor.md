@@ -159,7 +159,7 @@ Under **A2 Music** are the audio tracks — **A3**, **A4** and on. A track holds
 - **From this film** (the default) listens to the quiet moments of your own clips — the room between the lines, tape hiss, hum — and makes a continuous bed of that sound. When the clips have too little quiet sound it says so on the card and **Quiet room** stands in.
 - **Other sounds:** Quiet room, Living room, Office, TV studio, Kitchen, Car interior, Outdoors day, Night outside, City street, Rain, VHS tape, Big hall, Plane cabin.
 - **New take** makes another version of the same sound — a new one every click. **Use this sound** swaps to what the picker shows, at the same level. **Rebuild** makes it again from the sequence as it is now (after a re-cut). **Remove** takes it off (Undo brings it back).
-- **Level** is in LUFS: **−27** by default — clearly there, under dialogue that sits around −16. The track head's level slider is the same control in percent. Every change is one Undo step.
+- **Level** is in LUFS: **−38** by default — a bed you stop hearing, about 20 dB under dialogue that sits around −16, that still fills every gap a cut would drop to silence. −27 is clearly there. The track head's level slider is the same control in percent. Every change is one Undo step.
 - **It follows the sequence.** Trim, add or delete shots and the bed stays as long as the sequence; when the sequence outgrows the sound file, a longer one is made in the background. A bed you split or moved by hand is left alone — to dip it somewhere, unlock it (**Lock** on the clip bar) and add level points.
 - **Automatic cuts** — the Editor's first cut of a Storyboard, **Auto-edit…**, and Storyboard's automatic film — get a *From this film* room tone by default. Turn **Add room tone to automatic cuts** off on the card to stop it. A music-video cut (the song replaces the clips' sound) and clips with no quiet sound get none.
 - It plays in the preview, mixes into the render and exports as its own audio track, like any other track. The file lives in the sequence's `audio/room_tone/` folder.
@@ -253,7 +253,7 @@ For an L-cut, do the same with the **outgoing** shot and drag its strip's right 
 
 1. Media pool → **Sound**. The **Room tone** card is at the top.
 2. Leave **From this film** picked (or choose a room) and press **Add room tone**. A *Room tone* track appears under the other sounds, as long as the sequence.
-3. Play across a few cuts. Too loud or too quiet? Move **Level** (−27 LUFS is the default). Not the right texture? **New take**, or pick another sound and press **Use this sound**.
+3. Play across a few cuts. Too loud or too quiet? Move **Level** (−38 LUFS is the default). Not the right texture? **New take**, or pick another sound and press **Use this sound**.
 4. **Save**.
 
 ### Replace a shot with a retake {#job-retake}

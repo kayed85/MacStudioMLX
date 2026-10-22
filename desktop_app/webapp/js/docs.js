@@ -20,12 +20,15 @@
 
 const DOCS_SECTIONS = [
   { id: 'getting-started', title: 'Getting started', group: 'Start', file: 'getting-started.md' },
+  { id: 'install', title: 'Install, update and disk space', group: 'Start', file: 'install.md' },
   { id: 'video', title: 'Video', group: 'Make', file: 'video.md' },
+  { id: 'hailuo-h3', title: 'Hailuo H3 video engine', group: 'Make', file: 'hailuo-h3.md' },
   { id: 'one-shot', title: 'One Shot', group: 'Make', file: 'one-shot.md' },
   { id: 'remix', title: 'Remix', group: 'Make', file: 'remix.md' },
   { id: 'images', title: 'Images', group: 'Make', file: 'images.md' },
   { id: 'storyboard', title: 'Storyboard', group: 'Make', file: 'storyboard.md' },
   { id: 'audio', title: 'Audio', group: 'Make', file: 'audio.md' },
+  { id: 'music', title: 'Music Studio', group: 'Make', file: 'music.md' },
   { id: 'editor', title: 'Editor', group: 'Cut', file: 'editor.md' },
   { id: 'train-character', title: 'Train Character', group: 'Characters', file: 'train-character.md' },
   { id: 'loras', title: 'LoRAs', group: 'Characters', file: 'loras.md' },
@@ -41,6 +44,27 @@ const DOCS = {
 };
 
 // ---- rendering --------------------------------------------------------------
+// Pinokio-only and Mac-app-only passages. A page wraps them in directive
+// lines of their own:
+//
+//   [[pinokio]] ... [[/pinokio]]     shown under Pinokio only
+//   [[mac-app]] ... [[/mac-app]]     shown inside the Phosphene Mac app only
+//
+// The block that does not apply is dropped with its directive lines before
+// anything renders, indexes or searches, so Pinokio's pages read exactly as
+// they did and the app's pages never send anyone to a Pinokio sidebar.
+function docsForDistribution(md, dist) {
+  const here = dist || ((typeof isMacApp === 'function' && isMacApp()) ? 'mac-app' : 'pinokio');
+  const out = [];
+  let skip = false;
+  for (const line of String(md).split('\n')) {
+    const m = line.trim().match(/^\[\[(\/?)(pinokio|mac-app)\]\]$/);
+    if (m) { skip = !m[1] && m[2] !== here; continue; }
+    if (!skip) out.push(line);
+  }
+  return out.join('\n');
+}
+
 function docsEsc(t) {
   return String(t).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
 }
@@ -102,7 +126,7 @@ const DOCS_SC_BLOCK = /^\[\[shortcuts(?::([\w,-]+))?\]\]\s*$/;
 
 // md → { html, headings: [{level, text, anchor}] }. Pure: the tests run it.
 function docsRender(md, sectionId) {
-  const lines = String(md).replace(/\r\n?/g, '\n').split('\n');
+  const lines = docsForDistribution(String(md).replace(/\r\n?/g, '\n')).split('\n');
   const out = [];
   const heads = [];
   let para = [];
@@ -278,7 +302,7 @@ async function docsLoad() {
     try {
       const r = await fetch('/webapp/docs/' + sec.file, { cache: 'no-cache' });
       if (!r.ok) throw new Error('HTTP ' + r.status);
-      DOCS.md[sec.id] = await r.text();
+      DOCS.md[sec.id] = docsForDistribution(await r.text());
     } catch (e) {
       DOCS.md[sec.id] = '# ' + sec.title + '\n\nThis page could not be loaded (' + String(e.message || e) +
         '). The panel serves it from webapp/docs/' + sec.file + '.';
@@ -503,5 +527,5 @@ function closeDocs() {
 // ---- published to the page -----------------------------------------------------
 Object.assign(globalThis, {
   DOCS_SECTIONS, openDocs, closeDocs, docsRender, docsSlug, docsPlain,
-  docsSearch, docsBuildIndex, docsLoad,
+  docsSearch, docsBuildIndex, docsLoad, docsForDistribution,
 });

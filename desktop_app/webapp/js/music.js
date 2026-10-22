@@ -857,7 +857,7 @@ function renderSongList(el, songs) {
   const rows = _familyOrder(songs).map(({o, depth}) => {
     const m = o.music || {};
     const playing = _barSong && _barSong.path === o.path && !_barAudio().paused;
-    const attr = JSON.stringify(o.path).replace(/"/g, '&quot;');
+    const attr = _esc(JSON.stringify(o.path));
     return `<div class="song-row${o.path === activePath ? ' active' : ''}${depth ? ' child' : ''}" data-path="${_esc(o.path)}"
                  onclick="selectOutput(${attr})" role="button" tabindex="0" onkeydown="if(event.key==='Enter')selectOutput(${attr})">
       <div class="song-cover" style="${songCoverStyle(o)}" aria-hidden="true">${depth ? '' : `<span>${_esc(_songTitle(o).slice(0, 1).toUpperCase())}</span>`}</div>
@@ -882,13 +882,14 @@ function _svgPause() { return '<svg width="14" height="14" viewBox="0 0 16 16" a
 // stock control in it. Cover, title, style — playback lives in the bar.
 function songHero(o) {
   const m = o.music || {};
+  const pathAttr = _esc(JSON.stringify(o.path));
   return `<div class="song-hero">
     <div class="song-hero-cover" style="${songCoverStyle(o)}"><span>${_esc(_songTitle(o).slice(0, 1).toUpperCase())}</span></div>
     <div class="song-hero-text">
       <div class="song-hero-title">${_esc(_songTitle(o))}</div>
       <div class="song-hero-style">${_esc(m.style || '')}</div>
       <div class="song-hero-meta">${o.clip_sec ? _mmss(o.clip_sec) : ''}${m.mode && m.mode !== 'off' ? ' · sheet music' : ''}${m.cover ? ' · cover' : ''}</div>
-      <button type="button" class="primary song-hero-play" onclick="musicBarToggle(${JSON.stringify(o.path).replace(/"/g, '&quot;')})">${_svgPlay()} Play</button>
+      <button type="button" class="primary song-hero-play" onclick="musicBarToggle(${pathAttr})">${_svgPlay()} Play</button>
     </div>
   </div>`;
 }
@@ -900,7 +901,7 @@ function musicMenuOpen(ev, path) {
   if (!menu) return;
   const o = (typeof findOutputByPath === 'function') ? findOutputByPath(path) : null;
   const m = (o && o.music) || {};
-  const attr = JSON.stringify(path).replace(/"/g, '&quot;');
+  const attr = _esc(JSON.stringify(path));
   const item = (label, sub, fn, disabled, why) =>
     `<button type="button" class="song-menu-item" ${disabled ? `disabled title="${_esc(why || '')}"` : ''} onclick="musicMenuClose(); ${fn}">${label}${sub ? `<span class="sub">${sub}</span>` : ''}</button>`;
   const noArt = !m.has_artifacts, noScore = !m.has_score;

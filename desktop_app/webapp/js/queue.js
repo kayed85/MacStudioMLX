@@ -726,7 +726,8 @@ function setEngine(engine, opts) {
       // 4.19 modes ride on runner flags an older H3 pack does not have.
       target = fallback.id;
       reason = 'This ' + e.label + ' runner predates ' + (H3_MODE_LABEL[currentMode] || currentMode)
-             + ' — press Update in Pinokio (your weights stay). Back on '
+             + distText(' — press Update in Pinokio (your weights stay). Back on ',
+                        '. Updating it isn\u2019t available in the Mac app yet. Back on ')
              + fallback.label + ' for now.';
     }
   }
@@ -950,12 +951,17 @@ function updateH3Availability(s) {
                // Same for the Draft's fast 3-step adapter.
                || (((next.tristep || {}).available) !== ((H3.tristep || {}).available))
                || (((next.tristep || {}).supported) !== ((H3.tristep || {}).supported))
+               // And for lightx2v v1.3 (Best on High): built from inside the panel.
+               || (((next.v13 || {}).available) !== ((H3.v13 || {}).available))
+               || (((next.v13 || {}).supported) !== ((H3.v13 || {}).supported))
+               || (((next.v13 || {}).download || {}).status !== ((H3.v13 || {}).download || {}).status)
                || ((next.tiers || []).length !== (H3.tiers || []).length);
   // BOTH bindings, and they must stay the same object: the H3-specific code
   // reads `H3` on nearly every line, the registry reads the probe map. A
   // divergence here is a switcher showing "not installed" over a working
   // engine (or worse, the reverse).
-  const _triDl = !!((next.tristep || {}).installing || (H3.tristep || {}).installing);
+  const _triDl = !!((next.tristep || {}).installing || (H3.tristep || {}).installing
+                    || (next.v13 || {}).installing || (H3.v13 || {}).installing);
   H3 = next;
   window._ENGINE_PROBES.h3 = next;
   // A running 3-step download prints its progress on the pill.
@@ -1063,11 +1069,12 @@ function openH3InstallCard(source) {
         ${_missing.length ? 'Missing: ' + _missing.map(escapeHtml).join(' · ') : ''}
       </p>
       <p style="margin:0 0 10px">
-        Fix it from Pinokio: open the <b>Phosphene</b> entry in the Pinokio
+        ${distText(`Fix it from Pinokio: open the <b>Phosphene</b> entry in the Pinokio
         sidebar and click <b>“${escapeHtml(fixMenuText)}”</b> (it appears in
         place of the install entry). The step is idempotent — it skips every
         weight already on disk. The panel picks the engine back up within a
-        couple of seconds, no restart.
+        couple of seconds, no restart.`,
+        `Repairing or building Hailuo H3 isn\u2019t available in the Mac app yet. LTX keeps working.`)}
       </p>` : `
       <p style="margin:0 0 10px">
         <b>Hailuo H3 is Phosphene's second video engine</b>, a peer of LTX
@@ -1080,18 +1087,28 @@ function openH3InstallCard(source) {
       <p style="margin:0 0 10px;color:var(--muted)">
         ${escapeHtml(H3.size_note || '')}
       </p>
-      ${H3.ram_lane === 'q8' ? `<p style="margin:0 0 10px">
+      ${H3.ram_lane === 'q8' && !isMacApp() ? `<p style="margin:0 0 10px">
         <b>This Mac runs it.</b> With ${escapeHtml(String(Math.round(H3.ram_gb || 0)))} GB
         of memory, H3 uses its compact Q8 engine, which the install builds by
         itself at the end (about 5 more minutes, nothing extra to download).
       </p>` : ''}
+      ${isMacApp() ? `<p style="margin:0 0 10px">
+        <b>Not in the Mac app yet.</b> Installing Hailuo H3 isn\u2019t available
+        in the Mac app yet. Everything else in Phosphene works without it.
+      </p>` : `<p style="margin:0 0 10px" class="h3-licence-step">
+        <b>1. Accept the MiniMax H3 licence.</b> H3's licence does not cover the
+        European Union, the United Kingdom, South Korea or the United States,
+        and it comes with use restrictions.
+        <button type="button" class="ghost-btn" onclick="openLicence('h3', {force: false}).then(licenceStatusRefresh)">Read the licence</button>
+        <span data-licence-status="h3"></span>
+      </p>
       <p style="margin:0 0 10px">
-        Install it from Pinokio, not from here: open the <b>Phosphene</b> entry
+        <b>2. Install it from Pinokio</b>, not from here: open the <b>Phosphene</b> entry
         in the Pinokio sidebar and click
         <b>“Install Hailuo H3 (second video engine, ~75 GB)”</b>. It is there
-        while the panel is running, too. The panel picks it up within a couple
-        of seconds — no restart.
-      </p>`;
+        while the panel is running, too. The installer stops until step 1 is
+        done. The panel picks H3 up within a couple of seconds — no restart.
+      </p>`}`;
     // THE DIAGNOSTIC DUMP GOES BEHIND A DISCLOSURE. `missing` is a list of raw
     // absolute paths — indispensable when an install half-lands, and pure
     // noise the other 99% of the time. Printing it under a two-sentence pitch
@@ -1113,6 +1130,7 @@ function openH3InstallCard(source) {
   }
   if (m) m.style.display = 'flex';
   _h3CardSeen = true;
+  if (typeof licencesLoad === 'function') licencesLoad(true).then(licenceStatusRefresh);
 }
 function closeH3InstallCard() {
   const m = document.getElementById('h3InstallModal');
@@ -1149,7 +1167,8 @@ function _h3NudgeEngineOffer() {
   // first draft, and it clipped exactly where the instruction lived.
   // H3-39: same "· 75 GB" default the modal title had, wrong whenever this is
   // a build-only or repair nudge — nothing downloads in either case.
-  const nudgeMsg = (H3.reason === 'missing_q8_dit')
+  const nudgeMsg = isMacApp() ? 'Hailuo H3 · not available in the Mac app yet.'
+    : (H3.reason === 'missing_q8_dit')
     ? 'Hailuo H3 · build the compact engine, no download — from the Pinokio sidebar.'
     : H3.repairable
       ? 'Hailuo H3 · repair, no download — from the Pinokio sidebar.'
@@ -1222,6 +1241,9 @@ async function enhancePrompt() {
     return;
   }
   btn.disabled = false; btn.innerHTML = originalLabel;
+  // 4.20: Enhance's model (Gemma 3) may still be downloading after a fresh
+  // install - say so and offer the download, not a red "failed".
+  if ((typeof packNeededToast === 'function' && packNeededToast(res))) return;
   if (res.error) {
     // VC-16: a GPU-busy refusal (409) names what's rendering instead of a
     // flat "a render is using the GPU" — show it inline, not a blocking
@@ -2682,11 +2704,13 @@ function _applyOfflineGate(offline) {
   if (!genBtn) return;
   if (offline) {
     genBtn.disabled = true;
-    genBtn.title = "Phosphene can't reach its own server right now — restart it from Pinokio.";
+    genBtn.title = distText("Phosphene can't reach its own server right now — restart it from Pinokio.",
+                            "Phosphene can't reach its own server right now — use Studio \u2192 Restart Engine.");
     genBtn.dataset.offlineBlocked = '1';
     if (note) {
       note.innerHTML = escapeHtml(
-        "Phosphene is offline — restart it from Pinokio before rendering.");
+        distText("Phosphene is offline — restart it from Pinokio before rendering.",
+                 "Phosphene is offline — use Studio \u2192 Restart Engine before rendering."));
       note.hidden = false;
       note.dataset.offlineNote = '1';
     }
@@ -2720,13 +2744,13 @@ function _setOfflineBanner(visible, msg) {
         '<span class="icon"><svg class="ph" aria-hidden="true"><use href="#ph-warning-fill"/></svg></span>' +
         '<span class="label">Phosphene offline</span>' +
         '<span class="text"></span>' +
-        '<span class="hint">restart from Pinokio</span>';
+        '<span class="hint"></span>';
       document.body.appendChild(bar);
     }
     bar.classList.remove('reconnected');
     bar.querySelector('.label').textContent = 'Phosphene offline';
     bar.querySelector('.text').textContent = text;
-    bar.querySelector('.hint').textContent = 'restart from Pinokio';
+    bar.querySelector('.hint').textContent = distText('restart from Pinokio', 'Studio \u2192 Restart Engine');
     const entry = `${new Date().toLocaleTimeString()} offline · ${text}`;
     window._panelBannerLog.push(entry);
     if (window._panelBannerLog.length > 8) window._panelBannerLog.shift();
@@ -2867,9 +2891,12 @@ function renderIntegrityBanner(integ) {
     + (codecBad.length
         ? '<span style="opacity:.92;flex-basis:100%">'
           + codecBad.map(b => escapeHtml(b.file + ' — ' + b.reason)).join('<br>')
-          + '. The codec patch may not be applied — click Update in Pinokio '
+          + distText('. The codec patch may not be applied — click Update in Pinokio '
           + '(if it persists, reinstall). Clips rendered like this carry '
-          + 'avoidable compression on faces.</span>'
+          + 'avoidable compression on faces.',
+          '. The codec patch may not be applied — use Phosphene \u2192 Check for Updates\u2026 '
+          + '(if it persists, Help \u2192 Report a Bug\u2026). Clips rendered like this carry '
+          + 'avoidable compression on faces.') + '</span>'
         : '')
     + '<span style="margin-left:auto;display:flex;gap:8px">'
     + repos.map(k => '<button class="btn btn-primary" onclick="repairModel(\'' + escapeHtml(k)
@@ -2913,7 +2940,8 @@ function engineEnvBannerHtml(st) {
     timeout: 'The last install timed out downloading packages - check the connection.',
     disk: 'The last install ran out of disk space - free some space first.',
     uv_error: 'The last install could not resolve or build a package.',
-    python_missing: 'The engine Python stopped working - run Install from Pinokio to rebuild it (models kept).',
+    python_missing: distText('The engine Python stopped working - run Install from Pinokio to rebuild it (models kept).',
+                             'The engine Python stopped working - quit Phosphene and open it again so setup can rebuild it (models kept).'),
   };
   if (!st || st.ok) return '';
   const rep = st.repair || {};
@@ -2923,7 +2951,8 @@ function engineEnvBannerHtml(st) {
       + '<span style="opacity:.92">' + escapeHtml(_redactLocalPaths(last) || 'Installing its Python packages')
       + ' \u2014 renders can start when it finishes. Models are not touched.</span>';
   }
-  const pinokio = '<span style="opacity:.85;flex-basis:100%">Or from Pinokio: Stop Phosphene, then '
+  // The Mac app has no sidebar: the in-studio Repair button is the only one.
+  const pinokio = isMacApp() ? '' : '<span style="opacity:.85;flex-basis:100%">Or from Pinokio: Stop Phosphene, then '
     + 'click \u201cRepair Phosphene engine (models kept)\u201d.</span>';
   if (rep.state === 'failed') {
     return '<span style="font-weight:700">The engine repair did not finish:</span>'
@@ -2984,6 +3013,38 @@ async function engineRepairStart() {
   if (typeof poll === 'function') poll();
 }
 
+// 4.19.5: POST /h3/repair (scripts/pinokio/h3_deps.sh - H3's packages at the
+// known-good set, no weights). Progress rides /status.h3_env; the toast below
+// says when it ends, because the card that offered it may be gone by then.
+async function h3RepairStart() {
+  try {
+    const r = await fetch('/h3/repair', { method: 'POST', body: new URLSearchParams({}) });
+    const res = await r.json().catch(() => ({}));
+    if (typeof phosToast === 'function') {
+      phosToast(r.ok ? 'Repairing Hailuo H3\u2019s packages\u2026 (about a minute, weights kept)'
+                     : (res.error || ('Repair could not start: HTTP ' + r.status)),
+                { kind: r.ok ? 'info' : 'danger', duration: 8000 });
+    }
+  } catch (e) {
+    if (typeof phosToast === 'function') phosToast('Repair could not start: ' + (e.message || e), { kind: 'danger' });
+  }
+  if (typeof poll === 'function') poll();
+}
+let _h3RepairWas = '';
+let _h3EnvLast = null;
+function noteH3EnvRepair(st) {
+  _h3EnvLast = st || null;
+  const rep = (st && st.repair) || {};
+  const now = rep.state || '';
+  if (_h3RepairWas === 'running' && (now === 'done' || now === 'failed') && typeof phosToast === 'function') {
+    phosToast(now === 'done'
+      ? 'Hailuo H3 is repaired \u2014 H3 renders can run. Press Retry on the failed render.'
+      : 'The Hailuo H3 repair did not finish: ' + _redactLocalPaths(rep.error || 'unknown error'),
+      { kind: now === 'done' ? 'success' : 'danger', duration: 10000 });
+  }
+  _h3RepairWas = now;
+}
+
 // Translate a cryptic engine error into actionable user guidance. Extracted
 // from the Now card 2026-08-11 so a storyboard shot's failure reads EXACTLY
 // like a manual one — one if/else, two callers, no way for the two to drift.
@@ -3041,6 +3102,19 @@ function nowCardFailureActions(last, info) {
       `title="Reopen this job in its form to pick the missing file again">` +
       `<svg class="ph" aria-hidden="true"><use href="#ph-arrow-clockwise"/></svg>` +
       `<span>Open in the form</span></button>` + dismiss;
+  }
+  // 4.19.5: the Hailuo H3 venv is off the package set this release was
+  // tested with (or its MLX is too old, or transformers refuses its own
+  // dependencies). Same shape: the card offers H3's one-click repair.
+  // Once /status.h3_env says the venv is fine again (the repair ran), the
+  // same card offers the ordinary Retry its toast promises (Codex 4.19.5).
+  const h3Fixed = typeof _h3EnvLast !== 'undefined' && _h3EnvLast && _h3EnvLast.ok
+    && !((_h3EnvLast.repair || {}).active);
+  if (action === 'repair_h3' && !h3Fixed) {
+    return `<button type="button" class="now-card-retry" data-action="repair-h3" ` +
+      `title="Re-install only Hailuo H3's Python packages, at the set this release was tested with (about a minute, weights kept)">` +
+      `<svg class="ph" aria-hidden="true"><use href="#ph-arrow-clockwise"/></svg>` +
+      `<span>Repair Hailuo H3</span></button>` + dismiss;
   }
   // 4.17.4: the engine's packages are not installed - every render fails the
   // same way until they are, so the card offers the repair, never a Retry.
@@ -3106,9 +3180,23 @@ function friendlyJobError(raw, engine) {
       action: 'repair_engine',
     };
   }
+  // 4.19.5: an H3 render refused at its start because the H3 venv cannot run
+  // this release's runner as tested (h3_env_fault in mlx_ltx_panel.py). Retry
+  // fails the same way; the repair re-installs only H3's packages.
+  if (/Hailuo H3 venv/i.test(raw)) {
+    return {
+      friendly: 'Hailuo H3\u2019s Python packages need a repair.',
+      hint: 'They are not the versions this release was tested with, so H3 stopped before using '
+          + 'the GPU. Press Repair Hailuo H3: it re-installs only those packages (about a minute) '
+          + 'and keeps every weight. LTX renders are not affected.',
+      details: _redactLocalPaths(raw) || raw,
+      action: 'repair_h3',
+    };
+  }
   if (/music engine isn't installed|YuE2 needs about|YuE2 weights.*repair/i.test(raw)) {
     return { friendly: 'Stopped before generating — the music engine is not ready.',
-      hint: 'Install or repair it from the Phosphene sidebar in Pinokio. Everything else in the panel is unaffected.' };
+      hint: distText('Install or repair it from the Phosphene sidebar in Pinokio. Everything else in the panel is unaffected.',
+                     'Use Install music engine or Repair music engine in Audio \u2192 Compose. Everything else in the studio is unaffected.') };
   }
   if (/draw things.*connection lost|connection lost.*draw things|draw things generation error/i.test(raw)) {
     return {
@@ -3411,6 +3499,7 @@ async function poll() {
   // Corrupt/partial-weight banner (mosaic self-heal).
   try { renderIntegrityBanner(mergeIntegrity(s.model_integrity, s.deep_verify)); } catch (_) {}
   try { renderEngineEnvBanner(s.engine_env); } catch (_) {}
+  try { noteH3EnvRepair(s.h3_env); } catch (_) {}
   try { renderDeepVerifyStatus(s.deep_verify); } catch (_) {}
 
   // Memory
@@ -3510,9 +3599,12 @@ async function poll() {
   const dl = s.download && s.download.active ? s.download : null;
   if (dl) {
     const elapsed = Math.max(0, Math.round(s.server_now - (dl.started_ts || s.server_now)));
-    mp.innerHTML = `<span class="dot"></span>↓ ${dl.key} · ${elapsed}s`;
+    mp.innerHTML = dl.background
+      ? `<span class="dot"></span>↓ extras · ${escapeHtml(String(dl.key))}`
+      : `<span class="dot"></span>↓ ${dl.key} · ${elapsed}s`;
     mp.className = 'pill pill-running';
-    mp.title = `Downloading ${dl.repo_id} — ${dl.last_line || 'starting…'}`;
+    mp.title = (dl.background ? `Background download after install (you can render meanwhile): ${dl.name || dl.repo_id}`
+                              : `Downloading ${dl.repo_id}`) + ` — ${dl.last_line || 'starting…'}`;
   } else {
     // Per-repo ready/total counts, scoped server-side (VC-32) to repos that
     // are actually relevant to THIS generation — never another generation's
@@ -4197,6 +4289,11 @@ async function poll() {
     currentOutputs = s.outputs;
     if (typeof updateModelCredit === 'function') { try { updateModelCredit(); } catch (e) {} }
     renderCarousel();
+    // W6: a clip's silence is learned in the background, so the selected
+    // clip's "No sound · Add sound" can arrive a poll after it was opened.
+    if (activePath && typeof findOutputByPath === 'function') {
+      try { syncPlayerSoundOffer(findOutputByPath(activePath)); } catch (e) {}
+    }
     // Pick the first FILTERED entry as the default selection so the
     // viewer agrees with what the gallery is showing — without this,
     // landing on Photos with no active selection would auto-pick a
@@ -4921,7 +5018,7 @@ function renderCarousel() {
   const _visibleSlice = visible.slice(0, _renderLimit);
   const _hiddenCount = visible.length - _visibleSlice.length;
   el.innerHTML = _visibleSlice.map(o => {
-    const pathAttr = JSON.stringify(o.path).replace(/"/g, '&quot;');
+    const pathAttr = escapeHtml(JSON.stringify(o.path));
     const isPhoto = outputKind(o) === 'image';
     const isAudio = outputKind(o) === 'audio';
     // Thumbnail markup branches on kind. Photos use <img> directly with
@@ -4950,7 +5047,7 @@ function renderCarousel() {
     //   - Hide was useless (clutter, never used in practice).
     //   - Extend wasn't practical on Mac.
     // Folder-reveal moved to a global button in the carousel header.
-    const animateArgs = JSON.stringify({path: o.path, prompt: ''}).replace(/"/g, '&quot;');
+    const animateArgs = escapeHtml(JSON.stringify({path: o.path, prompt: ''}));
     const animateChip = isPhoto
       ? `<button class="card-action card-action-photo" type="button"
                  title="Pre-fill i2v with this image (does not auto-submit)"
@@ -4962,7 +5059,7 @@ function renderCarousel() {
     // hidream_quality_inline, sets n=1, and auto-submits. Useful flow:
     // generate 4 candidates in Fast/Medium, pick the best, hit ✦ to bake the
     // same composition at Quality fidelity.
-    const remakeArgs = JSON.stringify({path: o.path}).replace(/"/g, '&quot;');
+    const remakeArgs = escapeHtml(JSON.stringify({path: o.path}));
     const remakeChip = (isPhoto && o.has_sidecar)
       ? `<button class="card-action card-action-photo" type="button"
                  title="Re-run this prompt + seed + refs at Quality (auto-submits)"
@@ -4982,6 +5079,11 @@ function renderCarousel() {
          onkeydown="if(event.target===event.currentTarget&&(event.key==='Enter'||event.key===' ')){event.preventDefault();selectOutput(${pathAttr});}">
       <div class="car-thumb-wrap">
         ${thumbHtml}
+        ${addSoundOffer(o) === 'run'
+          ? `<button class="car-add-sound" type="button"
+                     title="This clip has no sound. Hailuo H3 can make sound for it — the picture stays exactly as it is."
+                     onclick="event.stopPropagation(); addSoundFromCard(${pathAttr})"><svg class="ph" aria-hidden="true"><use href="#ph-speaker-slash"/></svg>No sound · Add sound</button>`
+          : ''}
         ${o.has_sidecar
           ? `<button class="car-info-btn" type="button" title="Show generation info"
                      onclick="event.stopPropagation(); openOutputInfoModal(${pathAttr})"><svg class="ph" aria-hidden="true"><use href="#ph-info"/></svg></button>`
@@ -5316,7 +5418,7 @@ function selectOutput(path, options) {
     const _sf = wrap.closest('.player-surface');
     if (_sf) _sf.setAttribute('data-song', '');
   } else if (isAudio) {
-    const pathAttr = JSON.stringify(path).replace(/"/g, '&quot;');
+    const pathAttr = escapeHtml(JSON.stringify(path));
     const openLink = (o && o.engine === 'music')
       ? `<button type="button" class="ghost-btn player-audio-open" onclick="openSongInAudioTab(${pathAttr})">Open in Audio tab</button>`
       : '';
@@ -5480,6 +5582,7 @@ function selectOutput(path, options) {
   const addSoundBtn = document.getElementById('addSoundBtn');
   if (addSoundBtn) addSoundBtn.style.display = (!isPhoto && !isAudio
     && typeof h3CanServe === 'function' && h3CanServe('v2a')) ? '' : 'none';
+  syncPlayerSoundOffer(o);
   const continueSongBtn = document.getElementById('continueSongBtn');
   if (continueSongBtn) continueSongBtn.style.display = (outIsA2v && !isPhoto && !isAudio) ? '' : 'none';
   // VA-26: Retake is video-only, engine-agnostic (any finished clip, H3
@@ -5629,7 +5732,7 @@ function openAudioUseMenu(ev, path) {
   const menu = document.getElementById('audioUseMenu');
   if (!menu || !path) return;
   const o = findOutputByPath(path);
-  const attr = JSON.stringify(path).replace(/"/g, '&quot;');
+  const attr = escapeHtml(JSON.stringify(path));
   const items = audioUseTargets(o, window._ENGINE_PROBES || {});
   menu.innerHTML = '<div class="song-menu-head">Use this audio for…</div>' + items.map(t =>
     `<button type="button" role="menuitem" class="song-menu-item" data-target="${t.id}"`
@@ -5934,6 +6037,7 @@ function openExpandLightbox() {
       <button type="button" class="ghost-btn" onclick="useLastFrameActive()">Use last frame</button>
       <button type="button" class="ghost-btn" onclick="openActiveInEditor()">Open in Editor</button>
       <button type="button" class="ghost-btn" onclick="revealActive()">Reveal in Finder</button>
+      <button type="button" class="ghost-btn" onclick="shareActive()">Share</button>
     ` : '';
   }
   lb.style.display = 'flex';
@@ -6218,7 +6322,8 @@ function useAsAddSoundSource(path) {
   path = path || activePath;
   if (!path) { phosToast('Pick a clip first.', { kind: 'warn' }); return; }
   if (typeof h3CanServe !== 'function' || !h3CanServe('v2a')) {
-    phosToast('Add sound needs Hailuo H3 with an up-to-date runner — press Update in Pinokio.', { kind: 'warn', duration: 6000 });
+    phosToast(distText('Add sound needs Hailuo H3 with an up-to-date runner — press Update in Pinokio.',
+                       'Add sound needs Hailuo H3 with an up-to-date runner, which isn\u2019t available in the Mac app yet.'), { kind: 'warn', duration: 6000 });
     return;
   }
   if (typeof workflowSwitch === 'function') { try { workflowSwitch('manual'); } catch (e) {} }
@@ -6230,6 +6335,57 @@ function useAsAddSoundSource(path) {
   updateDerived();
   document.querySelector('aside.form-pane').scrollTop = 0;
   phosToast('Clip loaded into Add sound — describe the sound you want, then Generate.', { kind: 'success' });
+}
+
+// W6 (2026-10-19): Add sound was nearly undiscovered (3 renders in 14 days
+// against 115 Lip-sync), so every SILENT clip offers it where the user is
+// already looking — on its gallery card and in the player. Silence is decided
+// server-side (list_outputs `silent`: no sound track, or a track of digital
+// silence; null while not known yet). What a clip is offered:
+//   'run'    — H3 can make sound for it now;
+//   'update' — H3 is installed but its runner predates Add sound;
+//   'needs'  — this Mac can run H3 but it is not installed;
+//   ''       — nothing (it has sound, not known yet, or H3 can't run here).
+function addSoundOffer(o) {
+  if (!o || o.silent !== true || outputKind(o) !== 'video') return '';
+  if (typeof h3CanServe === 'function' && h3CanServe('v2a')) return 'run';
+  const h3 = (window._ENGINE_PROBES && window._ENGINE_PROBES.h3) || {};
+  if (h3.available) return 'update';
+  return h3.capable ? 'needs' : '';
+}
+// The player's half: one line in the meta strip ("No sound · Add sound", a
+// button when H3 can run it, a plain sentence when it needs installing or
+// updating) and the Add sound action highlighted. Its own element, so a later
+// /status poll that learns the clip is silent can update it without reloading
+// the video (the level check runs server-side in the background).
+function syncPlayerSoundOffer(o) {
+  const meta = document.getElementById('playerOverlayMeta');
+  const btn = document.getElementById('addSoundBtn');
+  const offer = addSoundOffer(o);
+  if (btn) btn.classList.toggle('po-act-suggest', offer === 'run');
+  if (!meta) return;
+  let el = document.getElementById('poSoundOffer');
+  if (!offer) { if (el) el.remove(); return; }
+  if (!el) {
+    el = document.createElement('span');
+    el.id = 'poSoundOffer';
+    el.className = 'po-sound-offer';
+    meta.appendChild(el);
+  }
+  if (el.dataset.offer === offer) return;
+  el.dataset.offer = offer;
+  el.innerHTML = '<span class="po-dot"></span>' + (offer === 'run'
+    ? '<button type="button" class="po-silent po-silent-add" onclick="useAsAddSoundSource()"'
+      + ' title="Hailuo H3 makes sound for this clip — the picture stays exactly as it is.">'
+      + '<svg class="ph" aria-hidden="true"><use href="#ph-speaker-slash"/></svg>No sound · Add sound</button>'
+    : '<span class="po-silent">No sound · Add sound needs '
+      + (offer === 'update' ? 'a Hailuo H3 update' : 'Hailuo H3') + '</span>');
+}
+// The card's "Add sound": show the clip in the player AND land in Add sound
+// with it picked — the same door the player's own Add sound button opens.
+function addSoundFromCard(path) {
+  if (typeof selectOutput === 'function') selectOutput(path);
+  useAsAddSoundSource(path);
 }
 
 // VA-38: hands a published Windows-partial to Extend as its source. Not a
@@ -6530,6 +6686,54 @@ async function revealClipInFinder(path) {
 function revealActive() {
   if (!activePath) return phosToast('Pick a clip in Outputs first.', {});
   return revealClipInFinder(activePath);
+}
+
+// ---- Share (growth pass, 2026-10-19) ----------------------------------------
+// Nothing in the panel helped a clip leave the Mac with its origin attached:
+// the top 5% of installs make 58% of all renders and every one of them went
+// out unattributed. Share does the two things a post needs and nothing else:
+// a one-line caption with the link on the clipboard, and the file selected in
+// Finder, ready to drag into X / Reddit / Discord. No upload, no watermark,
+// no account; the fleet only learns that the button was used.
+const SHARE_CAPTION = 'Made on my Mac with Phosphene, free open-source AI video that runs locally: https://github.com/mrbizarro/phosphene';
+
+function _copyText(text) {
+  const legacy = () => {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return ok;
+    } catch (e) { return false; }
+  };
+  if (!navigator.clipboard || !navigator.clipboard.writeText) return Promise.resolve(legacy());
+  return navigator.clipboard.writeText(text).then(() => true).catch(() => legacy());
+}
+
+async function shareClip(path) {
+  if (!path) { phosToast('Pick a clip first.', {}); return; }
+  const copied = await _copyText(SHARE_CAPTION);
+  const fd = new URLSearchParams();
+  fd.set('path', path);
+  let r;
+  try { r = await (await fetch('/output/reveal', { method: 'POST', body: fd })).json(); }
+  catch (e) { r = { ok: false }; }
+  const shown = !!(r && r.ok);
+  try { _uiEvent('feature_used', {feature: 'share'}); } catch (_) {}
+  const msg = copied && shown ? 'Caption copied, and the clip is selected in Finder. Drag it into your post and paste.'
+            : copied ? 'Caption copied. Use Reveal in Finder to grab the file.'
+            : shown ? 'The clip is selected in Finder. Caption: ' + SHARE_CAPTION
+            : 'Could not copy or open Finder. Caption: ' + SHARE_CAPTION;
+  phosToast(msg, { kind: copied || shown ? 'success' : 'danger', duration: 8000 });
+}
+function shareActive() {
+  if (!activePath) return phosToast('Pick a clip in Outputs first.', {});
+  return shareClip(activePath);
 }
 
 async function openClipInEditor(path) {
@@ -7067,6 +7271,32 @@ async function loadParams(recipe) {
     _flashActionDone('loadParamsBtn', 'Loaded');
     return;
   }
+  // ov-review E-02: the Remix tools used to fall through to the final
+  // setMode('t2v') - Load Params of a Control or Colorize clip dropped its
+  // source video and the next Generate rendered plain text-to-video. They
+  // reopen in their own tool, with their own inputs.
+  else if (p.mode === 'control' || p.mode === 'restore') {
+    setMode(p.mode);
+    const srcId = p.mode === 'control' ? 'control_video_path' : 'restore_video_path';
+    const srcEl = document.getElementById(srcId);
+    if (srcEl) srcEl.value = p[srcId] || '';
+  }
+  else if (p.mode === 'ingredients') {
+    setMode('ingredients');
+    let imgs = [];
+    try { imgs = JSON.parse(p.ingredient_images_json || '[]'); } catch (e) { imgs = []; }
+    _ingredientPaths = (Array.isArray(imgs) ? imgs : [])
+      .filter(x => typeof x === 'string' && x).slice(0, 8);
+    try { _ingredientSync(); } catch (e) {}
+    const _set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+    _set('ingredient_action', p.ingredient_action || '');
+    if (typeof populateIngredientCharLoras === 'function') {
+      try { populateIngredientCharLoras(); } catch (e) {}
+    }
+    _set('ingredient_char_lora', p.ingredient_char_lora || '');
+    _set('ingredient_char_strength', p.ingredient_char_strength || '1.3');
+    _set('ingredient_char_trigger', p.ingredient_char_trigger || '');
+  }
   else if (p.mode === 'extend') setMode('extend');
   else if (p.mode === 'v2a') setMode('v2a');
   else if (p.mode === 'keyframe') setMode('keyframe');
@@ -7379,7 +7609,15 @@ async function loadParams(recipe) {
       try { setH3Speed(h3SpeedOfParams(p)); } catch (e) {}
     }
     if (typeof setH3Steps === 'function') {
-      try { setH3Steps(Number(p.h3_steps || 0) > 0 ? String(p.h3_steps) : 'auto'); } catch (e) {}
+      // A Best clip made on the full sampler, where Best would now run
+      // lightx2v v1.3 (High, Text/Image): pin the count it ran, so Load
+      // Params reproduces the same sampler instead of quietly switching it.
+      const _fullBestOnV13Cell = !p.h3_v13 && h3SpeedOfParams(p) === 'best'
+        && p.h3_quality === 'high' && (p.mode === 't2v' || p.mode === 'i2v')
+        && Number(p.steps || 0) > 0 && typeof h3V13State === 'function' && h3V13State().available;
+      const _pin = Number(p.h3_steps || 0) > 0 ? String(p.h3_steps)
+        : (_fullBestOnV13Cell ? String(p.steps) : 'auto');
+      try { setH3Steps(_pin); } catch (e) {}
     }
     // The render shape. Prefer the two axes when the sidecar carries them; fall
     // back to the composite key, which every sidecar has always carried and
@@ -7401,6 +7639,18 @@ async function loadParams(recipe) {
     }
     const _seedEl = document.getElementById('seed');
     if (_seedEl && _seedBefore != null) _seedEl.value = _seedBefore;
+  } else {
+    // ov-review E-03: setEngine()'s LTX branch hands the quality preset its
+    // default export back (H3 forces it off), which overwrote the export
+    // size and method this clip was made with - restored above, before the
+    // engine. A Load Params (or a queue Edit) of an Export x2 clip came back
+    // as Fit 720p. The recipe wins.
+    if (p.upscale && typeof setUpscale === 'function') {
+      try { setUpscale(p.upscale); } catch (e) {}
+    }
+    if (p.upscale_method && typeof setUpscaleMethod === 'function') {
+      try { setUpscaleMethod(p.upscale_method); } catch (e) {}
+    }
   }
 
   // STG round-trips (journey audit, High): the slider only means anything on
@@ -7567,10 +7817,10 @@ function renderOutputInfoBody(path, data) {
   };
 
   const promptText = p.prompt || '';
-  const promptAttr = JSON.stringify(promptText).replace(/"/g, '&quot;');
+  const promptAttr = escapeHtml(JSON.stringify(promptText));
   const seedVal = String(p.seed_used != null ? p.seed_used : p.seed || '');
-  const seedAttr = JSON.stringify(seedVal).replace(/"/g, '&quot;');
-  const pathAttr = JSON.stringify(path).replace(/"/g, '&quot;');
+  const seedAttr = escapeHtml(JSON.stringify(seedVal));
+  const pathAttr = escapeHtml(JSON.stringify(path));
   const accelMetrics = (data && data.accel_metrics) || null;
   const keyframeModeLabel = (() => {
     if (!p.keyframes_json) return 'FFLF (first + last frame)';
@@ -8771,7 +9021,7 @@ function draftAutosaveInstall() {
 // Inline handlers in the markup and the other files resolve these through
 // the global scope; everything NOT listed here is private to this module.
 Object.assign(globalThis, {
-  openFailedJobInForm, engineRepairStart,
+  openFailedJobInForm, engineRepairStart, h3RepairStart,
   notifyJobsDone, notifyOneJob, playDoneChime,
   h3FinishSetTier, h3FinishActive, setEngine, _syncEnginePromptTools,
   ltxFinishSetTier, ltxFinishActive, _syncFinishAffordance,
@@ -8792,10 +9042,10 @@ Object.assign(globalThis, {
   lbToggleFullscreen,
   audioUseTargets, audioUseApply, useAudioAsSoundtrack, openAudioUseMenu, closeAudioUseMenu,
   animateActive, hide, unhide, openOutputsFolder, hideActive,
-  useAsExtendSource, useAsAddSoundSource, useAsUpscaleSource, useAsUpscaleSourcePath, setUpscalePreset,
+  useAsExtendSource, useAsAddSoundSource, addSoundOffer, addSoundFromCard, syncPlayerSoundOffer, useAsUpscaleSource, useAsUpscaleSourcePath, setUpscalePreset,
   faceFixClip, faceFixActive, isUpscaledPath, loadParams, _flashActionDone, closeOutputInfoModal,
   queueSharpExport, sharpExportActive, useLastFramePath, useLastFrameActive,
-  revealClipInFinder, revealActive, openClipInEditor, openActiveInEditor, kebabToggle,
+  revealClipInFinder, revealActive, shareClip, shareActive, openClipInEditor, openActiveInEditor, kebabToggle,
   reorderQueuedJob, editQueuedJob, cancelEditingQueuedJob, updateQueuedJob, fmtEtaCompact,
   showEnhancePanel, acceptEnhance, undoEnhance, keepMineEnhance,
   updateLangHint, promptLooksNonLatin,

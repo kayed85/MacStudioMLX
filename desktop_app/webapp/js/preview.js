@@ -203,7 +203,15 @@ function _renderLiveStageFrame(s, preview) {
 
   const stopping = window._stopEarlyRequested === cur.id;
   wrap.classList.toggle('is-aborting', stopping);
-  if (!preview.meaningful || !preview.url) {
+  // THE FIRST ESTIMATE IS SHOWN, SOFTENED, AS SOON AS IT EXISTS. Only Stop
+  // early waits for `meaningful` (a stop over an unsettled take is the trap
+  // that rule exists for). The picture used to wait too, and on the distilled
+  // lane estimate 6 is ~2/3 of the way through the denoise: 129 s of a
+  // Balanced render on an M4 Max with nothing but this placeholder, while the
+  // engine had published five estimates whose layout (light, smoke, the
+  // subject's place) already matched the take (owner, 2026-10-22: "it just
+  // takes a shitload of time, and only near the end does it show").
+  if (!preview.url) {
     if (wrap.dataset.liveState !== 'warming') {
       wrap.innerHTML = `<div class="live-stage-warming">
         <svg class="live-stage-warming-mark" viewBox="0 0 24 16" fill="none" aria-hidden="true">
@@ -222,7 +230,10 @@ function _renderLiveStageFrame(s, preview) {
       img = wrap.querySelector('.live-stage-image');
     }
     if (img.getAttribute('src') !== preview.url) img.setAttribute('src', preview.url);
-    wrap.dataset.liveState = 'meaningful';
+    // Rough until the server calls it meaningful: blurred, so nobody judges a
+    // face or a detail the next estimates are still deciding.
+    img.classList.toggle('is-forming', !preview.meaningful);
+    wrap.dataset.liveState = preview.meaningful ? 'meaningful' : 'forming';
   }
 
   const badge = document.getElementById('liveStageBadge');
@@ -237,7 +248,8 @@ function _renderLiveStageFrame(s, preview) {
   const step = preview.estimate != null && preview.total != null
     ? ` · step ${preview.estimate}/${preview.total}` : '';
   if (title) title.textContent = preview.meaningful
-    ? `forming take${step}` : 'forming take · warming';
+    ? `forming take${step}`
+    : (preview.url ? `forming take${step} · rough` : 'forming take · warming');
   if (eta) {
     eta.textContent = stopping ? 'Finishing the current step, then stopping.'
       : (preview.remaining_sec != null && preview.remaining_sec > 0
@@ -510,11 +522,13 @@ function renderNowPreview(s, prog, previewData) {
     const note = document.getElementById('nowThumbHelpNote');
     if (note && note.textContent !== prev.help) note.textContent = prev.help;
   }
-  if (!prev.meaningful) {
+  if (!prev.url) {
     box.className = 'now-thumb is-warming';
     box.innerHTML = '';
   } else {
-    box.className = 'now-thumb' + (stopping ? ' is-aborting' : '');
+    // The rough estimates show too (see _renderLiveStageFrame); `is-forming`
+    // softens them until the server calls the take meaningful.
+    box.className = 'now-thumb' + (prev.meaningful ? '' : ' is-forming') + (stopping ? ' is-aborting' : '');
     // Replace the src in place rather than the node, so the browser does not
     // flash white between estimates.
     let img = box.querySelector('img');
@@ -530,7 +544,7 @@ function renderNowPreview(s, prog, previewData) {
       ? 'Finishing the current step, then stopping.'
       : (prev.meaningful
           ? `This is the shot it's making. Stop now if it's wrong${saves}.`
-          : 'Finding the shot…');
+          : (prev.url ? 'The shot is forming. It sharpens as the render settles.' : 'Finding the shot…'));
     meta.innerHTML += `<br><span style="color:var(--muted)">${escapeHtml(line)}</span>`;
   }
   if (actions && prev.abortable) {
@@ -736,7 +750,7 @@ async function _renderCharactersManageList() {
       const avatar = c.sample_image_url
         ? `<img class="cm-avatar" src="${escapeHtml(c.sample_image_url)}" alt="">`
         : `<span class="cm-avatar-ph">${escapeHtml(initial)}</span>`;
-      const idAttr = JSON.stringify(c.id).replace(/"/g, '&quot;');
+      const idAttr = escapeHtml(JSON.stringify(c.id));
       return `<div class="chars-manage-row" data-cid="${escapeHtml(c.id)}">
         ${avatar}
         <input type="text" class="cm-name-input"
@@ -1252,6 +1266,7 @@ function civitaiSetFamily(family) {
 // One UI predicate serves both LTX and H3. The active engine only changes the
 // LoRA family; it never changes whether NSFW controls/data are authorized.
 function spicyModeEnabled() {
+  if (typeof isMacApp === 'function' && isMacApp()) return false;   // no Spicy mode in the Mac app
   return !!(_settingsCache && _settingsCache.settings &&
             _settingsCache.settings.spicy_mode === true);
 }
@@ -1505,7 +1520,7 @@ async function civitaiSearch() {
     if (data.has_more) loadMore.style.display = '';
     if ((data.items || []).length === 0) {
       const meta = _civitaiContextMeta(_civitaiContext, _civitaiFamily);
-      grid.innerHTML = `<div class="hint">${meta.empty} "${escapeHtml(q || '')}"${civitaiNsfwRequested() ? '' : ' (try Show NSFW for more)'}. Try one shorter word — CivitAI matches whole words in the title and tags — or switch the engine pill above.</div>`;
+      grid.innerHTML = `<div class="hint">${meta.empty} "${escapeHtml(q || '')}"${(civitaiNsfwRequested() || isMacApp()) ? '' : ' (try Show NSFW for more)'}. Try one shorter word — CivitAI matches whole words in the title and tags — or switch the engine pill above.</div>`;
     }
   } catch (e) {
     status.textContent = 'Network error: ' + (e.message || e);
@@ -1855,13 +1870,21 @@ async function refreshModelsModal({ silent = false } = {}) {
   const active = data.active_download;
   hint.innerHTML = data.hf_available
     ? `Each row shows what's on disk. Click <b>Download</b> to fetch the missing files; progress streams to the log at the bottom of the page. Everything is resumable and checksum-verified.`
-    : `<span style="color:var(--warning,#d29922)"><svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-warning-fill"/></svg><code>hf</code> not found</span> — this Pinokio install doesn't have <code>huggingface_hub&gt;=1.0</code> in the venv. Run Update from Pinokio, then come back. The LTX-2.5 rows do not need it — they download from a GitHub release.`;
+    : `<span style="color:var(--warning,#d29922)"><svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-warning-fill"/></svg><code>hf</code> not found</span> — ` + distText(
+        `this Pinokio install doesn't have <code>huggingface_hub&gt;=1.0</code> in the venv. Run Update from Pinokio, then come back.`,
+        `this install doesn't have <code>huggingface_hub&gt;=1.0</code> in the venv. Quit Phosphene and open it again to rerun setup, then come back.`)
+      + ` The LTX-2.5 rows do not need it — they download from a GitHub release.`;
   // A row whose HOST pack is missing cannot usefully be downloaded: the add-on
   // lands INSIDE that pack's directory and loads from there by name, so
   // fetching it alone produces a folder holding two files and nothing else. The
   // dependency is STATED, not enforced silently.
   const completeByKey = {};
   repos.forEach(r => { completeByKey[r.key] = !!r.complete; });
+  // 4.20: packs a fresh install queued for after Start. While the background
+  // fetcher holds the slot, a click on one of them moves it up the queue, so
+  // its button stays live; only a CLICKED download blocks the others.
+  const queuedKeys = new Set(data.deferred_pending || []);
+  const slotBlocked = !!(active && !active.background);
   const rows = repos.map(r => {
     let cls, icon, statusText, btnHtml;
     // Per ROW, not per install. The 2.5 packs download from a GitHub release
@@ -1870,13 +1893,21 @@ async function refreshModelsModal({ silent = false } = {}) {
     // ahead. `needs_hf` is derived from the registry's mirror block.
     const hfOk = (data.hf_available ?? true) || (r.needs_hf === false);
     const hostMissing = r.host_key && !completeByKey[r.host_key];
-    if (active && active.key === r.key) {
+    if (r.app_owned) {
+      // Mac app: the app is fetching this pack itself (app_models.json) - no
+      // second Download here; the server refuses one too.
+      cls = 'downloading';
+      icon = '<svg class="ph" aria-hidden="true"><use href="#ph-arrow-clockwise-bold"/></svg>';
+      statusText = (data.app_models && data.app_models.state === 'paused')
+        ? 'Download paused' : 'Downloading in the background';
+      btnHtml = '';
+    } else if (active && active.key === r.key) {
       cls = 'downloading';
       icon = '<svg class="ph" aria-hidden="true"><use href="#ph-arrow-clockwise-bold"/></svg>';
       const elapsed = Math.max(0, Math.round((Date.now()/1000) - (active.started_ts || 0)));
       const last = active.last_line ? `<div class="progress">${escapeHtml(active.last_line)}</div>` : '';
-      statusText = `Downloading · ${elapsed}s${last}`;
-      btnHtml = `<button class="ghost" onclick="cancelDownload()">Cancel</button>`;
+      statusText = `${active.background ? 'Downloading in the background' : 'Downloading'} · ${elapsed}s${last}`;
+      btnHtml = `<button class="ghost" onclick="cancelDownload()">${active.background ? 'Skip' : 'Cancel'}</button>`;
     } else if (r.complete) {
       cls = 'ready'; icon = '<svg class="ph" aria-hidden="true"><use href="#ph-check-bold"/></svg>';
       // `where: 'hf_cache'` means the files were resolved from
@@ -1889,19 +1920,23 @@ async function refreshModelsModal({ silent = false } = {}) {
     } else if (r.present_files > 0) {
       cls = 'partial'; icon = '<svg class="ph" aria-hidden="true"><use href="#ph-download-simple"/></svg>';
       const left = r.total_files - r.present_files;
-      statusText = `Partial · ${r.present_files}/${r.total_files} files · ${left} missing — resume to finish`;
+      statusText = queuedKeys.has(r.key)
+        ? `Queued · downloads in the background after setup · ${r.present_files}/${r.total_files} files so far`
+        : `Partial · ${r.present_files}/${r.total_files} files · ${left} missing — resume to finish`;
       btnHtml = hostMissing
         ? `<button disabled title="Install the Q8 weights first — the add-on lives inside that folder.">Needs Q8</button>`
         : hfOk
-        ? `<button onclick="startDownload('${escapeHtml(r.key)}')" ${active ? 'disabled' : ''}>Resume</button>`
+        ? `<button onclick="startDownload('${escapeHtml(r.key)}')" ${slotBlocked || (active && !queuedKeys.has(r.key)) ? 'disabled' : ''}>${queuedKeys.has(r.key) && active ? 'Download next' : 'Resume'}</button>`
         : `<button disabled>Resume</button>`;
     } else {
       cls = 'missing'; icon = '<svg class="ph" aria-hidden="true"><use href="#ph-x-circle"/></svg>';
-      statusText = `Not installed · ~${r.size_gb || '?'} GB`;
+      statusText = queuedKeys.has(r.key)
+        ? `Queued · downloads in the background after setup · ~${r.size_gb || '?'} GB`
+        : `Not installed · ~${r.size_gb || '?'} GB`;
       btnHtml = hostMissing
         ? `<button disabled title="Install the Q8 weights first — the add-on lives inside that folder.">Needs Q8</button>`
         : hfOk
-        ? `<button onclick="startDownload('${escapeHtml(r.key)}')" ${active ? 'disabled' : ''}>Download</button>`
+        ? `<button onclick="startDownload('${escapeHtml(r.key)}')" ${slotBlocked || (active && !queuedKeys.has(r.key)) ? 'disabled' : ''}>${queuedKeys.has(r.key) && active ? 'Download next' : 'Download'}</button>`
         : `<button disabled>Download</button>`;
     }
     // "required" means required BY THIS BUILD. A base pack from the retired
@@ -1909,6 +1944,10 @@ async function refreshModelsModal({ silent = false } = {}) {
     // so is the difference between an inventory and a claim.
     const kindBadge = (r.active === false)
       ? `<span style="color:var(--muted)">previous generation</span>`
+      // 4.20: queued by a fresh install for after Start - not something the
+      // renderer is waiting on, whatever its registry kind says.
+      : queuedKeys.has(r.key)
+      ? `<span style="color:var(--muted)">arrives after setup</span>`
       : r.kind === 'optional'
       ? `<span style="color:var(--muted)">optional</span>`
       : `<span style="color:var(--success,#3fb950)">required</span>`;
@@ -1950,10 +1989,11 @@ async function refreshModelsModal({ silent = false } = {}) {
         : '<svg class="ph" aria-hidden="true"><use href="#ph-x-circle"/></svg>';
       const statusText = ready
         ? `Ready · engine picker unlocked · ${escapeHtml(h3.root || '')}`
-        : 'Available to install · one click in the Pinokio sidebar';
+        : distText('Available to install · one click in the Pinokio sidebar',
+                   'Not available in the Mac app yet');
       const btn = ready
         ? `<button class="ghost" disabled>Installed</button>`
-        : `<button onclick="openH3InstallCard()">How to install</button>`;
+        : `<button onclick="openH3InstallCard()">${distText('How to install', 'About H3')}</button>`;
       h3Row = `
         <li class="${cls}">
           <span class="icon">${icon}</span>
@@ -2011,9 +2051,41 @@ async function startDownload(key) {
   // to the user instead of silently no-op'ing the click.
   if (res && res.error) {
     alert(`Can't start download: ${res.error}`);
+  } else if (res && (res.queued || res.already) && res.note) {
+    // 4.20: the post-install background downloads hold the slot; the click
+    // moved this pack to the front of that queue (or it is the one running).
+    phosToast(res.note, { duration: 6000 });
   }
   refreshModelsModal();
   poll();
+}
+// 4.20: a feature whose pack has not landed yet (a fresh install fetches
+// Gemma 3 and the IC-LoRAs in the background after Start) answers 409 with
+// `needs_pack` / `pack_state`. One toast for all of them: the server's own
+// sentence, plus the one action that helps - Download now when nothing is
+// fetching it yet (or it is queued behind another pack), Show progress when
+// it is already on its way. True when it handled `res`.
+function packNeededToast(res) {
+  if (!res || !res.needs_pack) return false;
+  const el = phosToast(res.error || 'This needs a download first.',
+                       { kind: 'warning', duration: 12000 });
+  if (!el) return true;
+  const a = document.createElement('a');
+  a.href = '#';
+  a.className = 'phos-toast-action';
+  // waiting_disk is NOT fetching: the background download is paused for room,
+  // so the useful action is the explicit Download (not held to the floor).
+  const fetching = res.pack_state === 'downloading';
+  a.textContent = fetching ? 'Show progress'
+    : `Download now${res.pack_size ? ' (' + res.pack_size + ')' : ''}`;
+  a.onclick = (ev) => {
+    ev.preventDefault();
+    el.remove();
+    if (fetching) openModelsModal();
+    else startDownload(res.needs_pack);
+  };
+  el.appendChild(a);
+  return true;
 }
 async function cancelDownload() {
   if (!confirm('Cancel the active download? Partial files stay on disk; clicking Download/Resume later picks up where you left off.')) return;
@@ -2038,7 +2110,7 @@ Object.assign(globalThis, {
   spicyModeEnabled, renderSpicyAccess, civitaiNsfwRequested, renderCivitaiAuthBanner,
   closeCivitaiModal, civitaiSearch, civitaiLoadMore, renderCivitaiGrid,
   openModelsModal, closeModelsModal, refreshModelsModal, startDownload,
-  cancelDownload,
+  cancelDownload, packNeededToast,
   // inline-handler targets: generated markup resolves these through the
   // global scope (the v4.9.0 regression, PR #69)
   _charactersManageDelete, _charactersManageSave, civitaiAuthSave, civitaiSetFamily,

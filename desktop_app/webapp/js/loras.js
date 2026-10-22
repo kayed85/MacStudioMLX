@@ -910,9 +910,9 @@ function _loraRowKebabId(path) {
 
 function loraRowHtml(r, modeTag) {
   const pathHtml = escapeHtml(r.path);
-  const pathAttr = JSON.stringify(r.path).replace(/"/g, '&quot;');
+  const pathAttr = escapeHtml(JSON.stringify(r.path));
   const nameHtml = escapeHtml(r.name);
-  const nameAttr = JSON.stringify(r.name).replace(/"/g, '&quot;');
+  const nameAttr = escapeHtml(JSON.stringify(r.name));
   // Per-row family badges. `?` for unknown family (unclassified
   // base_model), `⚠` for an ACTIVE LoRA whose compat tags don't match
   // the current engine — clear visible signal that "this chip stays
@@ -1000,7 +1000,7 @@ function loraRowHtml(r, modeTag) {
   // as before — chips prepend the trigger to the prompt textarea.
   const chipsHtml = trigs.length
     ? trigs.slice(0, 12).map(w => {
-        const wAttr = JSON.stringify(w).replace(/"/g, '&quot;');
+        const wAttr = escapeHtml(JSON.stringify(w));
         return `<span class="trigger-chip" title="Click to add to prompt"
                        onclick="event.stopPropagation(); appendTriggerToPrompt(${wAttr})">${escapeHtml(w)}</span>`;
       }).join('')
@@ -1315,7 +1315,7 @@ function _renderManualCharactersList() {
     const voiceBadge = hasVoice
       ? `<span class="chars-avatar-voice" title="Has voice LoRA + reference clip"><svg class="ph"><use href="#ph-music-notes"/></svg></span>`
       : '';
-    const idAttr = JSON.stringify(c.id).replace(/"/g, '&quot;');
+    const idAttr = escapeHtml(JSON.stringify(c.id));
     const tt = `${escapeHtml(name)} · ${escapeHtml(trigger)}${hasVoice ? ' · has voice' : ' · silent'}${active ? ' · click to deselect' : ''}`;
     chips.push(`
       <button type="button" class="chars-avatar-chip ${active ? 'active' : ''}"

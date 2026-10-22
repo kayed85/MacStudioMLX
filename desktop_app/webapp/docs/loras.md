@@ -29,6 +29,7 @@ CivitAI needs an API key to download: paste it in the browser's banner or in Set
 
 - **LTX** — copy `.safetensors` files into `mlx_models/loras/` and press the rescan button.
 - **Hailuo H3** — **Import H3 LoRA** takes a `.safetensors` file (up to 4 GB) and reports how it was read and its recommended strength.
+  H3 LoRAs live in their own library, `mlx_models/hailuo-h3/loras/`; you can also drop files there by hand and press rescan, with the same checks. H3 accepts the runner layout with paired `lora_A` / `lora_B` tensors. ComfyUI repacks and Kohya files (`lora_down`, `lora_up` and `.alpha`) are converted on import, and a Kohya file keeps its alpha scaling, so strength 1.0 means "as trained".
 
 ## Stacking LoRAs on Hailuo H3 {#h3-stacking}
 

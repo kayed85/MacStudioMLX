@@ -8107,7 +8107,7 @@ async function sbeAddSoundFile() {
 // and the export already play it. `level` is the label (LUFS); the track's
 // `gain` is the number the mix plays, `sbeRtGain(level, ref_lufs)`.
 const SBE_RT_NAME = 'Room tone';
-const SBE_RT_DEFAULT_LEVEL = -27;      // mirrors room_tone.DEFAULT_LEVEL
+const SBE_RT_DEFAULT_LEVEL = -38;      // mirrors room_tone.DEFAULT_LEVEL
 const SBE_RT_LEVEL_MIN = -45;          // mirrors LEVEL_MIN / LEVEL_MAX
 const SBE_RT_LEVEL_MAX = -18;
 const SBE_RT_REF = -18;                // mirrors REF_LUFS

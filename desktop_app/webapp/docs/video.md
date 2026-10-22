@@ -11,12 +11,14 @@ The chips across the top of the form. Each one says what it takes.
 | **Text** | a prompt | a clip from words alone |
 | **Character** | a trained character + a prompt | your character's face (and voice) in a new shot — LTX only. See [Using a character](#docs/train-character/use-in-video) |
 | **Image** | a reference image + a prompt | a clip that starts from, or is inspired by, your picture |
-| **FFLF** | a start frame and an end frame | a clip that travels from one to the other |
+| **Start & end frame** (FFLF) | a start frame and an end frame | a clip that travels from one to the other |
 | **Keyframes** | 3–8 frames | a clip that passes through each |
 | **Extend** | a clip | more of that clip, after or before it |
+| **Add sound** | a clip | the same picture with new sound made for it — Hailuo H3 only |
+| **Lip-sync** | a picture and your audio | a face that talks or sings to your track — opens [Audio](#docs/audio) |
 | **Remix** | your own media | Ingredients, Motion Control, Colorize, Upscale & Face Fix — see [Remix](#docs/remix) |
 
-Hailuo H3 renders **Text** and **Image**; the other modes are LTX's.
+Hailuo H3 renders Text, Image, Start & end frame, Keyframes, Extend, Add sound and Lip-sync. **Character** and **Remix** are LTX's. See [what H3 can make](#docs/hailuo-h3/modes).
 
 ### Image: Anchor or Inspire {#anchor-inspire}
 
@@ -41,6 +43,8 @@ Pick the **Source video**, set **Extend by (seconds)** (0.5 to 10, default 2) an
 - **Q8 Pro** — 30 steps, wants 96 GB or more.
 
 Stay on Q8 Draft unless the Mac has the memory.
+
+On Hailuo H3, Extend adds up to 15 seconds and carries the clip's sound on — see [Extend on H3](#docs/hailuo-h3/extend).
 
 ## Writing the prompt {#prompt}
 
@@ -86,19 +90,22 @@ This is the LTX equivalent of H3's [per-window prompts](#windows) — same idea 
 
 ## Quality and Length on Hailuo H3 {#h3-quality}
 
+H3 has its own page: [Hailuo H3 video engine](#docs/hailuo-h3). In short:
+
 | Quality | Size | Notes |
 |---|---|---|
 | **Draft** | 640×384 | quick look — faces and fine detail only resolve at Standard and High |
+| **Fast HD** | 640×384 → 1280×768 | a Fast Draft, then Upscale & Face Fix sharpens it from the clip itself |
 | **Standard** | 768×448 | the workhorse |
 | **High** | 1024×576 | true 16:9, the recommended delivery size |
-| **Native** | 1344×768 | the most detail H3 can make — worth it with Turbo on, a long wait without |
+| **Native** | 1344×768 | the most detail H3 can make — always renders on Best, a long wait |
 
-**Length**: 3s, 5s (the longest single pass), **10s** and **15s**. 10 s and 15 s are chained from 5-second windows at render time, so choose the length before you render — there is no Extend afterwards.
+**Length**: 3s, 5s (the longest single pass), **10s** and **15s**, chained from 5-second windows, and **10s single pass** (one shot with no join, Best only). Typical times are in [How long it takes](#docs/hailuo-h3/times).
 
-### Turbo and Steps {#turbo}
+### Speed and Steps {#turbo}
 
-- **Speed: Standard / Turbo.** Turbo is a 4-step adapter: much faster, and it overrules Steps. If it is not downloaded yet, the chip shows its size.
-- **Steps: Auto / 12 / 16 / 20.** More steps, a longer wait (20 is the official reference recipe, about 2.4× Auto).
+- **Speed: ⚡ Fast / ✦ Best.** Fast is a 3-step pass — much quicker, a touch softer — and the default once its 180 MB adapter is installed (**Install (180 MB)** on the Fast half). Best is the full render for that size, with the sharpest faces. Native and 10s single pass always render on Best.
+- **Steps: Auto / 12 / 16 / 20** shows on Best only. More steps, a longer wait (20 is the official reference recipe, about 2.4× Auto).
 - On H3 installs whose runner has a single adapter slot, an **Adapter** row asks whether that slot goes to **Turbo** or **My LoRA** — they cannot both run. See [LoRAs on H3](#docs/loras/h3-stacking).
 
 ### Per-window prompts {#windows}
@@ -107,20 +114,25 @@ A 10 s or 15 s H3 clip asks every 5-second window for the same prompt, which can
 
 ### H3 first frame and orientation {#h3-image}
 
-Image mode works on H3 — the picture is the first frame. The **Orientation** row (top-level, next to the size chips) turns the tier's canvas **Portrait** at the same cost.
+Image mode works on H3 — the picture is the first frame. The **Orientation** row (top-level, next to the size chips) turns the canvas **Portrait** at the same cost.
 
 ## Engines side by side {#engines}
 
 | | LTX | Hailuo H3 |
 |---|---|---|
-| Modes | all Video modes, Remix, Audio | Text, Image |
+| Modes | all Video modes, Remix, Lip-sync | Text, Image, Start & end frame, Keyframes, Extend, Add sound, Lip-sync |
 | Sound | joint with the picture | joint video, dialogue and sound |
 | Characters and LoRAs | trained characters, LoRA stacks | its own H3 LoRA library |
 | Avoid box | on High and the guided modes | none — say it in the prompt |
 | Longest clip | 20s (Quick), 10s otherwise | 15s, chained windows |
 | Memory | the Tier dialog (health chip → Tier) shows which qualities this Mac runs | 36 GB or more (see below) |
 
-**H3 and memory.** The full H3 engine needs 60 GB. From 36 GB up, H3 runs on its compact Q8 engine, which **Install Hailuo H3** in Pinokio's Phosphene sidebar builds locally (about 5 minutes, ~22 GB, no extra download). Settings → **Hailuo H3 model** chooses between Automatic, Full and Compact. Below 36 GB, H3 is not offered — render on LTX. See [Troubleshooting](#docs/troubleshooting/memory).
+[[pinokio]]
+**H3 and memory.** The full H3 engine needs 60 GB. From 36 GB up, H3 runs on its compact Q8 engine, which **Install Hailuo H3** in Pinokio's Phosphene sidebar builds locally (about 5 minutes, ~22 GB, no extra download). Settings → **Hailuo H3 model** chooses between Automatic, Full and Compact. Below 36 GB, H3 is not offered — render on LTX. See [Install H3](#docs/hailuo-h3/install) and [Troubleshooting](#docs/troubleshooting/memory).
+[[/pinokio]]
+[[mac-app]]
+**H3 and memory.** Hailuo H3 is not available in the Mac app yet. Render on LTX. See [Install H3](#docs/hailuo-h3/install) and [Troubleshooting](#docs/troubleshooting/memory).
+[[/mac-app]]
 
 ## Upscale and export {#upscale}
 

@@ -39,7 +39,8 @@ function imgStudioUpdateValidity() {
     // 0.18+, so its "missing" case is really "update mflux", not a Qwen hint.
     invalidReason = (eng.value === 'ideogram4_inline')
       ? 'The Ideogram 4 engine needs mflux 0.18+ (the mflux-generate-ideogram4 CLI). Update the mflux add-on, then come back and Generate.'
-      : 'The Qwen-Image-Edit engine isn\'t installed. It ships with the image-engine pack: click Update in Pinokio\'s Phosphene sidebar (NOT in this panel), then come back and Generate. If it\'s still missing after Update, the sidebar also shows "Reinstall image engines (Ideogram 4 + Qwen-Edit)" — ~30 s, ~150 MB.';
+      : distText('The Qwen-Image-Edit engine isn\'t installed. It ships with the image-engine pack: click Update in Pinokio\'s Phosphene sidebar (NOT in this panel), then come back and Generate. If it\'s still missing after Update, the sidebar also shows "Reinstall image engines (Ideogram 4 + Qwen-Edit)" — ~30 s, ~150 MB.',
+                 'The Qwen-Image-Edit engine isn\'t installed, and the image-engine pack isn\'t available in the Mac app yet.');
   } else if (engInfo && engInfo.fits_mac === false) {
     invalidReason = 'This engine needs a ' + engInfo.mac_gb_needed + ' GB Mac — this one has '
       + (_IMG_HOST_RAM_GB || '?') + ' GB. Auto (the 4B FLUX engine) fits here.';
@@ -411,7 +412,9 @@ function imgStudioRenderEnginePill() {
       // cursor from its tooltip, and nothing happens (reported on Pinokio by
       // @poppy0396). The real action lives in Pinokio's sidebar, not here.
       pill.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-warning-bold"/></svg>Qwen-Image-Edit not installed';
-      pill.title = 'The Qwen-Image-Edit engine isn\'t installed.\n' +
+      pill.title = isMacApp()
+        ? 'The Qwen-Image-Edit engine isn\'t installed.\nThe image-engine pack isn\'t available in the Mac app yet.'
+        : 'The Qwen-Image-Edit engine isn\'t installed.\n' +
                    'This pill is a status indicator — the action is in Pinokio\'s\n' +
                    'Phosphene sidebar, not in this panel: click Update there.\n' +
                    'If it\'s still missing afterwards, the sidebar also shows\n' +
