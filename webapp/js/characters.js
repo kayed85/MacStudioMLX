@@ -4159,7 +4159,9 @@ function setQuality(q) {
   // Set canonical dimensions for the preset, respecting the current
   // aspect choice. Quick is 4:3 only — landscape orientation only.
   const preset = QUALITY_PRESETS[q];
-  const aspect = document.getElementById('aspect').value || 'landscape';
+  let aspect = (document.getElementById('aspect') || {}).value || 'landscape';
+  const h3o = (document.getElementById('h3_orientation') || {}).value;
+  if (h3o === 'portrait' && aspect === 'landscape') aspect = 'vertical';
   if (q === 'quick') {
     document.getElementById('width').value  = preset.w;
     document.getElementById('height').value = preset.h;

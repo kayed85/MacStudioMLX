@@ -38380,8 +38380,13 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         # stack, so there is no slot to allocate and a leftover "user" here
         # would only be a confusing field in the sidecar.
         _h3_lora_slot = H3_LORA_SLOT_DEFAULT
-        # LTX has its own aspect control; H3's orientation must not ride along.
-        _h3_orientation = H3_ORIENTATION_DEFAULT
+        # LTX has its own aspect control; keep orientation synchronized.
+        _raw_h3_orient = (f("h3_orientation", "") or "").strip().lower()
+        _raw_aspect = (f("aspect", "") or "").strip().lower()
+        if _raw_h3_orient == "portrait" or _raw_aspect in ("vertical", "portrait", "portrait_4_5"):
+            _h3_orientation = "portrait"
+        else:
+            _h3_orientation = H3_ORIENTATION_DEFAULT
         # LTX-2.5 distilled schedule preset ("fast" = the graded F6S2 draft
         # schedule, 5+2 forwards, renders a DIFFERENT take). Gated server-side
         # like every H3 rule above: the value rides only when the job will
@@ -38434,6 +38439,16 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         push(f"Turbo pins the sampler at {h3_turbo_steps()} steps — ignoring the "
              f"{_h3_steps}-step override.")
         _h3_steps = 0
+
+    _raw_h3_orient = (f("h3_orientation", "") or "").strip().lower()
+    _raw_aspect = (f("aspect", "") or "").strip().lower()
+    _want_vert = (_raw_h3_orient == "portrait" or _raw_aspect in ("vertical", "portrait", "portrait_4_5"))
+    _req_w = max(32, int(f("width", str(default_w)) or default_w))
+    _req_h = max(32, int(f("height", str(default_h)) or default_h))
+    if _want_vert and _req_w > _req_h:
+        _req_w, _req_h = _req_h, _req_w
+    elif not _want_vert and (_raw_h3_orient == "landscape" or _raw_aspect == "landscape") and _req_h > _req_w:
+        _req_w, _req_h = _req_h, _req_w
 
     job = {
         "id": _new_job_id(),
@@ -38548,8 +38563,9 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             "i2v_reference_mode": _i2v_ref_mode,
             "prompt": prompt,
             "negative_prompt": f("negative_prompt", ""),
-            "width": max(32, int(f("width", str(default_w)) or default_w)),
-            "height": max(32, int(f("height", str(default_h)) or default_h)),
+            "width": _req_w,
+            "height": _req_h,
+            "aspect": ("vertical" if _want_vert else "landscape"),
             "frames": max(1, int(f("frames", _frames_default) or _frames_default)),
             "steps": max(1, int(f("steps", "8") or 8)),
             "seed": str(normalize_seed(f("seed", "-1"))),

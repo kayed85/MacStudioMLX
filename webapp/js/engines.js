@@ -276,17 +276,23 @@ function setH3Orientation(v) {
   const val = (v === 'portrait') ? 'portrait' : 'landscape';
   const inp = document.getElementById('h3_orientation');
   if (inp) inp.value = val;
+  const aspInp = document.getElementById('aspect');
+  if (aspInp) aspInp.value = (val === 'portrait') ? 'vertical' : 'landscape';
   document.querySelectorAll('#h3OrientationGroup [data-h3-orientation]').forEach(b =>
     b.classList.toggle('active', b.dataset.h3Orientation === val));
+  document.querySelectorAll('#aspectGroup .pill-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.aspect === ((val === 'portrait') ? 'vertical' : 'landscape')));
   try { localStorage.setItem('phos_h3_orientation', val); } catch (e) {}
   const cell = (typeof h3CurrentCell === 'function') ? h3CurrentCell() : null;
-  if (cell) {
-    const wEl = document.getElementById('width');
-    const hEl = document.getElementById('height');
-    if (wEl && hEl) {
-      wEl.value = String((val === 'portrait') ? Math.min(cell.width, cell.height) : Math.max(cell.width, cell.height));
-      hEl.value = String((val === 'portrait') ? Math.max(cell.width, cell.height) : Math.min(cell.width, cell.height));
-    }
+  const wEl = document.getElementById('width');
+  const hEl = document.getElementById('height');
+  if (wEl && hEl) {
+    let baseW = cell ? cell.width : parseInt(wEl.value || '768', 10);
+    let baseH = cell ? cell.height : parseInt(hEl.value || '448', 10);
+    const minD = Math.min(baseW, baseH);
+    const maxD = Math.max(baseW, baseH);
+    wEl.value = String((val === 'portrait') ? minD : maxD);
+    hEl.value = String((val === 'portrait') ? maxD : minD);
   }
   _h3SyncOrientationSubs();
   if (typeof updateDerived === 'function') { try { updateDerived(); } catch (e) {} }
@@ -2752,6 +2758,7 @@ function _h3ApplyShape(qualityKey, lengthKey, opts) {
   // re-stamps these server-side too — a stale tab must never win.
   const orient = (document.getElementById('h3_orientation') || {}).value || 'landscape';
   const isPort = (orient === 'portrait');
+  set('aspect', isPort ? 'vertical' : 'landscape');
   set('width', isPort ? Math.min(cell.width, cell.height) : Math.max(cell.width, cell.height));
   set('height', isPort ? Math.max(cell.width, cell.height) : Math.min(cell.width, cell.height));
   set('frames', cell.frames);

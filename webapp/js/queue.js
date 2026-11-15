@@ -2102,7 +2102,7 @@ function snapAspectToImage(path) {
     const r = probe.naturalWidth / probe.naturalHeight;
     const target = r >= 1 ? 'landscape' : 'vertical';
     if (document.getElementById('aspect').value !== target) setAspect(target);
-    if (currentEngine() === 'h3' && typeof setH3Orientation === 'function') {
+    if (typeof setH3Orientation === 'function') {
       setH3Orientation(r >= 1 ? 'landscape' : 'portrait');
     }
   };
@@ -2358,12 +2358,11 @@ function _pickerCropTargetCanvas(key) {
   } else {
     w = parseInt((document.getElementById('width') || {}).value || '0', 10);
     h = parseInt((document.getElementById('height') || {}).value || '0', 10);
-    const eng = (document.getElementById('engine') || {}).value || document.body.dataset.engine;
-    if (eng === 'h3') {
-      const o = (document.getElementById('h3_orientation') || {}).value;
-      if (o === 'portrait' && w > h) { const tmp = w; w = h; h = tmp; }
-      else if (o === 'landscape' && h > w) { const tmp = w; w = h; h = tmp; }
-    }
+    const o = (document.getElementById('h3_orientation') || {}).value;
+    const a = (document.getElementById('aspect') || {}).value;
+    const isPort = (o === 'portrait' || a === 'vertical' || a === 'portrait');
+    if (isPort && w > h) { const tmp = w; w = h; h = tmp; }
+    else if (!isPort && (o === 'landscape' || a === 'landscape') && h > w) { const tmp = w; w = h; h = tmp; }
   }
   if (!(w > 0) || !(h > 0)) return null;
   return { w, h };
