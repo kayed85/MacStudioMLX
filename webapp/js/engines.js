@@ -284,15 +284,19 @@ function setH3Orientation(v) {
     b.classList.toggle('active', b.dataset.aspect === ((val === 'portrait') ? 'vertical' : 'landscape')));
   try { localStorage.setItem('phos_h3_orientation', val); } catch (e) {}
   const cell = (typeof h3CurrentCell === 'function') ? h3CurrentCell() : null;
-  const wEl = document.getElementById('width');
-  const hEl = document.getElementById('height');
-  if (wEl && hEl) {
-    let baseW = cell ? cell.width : parseInt(wEl.value || '768', 10);
-    let baseH = cell ? cell.height : parseInt(hEl.value || '448', 10);
-    const minD = Math.min(baseW, baseH);
-    const maxD = Math.max(baseW, baseH);
-    wEl.value = String((val === 'portrait') ? minD : maxD);
-    hEl.value = String((val === 'portrait') ? maxD : minD);
+  if (typeof applyAspect === 'function') {
+    try { applyAspect(targetAspect); } catch (_) {}
+  } else {
+    const wEl = document.getElementById('width');
+    const hEl = document.getElementById('height');
+    if (wEl && hEl) {
+      let baseW = cell ? cell.width : parseInt(wEl.value || '768', 10);
+      let baseH = cell ? cell.height : parseInt(hEl.value || '448', 10);
+      const minD = Math.min(baseW, baseH);
+      const maxD = Math.max(baseW, baseH);
+      wEl.value = String((val === 'portrait') ? minD : maxD);
+      hEl.value = String((val === 'portrait') ? maxD : minD);
+    }
   }
   _h3SyncOrientationSubs();
   if (typeof updateDerived === 'function') { try { updateDerived(); } catch (e) {} }

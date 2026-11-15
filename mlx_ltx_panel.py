@@ -38442,12 +38442,25 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
 
     _raw_h3_orient = (f("h3_orientation", "") or "").strip().lower()
     _raw_aspect = (f("aspect", "") or "").strip().lower()
-    _want_vert = (_raw_h3_orient == "portrait" or _raw_aspect in ("vertical", "portrait", "portrait_4_5"))
     _req_w = max(32, int(f("width", str(default_w)) or default_w))
     _req_h = max(32, int(f("height", str(default_h)) or default_h))
-    if _want_vert and _req_w > _req_h:
+
+    if _raw_aspect in ("vertical", "portrait", "portrait_4_5"):
+        _want_vert = True
+    elif _raw_aspect == "landscape":
+        _want_vert = False
+    elif _raw_aspect == "square":
+        _want_vert = None
+    elif _raw_h3_orient == "portrait":
+        _want_vert = True
+    elif _raw_h3_orient == "landscape":
+        _want_vert = False
+    else:
+        _want_vert = None
+
+    if _want_vert is True and _req_w > _req_h:
         _req_w, _req_h = _req_h, _req_w
-    elif not _want_vert and (_raw_h3_orient == "landscape" or _raw_aspect == "landscape") and _req_h > _req_w:
+    elif _want_vert is False and _req_h > _req_w:
         _req_w, _req_h = _req_h, _req_w
 
     job = {
@@ -38565,7 +38578,7 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             "negative_prompt": f("negative_prompt", ""),
             "width": _req_w,
             "height": _req_h,
-            "aspect": ("vertical" if _want_vert else "landscape"),
+            "aspect": ("vertical" if _want_vert is True else ("square" if _raw_aspect == "square" else "landscape")),
             "frames": max(1, int(f("frames", _frames_default) or _frames_default)),
             "steps": max(1, int(f("steps", "8") or 8)),
             "seed": str(normalize_seed(f("seed", "-1"))),

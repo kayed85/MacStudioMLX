@@ -4396,6 +4396,14 @@ function setAspect(a) {
   if (!ASPECTS[a]) return;
   document.getElementById('aspect').value = a;
   document.querySelectorAll('#aspectGroup .pill-btn').forEach(b => b.classList.toggle('active', b.dataset.aspect === a));
+  const isV = (a === 'vertical' || a === 'portrait_4_5');
+  const h3o = document.getElementById('h3_orientation');
+  if (h3o) {
+    h3o.value = isV ? 'portrait' : 'landscape';
+    document.querySelectorAll('#h3OrientationGroup [data-h3-orientation]').forEach(b =>
+      b.classList.toggle('active', b.dataset.h3Orientation === (isV ? 'portrait' : 'landscape')));
+    try { localStorage.setItem('phos_h3_orientation', isV ? 'portrait' : 'landscape'); } catch (e) {}
+  }
   applyAspect(a);
   // Same guard as setQuality: the H3 tier pins the canvas, so an orientation
   // change (the row is hidden under H3, but boot and Load Params still call
