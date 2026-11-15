@@ -37922,6 +37922,9 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
     else:
         quality = _quality_raw or "balanced"
         _quality_choice = _quality_choice_raw
+    if not SYSTEM_CAPS.get("allows_q8", False) and ltx_quality_uses_hq(quality):
+        quality = "standard"
+        _quality_choice = "standard"
     # THE CANVAS COMES FROM THE CELL. This was a per-quality if/elif of literal
     # sizes that had to be edited in lockstep with the registry — and once two
     # tiers shared the HQ pipeline, the `uses_hq` branch handed BOTH of them
@@ -46831,14 +46834,10 @@ def run_job_inner(job: dict) -> None:
 
     if ltx_quality_uses_hq(quality):
         if not SYSTEM_CAPS["allows_q8"]:
-            raise RenderRefused(
-                "hardware_tier",
-                f"High quality (Q8 two-stage) isn't supported on the "
-                f"{SYSTEM_CAPS['label']} hardware tier — Q8 dev transformer "
-                f"(~19 GB) plus the upscaler stage doesn't fit. "
-                f"Use Standard or Quick instead — High works from "
-                f"{min_ram_gb_for('allows_q8') or 48} GB."
-            )
+            push(f"[quality] High quality is not supported on {SYSTEM_CAPS['label']} hardware — automatically using Standard.")
+            quality = "standard"
+            p["quality"] = "standard"
+    if ltx_quality_uses_hq(quality):
         # Route to TwoStageHQPipeline (Q8 dev model + res_2s sampler + CFG anchor + TeaCache).
         # Defaults from ltx-2-mlx CLAUDE.md LTX_2_3_PARAMS.
         # Same completeness check as keyframe — see comment there.

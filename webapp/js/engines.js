@@ -2672,6 +2672,8 @@ function setH3Quality(key) {
   const q = h3QualityByKey(key);
   if (!q) return;
   _h3ApplyShape(q.key, h3CurrentLength());
+  const qEl = document.getElementById('quality');
+  if (qEl) qEl.value = (key === 'high' || key === 'native') ? 'standard' : (key === 'draft' ? 'quick' : 'standard');
 }
 // Set the DURATION. Canvas is untouched.
 function setH3Length(key) {
