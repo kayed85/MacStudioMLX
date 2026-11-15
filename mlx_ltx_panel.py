@@ -6351,6 +6351,45 @@ def ltx_fit_canvas(width, height, max_dim: int) -> tuple[int, int]:
     return rw, rh
 
 
+def snap_canvas_for_engine(engine: str, width: int, height: int, *, max_dim: int = 0) -> tuple[int, int]:
+    """Snap requested canvas dimensions to the nearest valid canvas for the given engine.
+    
+    - For LTX: rounds both dimensions to the nearest multiple of 64 (min 64),
+      and if max_dim > 0, fits proportionally under max_dim (e.g. 768 on Compact tier).
+    - For H3: snaps to the nearest valid H3 canvas bucket (Draft, Standard, High, Native),
+      respecting orientation (landscape vs portrait).
+    """
+    w, h = max(32, int(width)), max(32, int(height))
+    is_portrait = (h > w)
+    
+    if engine == "h3":
+        h3_canvases = [
+            (640, 384),   # Draft
+            (768, 448),   # Standard
+            (1024, 576),  # High
+            (1344, 768),  # Native
+        ]
+        if is_portrait:
+            targets = [(ch, cw) for cw, ch in h3_canvases]
+        else:
+            targets = h3_canvases
+        return min(targets, key=lambda t: (t[0] - w) ** 2 + (t[1] - h) ** 2)
+    else:
+        rw = max(64, int(round(w / 64.0)) * 64)
+        rh = max(64, int(round(h / 64.0)) * 64)
+        if max_dim and max(rw, rh) > max_dim:
+            scale = max_dim / max(rw, rh)
+            scaled_w, scaled_h = rw * scale, rh * scale
+            cw = max(64, int(round(scaled_w / 64.0)) * 64)
+            ch = max(64, int(round(scaled_h / 64.0)) * 64)
+            if cw > max_dim:
+                cw = max(64, int(scaled_w) // 64 * 64)
+            if ch > max_dim:
+                ch = max(64, int(scaled_h) // 64 * 64)
+            return (cw, ch)
+        return (rw, rh)
+
+
 def ltx_model_dir(quant: str, version_id: str | None = None) -> str:
     """Pack directory for a job spec, with the fallback the IC-LoRA / HDR
     sites hand-rolled four times: if the pack directory isn't on disk, hand
@@ -38463,6 +38502,9 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
     elif _want_vert is False and _req_h > _req_w:
         _req_w, _req_h = _req_h, _req_w
 
+    _max_dim = int(SYSTEM_CAPS.get("t2v_max_dim", 0)) if not SYSTEM_CAPS.get("allows_q8") else 0
+    _req_w, _req_h = snap_canvas_for_engine(_engine, _req_w, _req_h, max_dim=_max_dim)
+
     job = {
         "id": _new_job_id(),
         "status": "queued",
@@ -38852,8 +38894,9 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         # on the cell's own pipeline instead of relaxing it everywhere.
         _req_w, _req_h = job["params"]["width"], job["params"]["height"]
         _req_f = job["params"]["frames"]
-        job["params"]["width"], job["params"]["height"] = ltx_floor_canvas(
-            _req_w, _req_h)
+        _max_dim = int(SYSTEM_CAPS.get("t2v_max_dim", 0)) if not SYSTEM_CAPS.get("allows_q8") else 0
+        job["params"]["width"], job["params"]["height"] = snap_canvas_for_engine(
+            _engine, _req_w, _req_h, max_dim=_max_dim)
         if _req_f > 1:
             job["params"]["frames"] = ((_req_f - 1) // 8) * 8 + 1
         if (job["params"]["width"], job["params"]["height"]) != (_req_w, _req_h):

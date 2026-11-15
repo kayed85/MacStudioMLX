@@ -4787,6 +4787,20 @@ document.querySelectorAll('#temporalGroup .pill-btn').forEach(b => b.onclick = (
 document.querySelectorAll('#upscaleGroup .pill-btn').forEach(b => b.onclick = () => { if (!b.classList.contains('disabled')) setUpscale(b.dataset.upscale); });
 document.querySelectorAll('#upscaleMethodGroup .pill-btn').forEach(b => b.onclick = () => { if (!b.classList.contains('disabled')) setUpscaleMethod(b.dataset.method); });
 document.querySelectorAll('#aspectGroup .pill-btn').forEach(b => b.onclick = () => setAspect(b.dataset.aspect));
+
+// Auto-snap custom dimensions to the nearest multiple of 64 on edit
+['width', 'height'].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) {
+    el.addEventListener('change', () => {
+      let v = parseInt(el.value || '64', 10);
+      if (isNaN(v) || v < 64) v = 64;
+      el.value = String(Math.round(v / 64) * 64);
+      if (typeof updateDerived === 'function') updateDerived();
+      if (typeof updateCustomizeSummary === 'function') updateCustomizeSummary();
+    });
+  }
+});
 document.querySelectorAll('#extendModeGroup .pill-btn').forEach(b => b.onclick = () => setExtendMode(b.dataset.extendMode));
 
 
