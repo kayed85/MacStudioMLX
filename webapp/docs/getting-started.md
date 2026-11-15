@@ -23,7 +23,7 @@ The row of tabs at the top of the left column is where you choose what to make. 
 The engine switch in the header chooses which model renders: **LTX** or **Hailuo H3**. They are two different engines with different strengths, not a good one and a spare:
 
 - **LTX** — every Video mode, LoRAs and trained characters.
-- **Hailuo H3** — joint video, dialogue and sound: Text, Image, Start & end frame, Keyframes, Extend, Add sound and Lip-sync. It is a separate install of about 75 GB and needs 36 GB of memory. See [Hailuo H3](#docs/hailuo-h3).
+- **Hailuo H3** — joint video, dialogue and sound: Text, Image, Start & end frame, Keyframes, Extend, Add sound and Lip-sync. It is a separate install of about 75 GB and needs 16 GB of memory. See [Hailuo H3](#docs/hailuo-h3).
 
 The form changes with the engine: controls one engine does not use are hidden, and the Quality and Length chips show that engine's own sizes. The switch only appears when this Mac can run more than one engine. [How they compare](#docs/video/engines).
 
@@ -72,11 +72,11 @@ Every render also writes a small sidecar file beside it with its settings. That 
 ## The first start {#first-start}
 
 [[pinokio]]
-On a new install, 27.5 GB downloads before **Start** appears: the LTX-2.5 engine, its text encoder and the preview decoder. The installer checks disk space first: you need about 32.5 GB free, and it tells you if there is not enough.
+Start appears once the runtime is ready. No models download before the app opens. Setup needs about 18 GB free, including 15 GB kept free for your work.
 
-After **Start**, 10.7 GB more downloads in the background, one at a time: Gemma 3 (what **Enhance** and the **Storyboard planner** run on) and the adapters for **Upscale & Face Fix**, **Control**, **Ingredients** and **Colorize**.
+For video, click **Download video models**. The default is **LTX-2.5 Q4**, about 27.5 GB with its prompt encoder. It supports your first text or image video without the larger Q8 pack. Both parts download in order, with progress in the panel. **Stop download** keeps partial files; click the download button again to resume.
 
-You can follow progress in the panel. The background download keeps 10 GB free on the drive and waits if there is less. Until a model arrives, the feature that needs it says it is downloading and offers **Download now**.
+You can also choose **Images** or **Audio**. They have their own models, and do not need the video download. Enhance, the Storyboard planner and optional adapters offer a download when you use them. Nothing else starts downloading just because you opened the app.
 [[/pinokio]]
 [[mac-app]]
 The base set is about 28 GB: the LTX-2.5 engine, its text encoder and the preview decoder. Before anything downloads, the app shows every item and its size, the space needed and your free space. If the studio fits but the models don't, you can set up the studio now and download models later from inside it.
@@ -98,7 +98,15 @@ Updating an existing install downloads and removes nothing.
 [[mac-app]]
 - The version pill shows your version and commit. Click it to copy your build details for a bug report.
 - Updates come only from **Phosphene → Check for Updates…**. Your queue, settings, models and finished work are kept.
-- To repair the music engine, open **Audio → Compose** and click **Repair music engine**. Hailuo H3 is not available in the Mac app yet.
+- To repair the music engine, open **Audio → Compose** and click **Repair music engine**. Download Hailuo H3 from its card in the engine switch.
 [[/mac-app]]
+
+## The thank-you card {#star}
+
+After your fifth finished render, once you have left Phosphene alone for 30 seconds, a small card in the corner asks for a star on GitHub. It never covers your clip and never comes back once you close it (the **×** or Escape).
+
+- **One-click GitHub star:** if this Mac is signed in to GitHub with the `gh` command, **Star on GitHub** stars Phosphene right there and the card says thank you. Phosphene only asks `gh` to do it when you click; it never reads or keeps your GitHub login.
+- Otherwise the button opens Phosphene's GitHub page in your browser.
+- If you already starred (from the star in the header, the update banner, or GitHub itself as `gh` sees it), you never see the card.
 
 > **Tip** Press [[sc:docs.open]] anywhere to open these docs on the shortcuts page, and use the search box on the left to find any button by the word written on it.

@@ -1,391 +1,261 @@
-<p align="center">
-  <img src="assets/phosphene_logo_transparent.png" alt="MacStudio MLX Logo" width="220">
-</p>
+# Phosphene / MacStudioMLX: local AI video, music & speech studio for Mac
 
-# 🚀 MacStudio MLX - Native macOS Studio Edition
+**Phosphene / MacStudioMLX is an open-source Mac app that creates AI video with sound, pictures, songs and speech locally on Apple Silicon.** It runs LTX-2.5, MiniMax H3 (Hailuo H3), FLUX, and YuE2 locally with MLX: offline, no cloud, no API key, no account, no NVIDIA GPU needed.
 
-> **Maintained & Enhanced by [@kayed85](https://github.com/kayed85)**  
-> **Optimized for Apple Silicon Macs (MacBook Pro M1 Pro / M1 / M2 / M3 / M4)**  
+**Release: v5.0.26 (Customized & Unlocked Edition)** · Apple Silicon M1 to M5 · from 16 GB unified RAM
 
-<p align="center">
-  <img src="assets/the_commuter_hero.gif" alt="The Commuter — a 75-second One Shot made in MacStudio MLX" width="100%">
-  <br>
-  <sub><b>The Commuter</b> — a 75-second One Shot, rendered overnight on one Mac at native 1344×768 with Hailuo H3 and the new One Shot mode, from a single designed still. <a href="https://github.com/kayed85/MacStudioMLX/releases/latest">Watch the full film in the release</a>.</sub>
-</p>
+### ✨ Key Features & Customizations in this Build
+- **Pro Unlocked**: All Pro modes and capabilities enabled locally.
+- **H3 Faster Flex Turbo**: 4-step fast generation enabled and tuned for 16 GB Apple Silicon Macs.
+- **Arabic & Jordanian Dialect Support**: Built-in Arabic (`العربية الفصحى`) and Jordanian (`اللهجة الأردنية`) dialogue prompts and line generation.
+- **Arabic Singing & Music Studio**: Integrated YuE2 music engine with **ArabMaqamRock v3** LoRA adapters for full Arabic maqam compositions and vocal acoustics.
+- **16 GB Apple Silicon Memory Optimization**: Relaxed memory pressure and swap limits so generation finishes without premature termination.
 
 <p align="center">
-  <strong>Generative video, music, image, and character training on your Mac.</strong><br>
-  MLX. No PyTorch, no CUDA, no cloud, no API key.<br>
-  <a href="https://github.com/kayed85/MacStudioMLX">github.com/kayed85/MacStudioMLX</a>
+  <a href="https://phosphene.video/?utm_source=github&amp;utm_medium=readme&amp;utm_campaign=home&amp;utm_content=hero"><img src="assets/readme/app_video.webp" alt="The Phosphene Mac app: the Video tab with LTX-2.5 selected, a prompt box, the player and a gallery of AI video clips made locally on a Mac" width="100%"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/kayed85/MacStudioMLX/releases/latest">
-    <img src="https://img.shields.io/badge/Download_for_Mac-.dmg-6366f1?style=for-the-badge&logo=apple&logoColor=white" alt="Download DMG">
-  </a>
+  <a href="https://phosphene.video/download/?utm_source=github&amp;utm_medium=readme&amp;utm_campaign=download&amp;utm_content=hero"><b>Download for Mac</b></a> ·
+  <a href="https://phosphene.video/features/?utm_source=github&amp;utm_medium=readme&amp;utm_campaign=website&amp;utm_content=hero-features">See every feature</a> ·
+  <a href="https://phosphene.video/mac-requirements/?utm_source=github&amp;utm_medium=readme&amp;utm_campaign=website&amp;utm_content=hero-requirements">Will my Mac run it?</a> ·
+  <a href="https://phosphene.video/docs/?utm_source=github&amp;utm_medium=readme&amp;utm_campaign=docs&amp;utm_content=hero">Docs</a>
 </p>
 
-### 📥 [Click Here to Download MacStudio MLX for Mac (.dmg)](https://github.com/kayed85/MacStudioMLX/releases/latest)
+## At a glance
 
-> **Current release: v4.19.1.** Upstream release sync: Hailuo H3 fast mode, keyframes, extend, lip-sync, progressive layer offloading for 16 GB Apple Silicon, Music Studio & YuE2 audio engine, trained characters repair, and enhanced timeline editor. Full notes on the [releases page](https://github.com/kayed85/MacStudioMLX/releases).
+- **What it makes:** text-to-video and image-to-video with sound, lip-sync, long single shots, multi-shot films, an editing timeline, AI images and image editing, songs with vocals, text to speech, trained characters.
+- **Models:** LTX-2.5 (Lightricks), MiniMax H3 / Hailuo H3, MiniMax-H3-Image, P-H3-Image, FLUX.2 [klein], FLUX 3 Klein, Qwen-Image-Edit, Ideogram 4, YuE2, Qwen3-TTS, Gemma.
+- **Runs on:** Apple Silicon Macs, M1 to M5, from 16 GB of unified memory. Not Intel Macs, not Windows.
+- **Installs as:** a native Mac app, or one click through Pinokio.
+- **Costs:** free, with no credits, watermark or per-render charge. Optional Pro funds the project.
+- **Privacy:** renders on your Mac. Prompts, pictures and videos are never uploaded.
 
----
+## What you can make
 
-## 📸 Application Screenshot
+### Video with sound: LTX-2.5 on Apple Silicon
+
+Turn a prompt or a picture into a clip whose picture and sound are generated together, using the MLX port of Lightricks' LTX-2.5.
+Modes: **Text**, **Image** (animate your picture, or take its character into a new shot), **Start & end frame**, **Keyframes** (3 to 8 frames), **Extend**, **Lip-sync** to your own voice or song, and **Remix**: **Motion Control** copies the motion and camera of a clip you give it ([guide](docs/MOTION_CONTROL.md)), **Ingredients** combines 2 to 8 reference pictures, **Colorize** turns black-and-white footage into colour, and **Upscale & Face Fix** sharpens a finished clip.
+LTX-2.5 works from 16 GB of memory at smaller sizes and at full size from 48 GB. Since 5.0.20 a video on a 16 GB Mac peaks at about 5.7 GB of memory (it was 9 GB), and a render with LoRAs at about 6.7 GB (it was 19 GB), with the same frames as before.
 
 <p align="center">
-  <img src="assets/screenshots/macstudio_mlx_ui.png" alt="MacStudio MLX UI" width="100%" style="border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,0.5);">
+  <img src="assets/readme/gold_tear.webp" alt="A stone eye with a tear of molten gold, image-to-video made on a Mac with LTX-2.5 in Phosphene" width="49%">
+  <img src="assets/readme/drowned_ballroom.webp" alt="A diver with a lamp in a flooded ballroom, text-to-video made on a Mac with LTX-2.5 in Phosphene" width="49%">
+</p>
+<p align="center"><sub>“Stone eye, gold tear” (image to video) and “The Drowned Ballroom” (text to video), LTX-2.5. Every clip on this page was rendered on one Mac with Phosphene.</sub></p>
+
+### People who talk: MiniMax H3 (Hailuo) locally on a Mac
+
+MiniMax H3, also called Hailuo H3, is Phosphene's second video engine, for scenes where people speak: dialogue, voices and sound come out of one pass, with lips that match.
+It does text and image to video, start and end frames, keyframes, Extend up to 15 seconds, lip-sync, and **Add sound**, which gives a silent clip its own soundscape.
+Since 5.0.7 it runs from **16 GB** of memory: Draft and Standard from 16 GB, High from 18 GB; Clean up sound and 10 and 15-second chained clips need 36 GB.
+It is an optional download of about 75 GB (allow about 100 GB free while it installs), inside the Mac app or from the Pinokio sidebar.
+Its licence does not cover the EU, the UK, South Korea or the US.
+
+<p align="center">
+  <img src="assets/readme/mirror_blinks.webp" alt="A woman at a theatre mirror whose reflection blinks late, made with MiniMax H3 on a Mac" width="49%">
+  <img src="assets/readme/low_tide_sleeper.webp" alt="A giant stone sleeper on a black-sand beach at low tide, made with MiniMax H3 on a Mac" width="49%">
+</p>
+<p align="center"><sub>“The mirror blinks late” and “The low-tide sleeper”, MiniMax H3, image to video</sub></p>
+
+### Films: One Shot, Storyboard and the Editor
+
+- **One Shot:** one continuous shot of 30 seconds to 2 minutes that never cuts.
+- **Storyboard:** describe a film in a sentence; a local model writes the shot list, you edit it, draft every shot small and fast, then finish only the takes you keep. Add a song and it cuts a music video to the beat.
+- **Editor:** a real timeline with trims, splits, J and L cuts, music, titles and transitions. Render one file, or export the timeline to DaVinci Resolve, Premiere Pro or After Effects.
+- **Make it vertical:** a 9:16, 4:5 or square copy of any clip, in the More menu.
+
+<p align="center">
+  <img src="assets/readme/app_editor.webp" alt="The Phosphene Editor: an AI video timeline on a Mac with picture, sound, music and room tone lanes" width="100%">
+</p>
+<p align="center"><sub>The Editor: takes from any engine on one timeline, with their own sound, music and room tone.</sub></p>
+
+### Pictures and image editing: MiniMax-H3-Image and more
+
+The Images tab makes stills and edits them in plain words, then sends any picture straight to video.
+
+- **MiniMax-H3-Image** (MiniMax): detailed pictures from a descriptive prompt at 4, 8 or 16 megapixels. **New in 5.0.19, it edits your pictures:** drop a photo in, say what to change, combine up to 6 pictures in one edit, or change the shape and let it fill the new area. Free, a preview; needs Hailuo H3 installed.
+- **P-H3-Image** (Pruna AI, built on MiniMax H3): large photographs and posters with words spelled right.
+- **FLUX.2 [klein]**, the light first model, and **FLUX 3 Klein** (Black Forest Labs): pictures from words or from your reference pictures.
+- **Reference Edit** (Qwen-Image-Edit): change a background or an outfit, or combine up to three references.
+- **Ideogram 4:** readable words placed where you want them on a picture.
+
+<p align="center">
+  <img src="assets/readme/h3_image_combine.webp" alt="MiniMax-H3-Image combining two pictures on a Mac: a street photo plus a portrait of a man holding a mug becomes one picture of him standing in the street" width="100%">
+</p>
+<p align="center"><sub>Combining pictures with MiniMax-H3-Image: Picture 1 (the street) plus Picture 2 (the man) becomes one photograph. About 8 minutes for two pictures at Draft on an M4 Max with 64 GB.</sub></p>
+
+<p align="center">
+  <img src="assets/readme/app_images_edit.webp" alt="The Phosphene Images tab with MiniMax-H3-Image selected, two pictures loaded as Picture 1 and Picture 2, and the edit instruction in words" width="100%">
 </p>
 
----
+### Songs, speech and lip-sync
 
-## ✨ What's New in This Release?
+- **Music Studio** writes a full song with vocals and instruments from your lyrics and a style with YuE2, or an instrumental. Make another take, cover a song, or get the score. About 11 GB, from 16 GB of memory.
+- **Speech** turns a script into a spoken voice with Qwen3-TTS: nine preset voices with a delivery you describe, or a voice you have permission to use. About 6 GB, from 16 GB of memory.
+- **Lip-sync** makes a face in a picture talk or sing to your track, on LTX-2.5 or MiniMax H3.
 
-* **📱 Native macOS App & DMG Installer:** No command line or external browser runners required. Double-click the `.dmg` file to install `MacStudioMLX.app` directly into `/Applications`.
-* **⚡ Progressive Layer Offloading (16 GB M1/M2/M3 Support):** Ultra-low RAM block streaming runs heavy video models, Q8 Dev transformers, and multi-stage pipelines in ~1-3 GB peak unified memory without crashes.
-* **🎛️ Interactive Model Hub (Manager):** Lightweight 120 MB installer. Select and download only the AI models you want (`LTX-Video 2.5 4-bit`, `Gemma 3 4-bit`, `FLUX.2 Edit`, `Krea 2 Turbo`, `IC-LoRAs`) directly into your local Mac application data directory.
-* **💻 Tailored for MacBook Pro M1 Pro (16GB RAM+):** Pre-tuned low-memory precision profiles, half-memory H3 engine, Krea 2 Turbo, and TeaCache acceleration for high-speed local generation on M1 Pro chips.
-* **🎨 Custom macOS Futuristic Icon:** High-resolution 3D Apple squircle app icon.
+<p align="center">
+  <img src="assets/readme/neon_mile.webp" alt="A man singing at the wheel of a car at night, a Music Studio song lip-synced with MiniMax H3" width="49%">
+  <img src="assets/readme/bust_sings.webp" alt="A marble bust singing, LTX-2.5 lip-sync to a song made on a Mac" width="49%">
+</p>
+<p align="center"><sub>“Neon Mile”, a Music Studio song sung with MiniMax H3, and “The bust sings”, LTX-2.5 lip-sync</sub></p>
 
----
+### Characters and LoRAs
 
-## Overview
+Train a character LoRA on your Mac from 15 to 50 of your own photos, of an original character or of yourself, then put it in any LTX shot. Gemma writes the training captions locally.
+Training needs 24 GB; the graded High recipe runs on 64 GB or more. Browse and install LTX and H3 LoRAs inside the app.
 
+## Mac requirements
 
-MacStudio MLX is a local generative-media panel for Apple Silicon. It runs **two video engines as peers** — [LTX-Video 2.5](https://github.com/Lightricks/LTX-Video) (MLX port) and [Hailuo H3](https://github.com/MiniMax-AI) (MiniMax-H3 FL2VA) — both doing joint audio-and-video synthesis, plus [Qwen-Image-Edit-2509](https://huggingface.co/Qwen/Qwen-Image-Edit-2509) (with a Lightning 4-step fast tier) for stills, and an in-panel LoRA training pipeline for character identity (face + voice from a single dataset). Everything runs on-device: no cloud, no API keys, and no prompt, image, video or filename ever leaves your Mac. It does send anonymous usage counts (version, hardware class, render stats) — every field is listed in [docs/ANALYTICS.md](docs/ANALYTICS.md), and one click in Settings turns it off.
+**Will it run on your Mac?** The full answer for every memory size, with measured clip times per chip: [phosphene.video/mac-requirements](https://phosphene.video/mac-requirements/?utm_source=github&utm_medium=readme&utm_campaign=install).
 
-3.0 introduces in-panel character training (face + voice LoRA from one dataset), the Audio-to-Video workflow, the Image Studio tab, hardware capability tiering, and an agentic prompt enhancer driven by the same local Gemma 3 12B used for auto-captioning.
+Any Apple Silicon Mac from M1 to M5: MacBook Air, MacBook Pro, iMac, Mac mini, Mac Studio. Memory decides what you can run, and Phosphene only offers what your Mac can handle.
 
-A 7-second character clip with synced audio renders in roughly 6 minutes on an M4 Max 64 GB. The delivered file is **1280×720 HD** after the built-in 2× upscale; clips are generated at 1024×576 internally and upscaled before mux. Voice + face LoRAs from a 50-image dataset finish in ~3 hours on the same hardware.
+| Memory | What you can make |
+| --- | --- |
+| **16 GB** | LTX-2.5 video at smaller sizes, MiniMax H3 Draft and Standard (High from 18 GB), FLUX.2 [klein] pictures, songs, speech |
+| **24 GB** | Also image editing with Reference Edit, FLUX 3 Klein and Ideogram 4, and character training |
+| **32 GB** | Also P-H3-Image |
+| **36 GB** | Also MiniMax-H3-Image, long chained H3 clips and Clean up sound |
+| **48 to 64 GB** | Also LTX-2.5 at full size, High quality, Keyframes, Extend, trained characters |
+| **96 GB and up** | Larger keyframe and extend sizes; no size limits from 120 GB |
 
-The interface adapts to the machine it runs on. Under 48 GB of unified memory, the panel exposes only what fits in that envelope (text-to-video, image-to-video, and the Image tab). At 48 GB and above, character mode, first/last-frame keyframing, clip extension, and the Q8 HQ pipelines become available. Tier detection runs once at boot and the unsupported surfaces are hidden rather than greyed out.
-
-## Engines
-
-LTX, Hailuo H3 and YuE2 are peers with their own jobs and install sizes:
-
-| Engine | Surface | Weights | Unified memory |
-|---|---|---|---|
-| **LTX-Video 2.5** | Video, including Audio → Video | ~27.5 GB base; Q8 adds ~37 GB | Adapts to the Mac; advanced modes need more memory |
-| **Hailuo H3** | Video with dialogue and sound | ~75 GB; Q8 DiT adds ~22 GB | 36 GB+ with the Q8 DiT; 60 GB+ for full bf16 |
-| **YuE2** | Audio → Compose: vocals and arrangement from lyrics and a style | ~11 GB | 24 GB or more |
-
-YuE2 installs from inside the panel: open **Audio → Compose** and click **Install music engine (YuE2, ~11 GB)** (the Pinokio sidebar entry **Install the music engine** does the same).
-Compose offers section-tagged lyrics, a prose style, an Instrumental pill,
-three score modes, Draft/Final quality and a maximum length. Songs appear as
-48 kHz stereo WAVs in the gallery; **Drive video** loads a song into the video
-workflow without submitting it. Until the music pack is installed, Audio
-keeps its existing layout. [Music engine guide](docs/MUSIC_ENGINE.md).
-
-YuE2 weights use [CC BY-NC 4.0 plus individual-creator permission](LICENSES/YuE2-MODEL_LICENSE.txt):
-creators may monetize their songs; companies need a license for the weights.
-Code is Apache-2.0. Generated with YuE2 by Multimodal Art Projection · MLX port
-by vanch007. On an M4 Max a 3-minute song renders in about 3 minutes (Final)
-and a 2-minute Draft in about 1 minute, peaking at 11 GB of memory.
-
-## Features
-
-### Video
-<img width="872" height="141" alt="image" src="https://github.com/user-attachments/assets/f8e6d839-0ef5-4310-8b83-4f0a76a58779" />
-
-
-Text-to-video, image-to-video, and audio-to-video, all delivered as MP4 with joint audio (lip-sync, footsteps, ambience) in a single diffusion pass. Output is 1280×720 after the built-in 2× upscale. Character mode renders against the Q8 dev transformer with a fused character LoRA; the server-side validator refuses Q4 + character to prevent silent identity drift. First/last-frame keyframing and clip extension are available on the Q8 surface, with TeaCache wired through both.
-
-**Two engines, one switcher.** A segmented control in the header picks which engine renders the shot, and the form below re-prices itself for whichever one is selected:
-
-| | [**LTX-Video 2.5**](https://github.com/Lightricks/LTX-Video) | [**Hailuo H3**](https://github.com/MiniMax-AI) (MiniMax-H3 FL2VA) |
-|---|---|---|
-| **How you get it** | The base install (27.5 GB) | One click in the Pinokio sidebar (75 GB) |
-| **Modes** | Text, image, keyframes, extend, audio-to-video, character | Text, image, keyframes (end frame, first + last, timed), extend, lip-sync to your audio, add sound to a silent clip |
-| **Character LoRAs** | Yes — trained in-panel, face + voice | Imported H3 LoRAs (no in-panel training yet) |
-| **Memory** | Every tier in the table above; the surface adapts | 36 GB+ on the compact Q8 engine (the install builds it); 60 GB+ also runs the full bf16 engine |
-| **Best at** | Breadth: every workflow the panel offers, plus your own trained faces | Dialogue: joint video + spoken lines + sound, from one prompt |
-| **Weights licence** | [LTX-2.x Community License](LICENSES/LTX-2.x-Community-License.md) (Lightricks) | MiniMax Community License — territory restrictions apply |
-
-Neither engine is a fallback for the other. If only one is installed, the other appears in the switcher as an offer with its size on it — one click explains what it does and where to get it, and nothing about your existing renders changes when it lands.
-
-#### Remix — bring your own media
-
-Three IC-LoRA tools live under the **Remix** pill in the mode bar. All three run on the Q4 distilled checkpoint, so none of them needs the Q8 pack.
-
-| Tool | You give it | You get |
-|---|---|---|
-| **Motion Control** | a clip | a new render that copies its **motion, camera move, composition and pose** while your prompt repaints the subject and the scene |
-| **Ingredients** | 2–8 reference images (a face, a prop, a location) | one clip that composes them |
-| **Colorize** | a black-and-white or desaturated clip | the same clip in colour |
-
-**Motion Control** is the official [`Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control`](https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control) adapter — public, un-gated, no token, fetched with the base install. Feed it an ordinary video; it reads raw RGB, so nothing has to be preprocessed. A pose, depth, canny or segmentation **sequence** works too and follows more tightly, but you have to bring your own — **Phosphene ships no preprocessor** that derives one from a normal clip. Full write-up, including what makes a good control clip and what changes on LTX-2.5: **[`docs/MOTION_CONTROL.md`](docs/MOTION_CONTROL.md)**.
-
-### Image Studio
-<img width="1920" height="843" alt="image" src="https://github.com/user-attachments/assets/8e2f52de-b34c-44cf-9283-df30c4079607" />
-
-
-Qwen-Image-Edit (Lightning 4-step) is the default image engine. It handles instruction edits ("change the white jacket to red") and multi-subject composition with up to three reference images, generating four candidates per shot in seconds with the Lightning LoRA baked in. It's a one-click install; until it lands the panel renders stills on a lighter mflux model. Results drop cards into a unified gallery, each with an Animate button that pre-fills the I2V form with the source still.
-
-### Train Character
-
-<img width="877" height="864" alt="image" src="https://github.com/user-attachments/assets/6e0564d9-6912-4d99-a9b0-1f2a2b01453e" />
-
-
-
-End-to-end LoRA training inside the panel. The dataset uploader accepts 15 to 500 images per character. Captions are written by a local Gemma 3 12B (MLX, 4-bit) in roughly 90 seconds for a 37-image dataset, in the `[VISUAL]: <trigger>, <description>` format the LTX trainer expects. The default recipe is rank 32, alpha 32, 100 epochs, lr 1e-4, 512 px resolution, letterbox crop; total step count auto-scales with the dataset (e.g. 50 images → 5000 steps, 100 images → 10000 steps) so adding photos doesn't shift the trained-epochs target. Power users can override any of those in an advanced section. Optional voice LoRA from the same training run.
-
-**Training needs 64 GB, and the panel does not refuse below it — it quietly trains something smaller.** Full 512 px LTX LoRA training materialises backward activations for the dev transformer, and a 48 GB Mac falls into swap thrash and never finishes. So on any Mac with **under 64 GB of unified memory** the panel rewrites all three presets in place: Quick becomes rank 4 / 384 px / 120 steps, Medium rank 8 / 384 px / 300 steps, and **High becomes rank 8 / 448 px / 500 steps** — with the advanced overrides clamped to match, so you cannot ask for the full recipe and get it. The preset names on screen do not change.
-
-Be clear about what that means. **rank 32 is the only recipe anyone has graded for identity.** Below it the training finishes, writes a valid file, loads without a warning, and may simply not move the model. The panel measures that now: every trained LoRA is checked for how much it actually changed, a weak one finishes with a warning instead of a bare "done", and the verdict follows the file into the library so you find out before you spend a render. Quick and Medium say *"identity ungraded"* on their own pills for the same reason. If you are on a sub-64 GB Mac, read a weak verdict as *this hardware, this recipe* — not as a problem with your photos.
-
-<img width="871" height="640" alt="image" src="https://github.com/user-attachments/assets/a25bfc78-671e-4972-bf51-231ae5f5cc04" />
-
-The Train tab also exposes **Style** training (experimental in v3.0) — same end-to-end pipeline, different intent: a curated set of movie frames teaches the model an aesthetic (color grading, lighting, composition) rather than an identity. The trained style LoRA stacks with character LoRAs at render time. Lightly validated as of v3.0; please report rough edges via [GitHub Issues](https://github.com/mrbizarro/phosphene/issues).
-
-### Audio-to-Video
-<img width="876" height="557" alt="image" src="https://github.com/user-attachments/assets/e64b2a23-e3e2-4132-8ceb-838b0c089136" />
-
-New workflow tab in 3.0 — Phosphene's lip-sync: a picture (optional) and a stretch of audio become one clip whose mouth follows the track. WAV or MP3 in, MP4 out — the audio drives motion in the generated video, and an optional reference image anchors frame zero. On Q8 (≥64 GB unified memory) it runs the two-stage pipeline: low-resolution with classifier-free guidance, then full-resolution with the distilled LoRA fused on top. Below that it falls back to a faster Q4 distilled lane — smaller Macs still get Audio-to-Video, just not the Q8 pipeline. The original input audio is muxed onto the final clip so the result is a single self-contained MP4.
-
-### LoRAs
-
-Drop `.safetensors` into `mlx_models/loras/` for immediate use, or browse and install LTX LoRAs from CivitAI inside the panel (per-row rename, download, companion-aware delete). Character bundles live alongside style LoRAs and are filtered out of the regular picker so they don't show up twice.
-
-A CivitAI download shows its progress on the Install button and can be cancelled; nothing half-downloaded is kept. **Enhance** reads the active LoRAs' guides (or their creators' notes) as reference and keeps their trigger words - if the rewrite drops one, it is put back at the front.
-
-**MiniMax H3 LoRAs use a separate library.** Switch the Video engine to
-**Hailuo H3** and the LoRAs panel gains an **Import H3 LoRA** button: pick a
-`.safetensors` and the panel checks it against your installed H3 transformer
-before it ever appears in the picker. You can still drop files into
-`mlx_models/hailuo-h3/loras/` by hand and press Rescan — same checks, same
-result. H3 accepts the runner layout with paired `lora_A` / `lora_B` tensors
-and lets you choose its strength in the picker. ComfyUI repacks are handled
-automatically: the `diffusion_model.` namespace is stripped in a header-only
-rewrite that leaves every tensor byte-identical. A raw Kohya file
-(`lora_down`, `lora_up`, and `.alpha`) is deliberately rejected: renaming it
-would ignore its required alpha/rank scaling. Where the adapter states a scale
-the H3 runner cannot apply on its own, the import records it as the row's
-recommended strength instead of refusing the file. The H3 CivitAI filter also
-routes compatible downloads to this library; H3 uses one adapter at a time. If
-Turbo is selected, turn it off or choose **My LoRA** in the Adapter control to
-spend that slot on your custom LoRA for the render.
-
-### HTTP API
-
-Everything the panel does is reachable over plain HTTP on `127.0.0.1:8198`. Queue video jobs, generate images, train characters, manage LoRAs, poll status, fetch outputs — all from `curl`, a Python script, or an external agent like Claude Code or Codex. The panel UI is just one client; nothing about the feature set is exclusive to it.
-
-```bash
-# Queue a text-to-video render with a character LoRA stacked on a style LoRA.
-curl -s -X POST http://127.0.0.1:8198/queue/add \
-  --data-urlencode "mode=t2v" \
-  --data-urlencode "prompt=Cinematic close-up of bizarrotrn man in a wood-paneled study, golden hour" \
-  --data-urlencode "width=1024" --data-urlencode "height=576" \
-  --data-urlencode "frames=169" --data-urlencode "quality=high" \
-  --data-urlencode 'loras=[{"path":"mlx_models/loras/bizarrotrn_v2.safetensors","strength":1.0}]'
-# → {"ok": true, "id": "j-..."}
-```
-
-Endpoints cover the full lifecycle: `POST /queue/add` and `/run` for video, `POST /image/generate` for stills, `POST /train/start` for LoRA training, `POST /upload` for reference images and audio, `POST /characters/<id>/generate` for one-shot character renders, `POST /loras/refresh` and the CivitAI download endpoints for LoRA management, `GET /status` for queue and system state, `GET /outputs` for the gallery, `POST /queue/retry` / `/queue/remove` / `/queue/pause` / `/stop` for queue control. JSON in, JSON out, form-encoded POST bodies for the heavy endpoints. No auth — bound to loopback only.
-
-Full reference with every field, every default, and copy-pasteable `curl` invocations: **[docs/API.md](docs/API.md)**. Notable uses: batch overnight render runs, IDE integrations, custom front-ends, and external agents that orchestrate Phosphene as a tool. The in-panel chat was retired in v3.0 — its replacement is your own agent talking to this API.
-
-## Hardware
-
-Apple Silicon only. MLX is Apple-only by design.
-
-| RAM | Tier | What runs |
-|---|---|---|
-| Under 48 GB | Compact (Q4 surface) | Text and image-to-video at smaller sizes. Image tab works. FFLF, Extend and High are hidden — they need more memory than this tier has. |
-| 48 to 79 GB | Comfortable (Q8 surface) | The canonical tier, built on M4 Max 64 GB. Everything works. FFLF and Extend capped at 768 px long side. |
-| 80 to 119 GB | Roomy | Most modes at full size. FFLF and Extend up to 1024 px. |
-| 120 GB+ | Studio | No size limits. |
-
-Working-memory footprint is non-negotiable: standard 1280×704 generation peaks at roughly 22 GiB resident, and HQ with the Q8 dev transformer at roughly 38 GiB. Tier is detected once at boot from RAM and exposed to the UI via `body[data-cap-tier="q4|q8"]`. Set `LTX_FORCE_CAP_TIER=q4` to preview the Compact surface from a higher-tier machine.
-
-**RAM is not the only gate, and on LTX-2.5 it is not the interesting one.** The table above answers "what can this Mac's memory serve". Whether trained **characters** render faithfully, and whether the **High** tier exists at all, are questions about which weight packs are on disk — a 64 GB Mac holding only the base pack is Comfortable-tier and still cannot do either. The panel tracks that separately (`body[data-q8-pack]`), and every surface that offers a download says which pack and how big.
+**Disk:** setup itself downloads no models and needs 18 GB free. LTX-2.5 video is about 27.5 GB; MiniMax H3 about 75 GB; songs about 11 GB; speech about 6 GB; image models download on first use. In the Mac app the models can live on an external drive: choose the folder at setup or later in Settings.
+The [Mac requirements page](https://phosphene.video/mac-requirements/?utm_source=github&utm_medium=readme&utm_campaign=website&utm_content=requirements) answers it for your exact chip and memory, with render times measured on Macs like yours.
 
 ## Install
 
-### Via Pinokio (recommended)
+**Mac app (recommended):** [download Phosphene for Mac](https://phosphene.video/download/?utm_source=github&utm_medium=readme&utm_campaign=install&utm_content=mac-app), open it, review the setup plan, and pick the models you want. It updates itself, and it reuses models a Pinokio install already downloaded.
 
-1. Install [Pinokio](https://pinokio.computer).
-2. In Pinokio: **Discover** -> **Download from URL** -> paste `https://github.com/mrbizarro/phosphene`.
-3. Click **Install**.
-4. Click **Start** -> **Open Panel** -> http://127.0.0.1:8198.
+**Pinokio:** Phosphene also installs with one click through [Pinokio](https://pinokio.computer), a free app launcher:
 
-Pinokio handles the hardware gate, the vendored `ltx-2-mlx` clone at its pinned tag, the uv-managed Python 3.11 venv, the runtime patches, and the model download.
+1. Install Pinokio.
+2. Open **Discover → Download from URL** and paste `https://github.com/mrbizarro/phosphene`.
+3. Press **Install**, then **Start**, then open the app.
 
-**What a fresh install fetches (~37 GB):** LTX-2.5's engine (20.74 GB) and its Gemma 4 text encoder (6.73 GB) — the generation the panel renders with — plus the 22 MB live-preview decoder; Gemma 3 (~6 GB), which is what **Enhance** and the **Storyboard planner** run on; and three control LoRAs (~4 GB) for the **Colorize**, **Ingredients** and **Motion Control** modes — all three public and un-gated, no token needed. Every step is resumable. (**HDR** uses a fourth, *gated* LoRA — that one needs a Hugging Face token in Settings, and the panel fetches it on first use.)
+To update in Pinokio, press **Update**, then restart Phosphene.
+The [install guide](https://phosphene.video/docs/install/?utm_source=github&utm_medium=readme&utm_campaign=docs&utm_content=install) covers disk space, updates and troubleshooting. To install by hand, follow the [manual install](docs/MANUAL_INSTALL.md). Linux on Apple Silicon ([`docs/LINUX.md`](docs/LINUX.md)) is a community port maintained by @joshuaswarren on a best-effort basis.
 
-**LTX-2.3 is not downloaded.** It is needed only to *train* a character — the trainer runs against 2.3, not 2.5 — so the panel offers it (~20 GB, plus the ~21 GB full-precision dev transformer) the moment you open the **Train Character** tab, and in **Settings → Models** any time. The three control LoRAs are 2.3-trained, and Lightricks has published exactly one LTX-2.5 IC-LoRA to date (a pixel spatial upscaler): **Ingredients** is therefore refused on 2.5 with the reason, and **Motion Control** still transfers the motion but loses most of the prompt's grip on the new subject — see [`docs/MOTION_CONTROL.md`](docs/MOTION_CONTROL.md). Everything else renders on LTX-2.5.
+## iPhone Remote
 
-For trained characters and voices, install the **LTX-2.5 Q8 weights** (30.02 GB) from **Settings → Models**. The **High** tier additionally needs the **High add-on** (29.50 GB), which installs into the same folder.
+**Phosphene Remote** is the iPhone app that drives your Mac's studio: write prompts, run every Studio workflow, watch progress and save finished clips to your phone, at home or away. The Mac does the rendering. It is part of Pro: a Pro licence turns it on.
 
-If you have a Hugging Face token, paste it under **Settings** in the panel. Downloads run roughly 10x faster, and the same token unlocks the one gated LoRA (HDR). **Motion Control does not need it** — the Union Control weight is public.
+<p align="center">
+  <img src="assets/readme/app_remote.webp" alt="Phosphene Remote on an iPhone, starting and watching AI video renders on a Mac" width="260">
+</p>
+<p align="center"><a href="https://phosphene.video/remote/?utm_source=github&amp;utm_medium=readme&amp;utm_campaign=remote&amp;utm_content=remote-section">About Phosphene Remote</a> · <a href="https://apps.apple.com/app/phosphene-remote/id6827562294">App Store</a></p>
 
-### Manual install
+## Free and Pro
+
+Phosphene is open source under MIT and stays free. Every engine and feature available today stays free, and new model ports reach everyone free.
+
+**Pro** is how the project is paid for. It funds the model ports, the testing on real Macs and the long hours behind every release. In return, Pro members get new speed-ups first, plus:
+
+| Pro | What it does |
+| --- | --- |
+| Faster LTX clips | About a quarter less waiting on a 5-second LTX-2.5 clip (152 s on Free, 113 s on Pro, same clip and seed, M4 Max 64 GB). On 16 to 24 GB Macs, clips are 27 to 30% faster. Every Mac from 16 GB |
+| Faster H3 picture-to-video | 5-second H3 clips: 14:57 on Free, 10:02 on Pro (M4 Max 64 GB). Macs with 36 GB or more |
+| Faster Flex Turbo | Quicker H3 drafts, about 1.5x faster than Flex on Free. Macs with 36 GB or more |
+| AI fill for Make it vertical | Paints real picture above and below instead of a blur. Macs with 48 GB or more |
+| iPhone Remote | Drive the studio from your iPhone with the Phosphene Remote app |
+| Priority support | Your bug reports and feature requests come first |
+
+Pro is monthly or yearly, or Founding: one payment for three years of Pro, with nothing to renew. Contributed to Phosphene over time? We sometimes grant a Pro licence to long-time contributors: support@phosphene.video.
+[Plans and measured speed-ups](https://phosphene.video/pricing/?utm_source=github&utm_medium=readme&utm_campaign=pricing&utm_content=pro-section).
+
+## Agents, scripts and the API
+
+Everything the app does is reachable over a local HTTP API ([`docs/API.md`](docs/API.md)), so a script or an AI agent can queue renders too.
+Phosphene ships a `phosphene` command line tool and an MCP server for Claude Code, Codex or any MCP client; [`docs/AGENT_TOOLS.md`](docs/AGENT_TOOLS.md) has the setup:
 
 ```bash
-# 1. Clone Phosphene + the MLX port (pinned to our LTX-2.5 fork build).
-git clone https://github.com/kayed85/MacStudioMLX.git
-cd phosphene
-git clone https://github.com/dgrauet/ltx-2-mlx.git ltx-2-mlx
-cd ltx-2-mlx
-git remote add fork https://github.com/mrbizarro/ltx-2-mlx.git
-git fetch fork +refs/tags/v0.14.19+ltx25.7:refs/tags/v0.14.19+ltx25.7
-git checkout v0.14.19+ltx25.7
-cd ..
-
-# 2. Create the Python 3.11 venv inside ltx-2-mlx (uv-managed).
-#    Every install below uses the `uv` on your PATH — `--seed` puts pip,
-#    setuptools and wheel into the venv, not uv, so there is no env/bin/uv.
-cd ltx-2-mlx
-uv venv --python 3.11 --seed env
-
-# 3. Install the MLX pipeline + trainer packages. Pin mlx to 0.31.1 —
-#    0.31.2 attenuates the LTX vocoder by 22 dB — and cap transformers below
-#    5.13.0, which breaks every generation. Both on the same resolve.
-uv pip install --python env/bin/python \
-  'mlx==0.31.1' 'mlx-lm==0.31.1' 'mlx-metal==0.31.1' 'transformers>=5.0.0,<5.13.0'
-# --build-constraints pins hatchling below 1.32, which rejects upstream's
-# `readme = "../../README.md"` and fails metadata generation. See
-# pip-build-constraints.txt. The first pass resolves the packages'
-# dependencies (mlx-arsenal among them); the second replaces the editable
-# workspace links it leaves with real copies, which the codec patch needs.
-uv pip install --python env/bin/python \
-  --build-constraints ../pip-build-constraints.txt \
-  ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx ./packages/ltx-trainer
-uv pip install --python env/bin/python --reinstall --no-deps \
-  --build-constraints ../pip-build-constraints.txt \
-  ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx ./packages/ltx-trainer
-uv pip install --python env/bin/python \
-  pyyaml pydantic tqdm rich
-# mlx-vlm powers Gemma 3 auto-caption. --no-deps so it doesn't drag mlx-lm past 0.31.1.
-uv pip install --python env/bin/python --no-deps 'mlx-vlm==0.4.4'
-# Agent + downloader + hub pin range.
-uv pip install --python env/bin/python pillow numpy 'huggingface-hub>=1.5.0,<2.0' \
-  'hf_transfer>=0.1.6' 'litellm>=1.83.14' 'smolagents>=1.24.0'
-cd ..
-
-# 4. Apply the runtime patches (idempotent, fail loud on upstream drift).
-./ltx-2-mlx/env/bin/python3.11 patch_ltx_codec.py
-
-# 5. Download LTX-2.5 — the base install: the engine (20.74 GB), its Gemma 4
-#    text encoder (6.73 GB) and the 22 MB live-preview decoder. 27.5 GB total,
-#    resumable and sha256-verified. NOT `hf download`: these are our own
-#    quantisation of a gated upstream, mirrored as GitHub release assets.
-./ltx-2-mlx/env/bin/python3.11 scripts/fetch_pack_release.py \
-  --repo-key q4_25 --repo-key gemma4_25 --repo-key tae
-
-# 5b. (Optional) The Q8 weights (30.02 GB) — what trained characters and
-#     voices need. The High tier additionally needs the High add-on (29.50 GB).
-./ltx-2-mlx/env/bin/python3.11 scripts/fetch_pack_release.py --repo-key q8_25
-
-# 6. (Optional) Image tab — install mflux + apply the FBCache patch.
-uv pip install --python ltx-2-mlx/env/bin/python 'mflux==0.18.0'
-uv pip install --python ltx-2-mlx/env/bin/python --reinstall --no-deps 'mflux==0.18.0'
-uv pip install --python ltx-2-mlx/env/bin/python 'mlx-teacache==0.4.1'
-./ltx-2-mlx/env/bin/python3.11 patch_mflux_fbcache.py
-
-# 7. (Optional) HiDream — separate one-time clone for the photoreal engine.
-#    Clone HIDREAM-O1-MLX-LAB-active into your home directory, or set
-#    HIDREAM_LAB_DIR to point at it.
-#    git clone <hidream-lab-repo> ~/HIDREAM-O1-MLX-LAB-active
-
-# 8. Launch the panel.
-./ltx-2-mlx/env/bin/python3.11 mlx_ltx_panel.py
+python3 agents/phosphene_cli.py mcp-config   # prints the exact line for this install
+claude mcp add phosphene -- python3 /path/to/phosphene/agents/phosphene_mcp.py
 ```
 
-About the version pins: `mlx 0.31.2` attenuates the LTX vocoder by 22 dB. Stay on 0.31.1. `ltx-2-mlx` is pinned to the fork **tag** `v0.14.19+ltx25.7` (`mrbizarro/ltx-2-mlx`, commit `bf419b6`) — v0.14.19 plus the LTX-2.5 port, because upstream has no 2.5 branch. A tag, not a bare SHA: a force-push upstream would strand every install with an un-fetchable pin and a dead Update button. The installed packages report `0.14.19+ltx25.7` and `_LTX_EXPECTED_VERSION` must match that string exactly, or every render logs a VERSION SKEW warning. `scripts/pinokio/ltx_checkout.sh` holds the pin and `node scripts/check_ltx_pin.js` enforces the agreement. `mflux 0.18.0` is the version `patch_mflux_fbcache.py` is line-targeted against, and it is pinned TOGETHER with mlx — mflux declares its own mlx range, so installing it with deps after pinning mlx can silently move mlx (`node scripts/check_post_update.js` fails if either moves alone). `hatchling<1.32` (in `pip-build-constraints.txt`) is a *build-time* pin: 1.32 rejects the `readme = "../../README.md"` that all three upstream packages declare, which fails the wheel build on every tag.
+Agents can make video, images, speech and music, wait for jobs and fetch the files. There is also an image layout API for agents ([`docs/AGENT_API.md`](docs/AGENT_API.md)).
 
-## Interface
+## How fast is it?
 
-Workflow tabs at the top of the panel: Video, Images, Storyboard, Audio, Train Character. Each is a single page; the helper subprocess and model state persist across tab switches.
+Median times across Phosphene users for a 5-second LTX-2.5 clip at Balanced, model loading included (opt-out usage counts, 10 August to 22 October 2026):
 
-<table>
-<tr>
-<td width="50%"><img src="assets/screenshots/phos_05_character_mode.png" alt="Video tab · Character mode — compact avatar picker"></td>
-<td width="50%"><img src="assets/screenshots/phos_02_images_tab.png" alt="Images tab — multi-reference subject composition"></td>
-</tr>
-<tr>
-<td align="center"><sub><b>Video / Character mode</b> · round-avatar picker, voice indicator, manage modal</sub></td>
-<td align="center"><sub><b>Images</b> · Qwen-Image-Edit, multi-ref composition</sub></td>
-</tr>
-<tr>
-<td width="50%"><img src="assets/screenshots/phos_03_audio_tab.png" alt="Audio tab — audio drives the generation"></td>
-<td width="50%"><img src="assets/screenshots/phos_04_train_tab.png" alt="Train Character tab — dataset + auto-caption + voice LoRA"></td>
-</tr>
-<tr>
-<td align="center"><sub><b>Audio</b> · voice or music clip drives generation; optional reference image anchors frame 0</sub></td>
-<td align="center"><sub><b>Train Character</b> · drop 15-50 photos, Gemma 3 auto-captions, optional voice LoRA</sub></td>
-</tr>
-</table>
+| Mac | Size | Median |
+| --- | --- | --- |
+| M4, 16 GB | 480p | 10:40 (36 Macs) |
+| M4 Pro, 48 GB | 576p | 6:00 (30 Macs) |
+| M4 Max, 64 GB | 576p | 3:00 (16 Macs) |
 
-Prompting notes:
+On an M4 Max with 64 GB, a 5-second MiniMax H3 clip at Standard with Fast takes about 5 minutes, and a MiniMax-H3-Image edit of one picture at Draft about 5 minutes.
+Phosphene estimates the time before you press Generate, and **Bench** measures your own Mac. The [benchmarks page](https://phosphene.video/benchmarks/?utm_source=github&utm_medium=readme&utm_campaign=benchmarks&utm_content=speed-section) has every chip, updated with each release.
 
-- Video / text mode: describe sound the same way you describe scene; the audio path reads the same prompt as the visual.
-- Video / image mode: prompt with motion beats rather than describing the still. Roughly one beat per 2–3 seconds of clip length.
-- Video / character mode: select an avatar from the picker, include the trigger word in the prompt. Q8 Draft (736×416) for iteration, Q8 Pro (1024×576 → 1280×720 final) for delivery.
-- Images: zero to three reference slots. Empty zone is text-to-image. Qwen-Image-Edit instructions are read literally — "change the white jacket to red" preserves the rest of the scene.
-- Train Character: center crop for tight portraits, letterbox for wide-shot proportions. The default preset (rank 32, alpha 32, 100 epochs, lr 1e-4) is validated end-to-end and recommended as the starting point.
+<p align="center">
+  <img src="assets/readme/lantern_fjord.webp" alt="A man in a rowing boat among floating lanterns in a fjord, made with MiniMax H3 on a Mac" width="100%">
+</p>
+<p align="center"><sub>“Lantern Fjord”, MiniMax H3, image to video</sub></p>
 
-## Migrating from 2.0
+## FAQ
 
-Quit Pinokio (or the panel terminal), then click Update, then Start. Renders, settings, queue, models, and LoRAs all persist across the upgrade via Pinokio's `fs.link` persistent drive. The first update takes a few minutes.
+**Is Phosphene really free?**
+Yes. No subscription, credits or watermark, and every feature available today stays free. Pro adds speed-ups first and iPhone Remote; it does not lock today's features.
 
-> Stragglers note: a few very old v2.x installs once had to click Update twice (Pinokio ran the stale on-disk `update.js` before pulling the new one). The update script now force-reinstalls the changed packages, so a single Update is enough. If a v2.x install still boots to dependency errors, click Update once more.
+**Does it work offline?**
+Yes. Download the models once, then render without a connection. Online, it checks for updates and downloads only the models you ask for.
 
-Behavioral changes worth noting in 3.0:
+**Can I run LTX-2.5 or MiniMax H3 on an M1 or a 16 GB Mac?**
+Yes. LTX-2.5 runs from 16 GB at smaller sizes on any Apple Silicon Mac, and MiniMax H3 runs from 16 GB at Draft and Standard (High from 18 GB). Smaller and older chips take longer.
 
-- Character is a first-class mode pill on the Video tab, no longer a chip nested inside T2V.
-- Q8 HQ is the default quality for character renders. The server-side validator rejects Q4 + character combinations to prevent identity-degraded output.
-- TeaCache is wired through both Extend and Audio-to-Video stage 1.
-- Vertical-player chrome is positioned outside the right edge so 9:16 clips are no longer occluded by controls.
-- Training presets now scale step count by `epochs × image_count`. The 100-epoch "high" preset that produced the validated v2 LoRAs preserves its shape regardless of dataset size.
+**LTX-2.5 or MiniMax H3?**
+MiniMax H3 for people talking: dialogue and voices that match lips. LTX-2.5 for everything else: more modes, keyframes, trained characters, Motion Control and the smallest Macs. Phosphene has both behind one switch.
 
-## What's in the repo
+**Can I turn a photo into an AI video on my Mac?**
+Yes. Drop a picture into Image mode on LTX-2.5 or MiniMax H3 and describe what happens; the clip comes with sound.
 
-- `mlx_ltx_panel.py` is the panel HTTP server: worker thread, helper subprocess management, engine registry, capability tier detection. The HTTP route handlers live in `panel/routes_*.py` (registered into route tables — one claim per route, enforced), and the frontend is plain files under `webapp/` (`index.html`, twelve ES modules in `webapp/js/`, `webapp/style/panel.css`) served from disk. `docs/ARCHITECTURE.md` is the map: what lives where, how the halves talk, and where a new feature's code goes.
-- `mlx_warm_helper.py` is the long-running inference subprocess. Holds T2V, I2V, Extend, HQ, and Keyframe pipelines. Reads job specs from stdin, emits events to stdout.
-- `image_engine.py` dispatches the Image tab. Backends `hidream`, `mflux`, `mock`. Each spawns its own subprocess with `start_new_session=True` so `/stop` kills the whole tree.
-- `patch_ltx_codec.py` applies one idempotent runtime patch: lossless H.264 output (yuv444p). As of the v0.14.8 pin the memory-frees, VAE streaming, Metal-watchdog and frame_rate patches are all native upstream; the v0.14.19 pin keeps that shape — one edit, one line.
-- `lora_lab/` is vendored from the [`lora-lab`](https://github.com/mrbizarro/lora-lab) authoring tree. Training works out of the box; set `LTX_LORA_LAB_ROOT` to iterate against an external clone.
-- `mlx_models/` and `mlx_outputs/` both persist across Pinokio Reset via fs.link.
+**Do I need an API key, an account or an NVIDIA GPU?**
+No. Phosphene runs open models on your Mac's own GPU through Apple's MLX.
 
-`image_engine.py` also carries a `hidream` backend (8B Qwen3-VL backbone, unified pixel-patch transformer) for photoreal stills. It is **hidden in the UI since v3.0.3** ([#15](https://github.com/mrbizarro/phosphene/issues/15)) and not installed by default — it lives in a separate lab repo you clone manually into `$HIDREAM_LAB_DIR` (see Manual install, step 7) and is loaded on demand.
+**Does it run on Windows or Intel Macs?**
+No. Phosphene is built for Apple Silicon only.
 
-## License and credits
+**Can I use what I make commercially?**
+Phosphene's code is MIT. Each model has its own licence and some are non-commercial (see License). Check a model's licence before you sell its output.
 
-Panel: MIT, see [LICENSE](LICENSE). LTX-Video 2.5 weights: Lightricks' license. MLX: Apache 2.0. Gemma 3 12B: Google's terms. PiperSR: AGPL-3.0.
+## Privacy
 
-Phosphene depends on the following projects:
+No prompt, picture, video or filename is uploaded. The studio listens on `127.0.0.1` only, with no login, so don't expose it to a network.
+Phosphene checks for updates and contacts Hugging Face or CivitAI only when you download models or LoRAs.
+Anonymous usage counts (version, hardware class such as “M4 Max / 64 GB”, and render stats) are on by default; one click in Settings turns them off, and every field is listed in [`docs/ANALYTICS.md`](docs/ANALYTICS.md).
+Make original characters, or yourself or others with documented consent; see the [acceptable use policy](https://phosphene.video/acceptable-use/?utm_source=github&utm_medium=readme&utm_campaign=acceptable-use&utm_content=privacy-section) and the [privacy policy](https://phosphene.video/privacy/?utm_source=github&utm_medium=readme&utm_campaign=privacy&utm_content=privacy-section).
 
-- [Lightricks](https://github.com/Lightricks/LTX-Video) — LTX 2.5 and the joint audio + video architecture
-- [@dgrauet](https://github.com/dgrauet/ltx-2-mlx) — MLX port of LTX-Video; the foundation everything else builds on
-- [Apple ML team](https://github.com/ml-explore/mlx) — MLX
-- [HiDream-ai](https://huggingface.co/HiDream-ai/HiDream-O1-Image-Dev) — HiDream-O1 weights and reference implementation
-- [filipstrand/mflux](https://github.com/filipstrand/mflux) — MLX-native FLUX and Qwen-Edit family
-- [mlx-community](https://huggingface.co/mlx-community) — Gemma 3 12B 4-bit
-- [ModelPiper / PiperSR](https://github.com/ModelPiper/PiperSR) — optional 2× upscale on the Apple Neural Engine
-- [@cocktailpeanut](https://twitter.com/cocktailpeanut) — Pinokio
+## Contributing
 
-What Phosphene adds on top of those: a persistent batch queue, a warm helper subprocess with capability-tier feature gating, lossless H.264 output with JSON sidecars, the in-panel character + voice LoRA training pipeline, the Image tab dispatch layer with adaptive wall-time estimates, the local Gemma 3 prompt-enhancer, and the Pinokio install + update lifecycle scripts.
+Bug reports, ideas in Discussions and pull requests are welcome.
+A report with your chip, memory, macOS version, Phosphene version and the error line is worth as much as a patch.
+Contributors are credited in the release notes; see [CONTRIBUTING.md](CONTRIBUTING.md). What changed in each release is in the [changelog](https://phosphene.video/changelog/?utm_source=github&utm_medium=readme&utm_campaign=changelog&utm_content=contributing).
 
-## Roadmap
+## Credits
 
-Upcoming work — three-aspect character LoRAs, scene/room LoRAs for
-location continuity across clips, a real multi-character workflow,
-and stacking-aware strength balance — is tracked in [ROADMAP.md](ROADMAP.md).
-Contributors and feature requests welcome via GitHub Issues.
+- Lightricks for LTX-Video 2.x, and @dgrauet for ltx-2-mlx, the MLX port Phosphene builds on.
+- MiniMax for Hailuo H3 and MiniMax-H3-Image, and Apple ML research for MLX.
+- LightX2V for lightx2v v1.3, the adapter for Best on High; TaoLive (TaoMate-H3) and @kijai for the 3-step Fast adapter.
+- Pika Labs (Mellis, Inc.) for Pika H3 Flex, a MiniMax H3 Model Derivative, downloaded from Pika's own Hugging Face repo at a pinned revision and converted on your Mac. Powered by MiniMax H3.
+- Pruna AI for P-H3-Image.
+- Black Forest Labs for FLUX 3 Klein and FLUX.2 [klein], mflux-community for its MLX conversions, and @filipstrand for mflux.
+- The Qwen team for Qwen-Image-Edit and Qwen3-TTS, and mlx-audio for its MLX runtime.
+- Multimodal Art Projection for YuE2, and @vanch007 for its MLX port.
+- mlx-community for Gemma on MLX, and @cocktailpeanut for Pinokio.
 
-## Support development
+Thanks to @blackest, @tanis2000, @joshuaswarren, @sahilkashyap64, @Morac2, @ybekocak,
+@PhantombrainM, @Viktorminator, @Townesvz, @Sebartus, @mrapolo2020, @Techy2023,
+and everyone who filed a bug.
 
-Phosphene is free and open source.
+## License
 
-- Follow [@PhospheneAI](https://x.com/PhospheneAI) on X for releases and clips
-- Patreon: https://www.patreon.com/PhospheneAI
-- Issues and PRs: https://github.com/kayed85/MacStudioMLX
+Phosphene's own code is MIT. The AI models are not part of this repo and each has its own licence; Phosphene shows a model's licence before download or first run when the licence requires it.
 
-## Network note
+Ideogram 4, YuE2's weights, FLUX.1 Krea [dev] and Bria FIBO are non-commercial; YuE2 lets individual creators sell songs they make.
+The MiniMax H3 licence does not cover the EU, the UK, South Korea or the US.
+Check a model's licence before using its output commercially. The licence texts are in the [`LICENSES`](LICENSES) folder.
 
-Phosphene renders locally — no prompt, model input or output is ever uploaded. A clean production install makes three kinds of outbound request, and no others: it checks GitHub every 30 minutes for an update badge (disable with `PHOSPHENE_DISABLE_VERSION_CHECK=1`); it touches Hugging Face or CivitAI when you download models or LoRAs; and it sends anonymous usage counts — one event per panel start and one per finished render, carrying the panel version, a hardware class such as `M4 Max / 64 GB`, and render stats like engine, tier and a bucketed duration. Never content of any kind.
-
-That last one is **on by default and the build ships a working key**, so a fresh clone does report. Every event and field is specified in [docs/ANALYTICS.md](docs/ANALYTICS.md), mirrored in plain text to `state/usage-log.jsonl` so you can read exactly what was sent, and switched off in one click in Settings → *Anonymous usage analytics* (or with `PHOSPHENE_ANALYTICS_DISABLED=1`).
-
-The panel binds to `127.0.0.1` with no auth. It's not designed for LAN exposure or tunneling.
+<p align="center"><sub><a href="https://phosphene.video/?utm_source=github&amp;utm_medium=readme&amp;utm_campaign=home&amp;utm_content=footer">phosphene.video</a> · <a href="https://phosphene.video/download/?utm_source=github&amp;utm_medium=readme&amp;utm_campaign=download&amp;utm_content=footer">Download for Mac</a> · <a href="https://phosphene.video/docs/?utm_source=github&amp;utm_medium=readme&amp;utm_campaign=docs&amp;utm_content=footer">Docs</a></sub></p>

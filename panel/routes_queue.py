@@ -39,6 +39,14 @@ def get_status(h, parsed) -> None:
             "pid": P.STATE["pid"], "pgid": P.STATE["pgid"],
         })
         hidden_count = len(P.HIDDEN_PATHS)
+    # Human title per job, derived at read time (old history included).
+    for _j in ([payload["current"]] if payload.get("current") else []) + \
+            list(payload.get("queue") or []) + list(payload.get("history") or []):
+        try:
+            _p = _j.get("params") or {}
+            _j["title"] = P.clip_title.display_title(_p.get("prompt"), _p.get("label") or _j.get("label"))
+        except Exception:
+            pass
     # Polling fast path — newest 60 only. outputs_total tells the
     # carousel header "X older outputs not shown" so the "Show all"
     # button can surface them via the /outputs endpoint.
@@ -48,6 +56,13 @@ def get_status(h, parsed) -> None:
     payload["outputs"] = _outs
     payload["outputs_total"] = _outs_total
     payload["hidden_count"] = hidden_count
+    # The one-time "star us on GitHub" card (owner, 2 Nov 2026): true only
+    # between the third finished render and the page putting the card up.
+    payload["star_prompt_due"] = P.star_prompt_due()
+    # Which ask (review nudge, 12 Nov 2026): "remote" on a Mac with a paired
+    # Phosphene Remote, "github" otherwise. Read only while the card is due.
+    payload["star_prompt_variant"] = (P.star_prompt_variant()
+                                      if payload["star_prompt_due"] else "")
     # Storyboards — one line per board. Three jobs, all of them cheap:
     # the `S03/12` badge on a queue card needs the denominator, the tab
     # count during an overnight run needs `running`, and `To film` in
@@ -58,6 +73,9 @@ def get_status(h, parsed) -> None:
     payload["memory"] = P.get_memory()
     payload["comfy_pids"] = P.find_comfy_pids()
     payload["server_now"] = P.time.time()
+    # What is holding queued clips, in words (the Now card shows it). Scope "h3"
+    # = only Hailuo H3 clips wait; every other clip keeps going.
+    payload["hold"] = P.queue_hold_status(payload.get("queue"), payload["server_now"])
     payload["avg_elapsed_sec"] = avg
     # v3.0.7 (P2): surface the installed ltx-2-mlx version (from the
     # helper's ready event) so every bug report — not just a mismatch
@@ -95,6 +113,8 @@ def get_status(h, parsed) -> None:
             return priced
         if params.get("engine") == "music":
             return P.music_estimate(params["music_quality"], params["music_max_seconds"])["eta_sec"]
+        if params.get("engine") == "speech":
+            return P.speech_estimate(params.get("speech_text") or "", params.get("speech_speed") or 1.0)["eta_sec"]
         if params.get("mode") == "image":
             return float(avg_image) if avg_image else 90.0
         return float(avg_video) if avg_video else 420.0
@@ -135,7 +155,7 @@ def get_status(h, parsed) -> None:
                 "phase": "waiting", "pct": 0, "phase_label": str(_waiting),
                 "elapsed_sec": max(0.0, P.time.time() - _started) if _started else 0,
             }
-        elif _mode != "train" and _engine not in ("h3", "music"):
+        elif _mode != "train" and _engine not in ("h3", "music", "speech"):
             payload["current"]["progress"] = P._compute_progress(
                 payload["current"], payload.get("log") or [],
             )
@@ -152,6 +172,10 @@ def get_status(h, parsed) -> None:
         "low_memory": P.HELPER_LOW_MEMORY == "true",
         "idle_timeout_sec": P.HELPER_IDLE_TIMEOUT,
     }
+    # The post-decode hang rescue: how often it fired, and whether a clip is
+    # about to pay its cold start ("Engine restarting" on the Now card).
+    payload["engine_restart"] = P.engine_restart_status(
+        bool(payload.get("current") or payload.get("queue")), payload["server_now"])
     # Completeness checks come from the shared required_files.json so
     # the menu, the UI, and the run-time job validator all agree on
     # what counts as "installed". Single source of truth — see the
@@ -195,7 +219,13 @@ def get_status(h, parsed) -> None:
     payload["hq_surface_missing"] = P.hq_surface_missing()
     payload["q8_path"] = str(P.pack_path("q8"))
     payload["base_available"] = not _base_missing
-    payload["base_missing"] = _base_missing
+    # In the person's own folder name: `models/...` in the Mac app, where no
+    # `mlx_models` folder exists (shown_model_path). Machine decisions read
+    # base_available; this list is what gets shown.
+    payload["base_missing"] = [P.shown_model_path(f) for f in _base_missing]
+    path_errors = [P.model_path_problem(P._deferred_repo(k), write=bool(_base_missing))
+                   for k in P.capability_repo_keys("render")]
+    payload["model_path_error"] = next((e for e in path_errors if e), "")
     # Repo-level counts for the header pill — granular view that
     # matches the modal's per-repo rows (Q4 + Gemma + Q8 = 3 in the
     # default manifest). Avoids the pill claiming "2/2 ready" while
@@ -265,6 +295,8 @@ def get_status(h, parsed) -> None:
     payload["h3"] = P.h3_status()
     payload["music"] = P.music_status()
     payload["music_install"] = P.music_install_status()
+    payload["speech"] = P.speech_status()
+    payload["speech_install"] = P.speech_install_status()
     # 4.17.4: can a render start at all (the engine venv), and the one-click
     # repair's progress. File checks only - cheap enough for every poll.
     payload["engine_env"] = P.engine_env_status()
@@ -288,15 +320,15 @@ def get_status(h, parsed) -> None:
                 "repo_id": P.DOWNLOAD["repo_id"],
                 "started_ts": P.DOWNLOAD["started_ts"],
                 "last_line": P.DOWNLOAD["last_line"],
-                # 4.20: the post-install background fetcher, not a click.
+                # A bundle request uses the shared background queue.
                 "background": bool(P.DOWNLOAD.get("background")),
                 "name": _dl_repo.get("name") or P.DOWNLOAD["key"],
                 "size_gb": _dl_repo.get("size_gb"),
+                **P.model_download_progress(_dl_repo),
             }
         else:
             payload["download"] = {"active": False}
-    # 4.20: what install.js left for after Start, and where the background
-    # fetcher is with it (empty and idle on every install it never queued).
+    # Requested model packs and progress. Empty on a fresh first open.
     payload["deferred_downloads"] = P.deferred_status()
     # Mac app review #11: the process-wide GPU gate. `current` shows the queued
     # job; an inline image render, a character sheet, Enhance, a lyrics request
@@ -304,11 +336,24 @@ def get_status(h, parsed) -> None:
     # nowhere, so a client deciding "is it safe to stop the studio" must read
     # this too: {busy, holder, since, outside_queue}.
     payload["gpu"] = P.gpu_gate_status()
+    # One restart contract for native Studio, Pro and app updates. Include
+    # optional downloads that do not own the render queue or GPU.
+    # A queue with clips waiting counts (app review 10 Nov): `restart_busy_reason`
+    # is what the update is waiting for, in the app's own words.
+    _busy = P.restart_busy_status(payload.get("current"), payload.get("queue"),
+                                  bool(payload.get("paused")))
+    payload["restart_busy"] = _busy["busy"]
+    payload["restart_busy_reason"] = _busy["reason"]
     # Mac app only: the app's own model download (app_models.json). The
     # "Base models needed" card names it instead of offering a second fetch.
     _app = P.app_models_state()
     if _app is not None:
         payload["app_models"] = _app
+        # The app's download stopped and the Studio took it over
+        # (app_models_rescue_step): the page shows its own card again.
+        if P.APP_RESCUE["state"]:
+            payload["app_models_rescue"] = {"state": P.APP_RESCUE["state"],
+                                            "error": P.APP_RESCUE["error"]}
     payload["hf_available"] = P.HF_BIN is not None
     # Settings snapshot — only needs the public-safe view (booleans
     # for token presence, no secret values). The UI reads
@@ -392,7 +437,7 @@ def post_queue_retry(h, path, qs, ctype) -> None:
             h._json({"error": "overrides must be JSON"}, 400); return
         if not isinstance(overrides, dict):
             h._json({"error": "overrides must be a JSON object"}, 400); return
-        allowed = {"quality", "frames"}
+        allowed = {"quality", "frames", "pro_speedup_choice"}
         unknown = set(overrides) - allowed
         if unknown:
             h._json({"error": f"overrides may only set {sorted(allowed)}, "
@@ -400,6 +445,8 @@ def post_queue_retry(h, path, qs, ctype) -> None:
         if "quality" in overrides and overrides["quality"] not in (
                 "quick", "balanced", "standard", "high"):
             h._json({"error": f"unknown quality {overrides['quality']!r}"}, 400); return
+        if "pro_speedup_choice" in overrides and overrides["pro_speedup_choice"] not in ("on", "off"):
+            h._json({"error": "pro_speedup_choice must be on or off"}, 400); return
         if "frames" in overrides:
             try:
                 overrides["frames"] = int(overrides["frames"])
@@ -492,6 +539,12 @@ def post_queue_retry(h, path, qs, ctype) -> None:
     refusal = P.job_input_refusal(new_job["params"])
     if refusal:
         h._json({"error": refusal, "code": "input_missing"}, 400); return
+    # Fleet 2 Nov 2026: Retry on a failed training run re-queued the same run
+    # the trainer had just refused for want of its weights. Say it here.
+    if str(new_job["params"].get("mode") or "") == "train":
+        _weights = P.train_weights_refusal()
+        if _weights:
+            h._json({"error": _weights, "code": "train_models"}, 409); return
     _lic = P.job_licence_refusal(new_job["params"])
     if _lic:
         h._json(_lic, 451); return
@@ -668,9 +721,6 @@ def post_prompt_enhance(h, path, qs, ctype) -> None:
     # the dev transformer.
     user_prompt = (form.get("prompt", [""])[0] or "").strip()
     mode = (form.get("mode", ["t2v"])[0] or "t2v").lower()
-    aspect = (form.get("aspect", [""])[0] or form.get("orientation", [""])[0] or "").strip()
-    width = (form.get("width", [""])[0] or "").strip()
-    height = (form.get("height", [""])[0] or "").strip()
     # VC-13: default TRUE (unchanged behaviour — Enhance has always
     # translated to English). "0"/"false"/"off" is the explicit opt-out
     # from the prompt box's "Translate to English" toggle, which only
@@ -743,7 +793,6 @@ def post_prompt_enhance(h, path, qs, ctype) -> None:
         lora_ctx = []
     preserve_tokens = sorted(preserve_set)
     P.push(f"[enhance] {mode}: {user_prompt[:80]}…"
-         + (f"  aspect={aspect}" if aspect else "")
          + (f"  preserve={preserve_tokens}" if preserve_tokens else ""))
     # THE GPU GATE, like every other GPU user (routes_music._helper_run). The
     # queue unloads the LTX helper before an H3 or music render; an Enhance
@@ -764,8 +813,7 @@ def post_prompt_enhance(h, path, qs, ctype) -> None:
             "id": f"enh-{int(P.time.time()*1000)}",
             "params": {"prompt": user_prompt, "mode": mode, "seed": 10,
                        "preserve_tokens": preserve_tokens, "translate": translate,
-                       "lora_notes": lora_ctx,
-                       "aspect": aspect, "width": width, "height": height},
+                       "lora_notes": lora_ctx},
         }, timeout=P.PROMPT_ENHANCE_TIMEOUT)
     except Exception as exc:
         P.push(f"[enhance] failed: {exc}")
@@ -849,6 +897,11 @@ def post_run(h, path, qs, ctype) -> None:
     refusal = P.job_input_refusal(job.get("params") or {})
     if refusal:
         h._json({"error": refusal, "code": "input_missing"}, 400); return
+    # App review 10 Nov, row 4: no base video model on this Mac = not queued,
+    # for the API exactly as for the page's Generate button.
+    _base = P.base_models_refusal(job.get("params") or {})
+    if _base:
+        h._json(_base, 400); return
     # 4.19.8: a model whose licence asks for an explicit "I accept" (H3, the
     # non-commercial models) is refused with 451 until it is accepted; the
     # panel's licences.js shows the screen and re-sends this request.
@@ -859,7 +912,8 @@ def post_run(h, path, qs, ctype) -> None:
     # not discovered in the log after a long Extend render.
     refusal = P.extend_face_fix_refusal(job["params"])
     if refusal:
-        h._json({"error": refusal, "code": "pack_missing"}, 400); return
+        h._json({"error": refusal, "code": "pack_missing",
+                 "pinokio": P.face_fix_pinokio_offer()}, 400); return
     # Upscale ×2 above QHD exhausted 96 GB + swap: refused before it queues.
     _up = job["params"]
     if _up.get("mode") == "upscale" and _up.get("upscale_source_path"):
@@ -917,6 +971,23 @@ def post_queue_sharp_export(h, path, qs, ctype) -> None:
         out = P.queue_sharp_export(src)
     except Exception as exc:                                   # noqa: BLE001
         h._json({"ok": False, "error": f"could not queue Sharp export: {exc}"}, 500)
+        return
+    h._json(out, 200 if out.get("ok") else 400)
+
+
+@post("/queue/vertical_export")
+def post_queue_vertical_export(h, path, qs, ctype) -> None:
+    _rb = h._read_form_body()
+    if _rb is None:
+        return
+    body, form = _rb
+    src = (form.get("path", [""])[0] or qs.get("path", [""])[0] or "").strip()
+    ratio = (form.get("ratio", [""])[0] or qs.get("ratio", [""])[0] or "9:16").strip()
+    fill = (form.get("fill", [""])[0] or qs.get("fill", [""])[0] or "blur").strip()
+    try:
+        out = P.queue_vertical_export(src, ratio, fill)
+    except Exception as exc:                                   # noqa: BLE001
+        h._json({"ok": False, "error": f"could not queue Make it vertical: {exc}"}, 500)
         return
     h._json(out, 200 if out.get("ok") else 400)
 

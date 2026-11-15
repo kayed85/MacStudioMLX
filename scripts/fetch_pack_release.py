@@ -123,7 +123,6 @@ def lock_dest(dest_dir: Path) -> int:
     except ImportError:              # not a POSIX system: nothing to lock with
         return -1
     lock = pack_lock_path(dest_dir)
-    lock.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o644)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -247,15 +246,10 @@ def download_shard(url: str, dest: Path, expect_bytes: int, expect_sha: str,
                             last = now
             got = sha256_file(dest)
             if got != expect_sha:
-                if dest.name.endswith((".md", ".txt")) or dest.name.startswith("LICENSE"):
-                    log(f"[fetch] {label} sha256 mismatch for doc asset (expected {expect_sha[:12]}…, got {got[:12]}…) — keeping fetched file")
-                    return
                 dest.unlink(missing_ok=True)
                 raise RuntimeError(f"shard sha256 mismatch (expected {expect_sha[:12]}…, got {got[:12]}…)")
             size = dest.stat().st_size
             if size != expect_bytes:
-                if dest.name.endswith((".md", ".txt")) or dest.name.startswith("LICENSE"):
-                    return
                 dest.unlink(missing_ok=True)
                 raise RuntimeError(f"shard size mismatch (expected {expect_bytes}, got {size})")
             return
@@ -296,6 +290,48 @@ def sha256_file(path: Path) -> str:
 # --------------------------------------------------------------------------- #
 # Assembly
 # --------------------------------------------------------------------------- #
+def _pack_path(root: Path, name: str) -> Path:
+    """Confine a publisher's flat filename to the chosen pack directory.
+
+    The destination itself may be a user-selected symlink (Pinokio's shared
+    models). Children must not be symlinks, including dangling ones: partials
+    and progress files are opened for writing, and shards may be resumed.
+    This checks existing paths; it is not a sandbox against another local
+    process replacing paths concurrently.
+    """
+    if (not isinstance(name, str) or not name or name in (".", "..")
+            or any(c in name for c in ("/", "\\", ":"))
+            or any(ord(c) < 32 or ord(c) == 127 for c in name)):
+        raise ValueError(f"unsafe pack filename: {name!r}")
+    path = root / name
+    if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):
+        raise ValueError(f"unsafe pack path: {path}")
+    return path
+
+
+def _validate_file_paths(name: str, spec: dict, dest_dir: Path) -> None:
+    if name == PARTS_DIRNAME:
+        raise ValueError(f"reserved pack filename: {name!r}")
+    _pack_path(dest_dir, name)
+    partial = _pack_path(dest_dir, name + ".partial")
+    _pack_path(dest_dir, _progress_path(partial).name)
+    parts_dir = _pack_path(dest_dir, PARTS_DIRNAME)
+    # A spec may legitimately carry no shards here (e.g. the lock-contract
+    # manifests that mock assemble_file): assemble_file is the only reader of
+    # spec["shards"], so the preflight must not be stricter about structure
+    # than the base. Any shards that DO exist are still confined, which is all
+    # the guard needs — a manifest can only escape via a shard it declares.
+    for shard in spec.get("shards") or []:
+        _pack_path(parts_dir, shard["asset"])
+
+
+def _validate_pack_paths(files: dict, dest_dir: Path) -> None:
+    # Validate the whole manifest before writing anything, even if an unsafe
+    # entry follows valid ones. Extra sidecars are legitimate publisher output.
+    for name, spec in files.items():
+        _validate_file_paths(name, spec, dest_dir)
+
+
 def _progress_path(partial: Path) -> Path:
     return partial.with_suffix(partial.suffix + ".progress")
 
@@ -334,7 +370,8 @@ def assemble_file(name: str, spec: dict, dest_dir: Path, mirror: dict,
     the difference between +1.9 GB and +11.3 GB on the transformer, on machines
     that are already tight enough that we quantised the model for them.
     """
-    target = dest_dir / name
+    _validate_file_paths(name, spec, dest_dir)
+    target = _pack_path(dest_dir, name)
     want_sha = spec["sha256"]
     want_bytes = int(spec["bytes"])
 
@@ -342,14 +379,11 @@ def assemble_file(name: str, spec: dict, dest_dir: Path, mirror: dict,
         if target.stat().st_size == want_bytes and sha256_file(target) == want_sha:
             log(f"[fetch] {name} — already complete and verified, skipping")
             return
-        if target.name.endswith((".md", ".txt")) or target.name.startswith("LICENSE"):
-            log(f"[fetch] {name} — doc asset present, skipping re-fetch")
-            return
         log(f"[fetch] {name} — present but does not match the manifest, refetching")
 
-    parts_dir = dest_dir / PARTS_DIRNAME
+    parts_dir = _pack_path(dest_dir, PARTS_DIRNAME)
     parts_dir.mkdir(parents=True, exist_ok=True)
-    partial = dest_dir / (name + ".partial")
+    partial = _pack_path(dest_dir, name + ".partial")
     shards = spec["shards"]
     done = _read_progress(partial)
     if done:
@@ -362,7 +396,7 @@ def assemble_file(name: str, spec: dict, dest_dir: Path, mirror: dict,
             continue
         asset = shard["asset"]
         label = f"{name} [{idx + 1}/{len(shards)}]"
-        shard_path = parts_dir / asset
+        shard_path = _pack_path(parts_dir, asset)
         download_shard(asset_url(mirror, asset), shard_path,
                        int(shard["bytes"]), shard["sha256"],
                        attempts=attempts, timeout=timeout, label=label)
@@ -399,17 +433,14 @@ def assemble_file(name: str, spec: dict, dest_dir: Path, mirror: dict,
 # --------------------------------------------------------------------------- #
 def check_pack(manifest: dict, dest_dir: Path) -> list[str]:
     """Names of declared files that are missing or do not match the manifest."""
+    _validate_pack_paths(manifest["files"], dest_dir)
     bad: list[str] = []
     for name, spec in manifest["files"].items():
         path = dest_dir / name
         if not path.exists() or path.stat().st_size != int(spec["bytes"]):
-            if name.endswith((".md", ".txt")) or name.startswith("LICENSE"):
-                continue
             bad.append(name)
             continue
         if sha256_file(path) != spec["sha256"]:
-            if name.endswith((".md", ".txt")) or name.startswith("LICENSE"):
-                continue
             bad.append(name)
     return bad
 
@@ -419,6 +450,17 @@ def fetch_pack(repo_key: str, root: Path, dest: Path | None,
     repo = load_repo_entry(repo_key, root)
     mirror = mirror_of(repo)
     dest_dir = dest or (root / repo["local_dir"])
+    # Native bootstrap uses Python -I, which omits the script directory from
+    # sys.path. Load our sibling by its exact source path in that mode too.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "model_path_guard", Path(__file__).with_name("model_path_guard.py"))
+    model_path_guard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(model_path_guard)
+    configured = os.environ.get("LTX_MODELS_DIR")
+    model_root = Path(configured) if configured else (root / "mlx_models" if dest is None else dest.parent)
+    model_path_guard.require(model_root, dest_dir, write=not check_only,
+                             allow_new=not configured and dest is None)
     url = asset_url(mirror, mirror["manifest_asset"])
 
     log(f"[fetch] {repo_key}: {repo.get('name', repo_key)} → {dest_dir}")
@@ -427,18 +469,33 @@ def fetch_pack(repo_key: str, root: Path, dest: Path | None,
     files = manifest.get("files")
     if not isinstance(files, dict) or not files:
         raise SystemExit(f"release manifest for {repo_key} declares no files")
+    _validate_pack_paths(files, dest_dir)
 
     # The manifest is the mirror's word for what a pack is; required_files.json
     # is the app's. They must not drift, and a drift found HERE (before 21 GB is
     # pulled) is worth far more than one found by a loader at render time.
-    missing = [f for f in repo.get("files", []) if f not in files]
+    declared = list(repo.get("files", [])) + list(repo.get("sidecars") or [])
+    missing = [f for f in declared if f not in files]
     if missing:
         raise SystemExit(
             f"release manifest for {repo_key} is missing files that "
             f"required_files.json declares mandatory: {', '.join(missing)}"
         )
+    # The app checks a declared size EXACTLY (fleet #206), so a size that
+    # drifted from the manifest would leave a finished pack reading incomplete.
+    drift = [f for f, n in (repo.get("file_sizes") or {}).items()
+             if f in files and int(files[f].get("bytes", -1)) != int(n)]
+    if drift:
+        raise SystemExit(
+            f"release manifest for {repo_key} disagrees with required_files.json "
+            f"file_sizes for: {', '.join(drift)}"
+        )
 
-    dest_dir.mkdir(parents=True, exist_ok=True)
+    model_path_guard.require(model_root, dest_dir, write=not check_only,
+                             allow_new=not configured and dest is None)
+    if not check_only:
+        model_path_guard.prepare_directory(model_root, dest_dir,
+            allow_new=not configured and dest is None)
     if check_only:
         bad = check_pack(manifest, dest_dir)
         if bad:
@@ -466,6 +523,7 @@ def fetch_pack(repo_key: str, root: Path, dest: Path | None,
 
 def _fetch_locked(repo_key: str, files: dict, dest_dir: Path, mirror: dict,
                   *, attempts: int, timeout: int) -> int:
+    _validate_pack_paths(files, dest_dir)
     total_gb = sum(int(s["bytes"]) for s in files.values()) / 1e9
     log(f"[fetch] {len(files)} file(s), {total_gb:.2f} GB — resumable, sha256-verified")
 

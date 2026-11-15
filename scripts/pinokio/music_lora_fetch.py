@@ -244,6 +244,9 @@ def adapter_meta(path) -> dict:
     if not isinstance(data, dict):
         return {}
     out = {}
+    name = str(data.get("name") or "").strip()
+    if name:
+        out["name"] = name
     trigger = str(data.get("trigger") or "").strip()
     if trigger:
         out["trigger"] = trigger

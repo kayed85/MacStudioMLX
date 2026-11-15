@@ -1,6 +1,6 @@
 # Video
 
-The Video tab turns a prompt — and, if you like, an image or a clip — into a video with sound. Pick a mode, write the prompt, choose Quality and Length, press **Generate** ([[sc:prompt.generate]] from the prompt box).
+The Video tab turns a prompt — and, if you like, an image or a clip — into a video with sound. Pick the model in **Model**, the first row of the column (it decides which modes and settings are on offer below it), then a mode, write the prompt, choose Quality and Length, press **Generate** ([[sc:prompt.generate]] from the prompt box).
 
 ## Modes {#modes}
 
@@ -76,6 +76,8 @@ Quick, Balanced and Standard run on the fast (distilled) model; High and High ·
 
 **Length**: 3s, 5s (default), 7s, 10s — and 20s, which is offered at Quick only.
 
+Long LTX clips use a third less memory at the end of the render (5.0.25). The last step of a render, turning the finished shot into frames, is where memory peaks. On Macs with more than 32 GB, an LTX clip longer than 5 seconds now does it in 128-frame pieces. Measured on 10-second clips: about 12.7 GB instead of 20 GB at 1024×576, and 19 GB instead of 30 GB at 720p, in the same time and with no visible difference. Macs with 32 GB or less already worked in pieces and are unchanged.
+
 On the fast qualities, a **Speed** row offers **Tuned** or **Fast draft** — a faster schedule that changes the take. High has a **STG — detail guidance** slider.
 
 With a trained character selected the chips become **Q8 Draft** (704×384), **Q8 Pro** (1024×576, *best identity*) and, on LTX-2.5, High and High · 720p. Trained faces hold best on Q8 Pro.
@@ -125,13 +127,13 @@ Image mode works on H3 — the picture is the first frame. The **Orientation** r
 | Characters and LoRAs | trained characters, LoRA stacks | its own H3 LoRA library |
 | Avoid box | on High and the guided modes | none — say it in the prompt |
 | Longest clip | 20s (Quick), 10s otherwise | 15s, chained windows |
-| Memory | the Tier dialog (health chip → Tier) shows which qualities this Mac runs | 36 GB or more (see below) |
+| Memory | the Tier dialog (health chip → Tier) shows which qualities this Mac runs | 16 GB or more (see below) |
 
 [[pinokio]]
-**H3 and memory.** The full H3 engine needs 60 GB. From 36 GB up, H3 runs on its compact Q8 engine, which **Install Hailuo H3** in Pinokio's Phosphene sidebar builds locally (about 5 minutes, ~22 GB, no extra download). Settings → **Hailuo H3 model** chooses between Automatic, Full and Compact. Below 36 GB, H3 is not offered — render on LTX. See [Install H3](#docs/hailuo-h3/install) and [Troubleshooting](#docs/troubleshooting/memory).
+**H3 and memory.** The full H3 engine needs 60 GB. From 16 GB up, H3 runs on its compact Q8 engine, which **Install Hailuo H3** in Pinokio's Phosphene sidebar builds locally (about 5 minutes, ~22 GB, no extra download). Settings → **Hailuo H3 model** chooses between Automatic, Full and Compact. Below 16 GB, H3 is not offered — render on LTX. From 16 GB you make Draft and Standard clips, from 18 GB also High; Clean up sound and chained clips need 36 GB. See [Install H3](#docs/hailuo-h3/install) and [Troubleshooting](#docs/troubleshooting/memory).
 [[/pinokio]]
 [[mac-app]]
-**H3 and memory.** Hailuo H3 is not available in the Mac app yet. Render on LTX. See [Install H3](#docs/hailuo-h3/install) and [Troubleshooting](#docs/troubleshooting/memory).
+**H3 and memory.** The full H3 engine needs 60 GB. From 16 GB up, H3 runs on its compact engine, which Phosphene builds after you download H3 from its card (click **Hailuo H3** in the engine switch). From 16 GB you make Draft and Standard clips, from 18 GB also High; Clean up sound and chained clips need 36 GB. Below 16 GB, render on LTX. See [Install H3](#docs/hailuo-h3/install) and [Troubleshooting](#docs/troubleshooting/memory).
 [[/mac-app]]
 
 ## Upscale and export {#upscale}
@@ -147,6 +149,16 @@ Below the sizes, **Also run Upscale & Face Fix after the draft** is optional and
 **On LTX** (under **After the render** → **Export**): **720p fit** (default), **Native**, or **2×**. When it is not Native, **Method** chooses **Fast** (instant) or **Sharp** (a sharper upscaler, +30–90 s).
 
 Any finished clip can also go through [Upscale & Face Fix](#docs/remix/upscale-face-fix) later — one click over the player, in its action overlay.
+
+## Make it vertical {#vertical}
+
+Turn a finished widescreen clip into a tall one for phones. Pick the clip, open **More** on the player, and choose:
+
+- **Make it vertical** — a 9:16 copy. The whole picture stays in the middle; above and below is a soft, blurred copy of the same clip. Free, takes seconds.
+- **Make it portrait (4:5)** and **Make it square (1:1)** — the same, in those shapes. Free.
+- **Make it vertical (AI fill)** <span class="pro-chip">Pro</span> — instead of a blur, AI paints real picture above and below, so the clip looks as if it was shot tall. Your original picture in the middle is not changed. It needs a Mac with 48 GB of memory or more and the High quality video model, downloads a 1.3 GB add-on the first time, and takes about 15 minutes for a 5-second clip. If it cannot finish, you get the blurred version instead and a note saying why.
+
+The new file lands next to the original in Outputs, with the original sound.
 
 ## More controls {#more}
 

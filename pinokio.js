@@ -5,16 +5,8 @@
 // completeness checks) and is what install.js / update.js are wired to
 // produce — so the menu state never drifts from what the panel will accept.
 //
-// Three install levels we care about for menu rendering:
-//   env_ready          — venv + ltx-2-mlx clone exist (install.js step 1-3)
-//   base_models_ready  — Q4 + Gemma fully on disk (install.js step 4-5)
-//   q8_ready           — optional Q8 bundle fully on disk (download_q8.js)
-//
-// Anything less than `env_ready && base_models_ready` means the user can't
-// Start — we surface a Resume Install affordance instead of Start. This is
-// the SHIP-BLOCKER from the deep review: a network hiccup after venv
-// creation used to leave the menu showing Start, with the panel about to
-// crash because Q4/Gemma aren't on disk.
+// Start needs a working runtime. Models are requested inside the app;
+// an empty model folder is a valid first run. Q8 remains an optional offer.
 
 const fs = require("fs")
 const os = require("os")
@@ -31,7 +23,8 @@ const path = require("path")
 // PANEL's floor to 36 on the phase profile above and left this restatement and
 // the preflight's behind, so a 36-48 GB Mac was told by the panel that H3 runs
 // and by this menu that H3 does not exist. One number, three files.
-const H3_MIN_BYTES = 36 * 1000 * 1000 * 1000
+// 5.0.7: 16 GB. The pinned engine streams its weights from disk (--low-memory auto).
+const H3_MIN_BYTES = 16 * 1000 * 1000 * 1000
 // The full bf16 engine's floor (H3_MIN_RAM_GB = 60 in the panel). Below it the
 // compact Q8 engine is the only lane that renders, so its build is REQUIRED.
 const H3_BF16_BYTES = 60 * 1000 * 1000 * 1000
@@ -48,7 +41,9 @@ function h3Capable() {
 }
 
 function musicCapable() {
-  try { return os.totalmem() >= 24 * 1000 * 1000 * 1000 } catch (e) { return false }
+  // Same floor as MUSIC_MIN_RAM_GB (16 GB since 4.19.12). A "16 GB" Mac reports
+  // 17179869184 bytes, so the decimal 16e9 admits it and nothing smaller.
+  try { return os.totalmem() >= 16 * 1000 * 1000 * 1000 } catch (e) { return false }
 }
 
 // SYS-18: the Q8 download entry below was offered on EVERY Mac regardless
@@ -134,13 +129,25 @@ function readEnvironment(installRoot) {
 }
 
 function repoComplete(installRoot, repo, minBytes) {
-  // A repo is "complete" iff every listed file exists at >= minBytes under
-  // its local_dir. Mirrors the Python-side _repo_missing in mlx_ltx_panel.py.
-  for (const fname of (repo.files || [])) {
+  // A repo is "complete" iff every listed file exists under its local_dir at
+  // its declared exact size (file_sizes) or else >= minBytes, and every loader
+  // sidecar (small upscaler configs) exists and is not empty. Mirrors the
+  // Python-side pack_file_ok in mlx_ltx_panel.py (fleet #206).
+  const sizes = repo.file_sizes || {}
+  const sidecars = repo.sidecars || []
+  for (const fname of (repo.files || []).concat(sidecars)) {
     try {
       const abs = path.join(installRoot, repo.local_dir, fname)
       const st = fs.statSync(abs)
-      if (!st.isFile() || st.size < minBytes) return false
+      if (!st.isFile()) return false
+      const want = sizes[fname]
+      if (typeof want === "number" && want > 0) {
+        if (st.size !== want) return false
+      } else if (sidecars.includes(fname)) {
+        if (st.size <= 0) return false
+      } else if (st.size < minBytes) {
+        return false
+      }
     } catch (e) {
       return false
     }
@@ -150,7 +157,16 @@ function repoComplete(installRoot, repo, minBytes) {
 
 module.exports = {
   version: "7.0",
-  title: "MacStudioMLX",
+  // PUBLIC IDENTITY. From v4.8.2 to v4.15.2 this said "Phosphene BETA" and
+  // "[BETA — unreleased builds, runs alongside the stable install on port
+  // 8199]": the private beta checkout's local edit got committed and rode
+  // every promote since. Pinokio 8.2.0 overlays pinokio.json's title and
+  // description on top of these (kernel/api meta(), Object.assign order), so
+  // the sidebar read "Phosphene" — but the text shipped to every user, indexed
+  // by Pinokio's app search and shown by any build without that overlay. The
+  // beta install names itself in its own local pinokio.json (skip-worktree);
+  // nothing beta-only belongs in this file.
+  title: "Phosphene",
   // The Pinokio store listing. It still said "via LTX 2.3 (MLX)" three weeks after 2.5
   // became the generation a fresh install renders with — the first sentence a prospective
   // user reads, naming the wrong engine, while a confused existing user hunting a "why
@@ -174,15 +190,7 @@ module.exports = {
 
     // --- per-repo completeness from the unified manifest ---
     const repos = required.repos || []
-    // WHAT HIDES START IS "CAN THIS RENDER", NOT "IS EVERY base ROW COMPLETE".
-    // `kind: "base"` had come to mean two different things — fetched on a fresh
-    // install, AND the panel cannot render without it — and Gemma 3 is the first
-    // but not the second: it is LTX-2.3's encoder and the Enhance/planner model,
-    // and the active 2.5 generation renders with Gemma 4 instead. Marked base, a
-    // half-downloaded planner model made Pinokio declare the base renderer
-    // incomplete and hide Start on an install that renders perfectly. The
-    // preview decoder had the identical bug one commit earlier; this closes the
-    // class by asking the capability instead of the label.
+    // Use the active generation for the optional high-quality model offer.
     const caps = required.capabilities || {}
     const capRender = caps.render || {}
     // THE ACTIVE GENERATION, where it is knowable. A user pinned back with
@@ -198,10 +206,6 @@ module.exports = {
     if (pinnedVersion && (capRender.repos_by_version || {})[pinnedVersion]) {
       activeVersion = pinnedVersion
     }
-    const renderKeys = ((capRender.repos_by_version || {})[activeVersion] || [])
-    const baseRepos = renderKeys.length
-      ? renderKeys.map(k => repos.find(r => r.key === k)).filter(Boolean)
-      : repos.filter(r => r.kind === "base")
     // THE PACK THE BUTTON ACTUALLY INSTALLS. This read `key === "q8"` —
     // LTX-2.3's pack — while the menu entry it gates dispatches
     // download_q8.js -> q8_weights.sh -> `--repo-key q8_25`, i.e. LTX-2.5's.
@@ -223,7 +227,6 @@ module.exports = {
       ? `~${Math.round(q8Repo.size_gb)} GB` : "unknown size"
     const q8Name    = q8Repo && q8Repo.name ? q8Repo.name : "Q8 weights"
 
-    const base_ready = baseRepos.length > 0 && baseRepos.every(r => repoComplete(installRoot, r, minBytes))
     const q8_ready   = q8Repo ? repoComplete(installRoot, q8Repo, minBytes) : false
     const sharp_ready =
       info.exists("ltx-2-mlx/env/lib/python3.11/site-packages/pipersr") ||
@@ -336,7 +339,7 @@ module.exports = {
     // "install ~75 GB" when they already have the 75 GB is the thing that
     // made this look like data loss.
     const h3_repair = h3_weights && !h3_ready
-    // The compact Q8 engine, built locally at the end of install_h3.js. A 36-59
+    // The compact Q8 engine, built locally at the end of install_h3.js. A 16-59
     // GB Mac cannot render H3 without it (the panel's h3_capable()), and once
     // the weights are complete `h3_ready` is true — so the only entry left was
     // "Update Hailuo H3 runner", while the panel told the user to click an
@@ -598,27 +601,7 @@ module.exports = {
       return m
     }
 
-    // Env exists but base models aren't fully there → SHIP-BLOCKER fix.
-    // Don't show Start — the panel would crash on the first job. Run
-    // install.js again (it's idempotent: skips clone + venv if present,
-    // re-runs `hf download` which itself resumes any partial files).
-    if (!base_ready) {
-      const m = [
-        // Deliberately NOT `default: true`. Reaching this state means
-        // install.js has already run and did not complete, so auto-running it
-        // is precisely the respawn loop documented at install_attempted. The
-        // user clicks Resume when they're ready.
-        { icon: "fa-solid fa-rotate-right", text: "Resume Install (base models incomplete)", href: "install.js" },
-      ]
-      if (has_outputs) m.push({ icon: "fa-solid fa-film",  text: "Outputs", href: "mlx_outputs?fs=true" })
-      if (has_models)  m.push({ icon: "fa-solid fa-cube",  text: "Models",  href: "mlx_models?fs=true" })
-      if (has_uploads) m.push({ icon: "fa-solid fa-image", text: "Uploads", href: "panel_uploads?fs=true" })
-      pushLtxRepair(m)
-      pushH3Recovery(m)
-      m.push({ icon: "fa-regular fa-circle-xmark", text: "Reset engine (keeps models & outputs)", href: "reset.js" })
-      return m
-    }
-
+    // Models are optional until a feature is used. A runtime can always open.
     if (running.start) {
       const local = info.local("start.js")
       if (local && local.url) {
@@ -684,7 +667,7 @@ module.exports = {
     }
     baseMenu.push(...musicMenu())
     // Second VIDEO engine — joint picture + dialogue + sound. Opt-in only:
-    // ~75 GB, 36 GB+ Macs (H3_MIN_BYTES above), MiniMax Community License
+    // ~75 GB, 16 GB+ Macs (H3_MIN_BYTES above), MiniMax Community License
     // with territory restrictions. Hidden entirely on machines that can't
     // run it, so it never reads as a missing piece of the base install.
     const h3Entry = h3Offer()

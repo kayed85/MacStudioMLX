@@ -3,7 +3,7 @@
 MiniMax-H3 (FL2VA) takes one prompt and returns **picture, dialogue and sound
 generated together**. It is a **peer of LTX, not an add-on to it** — but it is
 too big to ship in the base install, so it arrives as **its own one-click
-install**: ~75 GB of weights, a 36 GB+ Mac, and a licence with territory
+install**: ~75 GB of weights, a 16 GB+ Mac (5.0.7; 36 GB before), and a licence with territory
 restrictions. LTX remains the default engine and is completely untouched by
 any of this; whichever engines you have installed sit side by side in the
 switcher.
@@ -22,7 +22,8 @@ it can.
 | **≥ 60 GB** (`H3_MIN_RAM_GB`) | bf16 master DiT | Renders. 64 GB Macs report ~63.x after firmware reservations, which is why the floor is 60. |
 | **≥ 36 GB** (`H3_MIN_RAM_GB_Q8`), Q8 DiT pack on disk | quantised Q8 DiT | Renders. |
 | **≥ 36 GB, Q8 DiT pack absent** | — | **Not a hardware verdict.** `scripts/pinokio/h3_build_q8.sh` builds that pack locally in ~5 min / ~22 GB with **no extra download**, and "Install Hailuo H3" runs it automatically below 60 GB. The switcher shows H3 as an offer, the inline card names the step, and `h3_status()` carries `needs_q8_dit: true` with the sentence in `ram_note`. The sentence depends on whether the ~75 GB is already on disk: never installed → the sidebar's **Install Hailuo H3** (a real download, the Q8 build is its last step); weights present → **Build Hailuo H3 compact engine** (minutes, no download). Both entries are in the Pinokio sidebar while the panel runs, too (4.15.3; before that they appeared only with the panel stopped). |
-| **< 36 GB** | — | Genuinely out of reach. The refusal states 36, not 64. |
+| **16–35 GB** (`H3_MIN_RAM_GB_LOWMEM`, 5.0.7) | Q8 DiT, streamed (`--low-memory auto`) | Renders when the installed runner has `--low-memory`; Draft and Standard from 16 GB, High from 18 GB. Pin `59da147` (`phosphene/v5.0-image4`). On a runner without the flag the floor stays 36. |
+| **< 16 GB** | — | Genuinely out of reach. The refusal states 16. |
 
 `h3_ram_verdict()` is the single place those bands are decided. The render
 refusal, the `make_job` fallback line, the switcher tooltip, the engine-row
@@ -357,33 +358,85 @@ says so under itself when one of them is picked.
   sigma subset, decode; plus `h3.schedule` (the sigmas the runner ran) and
   `h3.lora_accounting`. The ⓘ modal prints a Speed row.
 
-### Speed adapters run a per-head copy (2026-10-22)
+### Every H3 LoRA runs in the base's qkv row order (2026-10-22)
 
 H3's DiT stores the fused `attn.qkv_proj` rows **per head**, `(heads, 3,
-head_dim)`. Every speed adapter Phosphene resolves — Kijai's TaoMate r19, the
-official TaoMate r128, larryvrh's v4-600 EMA, the LightX2V v1.x repack — has
-its `lora_B` rows **contiguous**, `(3, heads, head_dim)`: the layout of the
-ComfyUI/diffusers definition it was trained or converted through. (One-way
-ANOVA on row norms, q/k/v as groups: base blocks.49 per-head F 5006 vs
-contiguous 43; the adapters' B·A deltas at blocks.49 read the other way,
-TaoMate 11 vs 1897, v4 0 vs 1038.) The runner only re-orders rows under
-`--lora-qkv-permute`, which has been OFF by default since 2026-08-15 and is
-global to a run, so it would also re-order a stacked user LoRA that lora-lab
-trained in the native layout.
+head_dim)`. The ComfyUI/diffusers definition the community trains against
+splits them **contiguously**, `(3, heads, head_dim)`, and every H3 LoRA
+measured is in that order: the speed adapters (Kijai's TaoMate r19, the
+official TaoMate r128, larryvrh's v4-600 EMA, the LightX2V v1.x repack) and
+every user LoRA in the library (ostris ai-toolkit, the fal
+`minimax-h3-trainer`, a kohya-style trainer). The runner only re-orders rows
+under `--lora-qkv-permute`, which has been OFF by default since 2026-08-15
+and is global to a run. So since then every H3 LoRA has added its q update
+to the wrong heads' rows.
 
-So the panel re-orders the speed adapter itself: `h3_bake_runner_layout()`
-writes `turbo-lora/runner-layout/<same name>` with each qkv `lora_B`'s 168
-blocks of 128 rows moved into per-head order. It is a byte move of whole rows
-(dtype-agnostic, no arithmetic), byte-identical to the runner's
-`_permute_qkv_rows` on all 52 modules of the real TaoMate file, stamped in the
-file's metadata with the source's size and mtime and re-made when either
-changes, and written through a `.partial` + rename. It runs right after a Fast
-or Turbo download and, for installs that already have the file, on the first
-render (0.25 s for the 182 MB TaoMate file on an M4 Max). The downloaded, digest-pinned file is never touched.
-A runner without `--lora-qkv-permute` predates 2026-08-15 and re-orders every
-`--lora` itself, so it is handed the source file. User LoRAs never go through
-this. Provenance: `h3.tristep` / `h3.turbo` carry `lora` (the file the runner
-read), `source` and `qkv_rows` (`per-head` or `runner`).
+**The test.** One-way ANOVA on per-row norms with q/k/v as the groups, read
+both ways. The base (bf16 pruned DiT and the Q8 pack alike) reads per head:
+blocks.0 F 1362 vs 83, blocks.49 5006 vs 43, token_refiner.0 1549 vs 10.
+`h3_lora_qkv_layout()` runs the same test on each of a LoRA's qkv modules —
+row norms of B·A via the rank×rank Gram matrix, so the full delta is never
+built — and each trained module votes for the larger F. 70 % agreement
+calls the file (measured files sit at 87-98 %); below that it is
+"unclear". A file whose metadata declares per-head rows (our own
+runner-layout copies, `fetch_h3_v13.py` builds, Viggle's "interleaved"
+exports) skips the vote. 0.03-0.9 s per file, cached per size + mtime.
+
+**Contiguous is the default (2026-10-23, 4.19.12 blocker).** MiniMax's own
+release is diffusers-shaped (separate `to_q` / `to_k` / `to_v`), and every
+tool that fuses them into one `attn.qkv_proj` stacks them `[q; k; v]`. So
+only a declared or measured per-head file runs as it is; "unclear" (or a
+dtype the vote cannot read) is re-ordered like every other fused file, with
+a log line. Before this, "unclear" ran as trained — wrong for every trainer
+we know of.
+
+**fc1 is not in this class.** The runner reads `mlp.fc1` as `[gate; value]`
+and so does every fused-name lineage: Kijai's comfy repack of LightX2V v1.0
+swaps diffusers' `[value; gate]` into it (his metadata says so, and our own
+diffusers repack agrees with his file as-is at +0.962), and his TaoMate r19
+keeps the official TaoMate r128's half order (per-block half-norm ratios
+identical: 0.014 / 0.014 / 0.206 at blocks 5 / 25 / 45). Diffusers-format
+files are refused at import, so `--lora-fc1-swap` stays off.
+
+**The fix.** `h3_lora_for_runner()` hands the runner, for a contiguous file,
+`<dir>/runner-layout/<same name>`: each qkv `lora_B`'s 168 blocks of 128 rows
+moved into per-head order by `h3_bake_runner_layout()` (whole-row byte moves,
+dtype-agnostic, no arithmetic; byte-identical to the runner's
+`_permute_qkv_rows` on the real TaoMate and bizarrotrn_h3 files). A per-head
+file runs as it is; an MLP-only LoRA has nothing to re-order. The copy is
+stamped with the source's size + mtime and re-made when either changes,
+written through `.partial` + rename, and pruned once its source leaves the
+library; the picker lists only the library's top level, so it never shows.
+The source file is never touched, so a recipe keeps naming it. Fast and
+Turbo get their copy right after download; everything else on first use. A
+runner without `--lora-qkv-permute` predates 2026-08-15 and re-orders every
+`--lora` itself, so it is handed the source.
+
+**Evidence.** Fast @ High 1024×576 5 s, seed 52031: the re-ordered TaoMate
+copy renders byte-identical to `--lora-qkv-permute`, and against the shipped
+order the mouth is 56 % sharper (Laplacian variance 26.4 → 41.1) with no
+added flicker. A character LoRA moves further: bizarrotrn_h3 at 1.0 on Fast
+@ High, seed 52032, ArcFace identity against its 42 training stills 0.399 →
+0.640, mouth region 24 % sharper, face 30 % steadier frame to frame — as
+shipped, the trigger's description (a waxed handlebar) won over the face the
+LoRA learned.
+
+**The 4.19.12 blocker (2026-10-23).** 4.19.11 shipped only the speed-adapter
+half (e1568d7): user LoRAs still went to the runner as trained, on every
+speed including Best at High with lightx2v v1.3 (its own file is per-head;
+a user LoRA stacked after it was not). Regression gates in
+`test_h3_tristep_draft.py`: the delta the runner applies, B'·A, equals the
+trained B·A with its rows moved (3, heads, head_dim) → (heads, 3,
+head_dim), derived from row indices, not from either implementation; and on
+the maintainer's Mac the bizarrotrn_h3 copy's tensor bytes match the copy
+that rendered the corrected clips (sha256 758e0096…). The fused block weight
+W + B'·A matches the pinned runner's own `--lora-qkv-permute` bit for bit
+(blocks 0 / 25 / 49); as 4.19.11 passed it, |Δ − Δref| / |Δref| ≈ 1.41,
+i.e. an orthogonal, unrelated update.
+
+**Provenance.** `h3.tristep` / `h3.turbo` carry `lora` (the file the runner
+read), `source` and `qkv_rows`; `params.h3_lora_qkv` lists each user LoRA
+with its `qkv_rows` (`re-ordered`, `as-trained`, `none`, `runner`).
 
 ### Best on High: lightx2v v1.3 (2026-10-22)
 
@@ -433,6 +486,65 @@ from the Speed row) downloads the pinned source (sha256 `97b77570…`,
 Both digests are checked; a corrupt or partial build is deleted, never
 renamed into place. `test_h3_v13.py` pins script↔panel parity, the re-layout
 against an independent reference, the job rules, the argv and the prices.
+
+### H3 Flex Turbo (5.0, Pro, preview)
+
+A faster H3 Flex draft, part of Phosphene Pro. This repository carries the option's name, its
+credit line, its picker row and its time estimates; what it downloads and how it renders are
+answered by the Pro add-on (`h3_flex_turbo_spec()` in the panel asks it), so a Free install
+shows the row as a Pro option and nothing more. Panel: `h3_flex_turbo_status()` in `/status` as
+`h3.flex_turbo`, `h3_flex_turbo=1` in make_job (rides every Flex gate), `POST
+/h3/flex-turbo/install` (402 without Pro), picker entry `h3flexturbo`, timing lane `flex_turbo`.
+Pro gate: `h3_flex_turbo_allowed()` (Pro ledger row `h3-flex-turbo`). Credit: the Pika H3 Flex
+Turbo LoRA by akhaliq, fusing Pika H3 Flex (Pika Labs) with LightX2V's MiniMax-H3 Turbo; weights
+under the MiniMax H3 Community License.
+
+### Pika H3 Flex: Pika Labs' six-step H3, natively on Apple Silicon (2026-10-30)
+
+**Pika H3 Flex running natively on Apple Silicon (MLX) — the first Mac port we know of.**
+Pika Labs released [Pika H3 Flex](https://huggingface.co/Pika-Labs/Pika-H3-Flex)
+on 2026-10-29 for NVIDIA only (H100 80 GB, `--cpu-offload` for 768p/15 s). It is
+not a new base model: a rank-128 LoRA (alpha 128) on MiniMax H3, base revision
+`42ed227` — whose transformer shards are byte-identical (LFS sha256) to the
+release this pack's pruned/Q8 DiT was built from — plus the sampler it was
+distilled for. Phosphene implements that method in its own MLX code; nothing
+of Pika's code is copied.
+
+| piece | what |
+|---|---|
+| sampler | runner `--pika-flex` = `--sampler renoise --sigma-knots 1000,750,500,250,100,40,0 --video-shift 12 --audio-shift 3` (6 forwards). Each forward predicts `x0 = x_t + sigma*v`; the next state is `x0` re-noised to the next knot with fresh noise (not an Euler blend); the terminal knot is 0. Engine commit `bef6d03` on `phosphene/v4.19.15` (`MiniMaxH3RenoiseScheduler`, `tests/test_pika_flex.py`). |
+| adapter | `scripts/fetch_h3_flex.py` downloads Pika's `fl2va/adapter.safetensors` (float32, sha256 `8ed6115d…`, 2,767,274,120 B) at revision `0ddf55ad` with Pika's LICENSE, NOTICE and manifest, then builds `pika_h3_flex_fl2va_phosphene.safetensors` (sha256 `c71f527d…`, 1,956,166,104 B, deterministic): q/k/v fused block-diagonal in the DiT's per-head order, fc1 halves swapped to `[gate; value]`, float32 to bfloat16 round-to-nearest-even (Pika's own loader runs the adapter in bf16), alpha == rank so no fold. The metadata declares per-head rows and carries the licence notice and a modification notice (Licence III.2). |
+| panel | the third Speed pill, **✧ Pika Flex (preview)** (`h3_flex=1`, a preview since 4.19.15), never a default. Text and Image, every 5 s-window cell (Draft, Standard, High, Native; chained lengths too); it wins over Fast, Turbo, v1.3 and a Steps pin. The note under the switch and the sidecar's `flex` block carry the credit and "Powered by MiniMax H3". `POST /h3/flex/install` builds it (licence-gated like H3). Hidden until the runner has `--pika-flex`. |
+
+Measured on the M4 Max 64 GB, Q8 DiT (2026-10-30):
+
+| shape | forwards | per forward | wall | peak |
+|---|---:|---:|---:|---:|
+| Draft 640×384, 5 s (124 f), Text | 6 | 40.8 s | 301 s | 24.0 GiB denoise / 25.7 run |
+| same prompt + seed, base H3 at 9 points (prompt cached) | 8 | 39.2 s | 358 s | 22.2 GiB denoise |
+| High 1024×576, 5 s, Image | 6 | 143 s | 976 s | 26.6 GiB denoise / 27.2 run |
+| same shot + seed, base H3 Best (16 points) | 15 | 139 s | 2190 s | 24.8 GiB denoise |
+| High 1024×576, 15 s (3 chained 5 s windows, 17-frame carried context), Image | 3 × 6 | 143 / 172 / 172 s | 3293–3304 s | 27.3 GiB |
+| Native 1344×768, 5 s, Image (stopped after forward 1: disk) | 6 | 340 s | ~37 min projected | — |
+
+On the High 5 s A/B (same first frame, prompt, seed) Flex took 16.3 min against
+the full sampler's 36.5 min (2.2×) for a clip of the same staging and quality.
+Chained 15 s keeps each 5 s window as good as a single one, but windows 2-3 can
+drift on set and supporting characters (the sitcom chain changed the dog and the
+sofa; the table-tennis chain held). Pika's own 15 s showcases are ONE dense pass
+at 1344×768, which on a Mac is the dense 15 s cell Flex does not take yet.
+
+The adapter costs ~4% per forward (runtime low-rank matmul) and ~1.8 GiB.
+"Run" peak is the Q8 text encoder phase, which the prompt cache skips. Whisper reads the
+scripted lines back verbatim on both test clips. Ref2VA is not offered: Pika's
+Ref2VA adapter targets the separate Ref2VA trunk (`transformer_ref`, ~20 GB as
+Q8), which this pack does not carry.
+
+**Licence.** The adapter is a MiniMax H3 Model Derivative (copyright Mellis,
+Inc.) under the MiniMax H3 Community License — same territory exclusion (US,
+EU, UK, KR), AUP, "MiniMax H3" shown in the UI (IV.2), the NOTICE text with any
+distribution (III.4). Pika's code is Apache-2.0 (`LICENSE-CODE`). Phosphene
+never re-hosts the weights; each Mac fetches Pika's original.
 
 ### Chained windows (v3.4.1)
 
@@ -546,6 +658,86 @@ The 3-step finish redraws the face and costs as much as High Fast, so Fast HD us
 auto:5`): 489 s, ArcFace 0.892 (min 0.814), visible expression change at the same seed —
 not adopted; the flag stays in the runner for research only.
 
+
+### Clean up sound (5.0): re-make a Fast render's sound
+
+Fast's sound comes from the same pass as its picture, with the 3-step adapter
+on. Measured against Best on the same prompt and seed it is low-heavy and dull:
+on a Mr Bizarro speech clip 55% of its energy sits under 300 Hz (Best: 8%), its
+spectral centroid is 552 Hz (Best: 1051 Hz); on a forge clip the anvil's ring
+(2-6 kHz) is 20% of the energy against 49% when the sound is re-made, and the
+two stereo channels agree less (L/R correlation 0.85 vs 0.93). This matches
+the third-party report about turbo-adapter sound (harsh, thin, echo-like),
+though on our TaoMate adapter "muddy" is the better word.
+
+**Clean up sound** (a checkbox under Speed, only with Fast) passes
+`--revoice-steps 9 --revoice-drop <the Fast adapter>`. After the picture is
+denoised the runner sets the Fast adapter's LoRA entries to 0 (a character
+LoRA stays on, so a trained voice keeps its voice), holds the finished picture
+clean (t = 1) and the text rows at t = 0, and denoises only the audio rows from
+fresh noise over a 9-point audio schedule. One full forward stores every
+block's keys/values for the rows that never change (int8, one scale and bias
+per 128-wide head vector); the 8 audio steps then run the audio rows alone
+against that store.
+
+| Standard 5 s, M4 Max, Q8 | Fast | Fast + Clean up sound | Best |
+|---|---|---|---|
+| Wall clock (speech / song / forge) | 4.3 / 4.0 / 4.0 min | 5.6 / 5.2 / 5.2 min | 9.5 min |
+| Re-voice pass | - | 74-80 s (store forward 64 s, then ~1.8 s per audio step) | - |
+| Peak | 22.9 GiB | 32.7 GiB | 22.9 GiB |
+| Speech: energy < 300 Hz / centroid | 55% / 552 Hz | 8% / 978 Hz | 8% / 1051 Hz |
+| Speech transcript (whisper large-v3-turbo) | exact | exact | exact |
+| Word boundaries vs Fast | - | within 0.04 s | - |
+| Mouth-opening vs loudness correlation | 0.42 | 0.31 | 0.46 |
+
+Draft: store forward 43 s + 1.9 s per audio step (+56 s), peak +6.6 GiB. The
+store grows with the canvas (~0.74 MB per packed row): `h3_revoice_fits()`
+greys the box where the Fast peak plus the store does not fit the budget the
+runner is given (High on a 36 GB Mac). The exact path (`--revoice-kv off`,
+every step a full forward) gives the same spectral result; the store is not
+what moves the numbers. `--revoice-strength < 1` (start from Fast's own sound
+noised to that sigma) keeps more of Fast's low end; not used.
+
+Off by default (`H3_REVOICE_DEFAULT`): it costs ~30% of a Fast render, and the
+mouth/loudness correlation drops (0.42 -> 0.31 on the speech clip) even though
+the words land on the same frames. Proof clips `h3wk_cleansound_*` in the
+dev gallery play the same picture with Fast's sound, then the cleaned one.
+
+### Face to keep: a reference image on FL2VA (5.0)
+
+`--reference IMAGE [--reference-size N] [--ref-patch PATCH[:S]]` packs a still
+as MiniMax's ref2va image block on the FL2VA layout: its own canvas (2048 px
+short edge upstream; the panel uses 1024), its own aspect-normalised grid, one
+rotary slot before the target, conditioning noise from its own draw, and
+`<Picture n>` in the vision tower after any keyframes.
+
+In the panel: **Face to keep** (an optional picker above the prompt, H3 Text and
+Image only, `h3_reference` in the make_job allowlist). The panel passes
+`--reference <file> --reference-size 1024` and, unless the prompt already names
+a picture, appends "The person from <Picture n> is in this shot, with the same
+face, hair and facial hair." to the description (n = 2 when a first frame is
+Picture 1). The prompt the user typed is kept in the sidecar; `h3.reference`
+records the still that was packed.
+
+Identity, Standard Fast text-only cafe scene, two seeds, ArcFace against the
+Mr Bizarro still centroid with the reference photo itself excluded (PM hub report
+for every arm):
+
+| Arm | seed 5201 median (min) | seed 5202 median (min) | Time |
+|---|---|---|---|
+| Text only (description of the man) | 0.365 (0.339) | 0.352 (0.328) | 3.9-4.0 min |
+| + reference at 1024 | 0.709 (0.691) | 0.674 (0.660) | 5.0 min |
+| + reference + Ref Patch | 0.691 (0.663) | 0.617 (0.582) | 5.0-5.1 min |
+| Same photo as the first frame (composition locked to it) | 0.736 (0.711) | 0.702 (0.670) | 4.2-4.3 min |
+| Character LoRA (bizarrotrn) instead | 0.491 (0.448) | 0.582 (0.523) | 4.0 min |
+
+So the reference keeps a face about as well as using the photo as the first
+frame, while the scene, framing and wardrobe follow the prompt. The Ref Patch
+(lihaoyun6, Apache-2.0, 148 MB: ref2va-minus-fl2va differences of the
+input/output projections; its AdaLN weights target an 8-wide input this
+checkpoint does not have) did not help and is not used by the panel.
+RefMods (ComfyUI-MiniMaxH3Mod, MIT; weights Apache-2.0) are pre-encoded
+reference latents for the same slot; not imported.
 
 ### Export pass — the same post-process LTX renders get
 
@@ -769,6 +961,62 @@ lands in the H3 library even if it was found under "All".
 is hidden entirely on a pack that predates it.
 
 ---
+
+## P-H3-Image (Pruna) — the image lane on the H3 runner
+
+Pruna AI's P-H3-Image (`PrunaAI/P-H3-Image` @ 7f98acef, adapter from `PrunaAI/P-H3-Image-Comfy` @ 44a0fb73) is MiniMax-H3 FL2VA
+plus a rank-128 adapter (208 modules, scale 1.0: proven tensor by tensor against our pruned base), run as ONE latent frame
+(two throw-away audio latents) over 8 forwards, no guidance. It reuses the H3 Q8 DiT already on disk; its own parts are a
+five-tap Qwen3-VL-4B text encoder + connector and a new single-frame ViT image decoder.
+
+- Runner: `scripts/generate_image.py PROMPT -o OUT --root <models>/p-h3-image --dit <q8> --aspect A --mp 2|4|8 --seed N --metrics M`
+  (5.0.7: the pin is now `59da147` on ref `phosphene/v5.0-image4`, cd07c3c plus low-memory streaming. Before that: engine pin cd07c3c on ref `phosphene/v5.0-image3`: 63893b3 plus the resident worker `scripts/serve_image.py` and compiled repeated blocks). Staged: text encoder out, then DiT + adapter,
+  then the decoder (tiled, 16x16 tokens).
+- Adapter layout: qkv rows permuted to our per-head layout, fc1 as published (NOT `--lora-fc1-swap`, unlike Flex). The load logs
+  `208 applied, 0 skipped`.
+- Fetch: `scripts/fetch_ph3_image.py --dir D --accepted`: pinned files (bytes + sha256), upstream LICENSE / LICENSE-APACHE / NOTICE
+  beside them, the decoder converted locally (renames + re-fused tensors, values unchanged, MODIFICATION_NOTICE in its metadata)
+  and checked against `DECODER_SHA256` 0415dda9; the 5.6 GB original is deleted after and never fetched again.
+- Studio: `image_engine.kind = "ph3image"`, engines `ph3image_draft_inline` / `ph3image_standard_inline` / `ph3image_inline`
+  (2 / 4 / 8 MP), `POST /image/ph3image/install` (H3 licence gate), `/status` block `ph3image`, capability row `images.p_h3_image`.
+- Measured, M4 Max 64 GB (ports/p-h3-image-pruna/bench/RESULT.md in the PM hub): 2 MP 75 s, 4 MP 146 s (15.4 s/step),
+  8 MP 312 s; peak 24.2 / 24.7 / 25.5 GB. Real-weight parity vs Pruna's code: text taps cos >= 0.99994, connector 1.000,
+  decoder fp32 126.8 dB.
+- Not ported: edit mode (1-8 reference images; needs the VAE encoder mapping and the vision tower), the 19 GB prompt rewriter.
+
+## MiniMax-H3-Image (MiniMax) — the H3 family's own image model
+
+`MiniMaxAI/MiniMax-H3-Image` @ 6534ea1c: a 33B DiT (H3 minus audio), six forwards with one fused output head each
+(`pdd_fused_heads.safetensors`), no guidance and no negative prompt, 4 to 16 MP (a request below 4 MP is generated on a
+4 MP canvas and resized back), text to image and edit (5.0.19, below). Port notes:
+`ports/minimax-h3-image` in the PM hub.
+
+- Runner: `scripts/generate_h3_image.py PROMPT -o OUT --root <models>/minimax-h3-image --text-dir <ddalcu-q8> --text-config
+  <upstream-meta/FL2VA/text_encoder/config.json> --aspect A --mp 4|8|16 --seed N --metrics M`. Staged: text encoder out, then the
+  DiT, then the decoder. The text encoder and its config are the H3 video lane's own files; no warm worker.
+- Fetch: `scripts/fetch_h3_image.py --dir D --accepted`: the 12 ORIGINAL shards at the pinned revision (bytes + sha256 each, 66.3 GB),
+  the VAE and the heads, upstream LICENSE + NOTICE beside them; each shard is quantised to Q8 and its AdaLN projections are
+  replaced by their six-timestep table, then the source shard is deleted. Peak extra disk ~26 GB, finished pack ~21 GB (the install
+  asks for 30 GB free). Resumable.
+- Studio: `image_engine.kind = "h3image"`, engines `h3image_draft_inline` / `h3image_standard_inline` / `h3image_high_inline`
+  (4 / 8 / 16 MP), `POST /image/h3image/install` (its OWN licence `minimax-h3-image`: 451 until accepted, not the H3 screen),
+  `/status` block `h3image`, capability row `images.h3_image` (`preview`, `t2i`, 6 steps, not Pro, no ledger row: Free vs Pro is the
+  owner's call). The lane stays greyed until the installed H3 checkout carries `scripts/generate_h3_image.py` (probed by FILE in
+  `h3image_supported()`); the engine pin (`scripts/pinokio/h3_checkout.sh`) has NOT moved and must before this ships.
+- Placeholders until `ports/minimax-h3-image/bench/RESULT.md`: `H3IMAGE_MEASURED_ETA` (seconds per tier) and `H3IMAGE_PEAK_GB` in
+  `mlx_ltx_panel.py`. The picker labels, the engine table and the Image Studio estimate all read them.
+
+### MiniMax-H3-Image edit (5.0.19)
+
+- Engine (minimax-h3-mlx `42fdc21`, branch `phosphene/v5.0-image6`): `--reference PATH` (repeatable, up to 16, Picture 1 first)
+  and `--match-reference` (output in Picture 1's shape at `--mp`). References are packed `[text | refs | target]`, one rotary
+  slot each, held at `0.999 * clean + 0.001 * noise` every forward; only the target is stepped. Qwen sees each picture at a
+  1024 px short edge with the release's `Picture n: ` label; the VAE encodes a 1024-2048 px copy cropped top-left to an even
+  16 px grid (the release's own encoder weights, the H3 video encoder architecture). Measured, M4 Max 64 GB: one 2048 px
+  picture at 4 MP = 291 s (text alone 119 s), peak 29.3 GB.
+- Studio: up to 6 pictures (`IMAGE_MAX_REFS_H3IMAGE`), offered only when the installed runner has `--match-reference`
+  (`h3image_edit_supported()`); aspect key `match` = Same as picture. All of it is Free (owner, 12 Nov 2026). The engine pin has NOT moved to `42fdc21`: the branch must be
+  pushed to the engine repo and `scripts/pinokio/h3_checkout.sh` bumped before users get it. Gap table: `docs/H3_IMAGE_GAPS.md`.
 
 ## What H3 does *not* do
 

@@ -142,22 +142,11 @@ ROOT = Path(__file__).resolve().parent
 # anything twice. LTX_STORYBOARD_PLANNER is the escape hatch for pointing at Qwen3.5 (or
 # anything else mlx-lm can load) without touching this file.
 MODELS_DIR = Path(os.environ.get("LTX_MODELS_DIR", str(ROOT / "mlx_models")))
-def _resolve_default_model_path() -> Path:
-    env_path = os.environ.get("LTX_STORYBOARD_PLANNER") or os.environ.get("LTX_GEMMA_PATH")
-    if env_path:
-        return Path(env_path)
-    candidates = [
-        MODELS_DIR / "gemma-3-12b-it-4bit",
-        ROOT / "mlx_models" / "gemma-3-12b-it-4bit",
-        MODELS_DIR / "gemma4-12b-ltx25-q4",
-        ROOT / "mlx_models" / "gemma4-12b-ltx25-q4",
-    ]
-    for cand in candidates:
-        if cand.exists():
-            return cand
-    return MODELS_DIR / "gemma-3-12b-it-4bit"
-
-DEFAULT_MODEL_PATH = _resolve_default_model_path()
+DEFAULT_MODEL_PATH = Path(
+    os.environ.get("LTX_STORYBOARD_PLANNER")
+    or os.environ.get("LTX_GEMMA_PATH")
+    or (MODELS_DIR / "gemma-3-12b-it-4bit")
+)
 
 # The child needs mlx + mlx_lm; the panel's own interpreter may not have them (it is 3.9).
 # Same resolution order as the panel's _resolve_helper_python().
@@ -308,7 +297,7 @@ L4  ONE CONTINUOUS ACTION per 5 seconds for a human subject. Two beats maximum i
 L5  NO UNANCHORED NEGATIONS. There is no negative prompt. Never write "not blurry", "high
     quality", "no distortion". The only refusals allowed are against things the model adds
     by itself: camera drift (L1) and unwanted lettering ("No text appears at any point.").
-L6  DIALOGUE lives inside <d>[Language] ...</d> (e.g. <d>[Arabic] ...</d> or <d>[English] ...</d>) and nowhere else. The speaker, their voice
+L6  DIALOGUE lives inside <d>[English] ...</d> and nowhere else. The speaker, their voice
     and their delivery are described OUTSIDE the tag. Immediately after the tag, stop the
     mouth: "his jaw ceases speaking motion and his mouth settles closed". One or two short
     sentences per 5 s. If a shot has no dialogue, it has no <d> at all.
@@ -799,7 +788,6 @@ Rules:
 5. Some beats have no dialogue at all. Those are where the scene breathes; say what the
    person is DOING instead.
 6. Keep it short: 8-14 beats, one or two sentences each. This is a 30-60 second scene.
-7. PRESERVE THE EXACT DIALOGUE LANGUAGE. If the brief provides dialogue lines in Arabic or any other non-English language, write the dialogue lines EXACTLY in that language inside double quotes. Do not translate them to English.
 
 Output plain text, one beat per line, in this form:
 
@@ -830,7 +818,7 @@ def _screenplay_text(resp: Dict[str, Any]) -> str:
 # A beat line or an attributed line of dialogue. Anything else is chatter.
 # The class carries parentheses so a sung attribution — NAME (sings): "..." —
 # survives the filter; without them every lyric line was silently dropped.
-_SCREENPLAY_LINE_RE = re.compile(r"^(?:BEAT\b|[\u0600-\u06FFA-Z][\u0600-\u06FFA-Za-z0-9 _\'()-]{0,30}:)")
+_SCREENPLAY_LINE_RE = re.compile(r"^(?:BEAT\b|[A-Z][A-Za-z0-9 _\'()-]{0,30}:)")
 
 
 def _build_screenplay_prompt(concept: str, n_shots: int, style: str,
@@ -1733,16 +1721,14 @@ def _prose_dialogue(text: str) -> List[str]:
 
 
 def _convert_prose_dialogue(text: str) -> Tuple[str, int]:
-    """Rewrap prose-quoted lines as <d>[Language] ...</d>. Returns (text, count)."""
+    """Rewrap prose-quoted lines as <d>[English] ...</d>. Returns (text, count)."""
     if _has_dialogue(text):
         return text, 0
     n = [0]
 
     def repl(m):
         n[0] += 1
-        val = m.group(2).strip()
-        lang = "Arabic" if re.search(r"[\u0600-\u06FF]", val) else "English"
-        return "%s<d>[%s] %s</d>" % (m.group(1), lang, val)
+        return "%s<d>[English] %s</d>" % (m.group(1), m.group(2).strip())
 
     out = _PROSE_DIALOGUE_RE.sub(repl, text or "")
     if n[0] and "ceases speaking motion" not in out:
@@ -2492,36 +2478,6 @@ def coerce_spec(
             "soundscape": sound,
             "music": music,
         }
-
-        # Auto-bind entity reference images (characters, locations) to shot refs
-        shot_refs: List[str] = []
-        raw_refs = s.get("refs")
-        if isinstance(raw_refs, list):
-            shot_refs.extend([str(r).strip() for r in raw_refs if str(r).strip()])
-
-        for c in (cast or []):
-            if isinstance(c, dict):
-                c_ref = c.get("ref") or c.get("ref_image") or c.get("image_output")
-                c_name = str(c.get("name") or c.get("id") or "").lower()
-                c_trig = str(c.get("trigger") or "").lower()
-                if c_ref and str(c_ref) not in shot_refs:
-                    if char and char.get("id") == c.get("id"):
-                        shot_refs.append(str(c_ref))
-                    elif c_name and (c_name in desc.lower() or c_name in str(s.get("title") or "").lower()):
-                        shot_refs.append(str(c_ref))
-                    elif c_trig and c_trig in desc.lower():
-                        shot_refs.append(str(c_ref))
-
-        for loc in (locs or []):
-            if isinstance(loc, dict):
-                l_ref = loc.get("ref") or loc.get("ref_image") or loc.get("image_output")
-                l_name = str(loc.get("name") or loc.get("id") or "").lower()
-                if l_ref and str(l_ref) not in shot_refs and l_name and l_name in desc.lower():
-                    shot_refs.append(str(l_ref))
-
-        shot["refs"] = shot_refs
-        if shot_refs and shot["mode"] == "text":
-            shot["mode"] = "remix"
         # Which place this shot happens in. Matched on the NAME the model was
         # given; if it answers with something not on the list, or answers with
         # nothing, a film with exactly ONE location falls back to that one —
@@ -2836,68 +2792,6 @@ def _parse_feedback(feedback: Any) -> Tuple[str, Optional[int], str]:
     return "film", None, text
 
 
-def _fallback_plan_film(
-    concept: str,
-    n_shots: int = 6,
-    style: str = "",
-    cast: list = None,
-    board_id: Optional[str] = None,
-    engine: str = "auto",
-    tier: str = "draft",
-    duration_s: float = 5.0,
-    seed_base: int = 42
-) -> Dict[str, Any]:
-    """Built-in fallback film planner when MLX / Gemma model is not available."""
-    created = int(time.time())
-    bid = board_id or ("sb-%d-%s" % (created, hashlib.sha1(("%s|%d" % (concept, seed_base)).encode("utf-8")).hexdigest()[:6]))
-
-    shots = []
-    camera_motions = [
-        "cinematic 35mm film shot, slow panning camera",
-        "medium tracking shot, handheld camera movement",
-        "close-up shot, shallow depth of field",
-        "wide-angle cinematic frame, gentle camera push-in",
-        "over-the-shoulder shot, natural illumination",
-        "dramatic lighting, smooth camera motion"
-    ]
-
-    sentences = [s.strip() for s in re.split(r"[.!?\n]", concept) if s.strip()]
-    if not sentences:
-        sentences = [concept.strip() or "Cinematic scene"]
-
-    for i in range(n_shots):
-        base_desc = sentences[i % len(sentences)]
-        cam = camera_motions[i % len(camera_motions)]
-        shot_prompt = "%s. %s" % (base_desc, cam)
-        if style:
-            shot_prompt += ", %s" % style
-
-        shots.append({
-            "id": "shot-%02d" % (i + 1),
-            "shot_index": i + 1,
-            "duration_sec": duration_s,
-            "prompt": shot_prompt,
-            "camera": cam,
-            "engine": engine if engine in ("h3", "ltx") else "ltx",
-            "seed": (seed_base + i * 100) % 1000000,
-        })
-
-    return {
-        "schema": 1,
-        "id": bid,
-        "title": concept.strip()[:60] or "Untitled Storyboard",
-        "created_at": created,
-        "cast": cast or [],
-        "policy": {"engine": engine, "tier": tier},
-        "shots": shots,
-        "_planner": {
-            "model": "built-in fallback planner",
-            "concept": concept,
-            "shots_requested": n_shots,
-        }
-    }
-
-
 def plan_film(
     concept: str,
     n_shots: int = 6,
@@ -2925,7 +2819,6 @@ def plan_film(
     python_exe: Optional[Any] = None,
     session: Optional[PlannerSession] = None,
     timeout_s: float = DEFAULT_TIMEOUT_S,
-    allow_fallback: bool = False,
 ) -> Dict[str, Any]:
     """Concept -> film spec that `storyboard.validate_storyboard()` accepts.
 
@@ -3091,7 +2984,7 @@ def plan_film(
             known_ids=known_ids, ref_root=ref_root, temperature=temperature,
             budget=budget, model_path=model_path, t_start=t_start,
             allow_hidden_faces=allow_hidden, locs=locs,
-            pass_warnings=pass_warnings, allow_fallback=allow_fallback)
+            pass_warnings=pass_warnings)
     finally:
         # The model is gone before this function returns, on every path including an
         # exception. Peak RSS is only final once the child has been reaped, so the
@@ -3107,7 +3000,7 @@ def _plan_with_session(sess, *, system, user, fb_mode, fb_shot, previous, valida
                        concept, n_shots, style, cast, board_id, engine, tier, duration_s,
                        seed_base, max_dim, known_ids, ref_root, temperature, budget,
                        model_path, t_start, allow_hidden_faces,
-                       locs=(), pass_warnings=(), allow_fallback=False) -> Dict[str, Any]:
+                       locs=(), pass_warnings=()) -> Dict[str, Any]:
     """The generate -> extract -> coerce -> validate -> ONE repair loop.
 
     Split out of plan_film() so the `finally:` that releases the model is three lines with
@@ -3162,13 +3055,6 @@ def _plan_with_session(sess, *, system, user, fb_mode, fb_shot, previous, valida
         resp = sess.generate(system, user, max_tokens=budget,
                              temperature=temperature, seed=seed_base % 100000)
     except PlannerError as exc:
-        if allow_fallback:
-            sys.stderr.write("[planner] model generate failed (%s) — using fallback plan\n" % exc)
-            return _fallback_plan_film(
-                concept=concept, n_shots=n_shots, style=style, cast=cast,
-                board_id=board_id, engine=engine, tier=tier, duration_s=duration_s,
-                seed_base=seed_base
-            )
         return _error("model_unavailable", str(exc),
                       hint="Check that the planner model exists and that ltx-2-mlx/env "
                            "has mlx-lm installed.",
@@ -3920,12 +3806,6 @@ def _worker_serve() -> int:
             continue
         try:
             import mlx.core as mx
-            try:
-                import mlx_lm.utils
-                for _gkey in ("gemma4_unified", "gemma4_unified_text", "gemma4_unified_audio", "gemma4", "Gemma4UnifiedForConditionalGeneration", "Gemma4UnifiedTextForConditionalGeneration"):
-                    mlx_lm.utils.MODEL_REMAPPING[_gkey] = "gemma2"
-            except Exception:
-                pass
             from mlx_lm import load as mlx_lm_load, generate as mlx_generate
             from mlx_lm.sample_utils import make_sampler
 

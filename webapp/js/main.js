@@ -29,11 +29,23 @@ function _wireModeGroupTabSemantics() {
 }
 
 // ====== Init ======
+// Translate the markup first (docs/TRANSLATING.md) — a no-op in English —
+// so every later startup step reads the page in its final language.
+applyI18n(document);
+i18nFillLanguageMenu();
+studioMotionInit();
 // Licence screens (4.19.8): wrap fetch() first, so a 451 licence_required
 // from any later call opens the model's licence instead of a bare error.
 installLicenceGate();
+// Grey out what the picked model cannot do (model_capabilities.py rows).
+capInstall();
+proStatusRefresh();
 musicInit();
+speechInit();
 _wireModeGroupTabSemantics();
+// Option A (redesign v2.1): a dimmed mode chip switches to the model that
+// makes it. Capture phase, so it runs before the chip's own onclick.
+document.getElementById('modeGroup')?.addEventListener('click', modeChipEngineClick, true);
 // VC-34: the Tier quick-link next to the Quality label. Tier is fixed at
 // boot (RAM doesn't change at runtime), so this is a one-time read of the
 // bootstrap payload — no reason to wait for the first /status poll.
@@ -48,7 +60,7 @@ _wireModeGroupTabSemantics();
   const btn = document.getElementById('enhanceBtn');
   if (!btn) return;
   const gen = ((BOOT.ltx || {}).generation === 'ltx23') ? '2.3' : '2.5';
-  btn.title = `Use Gemma to rewrite your prompt in the style LTX ${gen} was trained on`;
+  btn.title = T('main.use_gemma_to_rewrite_your', 'Use Gemma to rewrite your prompt in the style LTX {gen} was trained on', {gen});
 })();
 // Skip poll when the tab is backgrounded — at 1.5s cadence with a fan-
 // spinning render in the background, every saved request matters. Pinokio
@@ -103,7 +115,6 @@ document.addEventListener('click', (e) => {
     if (typeof retryJob === 'function') retryJob(id, { smaller: true });
   } else {
     window._dismissedFailureId = id;
-    try { localStorage.setItem('phos_dismissed_failure_id', id); } catch (e) {}
     if (typeof poll === 'function') poll();
   }
 });
@@ -195,3 +206,15 @@ initStagePlayerFit();
 // install_step `first_use`: one report the first time anyone clicks or types
 // on the page (health.js).
 try { armFirstUseReport(); } catch (e) {}
+// `/?open_film=<id>` opens that film in the Editor — the link an imported
+// cut answers with (`POST /storyboard/edit/import`), and what the Panel's
+// "Open in editor" sends. An identifier only, never a path; the editor's one
+// door (edOpenBoard) does the rest after the page has loaded.
+(() => {
+  let id = '';
+  try { id = new URLSearchParams(window.location.search).get('open_film') || ''; } catch (e) {}
+  if (!/^sb_[A-Za-z0-9_-]{1,100}$/.test(id)) return;
+  const go = () => { try { if (typeof edOpenBoard === 'function') edOpenBoard(id); } catch (e) {} };
+  if (document.readyState === 'complete') setTimeout(go, 0);
+  else window.addEventListener('load', go, { once: true });
+})();

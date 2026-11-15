@@ -2,14 +2,24 @@
 
 External agents (Claude Code, Codex, OSS, or anything that speaks HTTP) drive Phosphene through this API. The in-panel chat was removed 2026-05-15 — there's no agent embedded inside the panel anymore. Everything that the chat used to do can be done by an external agent through these endpoints.
 
+**Ready-made tools on top of this API:** the `phosphene` CLI and an MCP server for Claude Code,
+Codex or any MCP client, in `agents/` — [`AGENT_TOOLS.md`](AGENT_TOOLS.md).
+
 ## Server
 
-- **Base URL:** `http://127.0.0.1:8198` on a normal install. **`8199` is the DEV
-  profile's port**, and every example on this page uses it because that is the
-  panel these were written against. The rule is one line in the source
-  (`mlx_ltx_panel.py:275`): `DEFAULT_PORT = 8199 if PROFILE == "dev" else 8198`,
-  overridable with `LTX_PORT`. If a request here returns nothing, you are
-  almost certainly talking to a port that has no panel on it — try the other one.
+- **Find the studio first: `GET /agents/info`.** The port is not fixed, so do not
+  hard-code one. Every running studio writes `~/.phosphene/servers/<port>.json` and
+  answers `GET /agents/info` with `"app": "phosphene"`, its base URL and the exact
+  lines to connect an agent. The `phosphene` CLI and the MCP server in `agents/` find
+  it that way and need no port from you — see [`AGENT_TOOLS.md`](AGENT_TOOLS.md).
+- **Base URL:** whatever `/agents/info` (or the newest file in
+  `~/.phosphene/servers/`) reports. For reference: **the Mac app** picks a free port
+  in **8930–8999** at each start; a **Pinokio** install listens on `8198`; the DEV
+  profile listens on `8199`, and the examples on this page were written against it
+  (`DEFAULT_PORT = 8199 if PROFILE == "dev" else 8198` in `mlx_ltx_panel.py`,
+  overridable with `LTX_PORT`). If a request here returns nothing, you are talking
+  to a port with no studio on it: ask `/agents/info` on the ports above, or read
+  the servers folder.
 - **Process:** `mlx_ltx_panel.py` (in the repo root)
 - **Wire format:** form-encoded `POST` bodies; JSON exceptions are noted
   per-endpoint. Responses are **HTTP/1.0** — `BaseHTTPRequestHandler`'s
@@ -94,6 +104,8 @@ Add a job to the panel's queue. Returns immediately; the helper renders it async
 
 **Return:** `{"ok": true, "id": "j-<...>"}` — the job ID for polling.
 
+**400 `pack_missing`, `what: "base_models"` (after 5.0.13).** A video job is not queued while the base video model is not on this Mac — the API refuses it exactly as the page's Generate button does: `{ error: "Download the video model first. Open Settings → Models and press Download, then generate again.", code: "pack_missing", what: "base_models", missing: <files>, downloading: <bool>, action: { label, open: "models", api: "POST /models/video" } }`. While the model is downloading, `error` says so with the percentage. Image, music, speech, training, Sharp export and Hailuo H3 jobs are not judged by the video model. A job that reaches the render with an empty or partial model folder by another door is refused there with the same sentence, before the engine starts.
+
 **Example:**
 
 ```bash
@@ -112,6 +124,10 @@ curl -s -X POST http://127.0.0.1:8199/queue/add \
 ```
 
 ### `POST /run` — alias for `/queue/add` (identical behavior).
+
+### `POST /queue/vertical_export` — a tall copy of a finished clip (5.0.16)
+
+Form fields: `path` (a clip in outputs or uploads), `ratio` (`9:16` default, `4:5`, `1:1`), `fill` (`blur` default, free; `ai` is Pro and needs a 48 GB+ Mac with the High quality model). Returns `{ok, id}`, or `{ok, id, duplicate: true}` when the same export is already queued. 400 with `error` (and `pro_required: true` when Pro is not active). The job runs through the ordinary queue as mode `vertical_export`; the new file's sidecar records `vertical_export_fill` (`ai` or `blur`) and, when the AI fill fell back to the blur, `vertical_export_ai_error`.
 
 ### `POST /queue/retry`
 
@@ -189,7 +205,7 @@ curl -s -X POST http://127.0.0.1:8198/oneshot -H 'Content-Type: application/json
 | `seconds` | int | `60` | One of 30 / 45 / 60 / 90 / 120. Any other value is refused, never rounded (a 75 used to render as one clip). |
 | `engine` | `ltx` / `h3` | `ltx` | LTX renders 10 s parts (faces, voices, dialogue); H3 renders 15 s parts (motion, landscapes). H3 is refused when not installed. |
 | `quality` | str | engine default | LTX: `quick` / `balanced` / `standard` / `high`; with a character: `draft` / `pro` / `high` / `high_720p`; H3: `draft` / `standard` / `high` / `native`. |
-| `beats` | list or newline text | none | One line per five seconds. A blank line holds that moment; extra lines are dropped. Absent = the prompt is every beat. |
+| `beats` | list or newline text | none | One line per five seconds. A blank line holds that moment; extra lines are dropped. Absent = the prompt is every beat. With beats, the prompt's description (its sentences without a quoted line) opens every part, so the beats only say what happens; beats that are the prompt's own sentences (the tab's split button) are used as they are. |
 | `camera` | str | `""` | One move for the whole shot, its direction and speed; carried into every part (`take_camera`). |
 | `image` | path | none | A start frame already on this Mac — upload first with `POST /upload` (field `image`) and pass the returned `path`. Makes the first part i2v. |
 | `character_id` | str | none | A trained character (LTX only). Defaults quality to `pro`, the export to 720p Sharp, and `handoff` to `speech`. `character_strength`, `voice_strength` optional. |
@@ -275,6 +291,11 @@ Field semantics:
 - `gpu` (4.19.10) — `{ busy, holder, since, outside_queue }`: the panel's one GPU gate. `holder` is `"queue"` for the job in `current`, or what holds the GPU outside the queue: `"image"` (an Image Studio render), `"character_sheet"`, `"enhance"` (Prompt Enhance), `"lyrics"`, `"update"` (the post-update script). A client that must not interrupt work (stopping or updating the panel) waits for `current` to be `null`, the queue to be paused or empty, AND `gpu.busy` to be `false`.
 - `app_models` (Mac app only) — the app's own model download: `{ state, packs, active, locked, done_bytes, total_bytes }`. `locked` (4.19.10) is true while the app holds its download lock (`<Phosphene home>/.locks/models.lock`); the panel then offers no Download for those packs and refuses one with 409 `app_downloading`. A second `scripts/fetch_pack_release.py` on a pack folder that is already being written stops untouched with exit code 75.
 - `queue` — jobs waiting, FIFO order.
+- `hold` (after 5.0.13) — `null`, or `{ scope, what, text, since_ts, eta_min, waiting }`: what is holding queued clips. `scope: "h3"` is the Mac app's Hailuo H3 engine update: only H3 clips wait and every other clip keeps rendering (`text`: "Updating the Hailuo H3 engine (about N min). H3 clips wait; other clips keep going."). `scope: "all"` holds every clip (the compact-engine build, an update installing). `waiting` is how many queued clips it holds now. The Now card shows `text`.
+- `paused_reason` — `null` for a manual pause. After three clips in a row fail the same way it is one plain sentence that names the way out ("Queue paused: the last 3 clips failed the same way. The video model is not fully downloaded. Open Settings → Models to finish the download, then press Resume."), never the engine's raw error; that is on each failed job's `error`.
+- `engine_restart` (after 5.0.13) — `{ count, last_ts, restarting, text }`: the post-decode rescue (the engine went silent after writing a clip, the clip was kept and the engine restarted). `count` is per Studio run; `restarting` is true until the engine is up again while a clip is waiting to pay the cold start.
+- `restart_busy`, `restart_busy_reason` (after 5.0.13) — whether a restart would cut work, and why: `"render"`, `"queue"` (clips waiting in a queue that is not paused), `"model_download"`, `"engine_install"` or `""`. The Mac app's update flow reads these — [`APP_UPDATE_STATES.md`](APP_UPDATE_STATES.md).
+- `base_missing` — the base video model's missing files, under the folder name this install has (`mlx_models/…` in Pinokio, `models/…` in the Mac app). Decide on `base_available`; show this.
 - `history` — completed/failed jobs. Each entry has `status`, `elapsed_sec`, `output_path`, `raw_path` (native pre-upscale), `error`.
 - `log` — rolling buffer of helper stdout lines (last ~50 jobs).
 
@@ -619,6 +640,73 @@ Assembles the locked production recipe + queues a T2V render. The endpoint accep
 
 ---
 
+## Speech — text to speech (Audio → Speech)
+
+A script in, one WAV out (24 kHz mono, in `mlx_outputs/` as `speech_<stamp>_<slug>.wav` with a
+`.wav.json` sidecar), in one of nine preset voices or a saved character's own voice. The engine is
+Qwen3-TTS 12 Hz 1.7B (Apache-2.0) through mlx-audio, in its own venv; it is an optional ~6 GB
+install (`POST /speech/install`). Engineering reference: [`docs/SPEECH.md`](SPEECH.md).
+
+**Cloning needs the voice owner's confirmation.** Any request that uses a character's voice sample
+or a clip (`speech_voice_kind=character|clip`) must carry `speech_voice_consent=1` (the agent door:
+`"voice_consent": true`) — the caller confirms the voice is their own or that they have the
+speaker's permission. Without it the request is refused with 400 and nothing is queued. The
+confirmation is recorded in the output's sidecar (`voice_consent`). Impersonation is against
+Phosphene's acceptable-use policy.
+
+### `POST /queue/add` with `mode=speech`
+
+| Field | Values | Notes |
+|---|---|---|
+| `speech_text` | string, ≤ 2000 chars | One generation per non-empty line; lines join with a short breath. |
+| `speech_voice_kind` | `preset` (default) \| `character` \| `clip` | |
+| `speech_voice` | `ryan`, `aiden`, `serena`, `vivian`, `uncle_fu`, `dylan`, `eric`, `ono_anna`, `sohee` | `preset` only. Ryan and Aiden are native English. |
+| `speech_style` | `natural`, `warm`, `excited`, `deadpan`, `dramatic`, `whisper`, `sad`, `angry` | `preset` only: a delivery instruction the model reads. |
+| `speech_instruct` | string, ≤ 300 chars | `preset` only; replaces the style's instruction ("tired, like it's 3 a.m."). |
+| `speech_character` | a character id (`GET /characters`) | `character`: clones from that character's `voice_sample`. |
+| `speech_ref_audio` | a path (from `POST /upload`) | `clip`: 5–20 s of one person speaking. |
+| `speech_ref_text` | string, ≤ 600 chars | `character` or `clip`, optional: the words heard in the reference clip; the model then continues the recording (closer match — measured below in docs/SPEECH.md). |
+| `speech_voice_consent` | `1` | **Required** for `character` and `clip`. |
+| `speech_speed` | 0.5–2.0, default 1.0 | Pitch-preserving tempo (ffmpeg `atempo`). |
+| `speech_language` | `english` (default), `chinese`, `japanese`, `korean`, `german`, `french`, `russian`, `portuguese`, `spanish`, `italian` | |
+| `speech_seed` | int, `-1` = random | Same seed + text + voice = same take. |
+| `speech_title` | string | Names the file. |
+
+Progress rides `/status.current.progress` (`phase`: `load` → `speak` → `write`). The sidecar carries
+`engine: "speech"`, `voice`, `voice_kind`, `instruct`, `text`, `audio_seconds`, `seed`, `peaks`
+(`mlx_peak_gb`, `process_peak_gb`) and, for clones, `voice_consent`.
+
+### `POST /speech/generate` — the agent door
+
+JSON (`Content-Type: application/json`) or form. Same job as above, agent-shaped:
+
+```json
+{"text": "Please remain seated until the progress bar comes to a full stop.",
+ "voice": "aiden", "style": "dramatic", "speed": 1.0, "wait": true}
+```
+
+`character` (+ optional `clip_text`, the words in its voice sample) + `voice_consent: true` clones a character; `clip` (+ optional `clip_text`) + `voice_consent: true`
+clones a clip. `instruct`, `language`, `seed`, `title` as above. `wait` (default `true`) blocks
+until the WAV is written (≤ 10 min queue wait) and answers
+`200 {"ok":true,"job_id","path","url","audio_seconds","voice","seed","elapsed_sec","next"}`;
+`wait:false` answers `202 {"ok":true,"queued":true,"job_id","estimate"}`. Errors: `400` (bad request,
+missing confirmation), `409` (`code: not_installed`, or the job was stopped), `500` (the engine
+failed; `error` is its sentence), `504` (queue wait timed out).
+
+To lip-sync the result: `POST /queue/add` with `mode=a2v`, `audio=<path>`, `image=<a picture of the
+face>` and a scene `prompt` (see Lip-sync above).
+
+LTX-2.5 Speech outputs get a scene soundtrack by default (`a2v_scene_sound=auto`, identified by the WAV's Speech sidecar). Use `off` for voice only, or `on` to add a bed to other input audio. `a2v_scene_prompt` optionally describes the desired ambience/SFX; blank uses the scene prompt with dialogue removed. `a2v_scene_bed` optionally supplies an existing local bed instead of generating one (it can include instrumental music). The installed Q4 LTX joint audio branch makes a separate 512×320 take (8 denoise + 2 refinement steps); its picture is discarded. This is prompt-matched sound, not frame-constrained v2a. The voice alone conditions a2v, then ffmpeg copies its video stream and mixes the bed at −25 LUFS with 5:1 voice sidechain ducking (12 ms attack, 350 ms release). The output sidecar records the bed, prompt, settings and mix; the lip-sync score is measured before adding the bed. H3 and LTX-2.3 are unchanged.
+
+### `GET /speech/voices` · `GET /speech/estimate` · `POST /speech/install` · `POST /speech/install/stop`
+
+- `/speech/voices` → `{presets[], styles[], characters[] (only those with a voice sample), languages[], status, install}`.
+- `/speech/estimate?text=…&speed=…` → `{audio_sec, eta_sec, lipsync_fits}` (words ÷ 2.8/s; always an estimate).
+- `/speech/install` starts the background install (preflight → Python 3.12 venv → mlx-audio at
+  `scripts/speech/speech_constraints.txt` → the two pinned checkpoints); progress rides
+  `/status.speech_install` (`state`, `step_index`, `percent`, `bytes_done`/`bytes_total`). Install again
+  resumes. `/status.speech` says whether it is `available`.
+
 ## Image generation (separate from video)
 
 ### `POST /image/generate`
@@ -770,6 +858,8 @@ The Editor is a **top-level workflow**, not a stage of the storyboard: engine-ag
 | `restore` | `id`, `file` | Restore a history entry. Refuses while the film renders. |
 | `render` | `id`, `out`, `music`, `music_mode`, `format`, `size` | Assemble the film. `music_mode` is `replace` \| `under`. **Deliver as:** `format` is `h264` (default, the panel's preset) \| `hevc` (VideoToolbox, `hvc1`, about half the bytes) \| `prores` (422 HQ, 10-bit 4:2:2, PCM sound, a `.mov` no browser previews); `size` is `native` (as cut) \| `1080p` \| `2160p` — one Lanczos scale after the overlays, up only, never a crop, skipped when the cut is already that height. `finish` is `none` \| `grain` \| `heavy_grain` — moving film grain (`noise` t+u, strength 9 / 18) added AFTER the size so a 4K delivery gets 4K grain; a delivery-time treatment, never in the document, never in the preview or the export. A different delivery is a different file: `<slug>_film_hevc_1080p.mp4`, `<slug>_film_prores.mov`, `<slug>_film_1080p_grain.mp4`. The facts carry `deliver: {format, size, finish, label}`. |
 | `export-nle` | `id` | FCP7 XML + After Effects JSX + linked media. |
+| `import` | JSON: a cut spec, or `{cut: <spec>, wait: true}` | **An agent's cut -> a new film, ready to edit by hand** (5.0). One call for what took ~20. Answers `{id, title, clips, duration, notes, imported_files, editor_url, prepare}`; `editor_url` (`/?open_film=<id>`) opens it in the Editor. `wait: true` answers once the proxies, overlay previews and waveform are built. See **Cut spec** below. CLI `phosphene open-cut cut.json`; MCP `phosphene_open_cut`. |
+| `overlay-preview` | `id`, `path?` | Build the missing overlay previews for the film's saved overlays (plus `path`, if it is one of the panel's own files), synchronously; answers `{previews: {path: "proxy/ov-….mp4"}, built, failed}`. The Editor calls it for a video overlay that has none yet. |
 | `reveal` | `id`, `what` | Show in Finder. |
 | `generate` | `id`, `prompt`, `duration`, `duration_s`, `film_start`, `pass`, `character_id`, `seed`, `title`, `engine`, `trigger`, `retake_of` | Shoot a new clip straight into a slot. With `retake_of=<clip id>` it is a **retake**: the clip's own shot is CLONED (character, refs, location, engine) and only the prompt, the length and the seed change; the new shot carries `edit_slot.retake_of`, and when it renders the Editor offers it against that clip ("Use it" / "Keep the old one"). 400 if the clip is no longer on the timeline. |
 
@@ -851,7 +941,30 @@ A cross-dissolve is two clips in the same second, and the picture lane's one-cli
 
 `duration` is clamped on every read (`transition_duration`) to `min(asked, half the shorter neighbour, 2.0 s)` and snapped to an even number of frames; the document keeps the number typed. A side with no spare material is refused — `transition_no_handles` names the side and the shortfall ("clip 2 has only 0.10s before its in-point and the dissolve needs 0.25s there"). Every transition code (`transitions_shape`, `transition_shape`, `transition_unknown_clip`, `transition_last_clip`, `transition_duplicate_boundary`, `transition_kind`, `transition_duration`, `transition_no_handles`) is an **error**; none is in `WARNING_CODES`. `render` refuses with the same sentence. A still and a slug have all the handles anybody could ask for.
 
+#### Cut spec — `POST /storyboard/edit/import`
+
+The agent's vocabulary, turned into an `edit.json` by `storyboard_editor.edit_from_cut`:
+
+```jsonc
+{"phosphene_cut": 1, "title": "SUNDAY MASS", "fps": 24,
+ "clips": [{"path": "/…/s08_t1.mp4", "in": 0.7, "at": 11.6, "title": "s08"},   // out?, length?, speed?, gain?, mute?, fade_in?, fade_out?
+           {"path": "/…/s26_t1.mp4", "in": 0, "at": 58.5, "length": 5.0}],
+ "clip_gain": 0.9,                                     // every clip's sound level (a flat envelope)
+ "clip_fades": [0.04, 0.06],                           // sound fade in/out on every clip edge (a clip's fade_in/fade_out wins)
+ "soundtrack": {"path": "/…/score.m4a", "at": 0, "in": 0, "gain": 1.0},
+ "overlays": [{"path": "/…/sting.mov", "at": 0, "end": 63.5}, {"text": "FIN", "at": 60, "end": 63}],
+ "sounds": [{"path": "/…/bell.wav", "at": 12.0, "gain": 0.5}]}
+```
+
+- A clip plays from its `at` to the next clip's `at` (the last for its `length`); every time snaps to a frame, so neighbours touch. Without `at` on every clip they are laid back to back. `out` caps the material; the take's length always does. A picture file (`.png`, `.jpg`, …) is a still held for its slot.
+- A slot longer than its material (a talking shot whose silent head was skipped) is filled by slowing the clip down to `CUT_FIT_SLOWEST` (0.9x); past that the clip keeps its material and leaves a hole. Both are reported in `notes`.
+- A clip with `"mute": true` keeps its picture and drops its own sound (the document's clip mute): a lip-sync shot whose voice is already in the score would otherwise double, phase and clip.
+- The soundtrack plays Under the clips at its `gain`, no duck; the document is stamped so the legacy mix heal never applies.
+- Every file is probed first (one unreadable file refuses the whole cut, nothing written); files outside the outputs are hardlinked (copied across volumes) into the film's own `media/` folder — originals untouched. One board shot per distinct clip.
+
 #### `overlays[]` — cards, mattes, and titles
+
+**A video overlay previews from a copy** (5.0): `GET /storyboard/edit` adds `preview: "proxy/ov-<name>.mp4"` (or `null`) to every video overlay — HEVC with alpha through VideoToolbox (`hvc1`) when the source has alpha (a ProRes 4444 sting), all-intra H.264 otherwise — built by Prepare, by the import, and on demand by `overlay-preview`, served by the proxy route. The stage plays it on its own `<video>`; it never hands a video to the card `<img>` (that drew a broken-image "?" over every frame). The render composites the original, as always.
 
 `kind` is `still` | `video` | `text`. An explicit `kind` wins; with none, the path's suffix decides (`.png`/`.webp`/`.tif` are stills), so every overlay written before titles existed reads as it did. A **title** is an overlay whose pixels the render draws:
 
@@ -926,6 +1039,28 @@ Opens the output's containing folder in Finder (Mac).
 
 ---
 
+## Phosphene Bench — `/bench/*`
+
+A fixed, versioned benchmark (`bench.py`; suite PB1). It renders through the
+same queue and job timer as `/queue/add`, so its times are real render times.
+
+| Route | What |
+|---|---|
+| `GET /bench/plan` | `{suite, steps[], can_run, why, conditions, analytics_enabled, runs[], unsent_eligible, install, state}` — what will run on this Mac and why not. `steps[].status`: `ready`, `missing` (with `install`), `optional_skip` (H3). `why`: `busy_queue`, `busy_gpu`, `busy_download`, `wrong_generation`, `ltx_missing`, `image_missing` |
+| `GET /bench/status` | the live run: `{running, run_id, steps[], step_index, step_elapsed, last_run, stopped, error}` |
+| `POST /bench/start` | `{ok, run_id}`, or 409 `{code}` when anything is queued, running, holding the GPU or downloading, or a core step is not ready |
+| `POST /bench/stop` | stops the run and the step it is rendering |
+| `GET /bench/run?id=` | the result JSON (`docs/bench.schema.json`); `&download=1` saves it |
+| `GET /bench/card?id=` | the 3200×1800 result card PNG; `&download=1` saves it |
+| `GET /bench/text?id=` | `{text}` — the "Copy results" summary |
+| `POST /bench/submit` | opt-in: sends every complete, unsent PB1 run as `bench_result` (docs/ANALYTICS.md); 403 `analytics_off` when analytics is off |
+| `POST /bench/install_image` | downloads FLUX.2 [klein] 4B into the Hugging Face cache on an explicit click |
+
+Results live in `state/bench/<run_id>.json` + `.png`; `state/bench/submitted.json`
+lists the runs already sent.
+
+---
+
 ## Model licences (4.19.8)
 
 ### `GET /licences`
@@ -939,10 +1074,14 @@ Every licence the panel asks about, with this Mac's acceptance state:
 
 ### `POST /licences/accept`
 
-Form fields `key=<licence key>` and `accept=1` (the box the user ticked). Records the acceptance for
+Form fields `key=<licence key>`, `version=<version shown by GET /licences>` and
+`accept=1` (the box the user ticked). Missing or stale versions return 409 without accepting.
+Persistence failures return 503 and can be retried after restoring write access. Records the acceptance for
 the licence's current `version` in `state/model_licences.json` (plus a marker file the H3 installer
 reads) and returns `{"ok": true, "key": ..., "record": {...}, "licence": {...}}`. A changed licence
-version asks again. Accepting on someone's behalf is accepting for them: an agent should show the
+version asks again. The panel and shell require matching JSON and marker records; cached weights
+do not bypass acceptance. An app update with the same licence version retains a matching acceptance.
+Accepting on someone's behalf is accepting for them: an agent should show the
 user the terms from `GET /licences` first.
 
 ## Helper / system
@@ -1163,3 +1302,26 @@ Everything that the chat used to do — plan multiple shots, generate candidate 
 - Session state: agent maintains it externally.
 
 External agents (Claude Code, Codex, OSS) have full panel functionality through this API surface.
+
+
+### Model storage
+
+`GET /storage` lists model folders and their measured byte sizes, including
+current packs and unknown folders (kept). `reclaimable` counts only exact
+superseded filenames reviewed in `model_storage.RETIRED`, excluding required
+files, linked files and protected locations. `confirmation` identifies that
+snapshot. Sizes use decimal GB. Shared model roots are supported; linked pack
+folders are protected. Hugging Face caches outside the model roots are not scanned.
+
+`POST /storage/cleanup` takes form fields `confirmed=yes` and `confirmation`
+from a fresh inventory. It takes the downloader's folder locks and rechecks the
+snapshot before unlinking only those retired files. A changed snapshot or busy
+folder returns 409; a missing confirmation returns 400. An I/O failure returns
+500 and may leave a partially completed cleanup; refresh to see what remains.
+No client-supplied path is accepted. Outputs and LoRAs are never candidates.
+The free Settings > Storage panel asks for confirmation before this request.
+
+The initial retirement list covers unused pre-Y1.024 LTX 2.3 transformer and
+upscaler variants. LTX 2.3 training packs and all Turbo adapters stay protected
+from this action because they remain supported. Future model swaps must add
+reviewed exact filenames to the retirement list, with safety tests.

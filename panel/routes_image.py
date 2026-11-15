@@ -269,12 +269,6 @@ def get_image_engine_status(h, parsed) -> None:
         # made N=1 understate and N=4+ overstate the wall-time. The
         # studio now estimates correctly across all batch sizes.
         ENGINES = [
-            ("dt_qwen2_turbo",            None,                         0.0,  15.0,  10.0),
-            ("dt_krea2_turbo",            None,                         0.0,  12.0,  10.0),
-            ("dt_krea2_radiance",         None,                         0.0,  12.0,  10.0),
-            ("dt_krea2_ideokrea",         None,                         0.0,  12.0,  10.0),
-            ("dt_flux2_klein",            None,                         0.0,  10.0,  10.0),
-            ("qwen2_turbo_inline",         "Qwen/Qwen-Image-2.1",        18.0,  30.0,  45.0),
             # Qwen-Image-Edit-2511 — three-tier ladder. ~24 GB
             # download (one-time) shared across all three tiers.
             # ALL tiers use FBCache via the mflux patch — at 8+
@@ -284,8 +278,6 @@ def get_image_engine_status(h, parsed) -> None:
             ("qwen_edit_lightning_inline", "Qwen/Qwen-Image-Edit-2511", 24.0,  35.0,  50.0),
             ("qwen_edit_inline",           "Qwen/Qwen-Image-Edit-2511", 24.0,  75.0,  50.0),
             ("qwen_edit_high_inline",      "Qwen/Qwen-Image-Edit-2511", 24.0, 170.0,  60.0),
-            ("flux2_edit_inline",          "Runpod/FLUX.2-klein-4B-mflux-4bit", 2.5, 15.0, 10.0),
-            ("krea2_inline",               P.KREA2_REPO_UNGATED,          4.5,  20.0,  15.0),
             # Ideogram 4 fp8 — ~28 GB gated download. sec_per_image is
             # the default V4_DEFAULT_20 (20-step) baseline; the canvas
             # Quality dropdown can switch to V4_TURBO_12 (faster) or
@@ -304,28 +296,16 @@ def get_image_engine_status(h, parsed) -> None:
         # check). HiDream lives outside mflux; we surface its
         # install status via the lab-model existence check below.
         ENGINE_FAMILY = {
-            "qwen2_turbo_inline":         "qwen",
             "qwen_edit_lightning_inline": "qwen_edit",
             "qwen_edit_inline":           "qwen_edit",
             "qwen_edit_high_inline":      "qwen_edit",
-            "flux2_edit_inline":          "flux2_edit",
-            "krea2_inline":               "krea2",
             "ideogram4_inline":           "ideogram",
         }
         out = []
         for engine, repo, dl_gb, sec, cold in ENGINES:
             family_installed = True
             partial = None
-            if engine.startswith("dt_"):
-                import drawthings_bridge
-                if "qwen" in engine:
-                    m_file = "qwen_image_2.1_i8x.ckpt"
-                elif "flux" in engine:
-                    m_file = "flux_2_klein_4b_i8x.ckpt"
-                else:
-                    m_file = "krea_2_turbo_i8x.ckpt"
-                cached = (drawthings_bridge.DRAWTHINGS_MODELS_DIR / m_file).is_file() or drawthings_bridge.is_server_running()
-            elif engine in ("hidream_inline", "hidream_fast_inline", "hidream_quality_inline"):
+            if engine in ("hidream_inline", "hidream_fast_inline", "hidream_quality_inline"):
                 # HiDream lives outside the HF cache (lab venv path).
                 # All three modes share the same Dev-BF16 model dir.
                 cached = (P.agent_image_engine.HIDREAM_DEFAULT_MODEL / "model.safetensors").exists() and \
@@ -347,8 +327,6 @@ def get_image_engine_status(h, parsed) -> None:
                 # gated stub snapshot has only README/LICENSE).
                 if engine == "ideogram4_inline":
                     cached = P._ideogram_any_cached()
-                if engine == "krea2_inline":
-                    cached = P._krea2_any_cached()
                 # mflux engines additionally need their per-family
                 # binary on disk (e.g. mflux-generate-qwen-edit).
                 # Issue #12 (sureshkpiitk): the Image Studio let
@@ -388,8 +366,12 @@ def get_image_engine_status(h, parsed) -> None:
             except Exception:                              # noqa: BLE001
                 _need = 8.0
             _fits, _mac_gb = P._image_engine_fit(_need)
+            # The one download-size table (IMAGE_REPO_DOWNLOAD) wins over the
+            # row's literal: Reference Edit read "24 GB" for a 57.7 GB fetch.
+            dl_gb = P.image_repo_download_gb(repo, dl_gb)
             out.append({
                 "engine": engine,
+                "max_refs": P.image_max_refs(engine),
                 "repo_id": repo or "",
                 "cached": cached,
                 "ram_need_gb": round(float(_need), 1),
@@ -409,6 +391,12 @@ def get_image_engine_status(h, parsed) -> None:
                 "license_url": ("https://huggingface.co/" + repo)
                                if (repo and engine == "ideogram4_inline") else None,
             })
+        import flux3_engine
+        out.extend({**flux3_engine.status(key, float(P.SYSTEM_RAM_GB or 0)),
+                    "max_refs": P.image_max_refs(key)}
+                   for key in flux3_engine.PRESETS)
+        out.extend(P.ph3image_engine_rows())
+        out.extend(P.h3image_engine_rows())
         h._json({"engines": out,
                  "host_ram_gb": int(round(float(P.SYSTEM_RAM_GB or 0)))})
     except Exception as exc:                                # noqa: BLE001
@@ -480,6 +468,70 @@ def post_h3_v13_install(h, path, qs, ctype) -> None:
     if _lic:
         h._json(_lic, 451); return
     result = P._h3_install_v13(P.push)
+    if not result.get("ok"):
+        h._json(result, 409 if "active" in result.get("error", "") else 400)
+        return
+    h._json(result, 202)
+
+
+
+# ====== Hailuo H3 · Pika H3 Flex (a Speed choice) — fetch Pika's original FL2VA
+# adapter + LICENSE + NOTICE (pinned revision + sha256) and build the runner
+# layout locally. Pika H3 Flex running natively on Apple Silicon (MLX).
+@post("/h3/flex/install")
+def post_h3_flex_install(h, path, qs, ctype) -> None:
+    P.h3_status_invalidate()
+    # An H3 Model Derivative: the same licence screen as H3 itself.
+    _lic = P.licence_refusal_for("h3")
+    if _lic:
+        h._json(_lic, 451); return
+    result = P._h3_install_flex(P.push)
+    if not result.get("ok"):
+        h._json(result, 409 if "active" in result.get("error", "") else 400)
+        return
+    h._json(result, 202)
+
+# ====== Hailuo H3 · H3 Flex Turbo (Pro, preview) — download its published file
+# at the pinned revision + sha256 the Pro add-on names. Pro only.
+@post("/h3/flex-turbo/install")
+def post_h3_flex_turbo_install(h, path, qs, ctype) -> None:
+    P.h3_status_invalidate()
+    _lic = P.licence_refusal_for("h3")
+    if _lic:
+        h._json(_lic, 451); return
+    result = P._h3_install_flex_turbo(P.push)
+    if not result.get("ok"):
+        h._json(result, 402 if result.get("pro_required") else
+                409 if "active" in result.get("error", "") else 400)
+        return
+    h._json(result, 202)
+
+# ====== Images lane · P-H3-Image (Pruna, on MiniMax H3) - fetch Pruna's adapter, text encoder and
+# image decoder at pinned revisions (never re-hosted) and build the decoder layout locally.
+@post("/image/ph3image/install")
+def post_image_ph3image_install(h, path, qs, ctype) -> None:
+    P.h3_status_invalidate()
+    # A MiniMax H3 Model Derivative: the same licence screen as H3 itself.
+    _lic = P.licence_refusal_for("h3")
+    if _lic:
+        h._json(_lic, 451); return
+    result = P._ph3image_install(P.push)
+    if not result.get("ok"):
+        h._json(result, 409 if "active" in result.get("error", "") else 400)
+        return
+    h._json(result, 202)
+
+
+# ====== Images lane · MiniMax-H3-Image - fetch MiniMaxAI's 12 original shards at the pinned
+# revision (never re-hosted) and convert them shard by shard on this Mac (engine fetch_h3_image.py).
+# Its own licence (MiniMax-H3-Image Community License): 451 until accepted on this Mac.
+@post("/image/h3image/install")
+def post_image_h3image_install(h, path, qs, ctype) -> None:
+    P.h3_status_invalidate()
+    _lic = P.licence_refusal_for(P.H3IMAGE_LICENCE_KEY)
+    if _lic:
+        h._json(_lic, 451); return
+    result = P._h3image_install(P.push)
     if not result.get("ok"):
         h._json(result, 409 if "active" in result.get("error", "") else 400)
         return
@@ -784,8 +836,10 @@ def post_image_generate(h, path, qs, ctype) -> None:
     refs_in = payload.get("refs") or []
     if not isinstance(refs_in, list):
         h._json({"error": "refs must be a list of paths"}, 400); return
-    if len(refs_in) > 3:
-        h._json({"error": "refs supports at most 3 images (Qwen-Edit-2509 limit)"}, 400); return
+    import flux3_engine
+    _too_many = P.image_refs_refusal(payload.get("engine_override"), refs_in)
+    if _too_many:
+        h._json({"error": _too_many, "code": "image_refs"}, 400); return
     refs_resolved: list[str] = []
     for r in refs_in:
         if not isinstance(r, str) or not r.strip():
@@ -826,6 +880,13 @@ def post_image_generate(h, path, qs, ctype) -> None:
     if _lic:
         h._json(_lic, 451); return
 
+    if cfg.kind == "flux3":
+        try:
+            width, height = P.agent_image_engine.ASPECT_DIMS.get(aspect, (1280, 720))
+            flux3_engine.validate(cfg, width, height, refs_resolved, P.SYSTEM_RAM_GB)
+        except ValueError as e:
+            h._json({"error": str(e)}, 400); return
+
     # Output dir: panel_uploads/library/manual/<YYYYMMDD>/<unix_ms>/
     # — date-bucketed for directory hygiene PLUS a per-request
     # millisecond subdir so two generations in the same day don't
@@ -858,6 +919,8 @@ def post_image_generate(h, path, qs, ctype) -> None:
             # Stream mflux stdout into the panel log card so users
             # see step-by-step progress while the gen runs.
             # tqdm progress bars come through line-buffered.
+            if cfg.kind in ("flux3", "h3image") or (cfg.kind == "ph3image" and cfg.ph3image_warm_service):
+                P._preflight_image_job(cfg, engine_override=engine_override)
             candidates = P.agent_image_engine.generate(
                 prompt=prompt, n=n, aspect=aspect,
                 output_dir=out_dir,
@@ -865,6 +928,7 @@ def post_image_generate(h, path, qs, ctype) -> None:
                 refs=refs_resolved or None,
                 config=cfg,
                 on_log=lambda line: P.push(f"[image] {line}"),
+                **({"install_env": P._music_install_env()} if cfg.kind == "flux3" else {}),
             )
         except FileNotFoundError as e:
             h._json({"error": str(e)}, 404); return
@@ -908,6 +972,7 @@ def post_image_generate(h, path, qs, ctype) -> None:
             "generated_at": generated_at,
             "refs_ignored": c.get("refs_ignored", False),
             "source": "panel.image_studio",
+            **({"flux3": c} if cfg.kind == "flux3" else {}),
         }
         try:
             sidecar_path.write_text(P.json.dumps(sidecar, indent=2), encoding="utf-8")
@@ -919,6 +984,8 @@ def post_image_generate(h, path, qs, ctype) -> None:
         "candidates": candidates,
         "elapsed_seconds": elapsed,
         "engine": cfg.kind + (f"/{cfg.mflux_family}" if cfg.kind == "mflux" else ""),
-        "model": getattr(cfg, "mflux_model", None) or cfg.kind,
+        "model": (f"{P.PH3IMAGE_REPO}@{P.PH3IMAGE_REVISION[:7]}" if cfg.kind == "ph3image"
+                  else f"{P.H3IMAGE_REPO}@{P.H3IMAGE_REVISION[:7]}" if cfg.kind == "h3image"
+                  else getattr(cfg, "mflux_model", None) or cfg.kind),
         "output_dir": str(out_dir),
     })

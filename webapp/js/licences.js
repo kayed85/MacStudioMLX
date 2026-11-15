@@ -17,6 +17,7 @@
 // about licences.
 
 let _LIC = null;            // last GET /licences payload
+let _gateKey = null;        // the model shown by the current screen
 let _gateOpen = null;       // the promise of the screen currently shown
 const _nativeFetch = globalThis.fetch.bind(globalThis);
 
@@ -47,12 +48,16 @@ async function openLicence(key, opts) {
   opts = opts || {};
   await licencesLoad(true);
   const info = _licInfo(key);
-  if (!info) return true;                    // nothing to accept for this key
+  if (!info) return false;                    // no current licence was loaded
   if (info.accepted && !opts.readOnly && !opts.force) return true;
   // "Read the licence" on a licence nobody accepted yet IS the place to
   // accept it (the H3 credit line is the door for storyboard / API users).
   if (!info.accepted) opts = Object.assign({}, opts, { readOnly: false });
-  if (_gateOpen) return _gateOpen;
+  if (_gateOpen) {
+    if (_gateKey === key) return _gateOpen;
+    await _gateOpen;
+    return openLicence(key, opts);
+  }
   const ui = (_LIC && _LIC.ui) || {};
   const modal = document.getElementById('licenceModal');
   const body = document.getElementById('licenceBody');
@@ -60,7 +65,7 @@ async function openLicence(key, opts) {
   if (!modal || !body) return false;
   const terms = (info.terms || []).map(t => `<li>${_licEsc(t)}</li>`).join('');
   const accepted = info.accepted
-    ? `<p class="licence-accepted">Accepted on this Mac${info.accepted_at ? ' (' + _licEsc(String(info.accepted_at).slice(0, 10)) + ')' : ''}.</p>`
+    ? `<p class="licence-accepted">${T('licences.accepted_on_this_mac', 'Accepted on this Mac{v}.', {v: info.accepted_at ? ' (' + _licEsc(String(info.accepted_at).slice(0, 10)) + ')' : ''})}</p>`
     : '';
   title.textContent = info.title || info.licence || ui.modal_title || 'Model licence';
   body.innerHTML = `
@@ -76,7 +81,7 @@ async function openLicence(key, opts) {
       &middot; <a href="${_licEsc(info.url)}" target="_blank" rel="noopener">${_licEsc(ui.full_licence_link || 'Read the full licence')}</a>
     </p>
     ${info.report_line && info.report_url ? `<p class="licence-meta">${_licEsc(info.report_line)}
-      <a href="${_licEsc(info.report_url)}" target="_blank" rel="noopener">Report misuse</a></p>` : ''}
+      <a href="${_licEsc(info.report_url)}" target="_blank" rel="noopener">${T('licences.report_misuse', 'Report misuse')}</a></p>` : ''}
     ${accepted}
     ${(!info.accepted || opts.force) && !opts.readOnly ? `
       <label class="licence-check"><input type="checkbox" id="licenceAcceptBox">
@@ -87,7 +92,7 @@ async function openLicence(key, opts) {
       </div>
       <p class="licence-error" id="licenceError" hidden></p>` : `
       <div class="licence-actions">
-        <button class="ghost-btn" id="licenceDone">Close</button>
+        <button class="ghost-btn" id="licenceDone">${T('licences.close', 'Close')}</button>
       </div>`}`;
   modal.style.display = 'flex';
   let settled = false;
@@ -103,6 +108,7 @@ async function openLicence(key, opts) {
         modal.style.display = 'none';
         modal.onclick = null;
         _gateOpen = null;
+        _gateKey = null;
       }
       resolve(ok);
     };
@@ -115,12 +121,13 @@ async function openLicence(key, opts) {
     if (fin) fin.onclick = () => done(!!info.accepted);
     modal.onclick = (ev) => { if (ev.target === modal) done(!!info.accepted && !opts.force); };
     if (acc) acc.onclick = async () => {
+      if (!box.checked) return;
       acc.disabled = true;
       try {
         const r = await _nativeFetch('/licences/accept', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({ key, accept: '1' }),
+          body: new URLSearchParams({ key, version: info.version, accept: '1' }),
         });
         const j = await r.json().catch(() => ({}));
         if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
@@ -128,12 +135,14 @@ async function openLicence(key, opts) {
         licenceStatusRefresh();
         done(true);
       } catch (e) {
+        if (settled) return;
         const err = document.getElementById('licenceError');
-        if (err) { err.hidden = false; err.textContent = 'Could not save: ' + e.message; }
-        acc.disabled = false;
+        if (err) { err.hidden = false; err.textContent = T('licences.could_not_save', 'Could not save: ') + e.message; }
+        acc.disabled = !box.checked;
       }
     };
   });
+  _gateKey = key;
   _gateOpen = promise;
   return promise;
 }
@@ -150,8 +159,8 @@ function licenceStatusRefresh() {
     const info = _licInfo(el.getAttribute('data-licence-status'));
     if (!info) { el.textContent = ''; return; }
     el.textContent = info.accepted
-      ? 'Licence accepted on this Mac.'
-      : 'Not accepted yet.';
+      ? T('licences.licence_accepted_on_this_mac', 'Licence accepted on this Mac.')
+      : T('licences.not_accepted_yet', 'Not accepted yet.');
     el.classList.toggle('ok', !!info.accepted);
   });
 }

@@ -30,6 +30,7 @@ import os
 import platform
 import shutil
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -48,6 +49,22 @@ INSTRUMENTAL_STYLE = "instrumental, no vocals"
 
 def say(*parts):
     print("[music]", *parts, flush=True)
+
+
+def cover_decode_reason(exc) -> str:
+    """ffmpeg's own last line for a recording it could not decode, without
+    the path (the history card and the fleet's grouping read this line)."""
+    raw = getattr(exc, "stderr", None) or b""
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "replace")
+    for line in reversed(str(raw).splitlines()):
+        line = line.strip()
+        if line:
+            # "[in#0 @ 0x...] Error opening input: Invalid data found ..." and
+            # "/path/to/file.xyz: Invalid data found when processing input".
+            line = line.rsplit("] ", 1)[-1]
+            return line.rsplit(": ", 1)[-1][:160].rstrip(".")
+    return ""
 
 
 def parse_args(argv=None):
@@ -163,9 +180,9 @@ def relax_guard():
     from lyra import measure
 
     gib, mib = measure._GIB, measure._MIB
-    min_avail = float(os.environ.get("YUE2_MIN_AVAILABLE_GIB", "1.5"))
-    swap_out = float(os.environ.get("YUE2_MAX_SWAP_OUT_MIB", "1024"))
-    swap_growth = float(os.environ.get("YUE2_MAX_SWAP_GROWTH_MIB", "2048"))
+    min_avail = float(os.environ.get("YUE2_MIN_AVAILABLE_GIB", "0.8"))
+    swap_out = float(os.environ.get("YUE2_MAX_SWAP_OUT_MIB", "12288"))
+    swap_growth = float(os.environ.get("YUE2_MAX_SWAP_GROWTH_MIB", "12288"))
     counters = {"pressure_warnings": 0, "peak_footprint_gib": 0.0, "min_available_gib": None}
 
     def check(self, sample):
@@ -186,8 +203,9 @@ def relax_guard():
         swapped = sample["system_swap_out_bytes"] - self._baseline["system_swap_out_bytes"]
         growth = sample["system_swap_used_bytes"] - self._baseline["system_swap_used_bytes"]
         if swapped > swap_out * mib or growth > swap_growth * mib:
-            raise MemoryError(f"Stopping: the system is swapping ({swapped / mib:.0f} MiB out, "
-                              f"{growth / mib:.0f} MiB swap growth)")
+            if sample["system_available_bytes"] < min_avail * gib:
+                raise MemoryError(f"Stopping: the system is swapping ({swapped / mib:.0f} MiB out, "
+                                  f"{growth / mib:.0f} MiB swap growth) and available memory is depleted")
 
     measure.GPUExecution._check_sample = check
     return {"min_available_gib": min_avail, "max_swap_out_mib": swap_out,
@@ -345,7 +363,22 @@ def main(argv=None):
         except MemoryError as exc:
             say("error", f"memory guard: {exc}")
             return 3
+        except subprocess.CalledProcessError as exc:
+            # The engine decodes the recording with ffmpeg and lets a failed
+            # decode escape as a traceback (fleet, 5.0.21: "YuE2 exited with
+            # code 1: ^^^^ · File ..., line 39, in decode_audio · raise su...").
+            # A file ffmpeg cannot read is the person's input, not a crash.
+            why = cover_decode_reason(exc)
+            say("error", "could not read the recording to cover"
+                         + (f" ({why})" if why else "")
+                         + ". Pick another file - an MP3, WAV, M4A or FLAC "
+                           "that plays in QuickTime.")
+            return 2
         except FileNotFoundError as exc:
+            if getattr(exc, "filename", None) == "ffmpeg":
+                say("error", "ffmpeg was not found, so the recording could not "
+                             "be read. Restart Phosphene and compose again.")
+                return 2
             # The two transcription models are a separate, optional download.
             # Say which thing is missing rather than surfacing a cache path.
             say("error", f"the cover models are not installed yet ({exc}). "
@@ -469,10 +502,18 @@ def main(argv=None):
     lora_runtime = yue2_lora.LoRARuntime(adapters)
 
     config = GenerationConfig(ode_steps=int(args.steps))
-    pipe = YuE2Pipeline(
-        args.model_dir, args.vae_dir, precision=args.precision, generation_config=config,
-        memory_budget_gib=budget, vae_core_frames=args.vae_core_frames, progress=False,
-    )
+    # The constructor starts the memory guard and samples at once: a Mac that
+    # is already short (a 16 GB Mac with a browser open) stops HERE, and that
+    # is the same memory-guard stop as one mid-song - exit 3, so the panel
+    # says what to do instead of a generic "exited with code 1" (4.19.12).
+    try:
+        pipe = YuE2Pipeline(
+            args.model_dir, args.vae_dir, precision=args.precision, generation_config=config,
+            memory_budget_gib=budget, vae_core_frames=args.vae_core_frames, progress=False,
+        )
+    except MemoryError as exc:
+        say("error", f"memory guard: {exc}")
+        return 3
     # Surface the NAR / VAE progress the pipeline only reports when its own
     # stderr progress is enabled.
     from lyra import nar as _nar

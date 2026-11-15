@@ -1448,9 +1448,7 @@ def spoken_spans(prompt: str) -> list[str]:
     """Every spoken line in `prompt`, tag form and every quote form."""
     p = prompt or ""
     out = [m.group(1).strip() for m in _D_SPAN_RE.finditer(p)]
-    # Audio section contains sound effects (e.g. Audio: ... a quiet 'click'.) which are sound cues, not spoken dialogue
-    dialogue_part = p.split("Audio:", 1)[0]
-    stripped = _D_SPAN_RE.sub(" ", dialogue_part)
+    stripped = _D_SPAN_RE.sub(" ", p)
     for m in _Q_SPAN_RE.finditer(stripped):
         g = next((grp for grp in m.groups() if grp is not None), None)
         if g:
@@ -1505,9 +1503,8 @@ def shot_pacing_problem(prompt: str, duration_s: float) -> str | None:
                     f"~{int(allowed)} fit, so the line is cut off "
                     f"mid-sentence. Shorten the line, or lengthen the shot to "
                     f"at least {speech_fit_frames(words, slow=slow, sung=sung)} frames")
-    last = spans[-1].strip()
-    has_punct = any(c in ".!?؛؟" for c in last) or (last and last[-1] in ".!?؛؟\"'”’»«") or (last and last[0] in ".!?؛؟\"'”’»«")
-    if last and not has_punct:
+    last = spans[-1].rstrip()
+    if last and last[-1] not in ".!?":
         return (f"the line ends {last[-12:]!r} — no full stop, so it plays as "
                 f"a sentence that never finishes. Close the thought")
     return None
@@ -1990,20 +1987,14 @@ def shot_to_job(shot: dict, policy_pass: dict, *,
     # the scheduling bucket and this job dict can never disagree about what will run.
     engine = resolve_engine(shot, engine_mode=engine_mode, h3_available=h3_available)
 
-    w = policy_pass.get("width")
-    h = policy_pass.get("height")
-    board_aspect = str(shot.get("aspect") or shot.get("orientation") or policy_pass.get("aspect") or "").lower()
-    if board_aspect in ("portrait", "vertical", "9:16") and w and h and int(w) > int(h):
-        w, h = h, w
-
     job = {
         # The panel has ONE backend mode for text and character alike; see _PANEL_MODE.
         "mode": _PANEL_MODE.get(shot.get("mode"), "t2v"),
         "engine": engine,
         "prompt": prompt,
         "quality": policy_pass.get("quality", "balanced"),
-        "width": w,
-        "height": h,
+        "width": policy_pass.get("width"),
+        "height": policy_pass.get("height"),
         "frames": policy_pass.get("frames"),
         "enhance": "off",            # never let Gemma touch a planned prompt
         # `auto_open` was never in make_job's allowlist, so it silently did nothing. The field
@@ -2011,11 +2002,6 @@ def shot_to_job(shot: dict, policy_pass: dict, *,
         # must not pop a QuickTime window per shot.
         "open_when_done": "off",
     }
-
-    if board_aspect in ("portrait", "vertical", "9:16"):
-        job["aspect"] = "portrait"
-        if engine == "h3":
-            job["h3_orientation"] = "portrait"
 
     # Duration. Without this every shot rendered at the pass's frame count, so the per-shot
     # length control was decoration. Each engine gets its OWN grid — LTX snaps to frames%8==1

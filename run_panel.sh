@@ -38,7 +38,7 @@ MLX="$ROOT/ltx-2-mlx"
 # fallback so a hand-rolled uv venv still works. Plain `python3` is the Linux
 # venv (scripts/linux/install.sh): omarchy-mlx ships wheels for the distro's
 # Python, not 3.11.
-for _cand in "$MLX/env/bin/python3.14" "$MLX/env/bin/python3.11" "$MLX/.venv/bin/python3.11" "$MLX/env/bin/python3" "$MLX/env/bin/python" "$MLX/.venv/bin/python3"; do
+for _cand in "$MLX/env/bin/python3.11" "$MLX/.venv/bin/python3.11" "$MLX/env/bin/python3" "$MLX/.venv/bin/python3"; do
   if [[ -x "$_cand" ]]; then PY="$_cand"; break; fi
 done
 

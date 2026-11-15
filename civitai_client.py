@@ -148,7 +148,6 @@ def _civitai_request(path: str, params: dict | None = None,
 # Flux engine exposed today, so surfacing Flux LoRAs in the browser
 # would just create install candidates that no engine can run.
 _CIVITAI_IMAGE_FAMILIES: dict[str, list[str]] = {
-    "flux":    ["Flux.1 D", "Flux.1 S", "Flux.1 Dev", "Flux.1 Schnell", "Flux.1 Krea", "Flux.1", "Flux.2"],
     "qwen":    ["Qwen 2", "Qwen"],   # Qwen-Image-Edit-2511 + Qwen-Image (2509)
     "hidream": ["HiDream-O1"],       # HiDream-O1-Image-Dev
 }

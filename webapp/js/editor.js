@@ -19,14 +19,22 @@
 //     clip.path when clip.proxy exists, and the one place it may (no proxy yet)
 //     says so on the badge instead of pretending.
 //
-//  2. Two <video> elements measured NO benefit over one once proxies are in
-//     play — the swap costs what the seek costs, and two decoders is two
-//     decoders. There is one video element here, deliberately.
+//  2. The program monitor has TWO <video> elements, one on screen and one
+//     loading the next clip off screen (sbeStageVideo). An older measurement
+//     found "no benefit" in a second element, but it timed the seek, not the
+//     picture: with one element, every cut handed the visible <video> a new
+//     file, and the app's web view (WebKit) paints black until that file has
+//     decoded its first frame. Measured 2 Nov 2026 on the 17-clip SUNDAY MASS
+//     film, by capturing the monitor in the app's own web view: all 16 cuts
+//     went black (88 black frames, 60-260 ms each); with the two elements,
+//     0 of 16. The visible element is never given a new file.
 //
-//  3. The preview freezes 50-67 ms at each cut (1.2-1.6 frames at 24 fps) and
-//     Safari's seeking is accurate to 3-6 frames. That is stated once, quietly,
-//     under the transport, and never papered over: the render is exact, the
-//     preview is an approximation of it.
+//  3. Safari's seeking is accurate to 3-6 frames, and a cut the spare had no
+//     time to prepare (shots shorter than about a quarter of a second, or a
+//     scrub) holds the outgoing frame until the incoming one is ready instead
+//     of going black. That is stated once, quietly, under the transport, and
+//     never papered over: the render is exact, the preview is an
+//     approximation of it.
 //
 // Two traps this feature already paid for, both load-bearing: `muted` is set
 // BEFORE the first play() or Chrome silently refuses autoplay, and elements are
@@ -199,6 +207,9 @@ window.SBE = {
   peaks: null, peaksFor: '', unplaced: [], pool: [], relink: [], offline: [], prepare: {},
   onMissing: null,
   proxyUrl: '', revision: 0, dirty: false, saving: false, conflict: 0,
+  // The program monitor's two <video> elements: which one is on screen, and
+  // the number of the newest request to change it (see sbeStageVideo).
+  vidLive: 'sbeVideo', vidGen: 0,
   // THE SAVE'S OWN BOOKKEEPING. `savePending` is the save that arrived while
   // another was in flight and used to be thrown away; `dirtyAt` is when the
   // oldest unwritten change was made, which is what lets the tick notice that
@@ -483,6 +494,21 @@ function sbeLayout(clips) {
 // an extension tag and a timestamp — "bizarrotrn_the_man_in_the_loud_4_
 // dn768x416_ext6_20260818_215…" — and at fit zoom both truncate, so the track
 // read as a row of half-words. The exact filename stays on the block's title.
+// A NAME THAT FITS THE BLOCK. Ellipsis truncation turned every shot on a
+// one-minute film into "S…" (SUNDAY MASS, 2 Nov: 17 blocks, not one readable
+// at the default zoom), because the useful part of "S05 · 05_s08" is its head
+// and the label was cut from the tail. A narrow block shows the head alone:
+// the shot code before " · ", or the first word. The full name stays in the
+// block's tooltip and the inspector.
+function sbeClipShortName(label, w) {
+  const nice = sbeNiceName(label);
+  if (sbeNum(w, 999) >= 110) return nice;
+  const raw = String(label || '').trim();
+  const head = raw.indexOf(' · ') > 0 ? raw.split(' · ')[0].trim() : '';
+  if (head && head.length <= 8) return head;
+  return (nice.split(' ')[0] || nice).slice(0, 10);
+}
+
 function sbeNiceName(s) {
   let t = String(s || '').trim();
   if (!t) return '';
@@ -680,7 +706,7 @@ function sbeSetAudioLink(clips, id, linked) {
   const c = sbeById(clips, id);
   if (!c) return { clips: clips, ok: false, why: 'gone' };
   if (sbeKind(c) !== 'video') {
-    return { clips: clips, ok: false, why: 'only a video clip has sound of its own' };
+    return { clips: clips, ok: false, why: T('editor.only_a_video_clip_has', 'only a video clip has sound of its own') };
   }
   const out = clips.map(x => Object.assign({}, x));
   const t = sbeById(out, id);
@@ -705,9 +731,9 @@ function sbeAudioEdit(clips, id, mode, want) {
   const w = sbeClipAudio(c);
   if (w.coupled) {
     return { clips: clips, ok: false,
-             why: 'this sound travels with its picture at the offset you set — unlink it to move it on its own' };
+             why: T('editor.this_sound_travels_with_its', 'this sound travels with its picture at the offset you set — unlink it to move it on its own') };
   }
-  if (w.linked) return { clips: clips, ok: false, why: 'unlink the sound first' };
+  if (w.linked) return { clips: clips, ok: false, why: T('editor.unlink_the_sound_first', 'unlink the sound first') };
   if (c.locked) return { clips: clips, ok: false, why: 'locked' };
   const src = sbeNum(c.duration, 0);
   const out = clips.map(x => Object.assign({}, x));
@@ -790,13 +816,13 @@ function sbeSetClipMute(clips, id, on) {
   const c = sbeById(clips, id);
   if (!c) return { clips: clips, ok: false, why: 'gone' };
   if (sbeKind(c) !== 'video') {
-    return { clips: clips, ok: false, why: 'only a video clip has sound to mute' };
+    return { clips: clips, ok: false, why: T('editor.only_a_video_clip_has_2', 'only a video clip has sound to mute') };
   }
   if (c.has_audio === false) {
     return { clips: clips, ok: false,
-             why: 'this clip has no sound of its own to mute' };
+             why: T('editor.this_clip_has_no_sound', 'this clip has no sound of its own to mute') };
   }
-  if (!!c.mute === !!on) return { clips: clips, ok: false, why: 'no change' };
+  if (!!c.mute === !!on) return { clips: clips, ok: false, why: T('editor.no_change', 'no change') };
   const out = clips.map(x => Object.assign({}, x));
   const t = sbeById(out, id);
   if (on) t.mute = true; else delete t.mute;
@@ -823,7 +849,7 @@ function sbeSetSoundLane(clips, id, lane) {
   const c = sbeById(clips, id);
   if (!c) return { clips: clips, ok: false, why: 'gone' };
   if (sbeKind(c) !== 'video') {
-    return { clips: clips, ok: false, why: 'only a video clip has sound of its own' };
+    return { clips: clips, ok: false, why: T('editor.only_a_video_clip_has', 'only a video clip has sound of its own') };
   }
   if (c.locked) return { clips: clips, ok: false, why: 'locked' };
   const want = (sbeNum(lane) === 2) ? 2 : 1;
@@ -855,8 +881,8 @@ function sbeAlternateLanes(clips) {
   });
   if (!changed) {
     return { clips: clips, ok: false, changed: 0,
-             why: vids.length ? 'The clip sound already alternates A, B, A… — nothing to change.'
-                              : 'There is no clip sound on this __SEQ__ to lay out.' };
+             why: vids.length ? T('editor.the_clip_sound_already_alternates', 'The clip sound already alternates A, B, A… — nothing to change.')
+                              : T('editor.there_is_no_clip_sound_2', 'There is no clip sound on this __SEQ__ to lay out.') };
   }
   return { clips: out, ok: true, changed: changed };
 }
@@ -970,7 +996,7 @@ function sbeResyncAudio(clips, id) {
   const w = sbeClipAudio(c);
   if (!w.split) {
     return { clips: clips, ok: false,
-             why: 'this clip\'s sound is already under its own picture' };
+             why: T('editor.this_clip_s_sound_is', 'this clip\'s sound is already under its own picture') };
   }
   if (c.locked) return { clips: clips, ok: false, why: 'locked' };
   const want = sbeRound(sbeNum(c.film_start) + (w.start - sbeNum(c.start)) / w.speed);
@@ -979,7 +1005,7 @@ function sbeResyncAudio(clips, id) {
              why: 'the sound would have to start before the __SEQ__ does — move the picture later first' };
   }
   if (Math.abs(want - w.film_start) < 1e-9) {
-    return { clips: clips, ok: false, why: 'that sound is already in sync' };
+    return { clips: clips, ok: false, why: T('editor.that_sound_is_already_in', 'that sound is already in sync') };
   }
   const out = clips.map(x => Object.assign({}, x));
   const t = sbeById(out, id);
@@ -1030,10 +1056,10 @@ function sbeSetSpeed(clips, id, v) {
   if (!c) return { clips: clips, ok: false, why: 'gone' };
   if (c.locked) return { clips: clips, ok: false, why: 'locked' };
   if (sbeKind(c) !== 'video') {
-    return { clips: clips, ok: false, why: 'only a video clip has a clock to run fast or slow' };
+    return { clips: clips, ok: false, why: T('editor.only_a_video_clip_has_3', 'only a video clip has a clock to run fast or slow') };
   }
   const want = sbeRound(Math.max(SBE_SPEED_MIN, Math.min(SBE_SPEED_MAX, sbeNum(v, 1) || 1)));
-  if (Math.abs(want - sbeSpeed(c)) < 1e-9) return { clips: clips, ok: false, why: 'no change' };
+  if (Math.abs(want - sbeSpeed(c)) < 1e-9) return { clips: clips, ok: false, why: T('editor.no_change', 'no change') };
   const mark = sbeSyncMark(clips);
   const out = clips.map(x => Object.assign({}, x));
   const t = sbeById(out, id);
@@ -1102,7 +1128,7 @@ function sbeSetFade(clips, id, edge, seconds) {
   const want = Math.max(0, Math.min(sbeClipLen(c), sbeNum(seconds)));
   const now = sbeFx(c);
   if (Math.abs(now[key] - want) < 1e-6 && !(want === 0 && c.fx && c.fx[key])) {
-    return { clips: clips, ok: false, why: 'no change' };
+    return { clips: clips, ok: false, why: T('editor.no_change', 'no change') };
   }
   const out = clips.map(x => Object.assign({}, x));
   const t = sbeById(out, id);
@@ -1546,10 +1572,10 @@ function sbeDeleteStrip(clips, id) {
   if (!c) return { clips: clips, ok: false, why: 'gone' };
   if (c.locked) return { clips: clips, ok: false, why: 'locked' };
   if (sbeKind(c) !== 'video') {
-    return { clips: clips, ok: false, why: 'only a video clip has sound' };
+    return { clips: clips, ok: false, why: T('editor.only_a_video_clip_has_4', 'only a video clip has sound') };
   }
   if (sbeClipMuted(c) && !sbeClipAudio(c).split) {
-    return { clips: clips, ok: false, why: 'this clip is already silent' };
+    return { clips: clips, ok: false, why: T('editor.this_clip_is_already_silent', 'this clip is already silent') };
   }
   const out = clips.map(x => Object.assign({}, x));
   const t = sbeById(out, id);
@@ -1733,7 +1759,7 @@ function sbeTsRemoveTrack(tracks, tid) {
   if (!t) return { tracks: tracks, ok: false, why: 'gone' };
   if ((t.strips || []).some(s => s.locked === true)) {
     return { tracks: tracks, ok: false,
-             why: 'a sound on this track is locked — unlock it before removing the track' };
+             why: T('editor.a_sound_on_this_track', 'a sound on this track is locked — unlock it before removing the track') };
   }
   return { tracks: sbeTsCopy(tracks).filter(x => String(x.id) !== String(tid)),
            ok: true, removed: t };
@@ -1765,7 +1791,7 @@ function sbeTsPlace(tracks, tid, strip, want) {
   const s = JSON.parse(JSON.stringify(strip || {}));
   const len = sbeTsWindow(s).len;
   if (len < SBE_TRACK_STRIP_MIN) {
-    return { tracks: tracks, ok: false, why: 'that sound is too short to place' };
+    return { tracks: tracks, ok: false, why: T('editor.that_sound_is_too_short', 'that sound is too short to place') };
   }
   const at = Math.max(0, sbeNum(want));
   let t = null;
@@ -1803,7 +1829,7 @@ function sbeTsMove(tracks, sid, toTid, want) {
     if (!dest) return { tracks: tracks, ok: false, why: 'gone' };
   }
   const spot = sbeTsNearest(dest, want, len, sid);
-  if (spot === null) return { tracks: tracks, ok: false, why: 'there is no room there' };
+  if (spot === null) return { tracks: tracks, ok: false, why: T('editor.there_is_no_room_there', 'there is no room there') };
   g.track.strips.splice(g.si, 1);
   g.strip.film_start = spot;
   dest.strips.push(g.strip);
@@ -1830,7 +1856,7 @@ function sbeTsMoveGroup(tracks, ids, delta) {
   for (const g of found) {
     const w = sbeTsWindow(g.strip);
     if (!sbeTsFits(g.track, w.film_start, w.len, list)) {
-      return { tracks: tracks, ok: false, why: 'there is no room there' };
+      return { tracks: tracks, ok: false, why: T('editor.there_is_no_room_there', 'there is no room there') };
     }
   }
   for (const t of out) sbeTsSort(t);
@@ -1878,7 +1904,7 @@ function sbeTsSplit(tracks, sid, t, newId) {
   const off = sbeNum(t) - w.film_start;
   if (off < SBE_TRACK_STRIP_MIN || w.len - off < SBE_TRACK_STRIP_MIN) {
     return { tracks: tracks, ok: false,
-             why: 'the playhead is not inside that sound, or is right on its edge' };
+             why: T('editor.the_playhead_is_not_inside', 'the playhead is not inside that sound, or is right on its edge') };
   }
   const out = sbeTsCopy(tracks);
   const g = sbeTsFind(out, sid);
@@ -1944,7 +1970,7 @@ function sbeTsDelete(tracks, sid, ripple) {
       if (sw.film_start < w.film_end - 1e-6) continue;
       if (s.locked === true) {
         return { tracks: tracks, ok: false,
-                 why: 'a locked sound after it on the same track cannot slide — unlock it, or use Lift' };
+                 why: T('editor.a_locked_sound_after_it', 'a locked sound after it on the same track cannot slide — unlock it, or use Lift') };
       }
       s.film_start = sbeRound(Math.max(0, sw.film_start - w.len));
     }
@@ -2080,16 +2106,16 @@ function sbeTsSnaps(tracks, clips, skip) {
 // where it plays. Refused, with the reason, for a clip that has none, and for
 // a retimed one: a track strip plays at 1x.
 function sbeTsFromClip(c) {
-  if (!c || sbeKind(c) !== 'video') return { why: 'Only a video clip has sound of its own to copy.' };
-  if (c.has_audio === false) return { why: 'This clip has no sound of its own to copy.' };
+  if (!c || sbeKind(c) !== 'video') return { why: T('editor.only_a_video_clip_has_5', 'Only a video clip has sound of its own to copy.') };
+  if (c.has_audio === false) return { why: T('editor.this_clip_has_no_sound_2', 'This clip has no sound of its own to copy.') };
   const w = sbeClipAudio(c);
   if (Math.abs(w.speed - 1) > 1e-9) {
-    return { why: 'This clip plays at ' + w.speed + 'x and a sound on an audio track plays at 1x — '
-                  + 'set the clip back to 1x to copy its sound.' };
+    return { why: T('editor.this_clip_plays_at', 'This clip plays at ') + w.speed + T('editor.x_and_a_sound_on', 'x and a sound on an audio track plays at 1x — ')
+                  + T('editor.set_the_clip_back_to', 'set the clip back to 1x to copy its sound.') };
   }
   const s = { id: sbeNewId(), path: String(c.path || ''), start: w.start, end: w.end,
               film_start: sbeRound(w.film_start + w.len),
-              title: sbeTsCopyTitle({ title: c.title, path: c.path }, 'clip sound') };
+              title: sbeTsCopyTitle({ title: c.title, path: c.path }, T('editor.clip_sound', 'clip sound')) };
   if (sbeNum(c.duration, 0) > 0) s.duration = sbeNum(c.duration);
   const e = sbeAfx(c, w.len);
   const afx = {};
@@ -2106,13 +2132,13 @@ function sbeTsFromClip(c) {
 // it does not travel). A2 holds ONE strip, so the copy is always a track's.
 function sbeTsFromBed(audio, peaksDur) {
   const a = audio || {};
-  if (!a.path) return { why: 'There is no soundtrack on A2 to copy.' };
+  if (!a.path) return { why: T('editor.there_is_no_soundtrack_on', 'There is no soundtrack on A2 to copy.') };
   const w = sbeMusicWindow(a, peaksDur);
   if (w.film_end === null || w.tail === null) {
-    return { why: 'The soundtrack\'s length is not known yet — press Prepare in the A2 head\'s ▾ first.' };
+    return { why: T('editor.the_soundtrack_s_length_is', 'The soundtrack\'s length is not known yet — press Prepare in the A2 head\'s ▾ first.') };
   }
   const len = sbeRound(w.tail - w.head);
-  if (len < SBE_TRACK_STRIP_MIN) return { why: 'The soundtrack is trimmed to nothing.' };
+  if (len < SBE_TRACK_STRIP_MIN) return { why: T('editor.the_soundtrack_is_trimmed_to', 'The soundtrack is trimmed to nothing.') };
   const s = { id: sbeNewId(), path: String(a.path), start: w.head, end: w.tail,
               film_start: sbeRound(w.film_start + len),
               title: sbeTsCopyTitle({ path: a.path }, 'music') };
@@ -2199,7 +2225,7 @@ function sbeTsMutateEach(ids, fn) {
     tracks = r.tracks;
     done.push(r);
   }
-  const say = (w) => (w === 'locked' ? 'That sound is locked.' : w);
+  const say = (w) => (w === 'locked' ? T('editor.that_sound_is_locked', 'That sound is locked.') : w);
   if (!done.length) {
     phosToast(say(why[0] || 'Nothing on this selection could take that.'), {});
     return false;
@@ -2209,9 +2235,9 @@ function sbeTsMutateEach(ids, fn) {
   SBE.redo.length = 0;
   SBE.tracks = tracks;
   SBE.dirty = true;
-  sbeSetState('unsaved changes', 'dirty');
+  sbeSetState(T('editor.unsaved_changes', 'unsaved changes'), 'dirty');
   if (why.length) {
-    phosToast(why.length + ' of ' + list.length + ' were left as they were — '
+    phosToast(why.length + ' of ' + list.length + T('editor.were_left_as_they_were', ' were left as they were — ')
               + say(why[0]), { duration: 6000 });
   }
   sbePaint();
@@ -2268,9 +2294,20 @@ function sbeOvText(o) {
   };
 }
 
-function sbeOvAt(overlays, t) {
+// TWO LAYERS ON THE OVERLAY LANE (2 Nov): pictures (stills, videos) and
+// titles. A title may sit over a picture overlay — a logo bug that runs the
+// whole film is exactly where a title has to go — but two pictures, or two
+// titles, still never share a second. Before this, Add title on SUNDAY MASS
+// (a spinning mark over all 63 s) landed the title AFTER the film's last
+// frame, where nothing shows it, and said nothing.
+function sbeOvLayerOf(o) { return sbeOvKind(o) === 'text' ? 'text' : 'media'; }
+
+// `layer` narrows the lookup to 'text' or 'media'; absent is either (the
+// first one in film order, the old behaviour).
+function sbeOvAt(overlays, t, layer) {
   const now = sbeNum(t);
   for (const o of overlays || []) {
+    if (layer && sbeOvLayerOf(o) !== layer) continue;
     if (now >= sbeNum(o.film_start) - 1e-6 && now < sbeNum(o.film_end)) return o;
   }
   return null;
@@ -2281,11 +2318,14 @@ function sbeOvById(overlays, id) {
   return null;
 }
 
-// ONE LANE, so a move that would land on top of another card is refused
-// rather than silently stacked — the same rule the picture lane lives by.
-function sbeOvFits(overlays, id, fs, fe) {
+// ONE LANE PER LAYER, so a move that would land on top of another card is
+// refused rather than silently stacked — the same rule the picture lane lives
+// by. `layer` ('text' | 'media') limits the check to that layer; a title over
+// a picture overlay is not a collision. Absent checks every overlay.
+function sbeOvFits(overlays, id, fs, fe, layer) {
   for (const o of overlays || []) {
     if (o.id === id) continue;
+    if (layer && sbeOvLayerOf(o) !== layer) continue;
     if (fs < sbeNum(o.film_end) - 1e-6 && fe > sbeNum(o.film_start) + 1e-6) {
       return false;
     }
@@ -2299,9 +2339,9 @@ function sbeOvMove(overlays, id, filmStart) {
   if (o.locked) return { overlays: overlays, ok: false, why: 'locked' };
   const len = Math.max(SBE_MIN_CLIP, sbeNum(o.film_end) - sbeNum(o.film_start));
   const fs = Math.max(0, sbeNum(filmStart));
-  if (!sbeOvFits(overlays, id, fs, fs + len)) {
+  if (!sbeOvFits(overlays, id, fs, fs + len, sbeOvLayerOf(o))) {
     return { overlays: overlays, ok: false,
-             why: 'another overlay is already there' };
+             why: T('editor.another_overlay_is_already_there', 'another overlay is already there') };
   }
   const out = overlays.map(x => Object.assign({}, x));
   const t = sbeOvById(out, id);
@@ -2319,8 +2359,8 @@ function sbeOvTrim(overlays, id, edge, filmTime) {
   let fs = sbeNum(o.film_start), fe = sbeNum(o.film_end);
   if (edge === 'l') fs = Math.min(fe - SBE_MIN_CLIP, Math.max(0, sbeNum(filmTime)));
   else fe = Math.max(fs + SBE_MIN_CLIP, sbeNum(filmTime));
-  if (!sbeOvFits(overlays, id, fs, fe)) {
-    return { overlays: overlays, ok: false, why: 'another overlay is there' };
+  if (!sbeOvFits(overlays, id, fs, fe, sbeOvLayerOf(o))) {
+    return { overlays: overlays, ok: false, why: T('editor.another_overlay_is_there', 'another overlay is there') };
   }
   const out = overlays.map(x => Object.assign({}, x));
   const t = sbeOvById(out, id);
@@ -2336,12 +2376,15 @@ function sbeOvTrim(overlays, id, edge, filmTime) {
 function sbeOvAdd(overlays, item, filmStart) {
   const dur = Math.max(SBE_MIN_CLIP, sbeNum(item.duration_s, 0) || 3);
   let fs = Math.max(0, sbeNum(filmStart));
-  // Land somewhere free rather than refusing: the lane is one track, and a
-  // card dropped onto another card means "after it".
+  const layer = (item.kind === 'text') ? 'text' : 'media';
+  // Land somewhere free rather than refusing: a card dropped onto another
+  // card OF ITS OWN LAYER means "after it". A title over a picture overlay
+  // stays where it was asked for.
   for (let i = 0; i < (overlays || []).length + 1; i++) {
-    if (sbeOvFits(overlays, null, fs, fs + dur)) break;
+    if (sbeOvFits(overlays, null, fs, fs + dur, layer)) break;
     let push = fs;
     for (const o of overlays) {
+      if (sbeOvLayerOf(o) !== layer) continue;
       if (fs < sbeNum(o.film_end) - 1e-6 && fs + dur > sbeNum(o.film_start) + 1e-6) {
         push = Math.max(push, sbeNum(o.film_end));
       }
@@ -2349,7 +2392,11 @@ function sbeOvAdd(overlays, item, filmStart) {
     fs = push;
   }
   const kind = (item.kind === 'text') ? 'text'
-    : (/\.(png|webp|tiff?)$/i.test(String(item.path || '')) ? 'still' : 'video');
+    : (item.kind === 'still'
+       // JPEG/BMP/GIF are stills too. They used to fall through to `video`,
+       // so the stage tried to play a JPEG in a <video> element.
+       || /\.(png|webp|tiff?|jpe?g|bmp|gif)$/i.test(String(item.path || ''))
+       ? 'still' : 'video');
   const o = {
     id: sbeNewId(), kind: kind,
     path: (kind === 'text') ? null : item.path, title: item.title || '',
@@ -2386,7 +2433,7 @@ function sbeOvDelete(overlays, id) {
 const SBE_TX_KINDS = ['dissolve', 'fade_black'];
 const SBE_TX_MIN = 1 / 24;
 const SBE_TX_MAX = 2.0;
-const SBE_TX_LABELS = { dissolve: 'Dissolve', fade_black: 'Fade through black' };
+const SBE_TX_LABELS = { dissolve: T('editor.dissolve', 'Dissolve'), fade_black: T('editor.fade_through_black', 'Fade through black') };
 
 function sbeTxById(txs, id) {
   for (const t of txs || []) if (t.id === id) return t;
@@ -2427,28 +2474,28 @@ function sbeTxResolve(clips, txs, fps) {
                   at: 0, problem: null };
     const fail = (code, message) => { res.problem = { code: code, message: message }; out.push(res); };
     const k = pos[res.after_clip];
-    if (k === undefined) { fail('transition_unknown_clip', label + ': names no clip on this timeline'); return; }
+    if (k === undefined) { fail('transition_unknown_clip', label + T('editor.names_no_clip_on_this', ': names no clip on this timeline')); return; }
     const a = order[k];
-    if (k + 1 >= order.length) { fail('transition_last_clip', 'this is the last clip — there is nothing after it to dissolve into'); return; }
+    if (k + 1 >= order.length) { fail('transition_last_clip', T('editor.this_is_the_last_clip', 'this is the last clip — there is nothing after it to dissolve into')); return; }
     const b = order[k + 1];
     res.before_clip = b.id;
     res.at = sbeRound(sbeNum(a.film_end));
-    if (seen[res.after_clip]) { fail('transition_duplicate_boundary', 'this cut already has a transition — one per boundary'); return; }
+    if (seen[res.after_clip]) { fail('transition_duplicate_boundary', T('editor.this_cut_already_has_a', 'this cut already has a transition — one per boundary')); return; }
     seen[res.after_clip] = true;
-    if (SBE_TX_KINDS.indexOf(res.kind) < 0) { fail('transition_kind', label + ': unknown kind ' + res.kind); return; }
-    if (!(sbeNum(row.duration) > 0)) { fail('transition_duration', 'the duration must be above 0 s'); return; }
+    if (SBE_TX_KINDS.indexOf(res.kind) < 0) { fail('transition_kind', label + T('editor.unknown_kind', ': unknown kind ') + res.kind); return; }
+    if (!(sbeNum(row.duration) > 0)) { fail('transition_duration', T('editor.the_duration_must_be_above', 'the duration must be above 0 s')); return; }
     const d = sbeTxDuration(row, sbeLen(a), sbeLen(b), fps);
-    if (d < SBE_TX_MIN - 1e-9) { fail('transition_duration', 'these two clips are too short to carry a transition between them'); return; }
+    if (d < SBE_TX_MIN - 1e-9) { fail('transition_duration', T('editor.these_two_clips_are_too', 'these two clips are too short to carry a transition between them')); return; }
     res.duration = d;
     res.half = sbeRound(d / 2);
     const word = res.kind.replace('_', ' ');
     const needOut = res.half * sbeSpeed(a), needIn = res.half * sbeSpeed(b);
     const short = [];
     const tail = sbeTxSpare(a, 'tail');
-    if (tail === null) short.push('the source length of the outgoing clip is not known — run Prepare so the panel can measure it');
-    else if (tail + 1e-6 < needOut) short.push('the outgoing clip has only ' + tail.toFixed(2) + 's beyond its out-point and the ' + word + ' needs ' + needOut.toFixed(2) + 's there — trim its tail in or shorten the transition');
+    if (tail === null) short.push(T('editor.the_source_length_of_the', 'the source length of the outgoing clip is not known — run Prepare so the panel can measure it'));
+    else if (tail + 1e-6 < needOut) short.push(T('editor.the_outgoing_clip_has_only', 'the outgoing clip has only ') + tail.toFixed(2) + 's beyond its out-point and the ' + word + ' needs ' + needOut.toFixed(2) + T('editor.s_there_trim_its_tail', 's there — trim its tail in or shorten the transition'));
     const head = sbeTxSpare(b, 'head');
-    if (head !== null && head + 1e-6 < needIn) short.push('the incoming clip has only ' + head.toFixed(2) + 's before its in-point and the ' + word + ' needs ' + needIn.toFixed(2) + 's there — trim its head in or shorten the transition');
+    if (head !== null && head + 1e-6 < needIn) short.push(T('editor.the_incoming_clip_has_only', 'the incoming clip has only ') + head.toFixed(2) + 's before its in-point and the ' + word + ' needs ' + needIn.toFixed(2) + T('editor.s_there_trim_its_head', 's there — trim its head in or shorten the transition'));
     if (short.length) { fail('transition_no_handles', short.join('; ')); return; }
     out.push(res);
   });
@@ -2507,7 +2554,7 @@ function sbeTxMutate(fn) {
   SBE.redo.length = 0;
   SBE.transitions = res.transitions;
   SBE.dirty = true;
-  sbeSetState('unsaved changes', 'dirty');
+  sbeSetState(T('editor.unsaved_changes', 'unsaved changes'), 'dirty');
   sbePaint();
   sbeQueueSave();
   return res;
@@ -2708,7 +2755,9 @@ function sbeMoveTo(clips, id, filmStart, opts) {
   sbeLayout(rest);                       // where would it land packed tight?
   const prev = rest[rest.indexOf(c) - 1];
   const floor = prev ? sbeNum(prev.film_end) : 0;
-  c._gap = Math.max(0, sbeRound(want - floor));
+  // `tight`: a reorder of a film cut end to end lands the shot flush against
+  // its new neighbour — a drop a few pixels off must not open a black hole.
+  c._gap = (opts && opts.tight) ? 0 : Math.max(0, sbeRound(want - floor));
   sbeLayout(rest);
   // The clip being dragged is exempt: its sound stays exactly where it is,
   // which is the J-cut. Everything the reflow pushed takes its sound along.
@@ -2803,8 +2852,8 @@ function sbeSlip(clips, id, deltaSrcSeconds) {
   const applied = sbeRound(start - sbeNum(c.start));
   if (Math.abs(applied) < 1e-9) {
     return { clips: clips, ok: false,
-             why: (deltaSrcSeconds < 0 ? 'Already at the start of the take — nothing to give.'
-                                       : 'Already at the end of the take — nothing to give.') };
+             why: (deltaSrcSeconds < 0 ? T('editor.already_at_the_start_of', 'Already at the start of the take — nothing to give.')
+                                       : T('editor.already_at_the_end_of', 'Already at the end of the take — nothing to give.')) };
   }
   c.start = sbeRound(sbeNum(c.start) + applied);
   c.end = sbeRound(sbeNum(c.end) + applied);
@@ -2823,7 +2872,7 @@ function sbeSlipNudge(dir, big) {
   const d = ((big ? 10 : 1) * (dir < 0 ? -1 : 1)) / sbeFps() * sbeSpeed(c);
   const ok = sbeMutate(cs => sbeSlip(cs, id, d));
   if (ok) {
-    phosToast('Slipped ' + (d > 0 ? '+' : '') + Math.round(d * sbeFps() / sbeSpeed(c)) + ' f.',
+    phosToast(T('editor.slipped', 'Slipped ') + (d > 0 ? '+' : '') + Math.round(d * sbeFps() / sbeSpeed(c)) + ' f.',
               { duration: 2000 });
   }
 }
@@ -2842,7 +2891,7 @@ function sbeRollEdit(clips, prevId, nextId, deltaFilmSeconds) {
   if (!prev || !next) return { clips: clips, ok: false, why: 'gone' };
   if (prev.locked || next.locked) return { clips: clips, ok: false, why: 'locked' };
   if (Math.abs(sbeNum(prev.film_end) - sbeNum(next.film_start)) > 1e-6) {
-    return { clips: clips, ok: false, why: 'Those two shots do not share a cut.' };
+    return { clips: clips, ok: false, why: T('editor.those_two_shots_do_not', 'Those two shots do not share a cut.') };
   }
   const spPrev = sbeSpeed(prev), spNext = sbeSpeed(next);
   let d = sbeNum(deltaFilmSeconds);
@@ -2857,8 +2906,8 @@ function sbeRollEdit(clips, prevId, nextId, deltaFilmSeconds) {
   d = sbeRound(Math.max(lo, Math.min(hi, d)));
   if (Math.abs(d) < 1e-9) {
     return { clips: clips, ok: false,
-             why: (deltaFilmSeconds < 0 ? 'The shot before is already as short as it can be.'
-                                        : 'The shot after is already as short as it can be.') };
+             why: (deltaFilmSeconds < 0 ? T('editor.the_shot_before_is_already', 'The shot before is already as short as it can be.')
+                                        : T('editor.the_shot_after_is_already', 'The shot after is already as short as it can be.')) };
   }
   // Only the SOURCE windows move by hand; `_gap` before each clip is
   // untouched (next's stays 0 — still no hole), so `sbeLayout` derives both
@@ -2922,7 +2971,7 @@ function sbeLiftDelete(clips, id) {
   const c = sbeById(clips, id);
   if (!c) return { clips: clips, ok: false, why: 'gone' };
   if (c.locked) return { clips: clips, ok: false, why: 'locked' };
-  if (sbeKind(c) === 'slug') return { clips: clips, ok: false, why: 'already a hole' };
+  if (sbeKind(c) === 'slug') return { clips: clips, ok: false, why: T('editor.already_a_hole', 'already a hole') };
   const len = sbeLen(c);
   const out = clips.map(x => (x === c) ? {
     id: c.id, kind: 'slug', path: null, proxy: null, duration: null,
@@ -2936,13 +2985,13 @@ function sbeLiftDelete(clips, id) {
 
 function sbeSplitAt(clips, t, newId, transitions) {
   const c = sbeClipAt(clips, t);
-  if (!c) return { clips: clips, ok: false, why: 'nothing there' };
+  if (!c) return { clips: clips, ok: false, why: T('editor.nothing_there', 'nothing there') };
   if (c.locked) return { clips: clips, ok: false, why: 'locked' };
   // `off` is FILM seconds into the slot; the cut in the take is `off * speed`.
   const off = sbeNum(t) - sbeNum(c.film_start);
   const sp = sbeSpeed(c);
   if (off < SBE_MIN_CLIP || sbeLen(c) - off < SBE_MIN_CLIP) {
-    return { clips: clips, ok: false, why: 'too close to an edge' };
+    return { clips: clips, ok: false, why: T('editor.too_close_to_an_edge', 'too close to an edge') };
   }
   // THE SOUND IS CUT WHERE THE PICTURE IS, NOT COPIED TWICE. The deep copy
   // below used to carry `audio` into the new half verbatim, so one strip became
@@ -2960,7 +3009,7 @@ function sbeSplitAt(clips, t, newId, transitions) {
       // express (an absent `audio` means LINKED, which would invent sound the
       // film does not have). Say so instead of guessing.
       return { clips: clips, ok: false,
-               why: 'the unlinked sound does not reach this cut — move the '
+               why: T('editor.the_unlinked_sound_does_not', 'the unlinked sound does not reach this cut — move the ')
                     + 'strip back or re-link it first' };
     }
     cutA = sbeAudioField({ start: w.start, end: sp2,
@@ -3014,7 +3063,7 @@ function sbeClipboardCopy(clips, ids) {
 // PASTE ATTRIBUTES, from the one clip copied, onto every clip in `ids` —
 // grade, frame, fades and speed; never the path, the window or the slot.
 function sbeClipboardPasteAttrs(clips, ids, source) {
-  if (!source) return { clips: clips, ok: false, why: 'nothing copied' };
+  if (!source) return { clips: clips, ok: false, why: T('editor.nothing_copied', 'nothing copied') };
   let out = clips.slice();
   let touched = 0;
   for (const id of ids || []) {
@@ -3039,7 +3088,7 @@ function sbeClipboardPasteAttrs(clips, ids, source) {
     }
     touched++;
   }
-  return { clips: out, ok: touched > 0, why: touched ? '' : 'nothing to paste onto' };
+  return { clips: out, ok: touched > 0, why: touched ? '' : T('editor.nothing_to_paste_onto', 'nothing to paste onto') };
 }
 
 // PASTE CLIPS, inserted at a film time in copied order — each a new clip
@@ -3075,14 +3124,14 @@ function sbeClipboardPasteClips(clips, items, at) {
     want += filmLen;
   }
   return { clips: cs, ok: added.length > 0, added: added,
-           why: added.length ? '' : 'nothing could be pasted' };
+           why: added.length ? '' : T('editor.nothing_could_be_pasted', 'nothing could be pasted') };
 }
 
 function sbeClipCopy() {
   const ids = sbeSelIds();
-  if (!ids.length) { phosToast('Select a clip first.', {}); return; }
+  if (!ids.length) { phosToast(T('editor.select_a_clip_first', 'Select a clip first.'), {}); return; }
   SBE.clipboard = sbeClipboardCopy(SBE.clips, ids);
-  phosToast((SBE.clipboard.length === 1 ? 'Clip copied.' : SBE.clipboard.length + ' clips copied.'),
+  phosToast((SBE.clipboard.length === 1 ? T('editor.clip_copied', 'Clip copied.') : SBE.clipboard.length + T('editor.clips_copied', ' clips copied.')),
             { duration: 2500 });
 }
 // ONE COMMAND, TWO MEANINGS — the same split Premiere spreads across Paste
@@ -3094,19 +3143,19 @@ function sbeClipCopy() {
 function sbeClipPaste() {
   if (!SBE.open || !SBE.id) return;
   const clip = SBE.clipboard || [];
-  if (!clip.length) { phosToast('Nothing copied yet — ⌘C a clip first.', {}); return; }
+  if (!clip.length) { phosToast(T('editor.nothing_copied_yet_c_a', 'Nothing copied yet — ⌘C a clip first.'), {}); return; }
   const selIds = sbeSelIds();
   if (clip.length === 1 && selIds.length >= 1) {
     const ok = sbeMutate(cs => sbeClipboardPasteAttrs(cs, selIds, clip[0]));
     if (ok) {
-      phosToast('Grade, frame, fades and speed pasted onto ' + selIds.length
+      phosToast(T('editor.grade_frame_fades_and_speed', 'Grade, frame, fades and speed pasted onto ') + selIds.length
                 + (selIds.length === 1 ? ' clip.' : ' clips.'), { kind: 'success', duration: 4000 });
     }
     return;
   }
   const ok = sbeMutate(cs => sbeClipboardPasteClips(cs, clip, SBE.playhead));
   if (ok) {
-    phosToast((clip.length === 1 ? 'Clip' : clip.length + ' clips') + ' pasted at '
+    phosToast((clip.length === 1 ? T('editor.clip', 'Clip') : clip.length + ' clips') + T('editor.pasted_at', ' pasted at ')
               + sbeFmtTime(SBE.playhead) + '.', { kind: 'success', duration: 4000 });
   }
 }
@@ -3127,7 +3176,7 @@ function sbeSetSeqAspect(key) {
   SBE.edit = SBE.edit || {};
   SBE.edit.settings = Object.assign({}, SBE.edit.settings || {}, { aspect: key });
   SBE.dirty = true;
-  sbeSetState('unsaved changes', 'dirty');
+  sbeSetState(T('editor.unsaved_changes', 'unsaved changes'), 'dirty');
   sbePaintChrome();
   sbeQueueSave();
 }
@@ -3244,10 +3293,10 @@ function sbeReplaceClip(clips, id, item) {
   if (srcDur + 0.001 < need) {
     const f = v => (Math.round(v * 10) / 10).toFixed(1) + 's';
     return { clips: clips, ok: false,
-             why: 'That take is ' + f(srcDur) + ' long and this slot needs ' +
+             why: T('editor.that_take_is', 'That take is ') + f(srcDur) + T('editor.long_and_this_slot_needs', ' long and this slot needs ') +
                   f(need) + (Math.abs(sp - 1) > 1e-9 ? ' at ' + sp + 'x' : '') +
-                  '. Trim the clip to ' + f(srcDur / sp) + ' or less first, ' +
-                  'or pick a longer take.' };
+                  T('editor.trim_the_clip_to', '. Trim the clip to ') + f(srcDur / sp) + T('editor.or_less_first', ' or less first, ') +
+                  T('editor.or_pick_a_longer_take', 'or pick a longer take.') };
   }
   // Keep the OLD in-point where it can — a replace that keeps its manual
   // offset is more often right than one that silently resets to zero — and
@@ -3341,7 +3390,7 @@ function sbeSetGrade(clips, id, field, v) {
   if (!c) return { clips: clips, ok: false, why: 'gone' };
   if (c.locked) return { clips: clips, ok: false, why: 'locked' };
   const lim = SBE_GRADE_FIELDS[field];
-  if (!lim) return { clips: clips, ok: false, why: 'unknown field' };
+  if (!lim) return { clips: clips, ok: false, why: T('editor.unknown_field', 'unknown field') };
   const [lo, hi, def] = lim;
   const val = sbeRound(Math.max(lo, Math.min(hi, sbeNum(v))));
   const adj = Object.assign({}, c.adjust || {});
@@ -3367,7 +3416,7 @@ function sbeCopyGrade(clips, fromId, toIds) {
     }
     touched++;
   }
-  return { clips: clips, ok: touched > 0, why: touched ? '' : 'nothing to copy it onto' };
+  return { clips: clips, ok: touched > 0, why: touched ? '' : T('editor.nothing_to_copy_it_onto', 'nothing to copy it onto') };
 }
 
 // FRAMING — the mirror of `clip_frame()`: zoom 1–3 and the anchor as
@@ -3386,7 +3435,7 @@ function sbeSetFraming(clips, id, field, v) {
   const c = sbeById(clips, id);
   if (!c) return { clips: clips, ok: false, why: 'gone' };
   if (c.locked) return { clips: clips, ok: false, why: 'locked' };
-  if (sbeKind(c) === 'slug') return { clips: clips, ok: false, why: 'black has nothing to reframe' };
+  if (sbeKind(c) === 'slug') return { clips: clips, ok: false, why: T('editor.black_has_nothing_to_reframe', 'black has nothing to reframe') };
   const cur = sbeFraming(c);
   const next = Object.assign({}, cur);
   next[field] = sbeNum(v, cur[field]);
@@ -3955,8 +4004,8 @@ function sbeSoundModeToggle() {
   const on = !sbeSoundMode();
   sbeSoundModeSet(on);
   sbeViewToast(on
-    ? 'Sound mode — every sound lane at full height, the picture small. ⇧A or the ⌁ button brings the picture back.'
-    : 'Picture mode — the picture takes the height, the sound lanes are thin. Click a sound to select it; ⇧A for sound mode.',
+    ? T('editor.sound_mode_every_sound_lane', 'Sound mode — every sound lane at full height, the picture small. ⇧A or the ⌁ button brings the picture back.')
+    : T('editor.picture_mode_the_picture_takes', 'Picture mode — the picture takes the height, the sound lanes are thin. Click a sound to select it; ⇧A for sound mode.'),
     { duration: 4000 });
 }
 
@@ -3971,22 +4020,22 @@ function sbeViewTip(btn, pressed, name, onText, offText, keyId) {
   btn.title = name + ' — ' + (pressed ? onText : offText) + sbeKeyHint(keyId);
 }
 function sbePaintPanels() {
-  sbeViewTip(sbeEl('sbeSoundBtn'), sbeSoundMode(), 'Sound mode',
-    'on: the sound lanes are at full height and the picture is small. Click for picture mode — thin lanes, big picture.',
-    'off. Click to open every sound lane at full height; the picture gets small.',
+  sbeViewTip(sbeEl('sbeSoundBtn'), sbeSoundMode(), T('editor.sound_mode', 'Sound mode'),
+    T('editor.on_the_sound_lanes_are', 'on: the sound lanes are at full height and the picture is small. Click for picture mode — thin lanes, big picture.'),
+    T('editor.off_click_to_open_every', 'off. Click to open every sound lane at full height; the picture gets small.'),
     'editor.soundMode');
-  sbeViewTip(sbeEl('sbeInspectBtn'), !!SBE.inspect, 'Inspector',
-    'showing on the right. Click to hide it; the monitors take the width.',
-    'hidden. Click to show the right-hand panel: speed, fades, brightness, zoom, transitions and titles for what is selected.',
+  sbeViewTip(sbeEl('sbeInspectBtn'), !!SBE.inspect, T('editor.inspector', 'Inspector'),
+    T('editor.showing_on_the_right_click', 'showing on the right. Click to hide it; the monitors take the width.'),
+    T('editor.hidden_click_to_show_the', 'hidden. Click to show the right-hand panel: speed, fades, brightness, zoom, transitions and titles for what is selected.'),
     'editor.inspector');
-  sbeViewTip(sbeEl('sbeSrcBtn'), sbeSrcShown(), 'Source monitor',
-    'showing on the left. Click to hide it; the Program monitor stays the size it is.',
-    'hidden. Click to show the left screen, where a clip from the media pool or the timeline plays before you cut it in.',
+  sbeViewTip(sbeEl('sbeSrcBtn'), sbeSrcShown(), T('editor.source_monitor', 'Source monitor'),
+    T('editor.showing_on_the_left_click', 'showing on the left. Click to hide it; the Program monitor stays the size it is.'),
+    T('editor.hidden_click_to_show_the_2', 'hidden. Click to show the left screen, where a clip from the media pool or the timeline plays before you cut it in.'),
     '');
   sbeViewTip(sbeEl('sbePanelsBtn'),
-    !(document.body && document.body.classList.contains('ed-focus')), 'Side panels',
-    'showing: the tabs, the media pool and the queue. Click to hide them and give the cut the whole window.',
-    'hidden. Click to bring back the tabs, the media pool and the queue.',
+    !(document.body && document.body.classList.contains('ed-focus')), T('editor.side_panels', 'Side panels'),
+    T('editor.showing_the_tabs_the_media', 'showing: the tabs, the media pool and the queue. Click to hide them and give the cut the whole window.'),
+    T('editor.hidden_click_to_bring_back', 'hidden. Click to bring back the tabs, the media pool and the queue.'),
     'editor.panels');
 }
 
@@ -4082,7 +4131,7 @@ function sbePanelsToggle() {
   sbePanelsApply(hidden);
   sbePaint();
   if (hidden) {
-    sbeViewToast('Side panels hidden — the media pool and the queue are out of the way. ` (or Panels in the View group) brings them back.',
+    sbeViewToast(T('editor.side_panels_hidden_the_media', 'Side panels hidden — the media pool and the queue are out of the way. ` (or Panels in the View group) brings them back.'),
                 { duration: 4000 });
   }
 }
@@ -4152,33 +4201,107 @@ function edInit() {
   edShowPicker();
 }
 
-// The empty state, painted from the board list. This is "pick a film / start
-// from clips": every film with something on disk, plus the pool on the left.
+// THE EDITOR NEVER OPENS ON A START SCREEN. With no document it opens an
+// empty timeline: a fresh sequence named by date, ready for a drag or a +.
+// The server keeps it out of every list until it holds a first clip, and
+// reuses it, so opening the Editor again does not pile up empty boards.
+// The old pick-a-sequence screen (#edEmpty) is only the fallback when the
+// panel does not answer.
 async function edShowPicker() {
-  edShow('empty');
-  // With no document open "this film" has nothing in it, so the pool opens
-  // on the generations — which is the source that always has something.
-  if (ED.src === 'film') edPoolSrc('gallery'); else edPoolRefresh();
-  const box = document.getElementById('edPick');
-  if (box) box.innerHTML = '<span class="sbe-note">reading your __SEQS__…</span>';
-  let boards = [];
-  try {
-    const r = await (await fetch('/storyboard/list')).json();
-    boards = ((r && r.boards) || []).filter(b => (b.clips || 0) > 0);
-  } catch (e) { boards = []; }
-  if (!box) return;
-  if (!boards.length) {
-    box.innerHTML = '<span class="sbe-note">Nothing has been rendered yet. ' +
-      'Anything you generate — on any engine — shows up in the media pool ' +
-      'on the left, and one click puts it on the track.</span>';
+  if (ED.starting) return ED.starting;
+  ED.starting = (async () => {
+    let r = null;
+    try {
+      r = await (await fetch('/storyboard/new-sequence', { method: 'POST', body: new URLSearchParams() })).json();
+    } catch (e) { r = null; }
+    if (r && r.ok && r.id) {
+      // An empty sequence has no clips of its own: the pool opens on the
+      // generations, the source that always has something.
+      edPoolSrc('gallery');
+      edOpenBoard(r.id);
+      return;
+    }
+    edShow('empty');
+    const box = document.getElementById('edPick');
+    if (box) box.innerHTML = '<span class="sbe-note">The panel did not answer.</span>' +
+      '<button type="button" onclick="edShowPicker()">Try again</button>';
+  })();
+  try { await ED.starting; } finally { ED.starting = null; }
+}
+
+// A new sequence is real from its first clip: saved then, not left as
+// unsaved changes. From there on it is an ordinary sequence in every list.
+function edSaveOnFirstClip(wasEmpty) {
+  if (wasEmpty && (SBE.clips || []).length && SBE.open && SBE.id) {
+    try { sbeSave(true); } catch (_) {}
+  }
+}
+
+// A new empty sequence from the sequence menu. An already empty one is not
+// duplicated: there is nothing to start over.
+async function sbeFilmsNew() {
+  sbePopCloseAll('');
+  if (SBE.open && !(SBE.clips || []).length) {
+    phosToast(T('editor.this_sequence_is_already_empty', 'This sequence is already empty. Drag clips in.'), { duration: 3000 });
     return;
   }
-  box.innerHTML = boards.map(b =>
-    '<button type="button" onclick="edOpenBoard(\'' + escapeHtml(b.id) + '\')">' +
-    '<svg class="ph" aria-hidden="true"><use href="#ph-film-strip"/></svg>' +
-    escapeHtml(b.title || b.id) +
-    '<span class="sub">' + (b.clips || 0) + ' clip' + ((b.clips === 1) ? '' : 's') +
-    '</span></button>').join('');
+  await edShowPicker();
+}
+
+// Rename in place: the name in the header turns into a field.
+function sbeRename() {
+  sbePopCloseAll('');
+  const ttl = sbeEl('sbeTitle');
+  if (!ttl || !SBE.id || ttl.querySelector('input')) return;
+  const id = SBE.id, current = SBE.title || ttl.textContent;
+  const input = document.createElement('input');
+  input.type = 'text'; input.value = current; input.className = 'sb-board-rename';
+  input.setAttribute('aria-label', T('editor.sequence_name', 'Sequence name'));
+  const done = (save) => {
+    const next = input.value.trim();
+    ttl.textContent = (save && next) || current;
+    if (save && next && next !== current) {
+      SBE.title = next;
+      fetch('/storyboard/save', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: id, board: { id: id, title: next } }) })
+        .then(r => r.json()).then(r => {
+          if (!r || !r.ok) { phosToast((r && r.error) || 'Could not rename that sequence.', { kind: 'danger' }); }
+        }).catch(() => {});
+    }
+  };
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+    else if (e.key === 'Escape') { input.value = current; input.blur(); }
+  });
+  input.addEventListener('blur', () => done(true), { once: true });
+  ttl.textContent = '';
+  ttl.appendChild(input);
+  input.focus(); input.select();
+}
+
+// The sentence on an empty track. Which one depends on the media pool, so it
+// is repainted whenever the pool is (edPoolPaint).
+function edTrackHintHtml() {
+  const rows = (ED.rows || []).filter(r => r.kind !== 'sound');
+  if (!rows.length) {
+    return T('editor.nothing_to_add_yet_make', 'Nothing to add yet. Make a clip in Video or One Shot and it shows up in the media pool.');
+  }
+  return T('editor.drag_clips_here_or_press', 'Drag clips here, or press + on a clip.') +
+    '<button type="button" class="ghost-btn sbe-track-all" onclick="edPoolAddAll()">' +
+    (rows.length === 1 ? T('editor.add_the_clip', 'Add the clip') : T('editor.add_these', 'Add these ') + rows.length + T('editor.clips_in_order', ' clips in order')) + '</button>';
+}
+function edTrackHintRefresh() {
+  const el = document.querySelector('.sbe-track-empty:not(.sbe-ovlane-empty)');
+  if (el) el.innerHTML = edTrackHintHtml();
+}
+async function edPoolAddAll() {
+  const list = document.getElementById('edPoolList');
+  const rows = (list || {})._rows || [];
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i].kind === 'sound') continue;
+    await edPoolAdd(i);
+  }
 }
 
 // The one door, from anywhere: the rail's step 3, a board row, the picker.
@@ -4274,9 +4397,9 @@ function sbeCloseDoc(opts) {
     const was = SBE.title || 'this draft';
     sbeBackup(true).then(kept => {
       if (!kept) {
-        phosToast('The unsaved changes in "' + was + '" could not be backed ' +
-                  'up before it closed. Open it again and press Save if it ' +
-                  'still has them.', { kind: 'danger', duration: 9000 });
+        phosToast(T('editor.the_unsaved_changes_in', 'The unsaved changes in "') + was + T('editor.could_not_be_backed', '" could not be backed ') +
+                  T('editor.up_before_it_closed_open', 'up before it closed. Open it again and press Save if it ') +
+                  T('editor.still_has_them', 'still has them.'), { kind: 'danger', duration: 9000 });
       }
     });
   }
@@ -4337,7 +4460,7 @@ async function sbeFilmsToggle() {
     boards = ((r && r.boards) || [])
       .filter(b => (b.clips || 0) > 0 || b.has_timeline || b.id === SBE.id);
   } catch (e) {
-    note.textContent = 'The panel did not answer — try again.';
+    note.textContent = T('editor.the_panel_did_not_answer', 'The panel did not answer — try again.');
     return;
   }
   if (pop.hidden) return;              // closed while the list was on its way
@@ -4345,15 +4468,26 @@ async function sbeFilmsToggle() {
   if (boards.length <= 1) note.textContent = 'No other __SEQ__ has clips yet.';
   list.innerHTML = boards.map(b => {
     const cur = b.id === SBE.id;
-    const n = b.clips || 0;
+    const n = b.has_timeline ? (b.edit_clips || 0) : (b.clips || 0);
+    const len = (b.has_timeline && b.edit_duration)
+      ? ' · ' + sbeFmtTime(b.edit_duration).replace(/\.\d+$/, '') : '';
     return '<button type="button" role="menuitem" class="ghost-btn' +
       (cur ? ' is-current' : '') + '"' + (cur ? ' aria-current="true"' : '') +
       ' onclick="sbeFilmsPick(\'' + escapeHtml(b.id) + '\')"' +
       ' title="' + escapeHtml(b.title || b.id) + '">' +
       '<span class="name">' + escapeHtml(b.title || b.id) + '</span>' +
-      '<span class="sub">' + (cur ? 'open · ' : '') + n + ' clip' + (n === 1 ? '' : 's') +
+      '<span class="sub">' + (cur ? T('editor.open', 'open · ') : '') + n + ' clip' + (n === 1 ? '' : 's') +
+      len + (b.updated_at ? ' · ' + edAgo(b.updated_at) : '') +
       '</span></button>';
   }).join('');
+}
+
+function edAgo(ts) {
+  const d = new Date(ts * 1000), now = new Date();
+  if (d.toDateString() === now.toDateString()) {
+    return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  }
+  return d.toLocaleDateString([], { day: 'numeric', month: 'short' });
 }
 
 function sbeFilmsPick(id) {
@@ -4400,7 +4534,7 @@ async function sbeLoad(quiet) {
     // A corrupt edit.json is NEVER silently replaced — the server says so and
     // the only honest thing to do is repeat it.
     sbeShowDocError(r && r.corrupt
-      ? (r.error || 'edit.json is corrupt') + ' — nothing was overwritten. Fix or delete the file beside the board.'
+      ? (r.error || 'edit.json is corrupt') + T('editor.nothing_was_overwritten_fix_or', ' — nothing was overwritten. Fix or delete the file beside the board.')
       : ((r && r.error) || 'could not read this timeline'));
     return;
   }
@@ -4450,7 +4584,8 @@ function sbeAdopt(r, quiet) {
     if (t) t.textContent = SBE.title;
   }
   SBE.edit = r.edit || {};
-  SBE.audio = SBE.edit.audio || null;
+  // A track without a path (Remove's `{removed: true}`) is no track.
+  SBE.audio = (SBE.edit.audio && SBE.edit.audio.path) ? SBE.edit.audio : null;
   SBE.beats = SBE.edit.beats || null;
   SBE.revision = sbeNum(SBE.edit.revision, 0);
   SBE.proxyUrl = r.proxy_url || '';
@@ -4465,6 +4600,9 @@ function sbeAdopt(r, quiet) {
   SBE.backup = r.backup || null;
   SBE.backupHidden = false;          // a NEW offer is not the one dismissed
   SBE.overlays = (SBE.edit.overlays || []).map(o => Object.assign({}, o));
+  // The overlay previews are per film: a new load forgets what the last film
+  // asked for, so a preview built since is picked up from `o.preview`.
+  SBE.ovPreviews = {}; SBE.ovAsked = {}; SBE.ovFailed = {};
   SBE.transitions = (SBE.edit.transitions || []).map(t => Object.assign({}, t));
   SBE.tracks = sbeTsCopy(SBE.edit.audio_tracks || []);
   // EDITOR-1: THE MARKERS ARE THE DOCUMENT'S TOO. They were never read back,
@@ -4506,8 +4644,8 @@ function sbeAdopt(r, quiet) {
   // The saved mode wins over the control's default, or reopening a film would
   // silently re-arm `replace` on a timeline that was mixed `under`.
   sbeSetMusicMode((SBE.audio && SBE.audio.mode) || 'under');
-  sbeSetState(r.generated ? 'cut by the auto-editor' : 'saved · revision ' + SBE.revision,
-              'saved');
+  sbeSetState((r.generated && (SBE.clips || []).length) ? 'cut by the auto-editor' : sbeSavedText(),
+              (r.generated && (SBE.clips || []).length) ? 'saved' : sbeSavedKind());
   sbeSyncMusic();
   sbePaintDraft();
   sbePaintRecovery();
@@ -4544,9 +4682,24 @@ function sbeAdopt(r, quiet) {
   // Land on a picture, not on black. A timeline that opens dark reads as
   // broken for the second and a half before the first click.
   if (!SBE.playing && !SBE.drag) sbeShowFrameAt(SBE.playhead);
-  if (!quiet && r.generated) {
-    phosToast('No timeline existed, so the auto-editor cut one — every shot at its best window, on the beat.',
+  if (!quiet && r.generated && (SBE.clips || []).length) {
+    phosToast(T('editor.no_timeline_existed_so_the', 'No timeline existed, so the auto-editor cut one — every shot at its best window, on the beat.'),
               { duration: 7000 });
+  } else if (!quiet && (SBE.clips || []).length) {
+    // THE GESTURES, SAID ONCE. The drag rules lived only in the Keys popover,
+    // so a first-time user found them by accident. Shown the first time a
+    // timeline with clips opens on this Mac, then never again.
+    let fresh = false;
+    try {
+      const KEY = 'phos.editor.firstUseHint';
+      if (typeof localStorage !== 'undefined' && !localStorage.getItem(KEY)) {
+        localStorage.setItem(KEY, '1'); fresh = true;
+      }
+    } catch (e) { fresh = false; }   // no storage: no nagging on every open
+    if (fresh) {
+      phosToast(T('editor.drag_a_clip_to_move', 'Drag a clip to move it · drag its edge to trim · right-click a clip ')
+                + T('editor.for_more_the_keys_button', 'for more · the ⌨ Keys button lists every gesture.'), { duration: 9000 });
+    }
   }
 }
 
@@ -4560,6 +4713,14 @@ async function sbeFetchPeaks() {
     if (!res.ok) { SBE.peaks = null; SBE.peaksFor = ''; sbePaint(); return; }
     const doc = await res.json();
     if (SBE.id !== id) return;
+    // Peaks for a DIFFERENT song than the one now on the track (a Prepare
+    // that finished after Undo restored the previous song) must not be
+    // installed: the bed's length is read from them, and the restored song
+    // would play cut to the other song's duration.
+    const cur = String((SBE.audio && SBE.audio.path) || '');
+    if (cur && doc && doc.path && String(doc.path) !== cur) {
+      SBE.peaks = null; SBE.peaksFor = ''; sbePaint(); return;
+    }
     SBE.peaks = sbeDecodePeaks(doc);
     SBE.peaksFor = String(doc.path || '');
     // THE WAVEFORM EXISTS BEFORE THE EDIT KNOWS ABOUT IT. `prepare` writes
@@ -4569,7 +4730,18 @@ async function sbeFetchPeaks() {
     // off the peaks document, which carries its own path and duration. This
     // does NOT touch SBE.edit, so nothing here can be saved as if the
     // arrangement had a soundtrack it was never cut to.
-    if (!SBE.audio && doc && doc.path) {
+    // A track just committed by Prepare has no length until its peaks exist;
+    // take it from the peaks document so the music block can be drawn.
+    if (SBE.audio && doc && doc.path && SBE.audio.path === String(doc.path)
+        && !sbeNum(SBE.audio.duration) && sbeNum(doc.duration)) {
+      SBE.audio.duration = sbeNum(doc.duration);
+    }
+    // ...except when the document says, in so many words, "no soundtrack":
+    // `audio: {removed: true}` is what Remove saves (null is every new
+    // document's default, so it cannot carry that meaning), and the old
+    // peaks.json beside the board must not bring the removed song back.
+    if (!SBE.audio && doc && doc.path
+        && !(SBE.edit && SBE.edit.audio && SBE.edit.audio.removed)) {
       SBE.audio = { path: String(doc.path), offset: 0, peaks: 'peaks.json',
                     duration: sbeNum(doc.duration) };
       if (!sbeEl('sbeMusic').value) {
@@ -4594,12 +4766,17 @@ function sbePaintMusicName() {
   // `sbeMusicPath`, NOT `sbeMusicName` — the latter is the label painted onto
   // the music BLOCK down on the timeline, and two elements answering to one
   // id is one element and one bug.
+  // THE NAME IS THE DOCUMENT'S TRACK, not whatever is typed in the field.
+  // Showing the typed path made the head claim a change that Save, export and
+  // reload never saw; a typed path becomes the track only on Prepare.
   const el = sbeEl('sbeMusicPath');
   if (!el) return;
-  const full = String((sbeEl('sbeMusic') || {}).value || '');
+  const full = String((SBE.audio && SBE.audio.path) || '');
   const base = full.split('/').pop() || '';
   el.textContent = base || 'no soundtrack';
-  el.title = full || 'No soundtrack yet — press Change… to point at one';
+  el.title = full || 'No soundtrack yet. Open the music menu, type a path and press Prepare.';
+  const rm = sbeEl('sbeMusicRemove');
+  if (rm) rm.hidden = !full;
 }
 
 // "PROTECTED 4s AGO", or the truth when it is not. Painted from the tick, so
@@ -4627,13 +4804,14 @@ function sbePaintProtected() {
             && (Date.now() - SBE.dirtyAt) > SBE_SAVE_GRACE_MS
             && (SBE.backedUpAt || 0) < SBE.dirtyAt;
   let text;
-  if (age === null) text = SBE.dirty ? 'backing up…' : '';
-  else if (age < 60) text = 'protected ' + age + 's ago';
-  else text = 'protected ' + Math.round(age / 60) + 'm ago';
-  if (cold) text = 'NOT PROTECTED — ' + (age === null ? 'not backed up yet' : text);
+  if (age === null) text = SBE.dirty ? T('editor.backing_up', 'backing up…') : '';
+  else if (i18nLang() !== 'en') text = T('editor.protected_ago', 'protected {ago}', {ago: i18nAgo(age < 60 ? age : Math.round(age / 60) * 60)});
+  else if (age < 60) text = 'protected ' + age + T('editor.s_ago', 's ago');
+  else text = 'protected ' + Math.round(age / 60) + T('editor.m_ago', 'm ago');
+  if (cold) text = T('editor.not_protected', 'NOT PROTECTED — ') + (age === null ? T('editor.not_backed_up_yet', 'not backed up yet') : text);
   // A SECOND EDITOR IS INFORMATION, NEVER A REASON TO STOP. It used to be the
   // reason this tab stopped writing entirely.
-  if (SBE.otherEditor) text = (text ? text + ' · ' : '') + 'also open elsewhere';
+  if (SBE.otherEditor) text = (text ? text + ' · ' : '') + T('editor.also_open_elsewhere', 'also open elsewhere');
   // FILM-37: the routine case ("protected 4s ago") used to sit in the header
   // as its own always-visible chip, permanently spending width next to the
   // title/draft-chip/state text — the four of them together are what
@@ -4651,10 +4829,27 @@ function sbePaintProtected() {
   if (pill) pill.title = text || '';
 }
 
+// What the header says once the document is as saved as it can be. An empty
+// sequence the Editor made itself is not saved yet: nothing is written for it
+// until its first clip lands (edSaveOnFirstClip), so it must not claim a
+// revision.
+function sbeSavedKind() {
+  return (!(SBE.clips || []).length && SBE.revision <= 1) ? '' : 'saved';
+}
+function sbeSavedText() {
+  if (!(SBE.clips || []).length && SBE.revision <= 1) {
+    return 'not saved yet';
+  }
+  return T('editor.saved_revision', 'saved \u00b7 revision ') + SBE.revision;
+}
+
 function sbeSetState(text, kind) {
   const el = sbeEl('sbeState');
   if (!el) return;
   sbeEl('sbeStateText').textContent = text;
+  const NOT_SAVED = T('editor.nothing_is_saved_until_the', 'Nothing is saved until the first clip lands on the timeline.');
+  if (text === 'not saved yet') el.title = NOT_SAVED;
+  else if (el.title === NOT_SAVED) el.title = '';
   el.classList.toggle('is-dirty', kind === 'dirty');
   el.classList.toggle('is-saved', kind === 'saved');
   el.classList.toggle('is-alarm', kind === 'alarm');
@@ -4668,7 +4863,7 @@ function sbeShowDocError(msg) {
   const box = sbeEl('sbeErrors');
   box.hidden = false;
   box.innerHTML = '<b>' + escapeHtml(String(msg)) + '</b>';
-  sbeSetState('not saved', 'dirty');
+  sbeSetState(T('editor.not_saved', 'not saved'), 'dirty');
 }
 
 // Every mutation goes through here: one undo snapshot, one layout, one repaint,
@@ -4706,6 +4901,16 @@ function sbeSnapshot(audio) {
     markers: SBE.markers || [],
     audio: (audio === undefined)
       ? (SBE.audio || (SBE.edit && SBE.edit.audio) || null) : audio,
+    // THE DOCUMENT'S OWN TRACK, kept apart from the one on screen. A track
+    // only discovered from peaks.json is shown but not owned; recording what
+    // the document held lets undo restore exactly that, so undoing a trim
+    // never commits a discovered track and undoing Remove restores a real one.
+    // (Absent in snapshots stored by older builds: sbeRestore falls back.)
+    // A gesture snapshot passes the track as it was BEFORE the gesture; when
+    // the document owns the track, that earlier state is the document's too.
+    edit_audio: (!SBE.edit || !('audio' in SBE.edit)) ? undefined
+      : ((audio !== undefined && SBE.edit.audio && SBE.edit.audio.path)
+         ? audio : SBE.edit.audio),
   });
 }
 
@@ -4724,8 +4929,27 @@ function sbeRestore(json) {
   // ...and a restore never COMMITS a discovered track into the document. The
   // arrangement owns a soundtrack only once somebody has placed it (see
   // sbeApplyMusic); undoing a trim must not be what saves one.
-  if (SBE.edit.audio) SBE.edit.audio = s.audio || null;
-  SBE.audio = s.audio || null;
+  // Snapshots now carry the document's own track (`edit_audio`), so a
+  // soundtrack change or Remove undoes into the saved document too. Older
+  // stored snapshots lack it and keep the old rule.
+  SBE.audio = (s.audio && s.audio.path) ? s.audio : null;
+  if ('edit_audio' in s) {
+    SBE.edit.audio = (s.edit_audio && SBE.audio
+      && JSON.stringify(s.edit_audio) === JSON.stringify(SBE.audio))
+      ? SBE.audio : s.edit_audio;
+  } else if (SBE.edit.audio) {
+    SBE.edit.audio = SBE.audio;
+  }
+  // The A2 head names the document's track; repaint it so undoing Remove
+  // (or a change) does not leave "no soundtrack" over a restored song.
+  // Peaks belong to one song. Restoring a different track (undoing a
+  // soundtrack change) must not keep the replacement's waveform and length,
+  // or the restored song plays truncated to the other song's duration.
+  if (SBE.peaks && SBE.peaksFor && SBE.peaksFor !== String((SBE.audio || {}).path || '')) {
+    SBE.peaks = null; SBE.peaksFor = '';
+  }
+  if (typeof sbePaintMusicName === 'function') sbePaintMusicName();
+  if (typeof sbeSyncMusic === 'function') sbeSyncMusic();
 }
 
 // The overlay lane's own door, and it is the same door: one undo step, one
@@ -4743,7 +4967,7 @@ function sbeOvMutate(fn) {
   SBE.redo.length = 0;
   SBE.overlays = res.overlays;
   SBE.dirty = true;
-  sbeSetState('unsaved changes', 'dirty');
+  sbeSetState(T('editor.unsaved_changes', 'unsaved changes'), 'dirty');
   sbePaint();
   sbeQueueSave();
   // The mutation's own result, so a caller that needs to talk ABOUT what it
@@ -4761,7 +4985,7 @@ function sbeMarkerMutate(fn) {
   if (SBE.undo.length > SBE_UNDO_MAX) SBE.undo.shift();
   SBE.redo.length = 0;
   SBE.dirty = true;
-  sbeSetState('unsaved changes', 'dirty');
+  sbeSetState(T('editor.unsaved_changes', 'unsaved changes'), 'dirty');
   sbePaint();
   sbeQueueSave();
   return true;
@@ -4769,16 +4993,16 @@ function sbeMarkerMutate(fn) {
 function sbeMarkerAtPlayhead() {
   if (!SBE.open || !SBE.id) return;
   sbeMarkerMutate(ms => sbeMarkerAdd(ms, SBE.playhead, 'note', ''));
-  phosToast('Marker at ' + sbeFmtTime(SBE.playhead) + '. Right-click it to remove.',
+  phosToast(T('editor.marker_at', 'Marker at ') + sbeFmtTime(SBE.playhead) + '. Right-click it to remove.',
             { duration: 3000 });
 }
 
 function sbeOvAddAt(item, at) {
   const res = sbeOvMutate(os => sbeOvAdd(os, item, at));
   if (!res) return null;
-  phosToast('Overlay added — it composites over the picture. Drag it along '
-            + 'the lane, pull either end for its length, and fade it in from '
-            + 'Effects.', { duration: 7000 });
+  phosToast(T('editor.overlay_added_it_composites_over', 'Overlay added — it composites over the picture. Drag it along ')
+            + T('editor.the_lane_pull_either_end', 'the lane, pull either end for its length, and fade it in from ')
+            + T('editor.effects', 'Effects.'), { duration: 7000 });
   return res.added || null;
 }
 
@@ -4915,6 +5139,7 @@ function sbeSelectNone() {
 // one member would make a multi-selection unusable the moment anything in it
 // was pinned.
 function sbeMutateEach(ids, fn) {
+  const wasEmpty = !(SBE.clips || []).length;
   const list = (ids || []).slice();
   if (!list.length) return false;
   const before = sbeSnapshot();
@@ -4943,13 +5168,14 @@ function sbeMutateEach(ids, fn) {
   SBE.redo.length = 0;
   SBE.transitions = sbeTxPrune(SBE.transitions || [], SBE.clips);
   SBE.dirty = true;
-  sbeSetState('unsaved changes', 'dirty');
+  sbeSetState(T('editor.unsaved_changes', 'unsaved changes'), 'dirty');
   if (why.length) {
-    phosToast(why.length + ' of ' + list.length + ' were left as they were — '
+    phosToast(why.length + ' of ' + list.length + T('editor.were_left_as_they_were', ' were left as they were — ')
               + why[0], { duration: 6000 });
   }
   sbePaint();
   sbeQueueSave();
+  edSaveOnFirstClip(wasEmpty);
   return true;
 }
 
@@ -5032,14 +5258,14 @@ function sbeCloseGapAt(t) {
   const at = sbeNum(t);
   const h = holes.find(g => at >= sbeNum(g.film_start) - 1e-6
                          && at <= sbeNum(g.film_end) + 1e-6);
-  if (!h) { phosToast('No hole there.', {}); return false; }
+  if (!h) { phosToast(T('editor.no_hole_there', 'No hole there.'), {}); return false; }
   return sbeMutate(cs => {
     const mark = sbeSyncMark(cs);
     let after = null;
     for (const c of cs) {
       if (sbeNum(c.film_start) >= sbeNum(h.film_end) - 1e-3) { after = c; break; }
     }
-    if (!after) return { clips: cs, ok: false, why: 'nothing follows that hole' };
+    if (!after) return { clips: cs, ok: false, why: T('editor.nothing_follows_that_hole', 'nothing follows that hole') };
     if (after.locked) return { clips: cs, ok: false, why: 'locked' };
     for (let i = 0; i < cs.length; i++) {
       const prev = i > 0 ? cs[i - 1] : null;
@@ -5085,12 +5311,12 @@ function sbeNoticeHoles(holes) {
   if (!holes || !holes.length) return;
   const total = holes.reduce((a, g) => a + sbeNum(g.duration), 0);
   const t = phosToast(holes.length + ' hole' + (holes.length === 1 ? '' : 's') +
-            ' (' + total.toFixed(1) + 's) will play as black.',
+            ' (' + total.toFixed(1) + T('editor.s_will_play_as_black', 's) will play as black.'),
             { duration: 9000 });
   if (!t) return;
   const first = holes[0];
   const fill = document.createElement('a');
-  fill.href = '#'; fill.className = 'phos-toast-action'; fill.textContent = 'Fill';
+  fill.href = '#'; fill.className = 'phos-toast-action'; fill.textContent = T('editor.fill', 'Fill');
   fill.onclick = (ev) => {
     ev.preventDefault();
     if (typeof sbeGenOpen === 'function') {
@@ -5098,7 +5324,7 @@ function sbeNoticeHoles(holes) {
     }
   };
   const close = document.createElement('a');
-  close.href = '#'; close.className = 'phos-toast-action'; close.textContent = 'Close them';
+  close.href = '#'; close.className = 'phos-toast-action'; close.textContent = T('editor.close_them', 'Close them');
   close.onclick = (ev) => { ev.preventDefault(); sbeCloseAllGaps(); };
   t.appendChild(fill);
   t.appendChild(close);
@@ -5119,8 +5345,8 @@ function sbeNudge(dir, big) {
     // and `sbeMutate` would still stamp the document dirty, push an undo step
     // that undoes nothing and queue a save — on every repeat of a held key.
     phosToast(dir < 0
-      ? 'Already hard against what comes before it — nothing to give.'
-      : 'Already hard against what comes after it — nothing to give.',
+      ? T('editor.already_hard_against_what_comes', 'Already hard against what comes before it — nothing to give.')
+      : T('editor.already_hard_against_what_comes_2', 'Already hard against what comes after it — nothing to give.'),
       { duration: 5000 });
     return;
   }
@@ -5209,10 +5435,11 @@ function sbeRestoreUndoIfFresh() {
 }
 
 function sbeMutate(fn) {
+  const wasEmpty = !(SBE.clips || []).length;
   const before = sbeSnapshot();
   const res = fn(SBE.clips);
   if (!res || res.ok === false) {
-    if (res && res.why === 'locked') phosToast('That shot is locked.', {});
+    if (res && res.why === 'locked') phosToast(T('editor.that_shot_is_locked', 'That shot is locked.'), {});
     else if (res && res.why) phosToast(res.why, {});
     return false;
   }
@@ -5226,9 +5453,10 @@ function sbeMutate(fn) {
   if (res.transitions) SBE.transitions = res.transitions;
   SBE.transitions = sbeTxPrune(SBE.transitions || [], SBE.clips);
   SBE.dirty = true;
-  sbeSetState('unsaved changes', 'dirty');
+  sbeSetState(T('editor.unsaved_changes', 'unsaved changes'), 'dirty');
   sbePaint();
   sbeQueueSave();
+  edSaveOnFirstClip(wasEmpty);
   return true;
 }
 
@@ -5237,7 +5465,7 @@ function sbeUndo() {
   SBE.redo.push(sbeSnapshot());
   sbeRestore(SBE.undo.pop());
   SBE.dirty = true;
-  sbeSetState('unsaved changes', 'dirty');
+  sbeSetState(T('editor.unsaved_changes', 'unsaved changes'), 'dirty');
   sbePaint();
   sbeQueueSave();
 }
@@ -5247,7 +5475,7 @@ function sbeRedo() {
   SBE.undo.push(sbeSnapshot());
   sbeRestore(SBE.redo.pop());
   SBE.dirty = true;
-  sbeSetState('unsaved changes', 'dirty');
+  sbeSetState(T('editor.unsaved_changes', 'unsaved changes'), 'dirty');
   sbePaint();
   sbeQueueSave();
 }
@@ -5372,9 +5600,9 @@ async function sbeBackup(quiet) {
   // A BACKUP THAT IS NOT BEING WRITTEN IS THE SAFETY NET GONE, and the user
   // cannot tell by looking. It is the same alarm because it is the same
   // sentence: what is on screen is not anywhere else.
-  sbeSaveAlarm('the crash backup is not being written (' +
+  sbeSaveAlarm(T('editor.the_crash_backup_is_not', 'the crash backup is not being written (') +
                ((r && r.error) || 'the panel did not answer') +
-               ') — press Save');
+               T('editor.press_save', ') — press Save'));
   return false;
 }
 
@@ -5451,7 +5679,7 @@ async function sbeSave(quiet, force) {
     } catch (e) {
       // A throw here is the case that used to wedge the flag. It is also the
       // one nothing on screen could have told you about.
-      sbeSaveAlarm('the editor could not build the save (' +
+      sbeSaveAlarm(T('editor.the_editor_could_not_build', 'the editor could not build the save (') +
                    ((e && e.message) || String(e)) + ')');
     } finally {
       SBE.saving = false;
@@ -5479,7 +5707,7 @@ function sbeSaveAlarm(why) {
     sbeEl('sbeAlarmWhy').textContent = SBE.saveFailed;
   }
   sbePaintNotices();
-  sbeSetState('NOT SAVED', 'alarm');
+  sbeSetState(T('editor.not_saved_2', 'NOT SAVED'), 'alarm');
 }
 
 function sbeSaveAlarmClear() {
@@ -5579,10 +5807,10 @@ async function sbeSaveInner(quiet, force) {
     if (moved) {
       // The save that just landed deleted the crash backup, and what is on
       // screen is newer than it: put the net back under the newer work.
-      sbeSetState('unsaved changes · revision ' + SBE.revision + ' is saved', 'dirty');
+      sbeSetState(T('editor.unsaved_changes_revision', 'unsaved changes · revision ') + SBE.revision + T('editor.is_saved', ' is saved'), 'dirty');
       sbeQueueSave();
     } else {
-      sbeSetState('saved · revision ' + SBE.revision, 'saved');
+      sbeSetState(sbeSavedText(), sbeSavedKind());
     }
     sbePaint();
     return true;
@@ -5594,13 +5822,13 @@ async function sbeSaveInner(quiet, force) {
     sbeEl('sbeConflict').hidden = false;
     sbePaintNotices();
     sbeEl('sbeConflictText').textContent = r.draft_conflict
-      ? ('Another tab switched this __SEQ__ to the draft "' + (r.active_draft || '?') +
-         '". This arrangement belongs to "' + (sentDraft || '?') + '" and was not ' +
-         'written over it — its crash backup keeps it. Load theirs to follow the switch.')
-      : ('Another tab saved this timeline (it is at revision ' + SBE.conflict +
-         ', you started from ' + SBE.revision + '). Nothing here has been lost.');
-    sbeSaveAlarm('another tab is at revision ' + SBE.conflict +
-                 ' and this one is not being stored — choose which arrangement wins');
+      ? (T('editor.another_tab_switched_this_seq_2', 'Another tab switched this __SEQ__ to the draft "') + (r.active_draft || '?') +
+         T('editor.this_arrangement_belongs_to', '". This arrangement belongs to "') + (sentDraft || '?') + T('editor.and_was_not', '" and was not ') +
+         T('editor.written_over_it_its_crash', 'written over it — its crash backup keeps it. Load theirs to follow the switch.'))
+      : (T('editor.another_tab_saved_this_timeline', 'Another tab saved this timeline (it is at revision ') + SBE.conflict +
+         T('editor.you_started_from', ', you started from ') + SBE.revision + T('editor.nothing_here_has_been_lost', '). Nothing here has been lost.'));
+    sbeSaveAlarm(T('editor.another_tab_is_at_revision', 'another tab is at revision ') + SBE.conflict +
+                 T('editor.and_this_one_is_not', ' and this one is not being stored — choose which arrangement wins'));
     return false;
   }
   if (Array.isArray(r.errors) && r.errors.length) {
@@ -5608,7 +5836,7 @@ async function sbeSaveInner(quiet, force) {
     SBE.errors.all = r.errors || [];
     sbeRenderErrors(r.errors);
     sbeSaveAlarm(r.errors.length + ' problem' + (r.errors.length === 1 ? '' : 's') +
-                 ' in the timeline — nothing was written');
+                 T('editor.in_the_timeline_nothing_was', ' in the timeline — nothing was written'));
     sbePaint();
     return false;
   }
@@ -5676,7 +5904,7 @@ function sbeRenderErrors(errors) {
     '</ul>' +
     (rest > 0
       ? '<button type="button" class="ghost-btn" onclick="sbeErrsToggle()">'
-        + (SBE.errsOpen ? 'Show less' : escapeHtml('and ' + rest + ' more'))
+        + (SBE.errsOpen ? T('editor.show_less', 'Show less') : escapeHtml('and ' + rest + ' more'))
         + '</button>'
       : '');
   sbePaintNotices();
@@ -5693,12 +5921,12 @@ async function sbeTakeTheirs() {
   sbeEl('sbeConflict').hidden = true;
   sbePaintNotices();
   await sbeLoad();
-  phosToast('Loaded the other tab\'s arrangement.', {});
+  phosToast(T('editor.loaded_the_other_tab_s', 'Loaded the other tab\'s arrangement.'), {});
 }
 
 async function sbeForceSave() {
   const ok = await sbeSave(false, true);
-  if (ok) phosToast('Saved over the other tab\'s version.', { kind: 'success' });
+  if (ok) phosToast(T('editor.saved_over_the_other_tab', 'Saved over the other tab\'s version.'), { kind: 'success' });
 }
 
 // ---------------------------------------------------------------------------
@@ -5709,12 +5937,12 @@ async function sbeForceSave() {
 // notifications. The button is the opposite — it is pressed by somebody who
 // wants to be told it worked, so it says which revision they now have.
 async function sbeSaveNow() {
-  if (!SBE.open) { phosToast('Nothing to save yet.', {}); return; }
+  if (!SBE.open) { phosToast(T('editor.nothing_to_save_yet', 'Nothing to save yet.'), {}); return; }
   // A press while another save is on the wire no longer answers 'busy': it
   // waits for the write that carries it (sbeSave), so the revision named here
   // is the one that holds what was on screen when the button was pressed.
   const ok = await sbeSave(false);
-  if (ok) phosToast('Saved — revision ' + SBE.revision, { kind: 'success' });
+  if (ok) phosToast(T('editor.saved_revision_2', 'Saved — revision ') + SBE.revision, { kind: 'success' });
 }
 
 // "4 minutes ago", in the smallest unit that still reads as a duration. Pure,
@@ -5723,10 +5951,11 @@ function sbeAgo(when, now) {
   const t = sbeNum(when, 0);
   if (!t) return '';
   const d = Math.max(0, sbeNum(now, Date.now() / 1000) - t);
-  if (d < 45) return 'just now';
-  if (d < 5400) return Math.round(d / 60) + ' min ago';
-  if (d < 172800) return Math.round(d / 3600) + ' h ago';
-  return Math.round(d / 86400) + ' d ago';
+  if (d < 45) return T('editor.just_now', 'just now');
+  if (i18nLang() !== 'en' && d >= 60) return i18nAgo(d);
+  if (d < 5400) return Math.round(d / 60) + T('editor.min_ago', ' min ago');
+  if (d < 172800) return Math.round(d / 3600) + T('editor.h_ago', ' h ago');
+  return Math.round(d / 86400) + T('editor.d_ago', ' d ago');
 }
 
 // One row of the picker, as the two strings it shows. Pure so the wording is
@@ -5739,7 +5968,7 @@ function sbeVersionLine(v, now) {
   // called "autosave", which is the one word that means "not yours".
   const name = row.label ? String(row.label)
     : (row.readable === false ? 'unreadable'
-       : (row.manual ? 'Save' : 'autosave'));
+       : (row.manual ? T('editor.save', 'Save') : 'autosave'));
   const bits = [];
   if (row.revision !== null && row.revision !== undefined) {
     bits.push('revision ' + sbeNum(row.revision, 0));
@@ -5820,11 +6049,11 @@ function sbeDraftsPaint() {
       const meta = [sbeNum(d.clips, 0) + ' clip' + (sbeNum(d.clips, 0) === 1 ? '' : 's')];
       if (sbeNum(d.duration, 0) > 0) meta.push(sbeFmtTime(d.duration));
       if (d.saved_at) meta.push('saved ' + sbeAgo(d.saved_at));
-      else meta.push('never saved');
+      else meta.push(T('editor.never_saved', 'never saved'));
       return '<div class="sbe-vers-row' + (d.active ? ' is-active' : '') + '">' +
         '<span class="sbe-vr-main">' +
         '<span class="sbe-vr-name">' + escapeHtml(d.name) +
-        (d.active ? ' · open' : '') + '</span>' +
+        (d.active ? T('editor.open_2', ' · open') : '') + '</span>' +
         '<div class="sbe-vr-meta">' + escapeHtml(meta.join(' · ')) + '</div>' +
         '</span>' +
         (d.active ? '' : '<button type="button" class="ghost-btn" data-op="open" data-slug="' +
@@ -5853,9 +6082,9 @@ function sbeVersionsPaint(rows, keep) {
   const note = sbeEl('sbeVersNote');
   sbeDraftsPaint();
   if (note) {
-    note.textContent = 'Save writes the draft — nothing else does. Below are ' +
-      'this draft\'s past saves: every Save keeps the one before it, the last ' +
-      keep + ' of them, and Restore keeps what it replaces.';
+    note.textContent = T('editor.save_writes_the_draft_nothing', 'Save writes the draft — nothing else does. Below are ') +
+      T('editor.this_draft_s_past_saves', 'this draft\'s past saves: every Save keeps the one before it, the last ') +
+      keep + T('editor.of_them_and_restore_keeps', ' of them, and Restore keeps what it replaces.');
   }
   if (!list) return;
   if (!rows.length) {
@@ -5892,7 +6121,7 @@ function sbeVersionsPaint(rows, keep) {
                  : '<div class="sbe-vers-empty">None yet — press Save.</div>') +
     (auto.length
       ? '<details class="sbe-vers-auto"><summary>' + auto.length +
-        ' automatic snapshot' + (auto.length === 1 ? '' : 's') + '</summary>' +
+        T('editor.automatic_snapshot', ' automatic snapshot') + (auto.length === 1 ? '' : 's') + '</summary>' +
         auto.map(draw).join('') + '</details>'
       : '');
   list.querySelectorAll('button[data-file]').forEach(b => {
@@ -5921,8 +6150,8 @@ async function sbeDraftOp(op, extra, note) {
   // stashes the last SAVED file, so the work on screen went with no offer, no
   // toast and nothing to click.
   if (SBE.dirty && !SBE.conflict && !(await sbeBackup(true))) {
-    phosToast('This draft has unsaved changes that could not be snapshotted. ' +
-              'Press Save first — switching now would leave them behind.',
+    phosToast(T('editor.this_draft_has_unsaved_changes', 'This draft has unsaved changes that could not be snapshotted. ') +
+              T('editor.press_save_first_switching_now', 'Press Save first — switching now would leave them behind.'),
               { kind: 'danger', duration: 8000 });
     return false;
   }
@@ -5960,10 +6189,10 @@ function sbeNameMode(slug) {
   SBE.renaming = slug || '';
   const btn = sbeEl('sbeVersKeep');
   if (btn) {
-    btn.textContent = SBE.renaming ? 'Rename' : 'Copy';
+    btn.textContent = SBE.renaming ? T('editor.rename', 'Rename') : T('editor.copy', 'Copy');
     btn.title = SBE.renaming
-      ? 'Rename the draft — the timeline is not touched'
-      : 'A new draft holding a copy of the timeline on screen';
+      ? T('editor.rename_the_draft_the_timeline', 'Rename the draft — the timeline is not touched')
+      : T('editor.a_new_draft_holding_a', 'A new draft holding a copy of the timeline on screen');
   }
 }
 
@@ -5971,21 +6200,21 @@ function sbeDraftNew(fromCurrent) {
   const box = sbeEl('sbeVersName');
   const name = String((box && box.value) || '').trim();
   if (!name) {
-    phosToast('Give the draft a name — that is how you get back to it.', {});
+    phosToast(T('editor.give_the_draft_a_name', 'Give the draft a name — that is how you get back to it.'), {});
     if (box && box.focus) { try { box.focus(); } catch (e) {} }
     return;
   }
   sbeNameMode('');
   if (box) box.value = '';
   return sbeDraftOp('new', { name: name, from: fromCurrent ? 'current' : 'empty' },
-                    () => 'Working on "' + name + '" now. ' +
-                          (fromCurrent ? 'It holds a copy of the cut you were on.'
-                                       : 'Empty timeline, same soundtrack.'));
+                    () => 'Working on "' + name + T('editor.now', '" now. ') +
+                          (fromCurrent ? T('editor.it_holds_a_copy_of', 'It holds a copy of the cut you were on.')
+                                       : T('editor.empty_timeline_same_soundtrack', 'Empty timeline, same soundtrack.')));
 }
 
 function sbeDraftDuplicate(slug, name) {
   return sbeDraftOp('duplicate', { slug: slug },
-                    r => 'Copied "' + name + '" — you are on the copy now.');
+                    r => 'Copied "' + name + T('editor.you_are_on_the_copy', '" — you are on the copy now.'));
 }
 
 function sbeDraftOpen(slug, name) {
@@ -6003,7 +6232,7 @@ function sbeDraftRename(slug, was) {
     // panel remembers which row it belongs to — the old order focused first
     // and wrote the value after, so the caret sat behind the old name and
     // typing appended to it.
-    phosToast('Edit the name above, then press Rename.', {});
+    phosToast(T('editor.edit_the_name_above_then', 'Edit the name above, then press Rename.'), {});
     sbeNameMode(slug);
     if (box) {
       box.value = was || '';
@@ -6024,8 +6253,8 @@ async function sbeKeepVersion() {
   const box = sbeEl('sbeVersName');
   const label = String((box && box.value) || '').trim();
   if (!label) {
-    phosToast('Type a name for this save first — that is what makes it one ' +
-              'you can find again.', {});
+    phosToast(T('editor.type_a_name_for_this', 'Type a name for this save first — that is what makes it one ') +
+              T('editor.you_can_find_again', 'you can find again.'), {});
     if (box && box.focus) { try { box.focus(); } catch (e) {} }
     return;
   }
@@ -6042,15 +6271,15 @@ async function sbeKeepVersion() {
   // while telling this tab its own had been kept. Until the conflict is
   // settled there is no save of what is on this screen to name.
   if (SBE.conflict) {
-    phosToast('Another tab saved this timeline after you opened it, so what is ' +
-              'on disk is not what is on your screen. Choose Load theirs or ' +
-              'Keep mine first, then name the version.',
+    phosToast(T('editor.another_tab_saved_this_timeline_2', 'Another tab saved this timeline after you opened it, so what is ') +
+              T('editor.on_disk_is_not_what', 'on disk is not what is on your screen. Choose Load theirs or ') +
+              T('editor.keep_mine_first_then_name', 'Keep mine first, then name the version.'),
               { kind: 'danger', duration: 9000 });
     return;
   }
   if (SBE.dirty && !(await sbeSave(true))) {
-    phosToast('Your current arrangement could not be saved, so it could not ' +
-              'be named. Fix the save first.', { kind: 'danger', duration: 8000 });
+    phosToast(T('editor.your_current_arrangement_could_not', 'Your current arrangement could not be saved, so it could not ') +
+              T('editor.be_named_fix_the_save', 'be named. Fix the save first.'), { kind: 'danger', duration: 8000 });
     return;
   }
   const fd = new URLSearchParams();
@@ -6066,9 +6295,9 @@ async function sbeKeepVersion() {
   sbeNameMode('');
   if (box) box.value = '';
   if (r.already) {
-    phosToast('That save already has a name — nothing was changed.', {});
+    phosToast(T('editor.that_save_already_has_a', 'That save already has a name — nothing was changed.'), {});
   } else {
-    phosToast('Kept "' + label + '" — revision ' + sbeNum(r.revision, 0) +
+    phosToast(T('editor.kept', 'Kept "') + label + T('editor.revision', '" — revision ') + sbeNum(r.revision, 0) +
               '. The fifty-save prune will never take it.',
               { kind: 'success', duration: 5000 });
   }
@@ -6085,8 +6314,8 @@ function sbeDraftDelete(slug, name, btn) {
   if (btn && btn.dataset && btn.dataset.armed !== '1') {
     btn.dataset.armed = '1';
     btn.dataset.was = btn.textContent;
-    btn.textContent = 'Delete?';
-    btn.title = 'Press again to delete "' + name + '". Its past saves go with '
+    btn.textContent = T('editor.delete', 'Delete?');
+    btn.title = T('editor.press_again_to_delete', 'Press again to delete "') + name + T('editor.its_past_saves_go_with', '". Its past saves go with ')
               + 'it; the other drafts are untouched.';
     btn.classList.add('is-danger');
     setTimeout(() => {
@@ -6118,9 +6347,9 @@ function sbePaintDraft() {
   const btn = sbeEl('sbeKeepBtn');
   if (btn) {
     btn.title = SBE.dirty
-      ? 'Unsaved changes in "' + ((row && row.name) || 'this draft') +
-        '" — press Save to store them'
-      : 'Draft "' + ((row && row.name) || '') + '" — saved';
+      ? T('editor.unsaved_changes_in', 'Unsaved changes in "') + ((row && row.name) || 'this draft') +
+        T('editor.press_save_to_store_them', '" — press Save to store them')
+      : T('editor.draft', 'Draft "') + ((row && row.name) || '') + T('editor.saved', '" — saved');
   }
 }
 
@@ -6211,9 +6440,9 @@ function sbePaintRecovery() {
   // `edit_digest`) says WHAT — "1 clip changed: 02 brightness +0.30" — so
   // the two counts matching is no longer the only thing on screen.
   sbeEl('sbeRecoverWhat').textContent =
-    'from ' + sbeAgo(b.at) + ' · ' + sbeNum(b.clips, 0) + ' clips · ' +
+    'from ' + sbeAgo(b.at) + ' · ' + sbeNum(b.clips, 0) + T('editor.clips', ' clips · ') +
     sbeFmtTime(b.duration) + (b.diff ? ' · ' + b.diff : '') +
-    ' — your saved draft is untouched.';
+    T('editor.your_saved_draft_is_untouched', ' — your saved draft is untouched.');
   sbePaintNotices();
 }
 
@@ -6230,8 +6459,8 @@ async function sbeRecover() {
   SBE.undo.length = 0; SBE.redo.length = 0;
   SBE.dirty = false; SBE.dirtyAt = 0;
   sbeAdopt(r, true);
-  phosToast('Recovered — ' + SBE.clips.length + ' clip(s). The draft it ' +
-            'replaced was kept in this draft\'s history.',
+  phosToast(T('editor.recovered', 'Recovered — ') + SBE.clips.length + T('editor.clip_s_the_draft_it', ' clip(s). The draft it ') +
+            T('editor.replaced_was_kept_in_this', 'replaced was kept in this draft\'s history.'),
             { kind: 'success', duration: 6000 });
 }
 
@@ -6258,8 +6487,8 @@ async function sbeRestoreVersion(file) {
   // matches it.
   if (SBE.conflict) {
     phosToast('This film was changed in another tab — resolve that first; ' +
-              'restoring now would replace the arrangement on screen with ' +
-              'no way back to it.', { kind: 'danger', duration: 8000 });
+              T('editor.restoring_now_would_replace_the', 'restoring now would replace the arrangement on screen with ') +
+              T('editor.no_way_back_to_it', 'no way back to it.'), { kind: 'danger', duration: 8000 });
     return;
   }
   // The arrangement on screen is about to be replaced, so it goes to disk
@@ -6269,8 +6498,8 @@ async function sbeRestoreVersion(file) {
   // 409s or errors the server archives the OLD document, restore overwrites,
   // and the work goes with the undo stack that could have brought it back.
   if (SBE.dirty && !(await sbeSave(true))) {
-    phosToast('Your current arrangement could not be saved, so restoring ' +
-              'would lose it. Fix the save first.',
+    phosToast(T('editor.your_current_arrangement_could_not_2', 'Your current arrangement could not be saved, so restoring ') +
+              T('editor.would_lose_it_fix_the', 'would lose it. Fix the save first.'),
               { kind: 'danger', duration: 8000 });
     return;
   }
@@ -6284,9 +6513,9 @@ async function sbeRestoreVersion(file) {
   SBE.undo.length = 0; SBE.redo.length = 0;
   sbeAdopt(r, true);
   sbeVersionsPaint(r.versions || [], 50);
-  phosToast('Restored — ' + (SBE.clips.length) + ' clip(s), ' +
+  phosToast(T('editor.restored', 'Restored — ') + (SBE.clips.length) + ' clip(s), ' +
             sbeFmtTime(sbeFilmDuration(SBE.clips)) +
-            '. The arrangement it replaced was kept.',
+            T('editor.the_arrangement_it_replaced_was', '. The arrangement it replaced was kept.'),
             { kind: 'success', duration: 6000 });
 }
 
@@ -6587,12 +6816,12 @@ function sbeMarkerBands(markers, span) {
     const at = sbeNum(m.at);
     if (at < -1e-6 || at > span + 1e-6) continue;
     const kind = (m && (m.kind === 'beat' || m.kind === 'lyric')) ? m.kind : 'note';
-    const word = kind === 'beat' ? 'Beat' : kind === 'lyric' ? 'Lyric' : 'Marker';
+    const word = kind === 'beat' ? T('editor.beat', 'Beat') : kind === 'lyric' ? T('editor.lyric', 'Lyric') : T('editor.marker', 'Marker');
     out += '<span class="sbe-marker is-' + kind + '" data-marker="' + escapeHtml(m.id)
       + '" data-at="' + at.toFixed(4) + '" '
       + 'style="left:' + sbePx(at).toFixed(1) + 'px" '
       + 'title="' + escapeHtml((m.label ? m.label + ' · ' : '') + word + ' · '
-          + sbeFmtTime(at) + ' — click to jump, right-click to remove') + '"></span>';
+          + sbeFmtTime(at) + T('editor.click_to_jump_right_click', ' — click to jump, right-click to remove')) + '"></span>';
   }
   return out;
 }
@@ -6640,7 +6869,7 @@ function sbeSectionBands(sections, audio, trackDur, span) {
     const heat = e >= 0.75 ? 'loud' : (e <= 0.35 ? 'quiet' : 'steady');
     out += '<u class="sbe-sec is-' + escapeHtml(String(s.label || 'verse')) + '" ' +
            'title="' + escapeHtml(String(s.label || '') + ' · ' + sbeFmtTime(x0) + '–' + sbeFmtTime(x1)
-             + ' · ' + heat + ' — the Director cuts ' + (String(s.label) === 'chorus' ? 'fastest' : (String(s.label) === 'intro' || String(s.label) === 'outro' ? 'slowest' : 'at the base pace') + ' here')) + '" ' +
+             + ' · ' + heat + T('editor.the_director_cuts', ' — the Director cuts ') + (String(s.label) === 'chorus' ? 'fastest' : (String(s.label) === 'intro' || String(s.label) === 'outro' ? 'slowest' : T('editor.at_the_base_pace', 'at the base pace')) + ' here')) + '" ' +
            'style="left:' + sbePx(x0).toFixed(1) + 'px;width:' + px.toFixed(1) + 'px">' +
            (px > 40 ? escapeHtml(String(s.label || '')) : '') + '</u>';
   }
@@ -6659,8 +6888,8 @@ function sbePaintWave(span, width) {
     none.hidden = false;
     none.style.width = width + 'px';
     none.innerHTML = SBE.audio && SBE.audio.path
-      ? 'No waveform yet — press Prepare to build the proxies, the waveform and the beat grid.'
-      : 'No soundtrack on this timeline. Point one at it below and press Prepare.';
+      ? T('editor.no_waveform_yet_press_prepare', 'No waveform yet — press Prepare to build the proxies, the waveform and the beat grid.')
+      : T('editor.no_soundtrack_on_this_timeline', 'No soundtrack on this timeline. Point one at it below and press Prepare.');
     return;
   }
   none.hidden = true;
@@ -6693,7 +6922,7 @@ function sbePaintWave(span, width) {
   const p = SBE.peaks;
   const win = sbeMusicWindow(SBE.audio, p.duration);
   const w = Math.max(1, SBE.pps / p.rate);
-  const strong = (css.getPropertyValue('--border-strong') || '#3d477a').trim();
+  const strong = (css.getPropertyValue('--border-strong') || '#3a3a40').trim();
   // THE TRIMMED-AWAY PART IS STILL DRAWN, faintly. A trim you cannot see the
   // other side of is a trim you cannot pull back — the seconds are not gone,
   // they are outside the window, and the picture should say which.
@@ -6754,12 +6983,12 @@ function sbePaintMusic(width) {
   const name = String(a.path || '').split('/').pop();
   const played = Math.max(0, (w.film_end === null ? 0 : w.film_end) - w.film_start);
   const label = name + ' · ' + sbeFmtTime(w.film_start) + ' · ' +
-    played.toFixed(2) + 's' + (w.trimmed ? ' · trimmed' : '');
+    played.toFixed(2) + 's' + (w.trimmed ? T('editor.trimmed', ' · trimmed') : '');
   sbeEl('sbeMusicName').textContent = (right - left > 120) ? label : '';
-  el.title = name + '\nStarts at ' + sbeFmtTime(w.film_start) +
-    ' of the __SEQ__, from ' + sbeFmtTime(w.head) + ' of the track.' +
-    '\nDrag to move it (the others stay) · pull either end to trim · hold Alt to ignore the cuts · hold ⌘ to slide everything after it.' +
-    '\nCorners fade it · double-click the level line to add a point.';
+  el.title = name + T('editor.starts_at', '\nStarts at ') + sbeFmtTime(w.film_start) +
+    ' of the __SEQ__, from ' + sbeFmtTime(w.head) + T('editor.of_the_track', ' of the track.') +
+    T('editor.drag_to_move_it_the', '\nDrag to move it (the others stay) · pull either end to trim · hold Alt to ignore the cuts.') +
+    T('editor.corners_fade_it_double_click', '\nCorners fade it · double-click the level line to add a point.');
   sbePaintBedLevel(el, Math.max(3, right - left));
 }
 
@@ -6877,12 +7106,15 @@ function sbeBedLevelClick(ev) {
                     before: before, moved: true };
   try { sbeEl('sbeMusicLane').setPointerCapture(ev.pointerId); } catch (e) {}
   SBE.dirty = true;
-  sbeSetState('unsaved changes', 'dirty');
+  sbeSetState(T('editor.unsaved_changes', 'unsaved changes'), 'dirty');
   sbePaint();
   return true;
 }
 
 function sbeOnMusicDown(ev) {
+  // Only the main button drags. A right-click used to select the bed and arm
+  // a drag on its way to the browser's own menu.
+  if (ev && ev.button !== undefined && ev.button !== 0) return;
   if (sbeAudioSmall()) { sbeAudioOpenFrom(ev); return; }
   const el = sbeEl('sbeMusicClip');
   if (!el || el.hidden) return;
@@ -6972,7 +7204,7 @@ function sbeMusicCommit(beforeJson) {
   if (SBE.undo.length > SBE_UNDO_MAX) SBE.undo.shift();
   SBE.redo.length = 0;
   SBE.dirty = true;
-  sbeSetState('unsaved changes', 'dirty');
+  sbeSetState(T('editor.unsaved_changes', 'unsaved changes'), 'dirty');
   sbePaint();
   sbeQueueSave();
 }
@@ -7149,6 +7381,13 @@ function sbePaintMix() {
   const pct = Math.round(mix.bed_gain * 100);
   if (sl) { sl.value = String(pct); sl.disabled = !has; }
   if (num) num.textContent = pct + '%';
+  // The chip on the A2 head and its pop-up slider: the same number, visible
+  // whatever height the lane has.
+  const sl2 = sbeEl('sbeBedGain2'), num2 = sbeEl('sbeBedGainNum2'), chip = sbeEl('sbeBedChip');
+  if (sl2 && document.activeElement !== sl2) { sl2.value = String(pct); }
+  if (sl2) sl2.disabled = !has;
+  if (num2) num2.textContent = pct + '%';
+  if (chip) { chip.textContent = pct + '%'; chip.hidden = !has; }
   if (dk) { dk.checked = !!mix.duck; dk.disabled = !has; }
   // A CONTROL THAT HAS STOPPED ACTING SAYS SO, LOUDLY. The duck stands down
   // under an authored envelope — never two curves on one level — and a ticked
@@ -7157,7 +7396,7 @@ function sbePaintMix() {
   const off = has && sbeBedDuckSuppressed(a, sbeFilmDuration(SBE.clips));
   if (note) {
     note.hidden = !off;
-    note.textContent = off ? 'off — your own level line is driving the bed' : '';
+    note.textContent = off ? T('editor.off_your_own_level_line', 'off — your own level line is driving the bed') : '';
   }
   if (head) head.classList.toggle('is-duck-off', off);
 }
@@ -7175,15 +7414,14 @@ function sbePaintTrack() {
   // for a gap to fill", starting mid-word, while the track itself, the thing
   // that was empty, rendered nothing at all.
   let html = SBE.clips.length ? '' :
-    '<div class="sbe-track-empty">Nothing on the timeline yet — click a clip '
-    + 'in the media pool to put it here, or Add black for a gap to fill.</div>';
+    '<div class="sbe-track-empty">' + edTrackHintHtml() + '</div>';
   for (const g of holes) {
     const w = sbePx(g.duration);
     html += '<div class="sbe-gap" data-gap-start="' + g.film_start + '" ' +
             'data-gap-dur="' + g.duration + '" ' +
             'title="Nothing plays here. Click to generate a shot for it." ' +
             'style="left:' + sbePx(g.film_start).toFixed(1) + 'px;width:' + w.toFixed(1) + 'px">' +
-            (w > 84 ? escapeHtml(g.duration.toFixed(2) + 's hole · fill it') : '+') +
+            (w > 84 ? escapeHtml(g.duration.toFixed(2) + T('editor.s_hole_fill_it', 's hole · fill it')) : '+') +
             '</div>';
   }
   for (const c of SBE.clips) {
@@ -7220,7 +7458,12 @@ function sbePaintTrack() {
           // un-scrubbable would be advice to run a Prepare that would do
           // nothing.
           : (kind === 'video' && !c.proxy ? 'slow' : ''))));
-    const cls = 'sbe-clip is-' + kind + (selMap[String(c.id)] ? ' is-sel' : '')
+    // A NARROW BLOCK KEEPS ITS NAME. A speed or grade badge on a 40 px block
+    // printed over the shot code ("9.99X" for S14 at 0.99x); below ~70 px the
+    // badge gives way (the speed is in the tooltip, the inspector and the
+    // block's colour). A drag's live readout and Offline always show.
+    const showFlag = !!flag && (dragHud || offline || (flag === 'slow' ? w >= 36 : w >= 70));
+    const cls = T('editor.sbe_clip_is', 'sbe-clip is-') + kind + (selMap[String(c.id)] ? ' is-sel' : '')
               + ((selN > 1 && String(c.id) === String(SBE.sel)) ? ' is-primary' : '')
               + (c.id === SBE.curId ? ' is-playing' : '')
               + (bad ? ' is-bad' : '') + (c.locked ? ' is-locked' : '')
@@ -7228,15 +7471,26 @@ function sbePaintTrack() {
               + (Math.abs(sp - 1) >= 1e-6 ? ' is-retimed' : '')
               + (!sbeFramingIsNeutral(c) ? ' is-framed' : '')
               + (offline ? ' is-offline' : '')
-              + (flag ? ' has-flag' : '');
+              + (showFlag ? ' has-flag' : '');
     // A still and a slug have no source window to report — their only number
     // is the hold, and printing "0.00→3.00" of a clock they do not have reads
     // as a trim somebody made.
-    const meta = (kind === 'video')
-      ? (sbeNum(c.start).toFixed(2) + '→' + sbeNum(c.end).toFixed(2) +
-         ' · ' + sbeLen(c).toFixed(2) + 's' + (Math.abs(sp - 1) >= 1e-6 ? ' @' + sp + 'x' : '')
-         + (!sbeFramingIsNeutral(c) ? ' · \u2316' + sbeFraming(c).zoom.toFixed(1) + 'x' : ''))
-      : (sbeLen(c).toFixed(2) + 's hold' + (!sbeFramingIsNeutral(c) ? ' · \u2316' + sbeFraming(c).zoom.toFixed(1) + 'x' : ''));
+    // THE BLOCK SAYS WHERE THE SHOT IS AND HOW LONG IT PLAYS: film start and
+    // played length, the two numbers a cutter reads at a glance. The source
+    // in/out ("12.40→16.40") read as jargon on the block; it moves to the
+    // tooltip below, with the speed and framing spelled out.
+    const meta = sbeFmtTime(c.film_start).replace(/(\.\d)\d$/, '$1')
+      + ' · ' + sbeLen(c).toFixed(1) + 's'
+      + (Math.abs(sp - 1) >= 1e-6 ? ' · ' + sp + '×' : '');
+    const detail = (kind === 'video')
+      ? (T('editor.starts_at_2', 'Starts at ') + sbeFmtTime(c.film_start) + T('editor.in_the_film_plays', ' in the film, plays ')
+         + sbeLen(c).toFixed(2) + T('editor.s_uses', 's.\nUses ') + sbeNum(c.start).toFixed(2) + 's to '
+         + sbeNum(c.end).toFixed(2) + T('editor.s_of_the_source_clip', 's of the source clip')
+         + (Math.abs(sp - 1) >= 1e-6 ? ', at ' + sp + T('editor.speed', '× speed') : '') + '.'
+         + (!sbeFramingIsNeutral(c) ? T('editor.zoomed_in', '\nZoomed in ') + sbeFraming(c).zoom.toFixed(1) + '×.' : ''))
+      : (T('editor.starts_at_2', 'Starts at ') + sbeFmtTime(c.film_start) + T('editor.in_the_film_holds', ' in the film, holds ')
+         + sbeLen(c).toFixed(2) + 's.'
+         + (!sbeFramingIsNeutral(c) ? T('editor.zoomed_in', '\nZoomed in ') + sbeFraming(c).zoom.toFixed(1) + '×.' : ''));
     const label = (kind === 'slug')
       ? 'black'
       : (c.title || String(c.path || '').split('/').pop() || 'clip');
@@ -7257,17 +7511,23 @@ function sbePaintTrack() {
       ? '<img class="sbe-cl-thumb" alt="" loading="lazy" src="/storyboard/edit/poster?id='
         + encodeURIComponent(SBE.id) + '&name='
         + encodeURIComponent(String(c.proxy).split('/').pop()) + '&w=240">'
+      // No proxy yet (Prepare not run): the same /poster frame the media
+      // pool shows for this file, so every clip on the track has a picture.
+      // /poster refuses paths outside OUTPUT/UPLOADS; onerror hides it.
+      : (kind === 'video' && c.path && !offline)
+      ? '<img class="sbe-cl-thumb" alt="" loading="lazy" onerror="this.remove()" src="/poster?path='
+        + encodeURIComponent(c.path) + '">'
       : '';
     html += '<div class="' + cls + '" data-id="' + escapeHtml(c.id) + '" '
           + 'data-kind="' + escapeHtml(kind) + '" '
           + 'data-source="' + escapeHtml(c.source || 'auto') + '" '
-          + 'title="' + escapeHtml(label
-              + (offline ? '\nMedia offline — ' + (c.path || '') +
-                           '. Relink to point at the file that has it now.' : '')
+          + 'title="' + escapeHtml(label + '\n' + detail
+              + (offline ? T('editor.media_offline', '\nMedia offline — ') + (c.path || '') +
+                           T('editor.relink_to_point_at_the', '. Relink to point at the file that has it now.') : '')
               + (bad ? '\n' + bad[0].message : '')) + '" '
           + 'style="left:' + sbePx(c.film_start).toFixed(1) + 'px;width:' + w.toFixed(1) + 'px">'
           + thumb
-          + '<div class="sbe-cl-name">' + escapeHtml(sbeNiceName(label)) + '</div>'
+          + '<div class="sbe-cl-name">' + escapeHtml(sbeClipShortName(label, w)) + '</div>'
           + (w > 96 ? '<div class="sbe-cl-meta">' + escapeHtml(meta) + '</div>' : '')
           // FILM-39: "SLOW" was jargon with no tooltip and no action — it
           // means "no proxy yet, so scrubbing decodes from the source GOP".
@@ -7276,7 +7536,8 @@ function sbePaintTrack() {
           // without touching the clip's own drag/select handling.
           // 4.17: the flag is also the fix — a click runs Prepare
           // (sbeOnTrackDown routes it before any drag/select handling).
-          + (flag === 'slow'
+          + (!showFlag ? ''
+              : flag === 'slow'
               ? '<div class="sbe-cl-flag sbe-slow-flag" role="button" title="Slow to scrub until Prepare builds a proxy — click to run Prepare.">⧖</div>'
               : (flag ? '<div class="sbe-cl-flag">' + escapeHtml(flag) + '</div>' : ''))
           + sbeSyncBadge(c)
@@ -7314,14 +7575,14 @@ function sbePaintTrack() {
       const w = Math.max(6, sbePx(r.duration));
       html = '<div class="sbe-cut is-tx is-' + r.kind + (sel ? ' is-sel' : '') + '" data-after="'
            + escapeHtml(a.id) + '" title="' + escapeHtml(SBE_TX_LABELS[r.kind] + ' · '
-           + r.duration.toFixed(2) + 's, centred on the cut. Click to change it.')
+           + r.duration.toFixed(2) + T('editor.s_centred_on_the_cut', 's, centred on the cut. Click to change it.'))
            + '" style="left:' + (x - w / 2).toFixed(1) + 'px;width:' + w.toFixed(1) + 'px">'
            + (w > 44 ? '<span>' + escapeHtml((r.kind === 'dissolve' ? '\u2715 ' : '\u25d1 ')
               + r.duration.toFixed(2) + 's') + '</span>' : '') + '</div>';
     } else {
       html = '<div class="sbe-cut' + (sel ? ' is-sel' : '') + (bad ? ' is-bad' : '')
            + '" data-after="' + escapeHtml(a.id) + '" title="'
-           + escapeHtml(bad ? r.problem.message : 'Cut. Click to put a transition here.')
+           + escapeHtml(bad ? r.problem.message : T('editor.cut_click_to_put_a', 'Cut. Click to put a transition here.'))
            + '" style="left:' + (x - 6).toFixed(1) + 'px"></div>';
     }
     track.insertAdjacentHTML('beforeend', html);
@@ -7363,9 +7624,9 @@ function sbeSyncBadge(c) {
   if (!w.split || w.coupled || sbeAudioInSync(c)) return '';
   const d = sbeAudioDrift(c);
   return '<div class="sbe-sync" data-sync="' + escapeHtml(c.id) + '" '
-       + 'title="' + escapeHtml('The sound is ' + sbeDriftLabel(d) + ' out of sync '
-           + 'with its own picture (' + (d > 0 ? 'late' : 'early') + '). '
-           + 'Click to put it back under the frame it came from.') + '">'
+       + 'title="' + escapeHtml(T('editor.the_sound_is', 'The sound is ') + sbeDriftLabel(d) + T('editor.out_of_sync', ' out of sync ')
+           + T('editor.with_its_own_picture', 'with its own picture (') + (d > 0 ? 'late' : 'early') + '). '
+           + T('editor.click_to_put_it_back', 'Click to put it back under the frame it came from.')) + '">'
        + escapeHtml(sbeDriftLabel(d)) + '</div>';
 }
 
@@ -7414,8 +7675,8 @@ function sbeSongSyncBadge(c) {
   if (off === null || Math.abs(off) < 0.5 / sbeFps()) return '';
   const s = (off > 0 ? '+' : '') + off.toFixed(2) + ' s';
   return '<div class="sbe-songsync" data-songsync="' + escapeHtml(c.id) + '" '
-       + 'title="' + escapeHtml('This shot sits ' + s + ' vs the song it was conditioned on '
-           + '(' + (off > 0 ? 'late' : 'early') + '). Click to snap it back — a slip, the slot stays put.')
+       + 'title="' + escapeHtml(T('editor.this_shot_sits', 'This shot sits ') + s + T('editor.vs_the_song_it_was', ' vs the song it was conditioned on ')
+           + '(' + (off > 0 ? 'late' : 'early') + T('editor.click_to_snap_it_back', '). Click to snap it back — a slip, the slot stays put.'))
        + '">♪ ' + escapeHtml(s) + '</div>';
 }
 
@@ -7436,10 +7697,10 @@ function sbeSnapToSong(id) {
   const ok = sbeMutate(cs => sbeSlip(cs, id, off));
   if (ok) {
     const df = Math.round(off * sbeFps());
-    phosToast('Snapped to the song — ' + (df >= 0 ? '+' : '') + df + ' f.',
+    phosToast(T('editor.snapped_to_the_song', 'Snapped to the song — ') + (df >= 0 ? '+' : '') + df + ' f.',
               { kind: 'success', duration: 4000 });
   } else {
-    phosToast('Could not snap it — the take does not have that much head or tail left.', {});
+    phosToast(T('editor.could_not_snap_it_the', 'Could not snap it — the take does not have that much head or tail left.'), {});
   }
 }
 
@@ -7480,19 +7741,19 @@ function sbePaintAudioLane() {
     // MUTED SAYS MUTED, over everything else the strip might have said. The
     // strip STAYS — it is still where the sound would be, and the decision has
     // to be visible and reversible in the place it was made.
-    const label = mute ? 'no sound'
-                : (off ? ('MUTED · ' + w.len.toFixed(2) + 's')
-                : (w.coupled ? ('J-cut · ' + sbeDriftLabel(sbeAudioDrift(c)))
-                : (w.linked ? '' : ('sound · ' + w.len.toFixed(2) + 's'))));
+    const label = mute ? T('editor.no_sound', 'no sound')
+                : (off ? (T('editor.muted', 'MUTED · ') + w.len.toFixed(2) + 's')
+                : (w.coupled ? (T('editor.j_cut', 'J-cut · ') + sbeDriftLabel(sbeAudioDrift(c)))
+                : (w.linked ? '' : (T('editor.sound', 'sound · ') + w.len.toFixed(2) + 's'))));
     html += '<div class="' + cls + '" data-id="' + escapeHtml(c.id) + '" '
           + 'title="' + escapeHtml(off
-              ? 'Muted — this clip\'s own sound is switched off in the preview, the render and the export. Unmute sound, on the bar above the tracks.'
+              ? T('editor.muted_this_clip_s_own', 'Muted — this clip\'s own sound is switched off in the preview, the render and the export. Unmute sound, on the bar above the tracks.')
               : w.coupled
-              ? 'Linked at ' + sbeDriftLabel(sbeAudioDrift(c)) + ' — the sound keeps this offset and travels with the picture. Unlink it to slide it on its own.'
+              ? T('editor.linked_at', 'Linked at ') + sbeDriftLabel(sbeAudioDrift(c)) + T('editor.the_sound_keeps_this_offset', ' — the sound keeps this offset and travels with the picture. Unlink it to slide it on its own.')
               : (w.linked
-              ? 'This clip\'s sound moves with its picture. Unlink sound, on the bar above the tracks, to slide it under the neighbour (a J-cut or an L-cut). Drag it up or down to put it on the other sound lane.'
-              : 'Unlinked — drag to slide the sound, pull either end to trim it, drag it up or down to the other sound lane. The picture does not move.')
-              + ' Sound lane ' + sbeLaneName(lane) + '.') + '" '
+              ? T('editor.this_clip_s_sound_moves', 'This clip\'s sound moves with its picture. Unlink sound, on the bar above the tracks, to slide it under the neighbour (a J-cut or an L-cut). Drag it up or down to put it on the other sound lane.')
+              : T('editor.unlinked_drag_to_slide_the', 'Unlinked — drag to slide the sound, pull either end to trim it, drag it up or down to the other sound lane. The picture does not move.'))
+              + T('editor.sound_lane', ' Sound lane ') + sbeLaneName(lane) + '.') + '" '
           + 'style="left:' + x.toFixed(1) + 'px;width:' + Math.max(2, px).toFixed(1) + 'px">'
           + (mute ? '' : sbeStripWave(c, w, px))
           + (px > 70 ? '<span class="sbe-aclip-t">' + escapeHtml(label) + '</span>' : '')
@@ -7558,14 +7819,14 @@ function sbePaintTracks() {
                 + (off ? ' is-silenced' : '') + (s.locked === true ? ' is-locked' : '');
       body += '<div class="' + cls + '" data-strip="' + escapeHtml(String(s.id)) + '" '
         + 'data-track="' + tid + '" title="' + escapeHtml(name + '\n'
-            + (off ? 'Muted — silent in the preview, the render and the export.\n' : '')
-            + (s.locked === true ? 'Locked — Unlock on the bar above the tracks.'
-               : 'Drag to move it, onto another track too · pull either end to trim · '
-                 + 'the corners fade it · click the yellow line for a level point.')) + '" '
+            + (off ? T('editor.muted_silent_in_the_preview', 'Muted — silent in the preview, the render and the export.\n') : '')
+            + (s.locked === true ? T('editor.locked_unlock_on_the_bar', 'Locked — Unlock on the bar above the tracks.')
+               : T('editor.drag_to_move_it_onto', 'Drag to move it, onto another track too · pull either end to trim · ')
+                 + T('editor.the_corners_fade_it_click', 'the corners fade it · click the yellow line for a level point.'))) + '" '
         + 'style="left:' + sbePx(w.film_start).toFixed(1) + 'px;width:'
         + Math.max(2, px).toFixed(1) + 'px">'
         + sbeStripWave(item, w, px, sbeTsGainPoints(t, s))
-        + (px > 70 ? '<span class="sbe-aclip-t">' + escapeHtml((off ? 'MUTED · ' : '')
+        + (px > 70 ? '<span class="sbe-aclip-t">' + escapeHtml((off ? T('editor.muted', 'MUTED · ') : '')
                      + sbeNiceName(name)) + '</span>' : '')
         + sbeAudioFadeMarks(item, w)
         + (s.locked === true ? ''
@@ -7584,8 +7845,8 @@ function sbePaintTracks() {
   html += '<div class="sbe-tadd' + ((drop && drop.tid === 'new') ? ' is-drop' : '') + '" '
         + 'data-track="new"><span class="sbe-tadd-t">'
         + escapeHtml(tracks.length
-            ? 'Drop a sound here for a track of its own'
-            : 'Audio tracks — drop a sound from the media pool here, or press + Add audio track')
+            ? T('editor.drop_a_sound_here_for', 'Drop a sound here for a track of its own')
+            : T('editor.audio_tracks_drop_a_sound', 'Audio tracks. Drop a sound from the media pool here, or press + Add audio track'))
         + '</span></div>';
   box.innerHTML = html;
   const inner = sbeEl('sbeInner');
@@ -7620,8 +7881,8 @@ function sbePaintTrackHeads() {
       + '<span class="sbe-trk-row">'
       + '<button type="button" class="sbe-trk-mute' + (muted ? ' is-on' : '') + '" '
       + 'aria-pressed="' + muted + '" onclick="sbeTrackMute(' + q + ')" title="'
-      + (muted ? 'Unmute this track'
-               : 'Mute this track — silent in the preview, the render and the export') + '">M</button>'
+      + (muted ? T('editor.unmute_this_track', 'Unmute this track')
+               : T('editor.mute_this_track_silent_in', 'Mute this track — silent in the preview, the render and the export')) + '">M</button>'
       + '<input type="range" min="0" max="100" step="1" value="' + pct + '" '
       + 'aria-label="Level of audio track ' + label + '" '
       + 'title="How loud everything on this track plays. 100% is the files\' own level; the render applies exactly this." '
@@ -7636,7 +7897,7 @@ function sbeTsCommit(before) {
   if (SBE.undo.length > SBE_UNDO_MAX) SBE.undo.shift();
   SBE.redo.length = 0;
   SBE.dirty = true;
-  sbeSetState('unsaved changes', 'dirty');
+  sbeSetState(T('editor.unsaved_changes', 'unsaved changes'), 'dirty');
   sbePaint();
   sbeQueueSave();
 }
@@ -7644,8 +7905,8 @@ function sbeTsCommit(before) {
 function sbeTrackAdd() {
   if (!SBE.open) return;
   if (sbeTsMutate(ts => sbeTsNewTrack(ts))) {
-    phosToast(sbeTrackLabel(SBE.tracks.length - 1) + ' added — drag a sound from the media '
-              + 'pool onto it, or use Add sound file…. Sounds on different tracks play '
+    phosToast(sbeTrackLabel(SBE.tracks.length - 1) + T('editor.added_drag_a_sound_from', ' added — drag a sound from the media ')
+              + T('editor.pool_onto_it_or_use', 'pool onto it, or use Add sound file…. Sounds on different tracks play ')
               + 'together.', { duration: 6000 });
   }
 }
@@ -7655,8 +7916,8 @@ function sbeTrackRemove(tid) {
   if (!t) return;
   const n = (t.strips || []).length;
   if (sbeTsMutate(ts => sbeTsRemoveTrack(ts, tid))) {
-    phosToast('Track removed' + (n ? ' with its ' + n + ' sound' + (n === 1 ? '' : 's') : '')
-              + ' — Undo brings it back.', { duration: 6000 });
+    phosToast(T('editor.track_removed', 'Track removed') + (n ? T('editor.with_its', ' with its ') + n + ' sound' + (n === 1 ? '' : 's') : '')
+              + T('editor.undo_brings_it_back', ' — Undo brings it back.'), { duration: 6000 });
   }
 }
 
@@ -7748,16 +8009,16 @@ function sbePaintTsInspector(box) {
     + '<span class="sbe-adj-val">s</span></span>';
   box.innerHTML =
     '<b>' + escapeHtml(sbeNiceName(name)) + '</b>'
-    + (n > 1 ? '<span class="sbe-sect-lead">' + n + ' sounds selected · these are THIS '
-               + 'one\'s properties. The bar above the tracks acts on all ' + n + '.</span>' : '')
+    + (n > 1 ? '<span class="sbe-sect-lead">' + n + T('editor.sounds_selected_these_are_this', ' sounds selected · these are THIS ')
+               + T('editor.one_s_properties_the_bar', 'one\'s properties. The bar above the tracks acts on all ') + n + '.</span>' : '')
     + '<span>' + escapeHtml(sbeTrackLabel(f.ti) + ' · ' + (f.track.name || 'Sound')
                             + (f.track.muted === true ? ' (muted)' : '')) + '</span>'
     + '<span>source ' + w.start.toFixed(2) + '–' + w.end.toFixed(2) + 's'
     + (sbeNum(s.duration, 0) > 0 ? ' of ' + sbeNum(s.duration).toFixed(2) + 's' : '') + '</span>'
     + '<span>film ' + w.film_start.toFixed(2) + '–' + w.film_end.toFixed(2) + 's</span>'
-    + '<span class="sbe-why">' + escapeHtml('A sound on an audio track plays over everything '
-        + 'above it, mixed — in the preview, the render and the export.'
-        + (s.locked === true ? ' It is locked.' : '')) + '</span>'
+    + '<span class="sbe-why">' + escapeHtml(T('editor.a_sound_on_an_audio', 'A sound on an audio track plays over everything ')
+        + T('editor.above_it_mixed_in_the', 'above it, mixed — in the preview, the render and the export.')
+        + (s.locked === true ? T('editor.it_is_locked', ' It is locked.') : '')) + '</span>'
     + '<div class="sbe-sect"><div class="sbe-sect-h">Sound</div><div class="sbe-sect-b">'
     + '<span class="sbe-fade-row"><label for="sbeTsGain">Level</label>'
     + '<input type="range" id="sbeTsGain" min="0" max="100" step="1" value="' + g + '" '
@@ -7832,7 +8093,7 @@ function sbeTsLevelClick(ev) {
   SBE.tsDrag = { mode: 'kf', sid: at.sid, index: idx, rect: at.rect, before: before, moved: true };
   try { sbeEl('sbeTracks').setPointerCapture(ev.pointerId); } catch (e) {}
   SBE.dirty = true;
-  sbeSetState('unsaved changes', 'dirty');
+  sbeSetState(T('editor.unsaved_changes', 'unsaved changes'), 'dirty');
   sbePaint();
   return true;
 }
@@ -7894,7 +8155,7 @@ function sbeOnTsDown(ev) {
   if (!already) sbeTsSelectOne(sid); else SBE.sel = '@ts:' + sid;
   if (locked) {
     sbePaint();
-    phosToast('That sound is locked to its place. Press Unlock on the bar above the tracks.',
+    phosToast(T('editor.that_sound_is_locked_to', 'That sound is locked to its place. Press Unlock on the bar above the tracks.'),
               { duration: 6000 });
     return;
   }
@@ -8069,9 +8330,9 @@ async function sbeTsAddSoundPath(path, tid, at) {
   const idx = (SBE.tracks || []).findIndex(t => String(t.id) === String(res.track));
   sbeTsSelectOne(res.added.id);
   sbePaint();
-  phosToast((r.imported ? 'Brought into this film\'s audio folder and put' : 'Put')
+  phosToast((r.imported ? T('editor.brought_into_this_film_s', 'Brought into this film\'s audio folder and put') : T('editor.put', 'Put'))
             + ' on ' + sbeTrackLabel(idx) + ' at ' + sbeFmtTime(res.added.film_start)
-            + ' — drag it, trim either end, fade its corners.',
+            + T('editor.drag_it_trim_either_end', ' — drag it, trim either end, fade its corners.'),
             { kind: 'success', duration: 6000 });
   if (ED.src === 'sound' && r.imported) edPoolRefresh(true);
   return true;
@@ -8089,7 +8350,7 @@ async function edPoolSound(i, tid, at) {
 async function sbeAddSoundFile() {
   const inp = sbeEl('sbeSoundPath');
   const p = String((inp || {}).value || '').trim();
-  if (!p) { phosToast('Paste the full path of a sound file first.', {}); return; }
+  if (!p) { phosToast(T('editor.paste_the_full_path_of', 'Paste the full path of a sound file first.'), {}); return; }
   if (await sbeTsAddSoundPath(p, '', SBE.playhead)) {
     sbePopCloseAll('');
     if (inp) inp.value = '';
@@ -8106,9 +8367,9 @@ async function sbeAddSoundFile() {
 // with ONE locked strip from 0 to the film's end — so the preview, the render
 // and the export already play it. `level` is the label (LUFS); the track's
 // `gain` is the number the mix plays, `sbeRtGain(level, ref_lufs)`.
-const SBE_RT_NAME = 'Room tone';
+const SBE_RT_NAME = T('editor.room_tone', 'Room tone');
 const SBE_RT_DEFAULT_LEVEL = -38;      // mirrors room_tone.DEFAULT_LEVEL
-const SBE_RT_LEVEL_MIN = -45;          // mirrors LEVEL_MIN / LEVEL_MAX
+const SBE_RT_LEVEL_MIN = -60;          // mirrors LEVEL_MIN / LEVEL_MAX
 const SBE_RT_LEVEL_MAX = -18;
 const SBE_RT_REF = -18;                // mirrors REF_LUFS
 const SBE_RT_STEP = 30;                // mirrors BED_STEP_S
@@ -8211,7 +8472,7 @@ function sbeRtPlace(tracks, track) {
 
 function sbeRtRemove(tracks) {
   const cur = sbeRtFind(tracks);
-  if (!cur) return { tracks: tracks, ok: false, why: 'there is no room tone on this timeline' };
+  if (!cur) return { tracks: tracks, ok: false, why: T('editor.there_is_no_room_tone', 'there is no room tone on this timeline') };
   return { tracks: sbeTsCopy(tracks).filter((x, i) => i !== cur.ti), ok: true,
            removed: cur.track };
 }
@@ -8220,7 +8481,7 @@ function sbeRtRemove(tracks) {
 function sbeRtSetLevel(tracks, level) {
   const out = sbeTsCopy(tracks);
   const cur = sbeRtFind(out);
-  if (!cur) return { tracks: tracks, ok: false, why: 'there is no room tone on this timeline' };
+  if (!cur) return { tracks: tracks, ok: false, why: T('editor.there_is_no_room_tone', 'there is no room tone on this timeline') };
   const lvl = sbeRtClampLevel(level);
   cur.track.room_tone.level = lvl;
   const g = sbeRtGain(lvl, cur.track.room_tone.ref_lufs);
@@ -8304,19 +8565,19 @@ function edRtPaint() {
   const out = document.getElementById('edRtLevelOut');
   if (out) out.textContent = sbeRtFmtLevel(level);
   const row = info ? (info.variants || []).find(v => pick && v.id === pick.value) : null;
-  if (pick) pick.title = row ? row.label + ' — ' + row.blurb : 'Which room tone';
+  if (pick) pick.title = row ? row.label + ' — ' + row.blurb : T('editor.which_room_tone', 'Which room tone');
   const status = document.getElementById('edRtStatus');
   const busy = !!ED.rtBusy;
   if (status) {
     let msg;
-    if (busy) msg = 'Making the room tone…';
+    if (busy) msg = T('editor.making_the_room_tone', 'Making the room tone…');
     else if (!SBE.open) msg = 'Open a __SEQ__ to lay room tone under it.';
     else if (cur) {
       const muted = cur.track.muted === true;
-      msg = sbeTrackLabel(cur.ti) + ' · ' + sbeRtVariantLabel(rt.variant) + ' · take '
-        + (rt.seed || 1) + (muted ? ' · muted' : '')
-        + ((cur.track.strips || []).length !== 1 ? ' · edited by hand' : '');
-    } else msg = 'Not on this __SEQ__ yet.';
+      msg = sbeTrackLabel(cur.ti) + ' · ' + sbeRtVariantLabel(rt.variant) + T('editor.take', ' · take ')
+        + (rt.seed || 1) + (muted ? T('editor.muted_2', ' · muted') : '')
+        + ((cur.track.strips || []).length !== 1 ? T('editor.edited_by_hand', ' · edited by hand') : '');
+    } else msg = T('editor.not_on_this_seq_yet_2', 'Not on this __SEQ__ yet.');
     status.textContent = msg;
     status.classList.toggle('is-on', !!cur && !busy);
   }
@@ -8331,18 +8592,19 @@ function edRtPaint() {
   const del = document.getElementById('edRtRemoveBtn');
   const changed = !!(cur && pick && pick.value !== rt.variant);
   if (add) {
-    add.textContent = cur ? (changed ? 'Use this sound' : 'Rebuild') : 'Add room tone';
+    add.textContent = cur ? (changed ? T('editor.use_this_sound', 'Use this sound') : T('editor.rebuild', 'Rebuild')) : T('editor.add_room_tone', 'Add room tone');
     add.disabled = busy || !SBE.open;
     add.title = cur
-      ? (changed ? 'Swap the room tone for ' + (row ? row.label : 'this sound') + ', same level'
-                 : 'Make the bed again from the timeline as it is now (after a re-cut)')
-      : 'Lay this sound under the whole __SEQ__ on its own audio track — cuts stop dropping to silence';
+      ? (changed ? T('editor.swap_the_room_tone_for', 'Swap the room tone for ') + (row ? row.label : T('editor.this_sound', 'this sound')) + T('editor.same_level', ', same level')
+                 : T('editor.make_the_bed_again_from', 'Make the bed again from the timeline as it is now (after a re-cut)'))
+      : T('editor.lay_this_sound_under_the_2', 'Lay this sound under the whole __SEQ__ on its own audio track — cuts stop dropping to silence');
     add.classList.toggle('primary', !cur || changed);
   }
   if (take) { take.hidden = !cur; take.disabled = busy; }
   if (del) { del.hidden = !cur; del.disabled = busy; }
   const auto = document.getElementById('edRtAutoBox');
-  if (auto && info) auto.checked = info.auto !== false;
+  // OFF unless the setting says on (2 Nov): the automatic bed is opt-in.
+  if (auto && info) auto.checked = info.auto === true;
 }
 
 function sbeRtFmtLevel(v) {
@@ -8380,7 +8642,7 @@ async function edRtApply(kind) {
   if (ED.rtBusy) return false;
   const filmLen = sbeFilmDuration(SBE.clips);
   if (filmLen <= 0) {
-    phosToast('Put a clip on the timeline first — the room tone runs as long as the __SEQ__.', {});
+    phosToast(T('editor.put_a_clip_on_the_2', 'Put a clip on the timeline first — the room tone runs as long as the __SEQ__.'), {});
     return false;
   }
   await edRtLoad();
@@ -8410,8 +8672,8 @@ async function edRtApply(kind) {
   ED.rtBusy = false;
   if (String(SBE.id || '') !== askedFor) {
     edRtPaint();
-    phosToast('You opened another __SEQ__ while the room tone was being made, '
-              + 'so it was not placed.', { kind: 'warn', duration: 6000 });
+    phosToast(T('editor.you_opened_another_seq_while_2', 'You opened another __SEQ__ while the room tone was being made, ')
+              + T('editor.so_it_was_not_placed', 'so it was not placed.'), { kind: 'warn', duration: 6000 });
     return false;
   }
   if (!r || !r.ok) {
@@ -8421,19 +8683,32 @@ async function edRtApply(kind) {
   }
   // The timeline may have moved while the bed was being made.
   const nowLen = sbeFilmDuration(SBE.clips);
-  const tr = sbeRtNewTrack(r, nowLen, level, cur ? cur.track.id : '');
+  // A FIRST "FROM THIS FILM" BED GOES IN AT THE ROOM'S OWN LEVEL, measured
+  // from the clips (`suggest_level`), unless the slider was moved. The fixed
+  // −38 LUFS it used to take played 15-25 dB over the room it copied (SUNDAY
+  // MASS, 2 Nov): a flat hiss under every line.
+  let lvl = level;
+  if (!cur && ED.rtLevel === undefined && r.suggest_level !== undefined
+      && r.suggest_level !== null && isFinite(Number(r.suggest_level))) {
+    lvl = sbeRtClampLevel(r.suggest_level);
+    const sl = document.getElementById('edRtLevel');
+    if (sl) sl.value = String(Math.round(lvl));
+    const out = document.getElementById('edRtLevelOut');
+    if (out) out.textContent = sbeRtFmtLevel(lvl);
+  }
+  const tr = sbeRtNewTrack(r, nowLen, lvl, cur ? cur.track.id : '');
   const res = sbeTsMutate(ts => sbeRtPlace(ts, tr));
   ED.rtPicked = false;
   ED.rtFallback = r.fallback
-    ? ('Not enough quiet sound in these clips (' + r.fallback + ') — '
-       + (r.label || 'a preset') + ' stands in.')
+    ? (T('editor.not_enough_quiet_sound_in', 'Not enough quiet sound in these clips (') + r.fallback + ') — '
+       + (r.label || 'a preset') + T('editor.stands_in', ' stands in.'))
     : '';
   SBE.rtLen = nowLen;
   edRtPaint();
   if (!res) return false;
   const idx = (SBE.tracks || []).findIndex(t => String(t.id) === String(res.track));
   phosToast(SBE_RT_NAME + ' on ' + sbeTrackLabel(idx) + ': ' + (r.label || variant)
-            + (kind === 'take' ? ', take ' + seed : '') + ', ' + sbeRtFmtLevel(level) + '.',
+            + (kind === 'take' ? T('editor.take_2', ', take ') + seed : '') + ', ' + sbeRtFmtLevel(lvl) + '.',
             { kind: 'success', duration: 5000 });
   return true;
 }
@@ -8443,7 +8718,7 @@ function edRtRemove() {
   if (sbeTsMutate(ts => sbeRtRemove(ts))) {
     ED.rtFallback = '';
     edRtPaint();
-    phosToast('Room tone removed — Undo brings it back.', { duration: 5000 });
+    phosToast(T('editor.room_tone_removed_undo_brings', 'Room tone removed — Undo brings it back.'), { duration: 5000 });
   }
 }
 
@@ -8484,10 +8759,10 @@ async function edRtAuto(on) {
     const r = await (await fetch('/settings', { method: 'POST', body: fd })).json();
     if (r && r.ok === false) throw new Error(r.error || 'refused');
     if (ED.rtInfo) ED.rtInfo.auto = !!on;
-    phosToast(on ? 'Automatic cuts get room tone from now on.'
-                 : 'Automatic cuts come without room tone from now on.', { duration: 4000 });
+    phosToast(on ? T('editor.automatic_cuts_get_room_tone', 'Automatic cuts get room tone from now on.')
+                 : T('editor.automatic_cuts_come_without_room', 'Automatic cuts come without room tone from now on.'), { duration: 4000 });
   } catch (e) {
-    phosToast('That setting could not be saved: ' + e, { kind: 'danger' });
+    phosToast(T('editor.that_setting_could_not_be', 'That setting could not be saved: ') + e, { kind: 'danger' });
   }
   edRtPaint();
 }
@@ -8555,7 +8830,7 @@ function edPoolOverTracks(ev) {
   return null;
 }
 
-async function edPoolOverlay(i) {
+async function edPoolOverlay(i, at) {
   const rows = (document.getElementById('edPoolList') || {})._rows || [];
   const r = rows[i];
   if (!r || !SBE.open) {
@@ -8567,6 +8842,7 @@ async function edPoolOverlay(i) {
   // keyed derivative or the path exactly as it came; either way the lane gets
   // one path, and preview, render and export all read that same file.
   const item = { path: r.path, title: r.title || '', duration_s: 3 };
+  if (r.kind === 'still') item.kind = 'still';   // the pool already knows
   let keyed = null;
   try {
     // URLSearchParams, like every other editor POST. A `FormData` here sends
@@ -8583,7 +8859,7 @@ async function edPoolOverlay(i) {
     // The lane still works with the file exactly as it arrived. A card that
     // could not be measured is not a card that cannot be placed.
   }
-  const added = sbeOvAddAt(item, SBE.playhead);
+  const added = sbeOvAddAt(item, (at === null || at === undefined) ? SBE.playhead : at);
   if (added && keyed) sbeKeyedNotice(added.id, keyed);
 }
 
@@ -8610,7 +8886,7 @@ function sbeKeyedKeepOriginal() {
   sbeKeyedDismiss();
   if (!k || !k.id || !k.original) return;
   if (sbeOvMutate(os => sbeOvSetPath(os, k.id, k.original))) {
-    phosToast('Kept the original — the card is back on its black background.',
+    phosToast(T('editor.kept_the_original_the_card', 'Kept the original — the card is back on its black background.'),
               { duration: 5000 });
   }
 }
@@ -8635,12 +8911,18 @@ function sbePaintOverlays() {
     const name = (okind === 'text')
       ? (sbeOvText(o).text.split('\n')[0] || 'Title')
       : sbeNiceName(o.title || String(o.path || '').split('/').pop() || 'card');
-    html += '<div class="sbe-ov is-' + okind + (o.id === SBE.ovSel ? ' is-sel' : '') + '" '
+    // STACKED: a title that shares seconds with a picture overlay is drawn in
+    // the lane's lower half and the picture in the upper, so both stay
+    // visible and grabbable.
+    const other = (SBE.overlays || []).some(x => x !== o && sbeOvLayerOf(x) !== sbeOvLayerOf(o)
+      && sbeNum(x.film_start) < sbeNum(o.film_end) - 1e-6 && sbeNum(x.film_end) > sbeNum(o.film_start) + 1e-6);
+    const stack = other ? (okind === 'text' ? ' is-stack-lo' : ' is-stack-hi') : '';
+    html += '<div class="sbe-ov is-' + okind + stack + (o.id === SBE.ovSel ? ' is-sel' : '') + '" '
           + 'data-id="' + escapeHtml(o.id) + '" '
           + 'title="' + escapeHtml((okind === 'text'
-              ? 'Title — drawn over the picture. '
-              : 'Overlay — composited over the picture. ')
-              + 'Drag to move, pull either end to change how long.') + '" '
+              ? T('editor.title_drawn_over_the_picture', 'Title — drawn over the picture. ')
+              : T('editor.overlay_composited_over_the_picture', 'Overlay — composited over the picture. '))
+              + T('editor.drag_to_move_pull_either', 'Drag to move, pull either end to change how long.')) + '" '
           + 'style="left:' + x.toFixed(1) + 'px;width:' + w.toFixed(1) + 'px">'
           + (okind === 'still' && o.path
               ? '<img class="sbe-ov-thumb" alt="" src="/image?w=240&path='
@@ -8659,7 +8941,7 @@ function sbePaintOverlays() {
   // the four pool sources already follow. Without it the overlay lane is a
   // strip of nothing that teaches nobody it exists.
   lane.innerHTML = html || '<div class="sbe-track-empty sbe-ovlane-empty">'
-    + 'Overlay lane — drop a still here, press \u25a3 on an image in the '
+    + T('editor.overlay_lane_drop_a_still', 'Overlay lane. Drop a still here, press \u25a3 on an image in the ')
     + 'media pool, or Add title for text over the picture at the playhead.</div>';
   lane.style.width = sbeEl('sbeInner').style.width;
 }
@@ -8671,16 +8953,19 @@ function sbeOvPaint(t) {
   if (!el || !el.classList) return;
   const tx = sbeEl('sbeOvText');
   const now = (t === undefined) ? SBE.playhead : sbeNum(t);
-  const o = sbeOvAt(SBE.overlays, now);
+  // BOTH LAYERS, each on its own element: a title (the DOM text) can sit on
+  // a picture overlay (the image layer) at the same second.
+  const ot = sbeOvAt(SBE.overlays, now, 'text');
+  const om = sbeOvAt(SBE.overlays, now, 'media');
   const txOff = () => { if (tx && tx.classList) tx.classList.remove('is-on'); };
-  if (!o) { el.classList.remove('is-on'); txOff(); return; }
-  if (sbeOvKind(o) === 'text') {
+  if (!ot && !om) { el.classList.remove('is-on'); txOff(); sbeOvVideoOff(); sbeOvNote(''); return; }
+  if (ot) {
+    const o = ot;
     // A TITLE IS DRAWN IN THE DOM, not re-rendered: the same string, the same
     // anchor and the same size rule (`font_size` at 1080 high, scaled to
     // the stage) the rasteriser uses, so what is on the stage is what lands
     // in the file. The stage's own height is the scale; the style values
     // are written as custom properties and the stylesheet does the rest.
-    el.classList.remove('is-on');
     if (!tx || !tx.classList) return;
     const tt = sbeOvText(o);
     const st = tt.style;
@@ -8695,14 +8980,153 @@ function sbeOvPaint(t) {
     tx.style.opacity = String(sbeFadeOpacityAt(o, now));
     tx.classList.add('is-on');
     sbeOvTextPlace(tx, st, stage);
+  } else {
+    txOff();
+  }
+  const o = om;
+  if (!o || !o.path) { el.classList.remove('is-on'); sbeOvVideoOff(); sbeOvNote(''); return; }
+  // A VIDEO NEVER GOES THROUGH THE <img>. It used to: every overlay was
+  // `/image?path=<file>`, so a .mov sting failed to load and WebKit painted
+  // its broken-image "?" in the middle of every frame of the film (owner,
+  // SUNDAY MASS, 2 Nov). A video plays on its own layer from its preview.
+  if (sbeOvKind(o) === 'video') {
+    el.classList.remove('is-on');
+    sbeOvVideoPaint(o, now);
     return;
   }
-  txOff();
-  if (!o.path) { el.classList.remove('is-on'); return; }
+  sbeOvVideoOff();
   const url = '/image?w=1280&path=' + encodeURIComponent(o.path);
-  if (el.getAttribute('src') !== url) el.setAttribute('src', url);
+  if (!el.dataset) el.dataset = {};
+  if (!el.dataset.errHooked && typeof el.addEventListener === 'function') {
+    // NEVER A BROKEN-IMAGE GLYPH ON THE STAGE. A card that will not load is
+    // taken off and named quietly in the corner instead.
+    el.dataset.errHooked = '1';
+    el.addEventListener('error', () => {
+      el.dataset.failed = el.getAttribute('src') || '';
+      el.classList.remove('is-on');
+      sbeOvPaint();
+    });
+  }
+  if (el.getAttribute('src') !== url) { el.dataset.failed = ''; el.setAttribute('src', url); }
+  if (el.dataset.failed === url) {
+    el.classList.remove('is-on');
+    sbeOvNote(T('editor.this_overlay_can_t_be', 'This overlay can\u2019t be shown here \u2014 the render still includes it.'));
+    return;
+  }
+  sbeOvNote('');
   el.style.opacity = String(sbeFadeOpacityAt(o, now));
   el.classList.add('is-on');
+}
+
+// ---- THE OVERLAY LANE'S VIDEO LAYER --------------------------------------
+// The overlay's PREVIEW copy (made beside the clip proxies: HEVC with alpha
+// for a transparent sting, all-intra H.264 otherwise) plays muted on its own
+// <video>, following the playhead: seeked when parked, chased only past a
+// sixth of a second when playing. A video overlay with no preview yet asks
+// for one once and says so in the corner; one that cannot be previewed says
+// that, and the render — which reads the original — is unaffected.
+function sbeOvNote(text) {
+  const n = sbeEl('sbeOvNote');
+  if (!n) return;
+  if (n.textContent !== text) n.textContent = text;
+  n.hidden = !text;
+}
+
+function sbeOvVideoOff() {
+  const v = sbeEl('sbeOvVideo');
+  if (!v) return;
+  v.style.opacity = '0';
+  try { if (!v.paused) v.pause(); } catch (e) {}
+}
+
+function sbeOvPreviewFor(o) {
+  return (o && o.preview) || ((SBE.ovPreviews || {})[(o || {}).path]) || '';
+}
+
+function sbeOvAskPreview(path) {
+  if (!SBE.id || !path) return;
+  SBE.ovAsked = SBE.ovAsked || {};
+  if (SBE.ovAsked[path]) return;
+  SBE.ovAsked[path] = 1;
+  const fd = new URLSearchParams();
+  fd.set('id', SBE.id);
+  fd.set('path', path);
+  fetch('/storyboard/edit/overlay-preview', { method: 'POST', body: fd })
+    .then(r => r.json())
+    .then(r => {
+      SBE.ovPreviews = Object.assign({}, SBE.ovPreviews || {}, (r && r.previews) || {});
+      if (!SBE.ovPreviews[path]) { SBE.ovFailed = SBE.ovFailed || {}; SBE.ovFailed[path] = 1; }
+      sbeOvPaint();
+    })
+    .catch(() => { SBE.ovFailed = SBE.ovFailed || {}; SBE.ovFailed[path] = 1; sbeOvPaint(); });
+}
+
+// A browser that decodes HEVC but not its alpha layer (Chromium) shows a
+// transparent sting as an opaque black frame over the picture — worse than
+// nothing. One look at the four corners of the first frame decides: opaque
+// black corners on a non-WebKit engine means "cannot preview here".
+function sbeOvAlphaLost(v) {
+  if (!/Chrome\/|Firefox\//.test(navigator.userAgent || '')) return false;
+  try {
+    const c = document.createElement('canvas');
+    c.width = 32; c.height = 18;
+    const g = c.getContext('2d');
+    g.drawImage(v, 0, 0, 32, 18);
+    const d = g.getImageData(0, 0, 32, 18).data;
+    const at = (x, y) => { const i = (y * 32 + x) * 4; return d[i + 3] > 250 && d[i] + d[i + 1] + d[i + 2] < 12; };
+    return at(0, 0) && at(31, 0) && at(0, 17) && at(31, 17);
+  } catch (e) { return false; }
+}
+
+function sbeOvVideoPaint(o, now) {
+  const v = sbeEl('sbeOvVideo');
+  if (!v) return;
+  const prev = sbeOvPreviewFor(o);
+  if (!prev || !SBE.proxyUrl) {
+    sbeOvVideoOff();
+    if ((SBE.ovFailed || {})[o.path]) {
+      sbeOvNote(T('editor.this_overlay_can_t_be_2', 'This overlay can\u2019t be previewed here \u2014 the render still includes it.'));
+    } else {
+      sbeOvNote(T('editor.making_a_preview_of_the', 'Making a preview of the overlay\u2026'));
+      sbeOvAskPreview(o.path);
+    }
+    return;
+  }
+  const url = SBE.proxyUrl + encodeURIComponent(String(prev).split('/').pop());
+  if (!v.dataset) v.dataset = {};
+  if (!v.dataset.hooked && typeof v.addEventListener === 'function') {
+    v.dataset.hooked = '1';
+    v.addEventListener('error', () => { v.dataset.bad = v.dataset.src || ''; sbeOvPaint(); });
+    v.addEventListener('loadeddata', () => {
+      if (sbeOvAlphaLost(v)) v.dataset.bad = v.dataset.src || '';
+      sbeOvPaint();
+    });
+    // The transport stopping does not repaint the overlay lane, so the
+    // layer stops itself the moment it notices.
+    v.addEventListener('timeupdate', () => { if (!SBE.playing && !v.paused) { try { v.pause(); } catch (e) {} } });
+  }
+  if (v.dataset.src !== url) { v.dataset.src = url; v.src = url; }
+  if (v.dataset.bad === url) {
+    sbeOvVideoOff();
+    sbeOvNote(T('editor.this_overlay_can_t_be_2', 'This overlay can\u2019t be previewed here \u2014 the render still includes it.'));
+    return;
+  }
+  sbeOvNote('');
+  v.muted = true;
+  const want = Math.max(0, sbeNum(o.start) + Math.max(0, now - sbeNum(o.film_start)));
+  try {
+    if (v.readyState >= 1) {
+      const drift = v.currentTime - want;
+      if (SBE.playing) {
+        if (Math.abs(drift) > 0.16) v.currentTime = want;
+        if (v.paused) v.play().catch(() => {});
+      } else {
+        if (!v.paused) v.pause();
+        if (Math.abs(drift) > 0.5 / sbeFps()) v.currentTime = want;
+      }
+    }
+  } catch (e) {}
+  v.style.opacity = String(sbeFadeOpacityAt(o, now));
 }
 
 // WHERE THE BOX SITS, IN PIXELS, KEPT INSIDE THE FRAME. The anchor is a
@@ -8746,7 +9170,7 @@ function sbeOvTextCommit(field, value) {
     const t = sbeOvById(out, id);
     if (field === 'text') {
       const s = String(value || '').replace(/\r\n?/g, '\n').slice(0, SBE_TEXT_MAX);
-      if (!s.trim()) return { overlays: os, ok: false, why: 'a title needs some text' };
+      if (!s.trim()) return { overlays: os, ok: false, why: T('editor.a_title_needs_some_text', 'a title needs some text') };
       if (s === String(t.text || '')) return { overlays: os, ok: false, why: '' };
       t.text = s;
     } else {
@@ -8787,6 +9211,10 @@ function edAddTitle() {
   SBE.ovSel = res.added.id;
   SBE.sel = '';
   SBE.txSel = '';
+  // THE TEXT BOX HAS TO BE ON SCREEN to type into: it lives in the
+  // inspector, and with the inspector closed Add title selected a block the
+  // user then had to find a panel for.
+  if (!SBE.inspect && typeof sbeInspectSet === 'function') sbeInspectSet(true);
   sbePaint();
   sbeOvPaint();
   const box = sbeEl('sbeOvTextBox');
@@ -8849,7 +9277,7 @@ function sbeOnOvUp(ev) {
   if (SBE.undo.length > SBE_UNDO_MAX) SBE.undo.shift();
   SBE.redo.length = 0;
   SBE.dirty = true;
-  sbeSetState('unsaved changes', 'dirty');
+  sbeSetState(T('editor.unsaved_changes', 'unsaved changes'), 'dirty');
   sbePaint();
   sbeQueueSave();
 }
@@ -9067,7 +9495,7 @@ function sbeLevelClick(ev) {
                  rect: at.rect };
   try { sbeEl('sbeAudioLane').setPointerCapture(ev.pointerId); } catch (e) {}
   SBE.dirty = true;
-  sbeSetState('unsaved changes', 'dirty');
+  sbeSetState(T('editor.unsaved_changes', 'unsaved changes'), 'dirty');
   sbePaint();
   return true;
 }
@@ -9098,8 +9526,8 @@ function sbeAddPointAtPlayhead() {
     const w = sbeTsWindow(f.strip);
     const t = sbeNum(SBE.playhead) - w.film_start;
     if (t < -1e-6 || t > w.len + 1e-6) {
-      phosToast('Move the playhead over this sound first — a point is placed where you '
-                + 'are listening.', { duration: 6000 });
+      phosToast(T('editor.move_the_playhead_over_this', 'Move the playhead over this sound first — a point is placed where you ')
+                + T('editor.are_listening', 'are listening.'), { duration: 6000 });
       return;
     }
     const at = Math.max(0, Math.min(w.len, t));
@@ -9109,23 +9537,23 @@ function sbeAddPointAtPlayhead() {
   const c = sbeById(SBE.clips, SBE.sel);
   if (!c) return;
   if (!sbeStripEditable(c)) {
-    phosToast('Unlink this clip\'s sound first — a level line belongs to a '
-              + 'strip you can shape.', { duration: 6000 });
+    phosToast(T('editor.unlink_this_clip_s_sound', 'Unlink this clip\'s sound first — a level line belongs to a ')
+              + T('editor.strip_you_can_shape', 'strip you can shape.'), { duration: 6000 });
     return;
   }
   const w = sbeClipAudio(c);
   const t = sbeNum(SBE.playhead) - sbeNum(w.film_start);
   if (t < -1e-6 || t > w.len + 1e-6) {
-    phosToast('Move the playhead over this clip\'s sound first — a point is '
-              + 'placed where you are listening.', { duration: 6000 });
+    phosToast(T('editor.move_the_playhead_over_this_2', 'Move the playhead over this clip\'s sound first — a point is ')
+              + T('editor.placed_where_you_are_listening', 'placed where you are listening.'), { duration: 6000 });
     return;
   }
   const at = Math.max(0, Math.min(w.len, t));
   const r = sbeAddKeyframe(SBE.clips, c.id, at, sbeGainAt(c, w.len, at));
   if (!r.ok) {
     phosToast(r.why === 'there is already a point here'
-      ? 'There is already a point at the playhead — drag it, or right-click it '
-        + 'to remove it.' : 'That clip is locked.', { duration: 6000 });
+      ? T('editor.there_is_already_a_point', 'There is already a point at the playhead — drag it, or right-click it ')
+        + T('editor.to_remove_it', 'to remove it.') : T('editor.that_clip_is_locked', 'That clip is locked.'), { duration: 6000 });
     return;
   }
   sbeMutate(() => ({ clips: r.clips, ok: true }));
@@ -9143,7 +9571,7 @@ function sbeClearPoints() {
   });
   if (ts.length) {
     if (sbeTsMutateEach(ts, (tracks, id) => sbeTsPointsWrite(tracks, id, []))) {
-      phosToast('Level points removed. The fades are untouched — those are the corner '
+      phosToast(T('editor.level_points_removed_the_fades', 'Level points removed. The fades are untouched — those are the corner ')
                 + 'handles.', { duration: 6000 });
     }
     return;
@@ -9162,8 +9590,8 @@ function sbeClearPoints() {
     ? sbeMutate(cs => sbeAfxWrite(cs, ids[0], []))
     : sbeMutateEach(ids, (cs, x) => sbeAfxWrite(cs, x, []));
   if (ok) {
-    phosToast(n + ' level point' + (n === 1 ? '' : 's') + ' removed. The '
-              + 'fades are untouched — those are the corner handles.',
+    phosToast(n + T('editor.level_point', ' level point') + (n === 1 ? '' : 's') + T('editor.removed_the', ' removed. The ')
+              + T('editor.fades_are_untouched_those_are', 'fades are untouched — those are the corner handles.'),
               { duration: 6000 });
   }
 }
@@ -9209,8 +9637,8 @@ function sbeOnAudioDbl(ev) {
   if (!c) return;
   const w = sbeClipAudio(c);
   if (w.linked) {
-    phosToast('Unlink this clip\'s sound first — a level line belongs to a '
-              + 'strip you can shape.', { duration: 6000 });
+    phosToast(T('editor.unlink_this_clip_s_sound', 'Unlink this clip\'s sound first — a level line belongs to a ')
+              + T('editor.strip_you_can_shape', 'strip you can shape.'), { duration: 6000 });
     return;
   }
   const r = blk.getBoundingClientRect();
@@ -9332,16 +9760,16 @@ function sbeOnAudioDown(ev) {
     // inspector is already showing this clip.
     sbePaint();
     phosToast(w.coupled
-      ? 'This sound is linked to its picture at ' + sbeDriftLabel(sbeAudioDrift(c))
-        + ' and moves with it. Press Unlink sound on the bar above the tracks to slide it on its own.'
-      : 'That clip\'s sound is linked to its picture. Press Unlink sound on '
-        + 'the bar above the tracks to slide it under the neighbour.', { duration: 6000 });
+      ? T('editor.this_sound_is_linked_to', 'This sound is linked to its picture at ') + sbeDriftLabel(sbeAudioDrift(c))
+        + T('editor.and_moves_with_it_press', ' and moves with it. Press Unlink sound on the bar above the tracks to slide it on its own.')
+      : T('editor.that_clip_s_sound_is', 'That clip\'s sound is linked to its picture. Press Unlink sound on ')
+        + T('editor.the_bar_above_the_tracks', 'the bar above the tracks to slide it under the neighbour.'), { duration: 6000 });
     return;
   }
   if (c.locked) {
     sbePaint();
-    phosToast('That shot is locked, so its sound is locked with it. Press '
-              + 'Unlock on the bar above the tracks.', { duration: 6000 });
+    phosToast(T('editor.that_shot_is_locked_so', 'That shot is locked, so its sound is locked with it. Press ')
+              + T('editor.unlock_on_the_bar_above', 'Unlock on the bar above the tracks.'), { duration: 6000 });
     return;
   }
   const lane = sbeEl('sbeAudioLane');
@@ -9435,7 +9863,7 @@ function sbeOnAudioUp(ev) {
       if (SBE.undo.length > SBE_UNDO_MAX) SBE.undo.shift();
       SBE.redo.length = 0;
       SBE.dirty = true;
-      sbeSetState('unsaved changes', 'dirty');
+      sbeSetState(T('editor.unsaved_changes', 'unsaved changes'), 'dirty');
       sbeQueueSave();
     }
     sbePaint();
@@ -9450,11 +9878,11 @@ function sbeOnAudioUp(ev) {
     sbePaint();
     if (c0) {
       phosToast(sbeClipAudio(c0).coupled
-        ? 'This sound is linked to its picture at ' + sbeDriftLabel(sbeAudioDrift(c0))
-          + ' and moves with it. Press Unlink sound on the bar above the tracks to slide it on its own'
-          + ' — or drag it up or down to the other sound lane.'
-        : 'That clip\'s sound is linked to its picture. Press Unlink sound on the bar above the '
-          + 'tracks to slide it under the neighbour — or drag it up or down to the other sound lane.',
+        ? T('editor.this_sound_is_linked_to', 'This sound is linked to its picture at ') + sbeDriftLabel(sbeAudioDrift(c0))
+          + T('editor.and_moves_with_it_press_2', ' and moves with it. Press Unlink sound on the bar above the tracks to slide it on its own')
+          + T('editor.or_drag_it_up_or', ' — or drag it up or down to the other sound lane.')
+        : T('editor.that_clip_s_sound_is_2', 'That clip\'s sound is linked to its picture. Press Unlink sound on the bar above the ')
+          + T('editor.tracks_to_slide_it_under', 'tracks to slide it under the neighbour — or drag it up or down to the other sound lane.'),
         { duration: 6000 });
     }
     return;
@@ -9464,7 +9892,7 @@ function sbeOnAudioUp(ev) {
   if (SBE.undo.length > SBE_UNDO_MAX) SBE.undo.shift();
   SBE.redo.length = 0;
   SBE.dirty = true;
-  sbeSetState('unsaved changes', 'dirty');
+  sbeSetState(T('editor.unsaved_changes', 'unsaved changes'), 'dirty');
   sbePaint();
   sbeQueueSave();
 }
@@ -9486,9 +9914,9 @@ function sbeAlternateSel() {
   sbePopCloseAll('');
   const ok = sbeMutate(cs => sbeAlternateLanes(cs));
   if (ok) {
-    phosToast('Clip sound now alternates between lanes A and B — nothing moved in time. '
-              + 'To crossfade two shots, unlink a sound, pull its edge under its neighbour on '
-              + 'the other lane and fade both. Undo puts the lanes back.',
+    phosToast(T('editor.clip_sound_now_alternates_between', 'Clip sound now alternates between lanes A and B — nothing moved in time. ')
+              + T('editor.to_crossfade_two_shots_unlink', 'To crossfade two shots, unlink a sound, pull its edge under its neighbour on ')
+              + T('editor.the_other_lane_and_fade', 'the other lane and fade both. Undo puts the lanes back.'),
               { kind: 'success', duration: 9000 });
   }
   sbeBlurControl();
@@ -9514,24 +9942,24 @@ function sbeToggleAudioLink() {
     const ok = sbeMutateEach(ids, (cs, id) => sbeSetAudioLink(cs, id, want));
     if (ok) {
       phosToast(want
-        ? ids.length + ' strips unlinked — each one now drags and trims on '
-          + 'its own, under its own picture.'
-        : ids.length + ' strips re-linked — each one travels with its picture '
-          + 'again, keeping whatever offset it had.', { duration: 7000 });
+        ? ids.length + T('editor.strips_unlinked_each_one_now', ' strips unlinked — each one now drags and trims on ')
+          + T('editor.its_own_under_its_own', 'its own, under its own picture.')
+        : ids.length + T('editor.strips_re_linked_each_one', ' strips re-linked — each one travels with its picture ')
+          + T('editor.again_keeping_whatever_offset_it', 'again, keeping whatever offset it had.'), { duration: 7000 });
     }
     return;
   }
   const ok = sbeMutate(cs => sbeSetAudioLink(cs, c.id, !w.linked));
   if (!ok) return;
   phosToast(w.linked
-    ? 'Sound unlinked — drag the strip under this clip to slide it, or pull '
-      + 'either end. The picture stays where it is, and it stays draggable '
-      + 'from both edges.'
+    ? T('editor.sound_unlinked_drag_the_strip', 'Sound unlinked — drag the strip under this clip to slide it, or pull ')
+      + T('editor.either_end_the_picture_stays', 'either end. The picture stays where it is, and it stays draggable ')
+      + T('editor.from_both_edges', 'from both edges.')
     : (Math.abs(drift) > SBE_SYNC_TOL
-        ? 'Linked at ' + sbeDriftLabel(drift) + ' — the sound keeps that '
-          + 'offset and now travels with the picture. Resync puts it back '
-          + 'under its own frame.'
-        : 'Sound re-linked to the picture.'), { duration: 7000 });
+        ? T('editor.linked_at', 'Linked at ') + sbeDriftLabel(drift) + T('editor.the_sound_keeps_that', ' — the sound keeps that ')
+          + T('editor.offset_and_now_travels_with', 'offset and now travels with the picture. Resync puts it back ')
+          + T('editor.under_its_own_frame', 'under its own frame.')
+        : T('editor.sound_re_linked_to_the', 'Sound re-linked to the picture.')), { duration: 7000 });
 }
 
 function sbeDeleteStripSel() {
@@ -9541,8 +9969,8 @@ function sbeDeleteStripSel() {
   if (ids.length > 1) {
     const ok = sbeMutateEach(ids, (cs, id) => sbeDeleteStrip(cs, id));
     if (ok) {
-      phosToast('Sound removed from the selection — the pictures play silent '
-                + 'and none of them moved.', { duration: 7000 });
+      phosToast(T('editor.sound_removed_from_the_selection', 'Sound removed from the selection — the pictures play silent ')
+                + T('editor.and_none_of_them_moved', 'and none of them moved.'), { duration: 7000 });
     }
     return;
   }
@@ -9550,8 +9978,8 @@ function sbeDeleteStripSel() {
   if (!c) return;
   const ok = sbeMutate(cs => sbeDeleteStrip(cs, c.id));
   if (!ok) return;
-  phosToast('Sound removed — the picture plays silent and stays exactly where '
-            + 'it is. Undo brings it back.', { duration: 7000 });
+  phosToast(T('editor.sound_removed_the_picture_plays', 'Sound removed — the picture plays silent and stays exactly where ')
+            + T('editor.it_is_undo_brings_it', 'it is. Undo brings it back.'), { duration: 7000 });
 }
 
 function sbeToggleClipMute() {
@@ -9570,18 +9998,18 @@ function sbeToggleClipMute() {
     const ok = sbeMutateEach(ids, (cs, id) => sbeSetClipMute(cs, id, on));
     if (ok) {
       phosToast(on
-        ? 'The selection is muted — their own sound is off in the preview, '
-          + 'the render and the export. The soundtrack is untouched.'
-        : 'The selection is unmuted.', { duration: 6000 });
+        ? T('editor.the_selection_is_muted_their', 'The selection is muted — their own sound is off in the preview, ')
+          + T('editor.the_render_and_the_export', 'the render and the export. The soundtrack is untouched.')
+        : T('editor.the_selection_is_unmuted', 'The selection is unmuted.'), { duration: 6000 });
     }
     return;
   }
   const ok = sbeMutate(cs => sbeSetClipMute(cs, c.id, on));
   if (!ok) return;
   phosToast(on
-    ? 'Clip sound muted — it is off in the preview, the render and the export. '
-      + 'The strip stays where it is, and unmuting puts it back.'
-    : 'Clip sound unmuted.', { duration: 6000 });
+    ? T('editor.clip_sound_muted_it_is', 'Clip sound muted — it is off in the preview, the render and the export. ')
+      + T('editor.the_strip_stays_where_it', 'The strip stays where it is, and unmuting puts it back.')
+    : T('editor.clip_sound_unmuted', 'Clip sound unmuted.'), { duration: 6000 });
 }
 
 // THE REMATCH, from the flag on either half, from the clip bar, or from the
@@ -9596,8 +10024,8 @@ function sbeResyncSel(id) {
     if (ids.length > 1) {
       const ok = sbeMutateEach(ids, (cs, x) => sbeResyncAudio(cs, x));
       if (ok) {
-        phosToast(ids.length + ' strips are back under their own pictures. '
-                  + 'They are still unlinked, so they can be moved again.',
+        phosToast(ids.length + T('editor.strips_are_back_under_their', ' strips are back under their own pictures. ')
+                  + T('editor.they_are_still_unlinked_so', 'They are still unlinked, so they can be moved again.'),
                   { duration: 6000 });
       }
       return;
@@ -9611,8 +10039,8 @@ function sbeResyncSel(id) {
   const was = sbeAudioDrift(c);
   const ok = sbeMutate(cs => sbeResyncAudio(cs, who));
   if (!ok) { sbePaint(); return; }
-  phosToast('Sound rematched to its picture — it was ' + sbeDriftLabel(was)
-            + ' out. It is still unlinked, so it can be moved again.',
+  phosToast(T('editor.sound_rematched_to_its_picture', 'Sound rematched to its picture — it was ') + sbeDriftLabel(was)
+            + T('editor.out_it_is_still_unlinked', ' out. It is still unlinked, so it can be moved again.'),
             { duration: 6000 });
 }
 
@@ -9628,8 +10056,8 @@ function sbePaintHead() {
     t.innerHTML = escapeHtml(fmt(SBE.playhead)) +
       ' <span>/ ' + escapeHtml(fmt(sbeFilmDuration(SBE.clips))) + '</span>';
     t.title = frames
-      ? 'HH:MM:SS:FF at ' + sbeFps() + ' fps. Click for seconds.'
-      : 'Minutes:seconds. Click for a frame timecode.';
+      ? 'HH:MM:SS:FF at ' + sbeFps() + T('editor.fps_click_for_seconds', ' fps. Click for seconds.')
+      : T('editor.minutes_seconds_click_for_a', 'Minutes:seconds. Click for a frame timecode.');
   }
 }
 
@@ -9646,7 +10074,7 @@ function sbePaintHead() {
 // menu would have been two more chances to add a panel that Escape and a
 // click elsewhere could not shut.
 const SBE_POPS = ['sbeFilmsMenu', 'sbeRenderMenu', 'sbeMoreMenu', 'sbeKeysPop', 'sbeMusicMenu',
-                  'sbeCbarMenu', 'sbeCtxMenu', 'sbeSoundMenu'];
+                  'sbeCbarMenu', 'sbeCtxMenu', 'sbeSoundMenu', 'sbeBedPop'];
 
 function sbePopToggle(id, anchorId) {
   const el = sbeEl(id);
@@ -9720,7 +10148,7 @@ function sbePaintHeads() {
     const bits = [];
     if (split) bits.push(split + ' unlinked');
     if (muted) bits.push(muted + ' muted');
-    aud.textContent = bits.length ? bits.join(' · ') : 'linked to the picture';
+    aud.textContent = bits.length ? bits.join(' · ') : T('editor.linked_to_the_picture', 'linked to the picture');
     aud.classList.toggle('is-live', split > 0);
   }
   // THE SOUND AREA'S OWN CONTROL, on the head of the area it acts on — the
@@ -9733,8 +10161,8 @@ function sbePaintHeads() {
     sz.textContent = small ? '▸' : '▾';
     sz.setAttribute('aria-expanded', small ? 'false' : 'true');
     sz.title = (small
-      ? 'Sound mode — A1, A2 and every audio track at full height, the picture small'
-      : 'Picture mode — the sound lanes become thin strips and the picture gets the height')
+      ? T('editor.sound_mode_a1_a2_and', 'Sound mode — A1, A2 and every audio track at full height, the picture small')
+      : T('editor.picture_mode_the_sound_lanes', 'Picture mode — the sound lanes become thin strips and the picture gets the height'))
       + '.' + hint;
   }
 }
@@ -9775,17 +10203,17 @@ function sbeSplitWhy() {
   if (ts.length) return sbeTsSplitWhy(ts);
   const under = sbeClipAt(SBE.clips, SBE.playhead);
   if (!under) {
-    return 'Put the playhead over a shot first — this cuts whatever is under '
-         + 'it into two.' + sbeKeyHint('editor.split');
+    return T('editor.put_the_playhead_over_a', 'Put the playhead over a shot first — this cuts whatever is under ')
+         + T('editor.it_into_two', 'it into two.') + sbeKeyHint('editor.split');
   }
   if (under.locked) {
-    return 'The shot under the playhead is locked to its place. Unlock it to '
-         + 'cut it.';
+    return T('editor.the_shot_under_the_playhead', 'The shot under the playhead is locked to its place. Unlock it to ')
+         + T('editor.cut_it', 'cut it.');
   }
   const off = SBE.playhead - sbeNum(under.film_start);
   if (off < SBE_MIN_CLIP || sbeLen(under) - off < SBE_MIN_CLIP) {
-    return 'The playhead is right on a cut — move it into the middle of a '
-         + 'shot to split it.' + sbeKeyHint('editor.split');
+    return T('editor.the_playhead_is_right_on', 'The playhead is right on a cut — move it into the middle of a ')
+         + T('editor.shot_to_split_it', 'shot to split it.') + sbeKeyHint('editor.split');
   }
   return '';
 }
@@ -9799,14 +10227,18 @@ function sbeCbarPlayhead() {
   const el = sbeEl('sbeCbSplit');
   if (!el) return;
   const why = sbeSplitWhy();
-  const want = why || (sbeTsSelIds().length ? SBE_TS_SPLIT_TITLE : SBE_SPLIT_TITLE);
+  // Keep the name line sbePaintCbar puts first: the row is icons only, and
+  // every scrub used to replace "Split" + its consequence with bare text.
+  const body = why || (sbeTsSelIds().length ? SBE_TS_SPLIT_TITLE : SBE_SPLIT_TITLE);
+  const name = el.getAttribute('aria-label') || '';
+  const want = name ? name + '\n' + body : body;
   if (el.title !== want) el.title = want;
   if (el.disabled !== !!why) el.disabled = !!why;
 }
 
-const SBE_SPLIT_TITLE = 'Cuts the shot under the playhead into two at the '
-  + 'playhead. Nothing moves and nothing is lost.' + sbeKeyHint('editor.split');
-const SBE_TS_SPLIT_TITLE = 'Cuts the selected sound into two at the playhead. '
+const SBE_SPLIT_TITLE = T('editor.cuts_the_shot_under_the', 'Cuts the shot under the playhead into two at the ')
+  + T('editor.playhead_nothing_moves_and_nothing', 'playhead. Nothing moves and nothing is lost.') + sbeKeyHint('editor.split');
+const SBE_TS_SPLIT_TITLE = T('editor.cuts_the_selected_sound_into', 'Cuts the selected sound into two at the playhead. ')
   + 'Nothing moves; its fades and level points stay where they were.' + sbeKeyHint('editor.split');
 
 // DUPLICATE, READ FOR WHATEVER KIND OF SOUND IS SELECTED. The owner: "the
@@ -9821,26 +10253,26 @@ function sbeSoundLaneSel() {
 
 function sbeCbarDupRow(n, many, c, noSel) {
   const hint = sbeKeyHint('editor.duplicate');
-  const row = { id: 'sbeCbDup', act: 'sbeDuplicateSel()', label: 'Duplicate' };
+  const row = { id: 'sbeCbDup', act: 'sbeDuplicateSel()', label: T('editor.duplicate', 'Duplicate') };
   if (SBE.sel === '@music') {
     const r = sbeTsFromBed(SBE.audio, SBE.peaks ? SBE.peaks.duration : 0);
     return Object.assign(row, { why: r.why || '',
-      title: 'Copies the soundtrack onto an audio track, right after itself — A2 '
-             + 'holds one strip, so the copy lands on the first audio track with '
-             + 'room there, or on a new one.' + hint });
+      title: T('editor.copies_the_soundtrack_onto_an', 'Copies the soundtrack onto an audio track, right after itself — A2 ')
+             + T('editor.holds_one_strip_so_the', 'holds one strip, so the copy lands on the first audio track with ')
+             + T('editor.room_there_or_on_a', 'room there, or on a new one.') + hint });
   }
   if (c && sbeSoundLaneSel()) {
     const r = sbeTsFromClip(c);
     return Object.assign(row, { why: r.why || '',
-      title: 'Copies this clip\'s sound onto an audio track, right after itself — '
-             + 'the shot is not copied. It lands on the first audio track with room '
-             + 'there, or on a new one.' + hint });
+      title: T('editor.copies_this_clip_s_sound', 'Copies this clip\'s sound onto an audio track, right after itself — ')
+             + T('editor.the_shot_is_not_copied', 'the shot is not copied. It lands on the first audio track with room ')
+             + T('editor.there_or_on_a_new', 'there, or on a new one.') + hint });
   }
   return Object.assign(row, { why: n ? '' : noSel,
-    title: (many ? 'Each selected shot again, right behind itself'
-                 : 'The same shot again, right after this one')
-           + ' — window, speed, fades and grade included. Everything after '
-           + 'it slides.' + hint });
+    title: (many ? T('editor.each_selected_shot_again_right', 'Each selected shot again, right behind itself')
+                 : T('editor.the_same_shot_again_right', 'The same shot again, right after this one'))
+           + T('editor.window_speed_fades_and_grade', ' — window, speed, fades and grade included. Everything after ')
+           + T('editor.it_slides', 'it slides.') + hint });
 }
 
 // WHY SPLIT CANNOT CUT the selected track sounds, or '' when it can.
@@ -9856,8 +10288,8 @@ function sbeTsSplitWhy(ids) {
     }
   }
   return locked
-    ? 'The sound under the playhead is locked. Unlock it to cut it.'
-    : 'Put the playhead inside the selected sound first — Split cuts it there.'
+    ? T('editor.the_sound_under_the_playhead', 'The sound under the playhead is locked. Unlock it to cut it.')
+    : T('editor.put_the_playhead_inside_the', 'Put the playhead inside the selected sound first — Split cuts it there.')
       + sbeKeyHint('editor.split');
 }
 
@@ -9869,63 +10301,63 @@ function sbeCbarTsModel(ids) {
   const many = n > 1;
   const f = sbeTsFind(SBE.tracks, String(SBE.sel).slice(4)) || sbeTsFind(SBE.tracks, ids[0]);
   const s = f.strip;
-  const some = many ? ('all ' + n + ' sounds') : 'this sound';
-  const noPic = 'A sound on an audio track has no picture of its own — Link, Unlink and '
-              + 'Resync are for a clip\'s sound on A1.';
+  const some = many ? ('all ' + n + ' sounds') : T('editor.this_sound', 'this sound');
+  const noPic = T('editor.a_sound_on_an_audio_2', 'A sound on an audio track has no picture of its own — Link, Unlink and ')
+              + T('editor.resync_are_for_a_clip', 'Resync are for a clip\'s sound on A1.');
   const pts = ids.reduce((a, id) => {
     const g = sbeTsFind(SBE.tracks, id);
     return a + (g ? sbeAfx(g.strip, sbeTsWindow(g.strip).len).points.length : 0);
   }, 0);
   const rows = [
-    { id: 'sbeCbSplit', act: 'sbeSplitHere()', label: 'Split', why: sbeTsSplitWhy(ids),
+    { id: 'sbeCbSplit', act: 'sbeSplitHere()', label: T('editor.split', 'Split'), why: sbeTsSplitWhy(ids),
       title: SBE_TS_SPLIT_TITLE },
-    { id: 'sbeCbLift', act: 'sbeLiftSelected()', label: 'Lift', why: '',
-      title: 'Takes ' + some + ' off its track and leaves the silence, so nothing after '
-             + 'it moves.' + sbeKeyHint('editor.lift') },
-    { id: 'sbeCbRipple', act: 'sbeRippleSelected()', label: 'Ripple delete', why: '',
-      title: 'Takes ' + some + ' off and closes the gap on that track — the sounds after '
-             + 'it on the same track slide earlier. The picture and the other tracks do '
-             + 'not move.' + sbeKeyHint('editor.ripple') },
-    { id: 'sbeCbDup', act: 'sbeDuplicateSel()', label: 'Duplicate', why: '',
-      title: (many ? 'Each selected sound again, right after itself'
-                   : 'The same sound again, right after itself')
-             + ' on its own track — or at the next free spot on it. Trim, level, fades '
-             + 'and points included.' + sbeKeyHint('editor.duplicate') },
+    { id: 'sbeCbLift', act: 'sbeLiftSelected()', label: T('editor.lift', 'Lift'), why: '',
+      title: T('editor.takes', 'Takes ') + some + T('editor.off_its_track_and_leaves', ' off its track and leaves the silence, so nothing after ')
+             + T('editor.it_moves', 'it moves.') + sbeKeyHint('editor.lift') },
+    { id: 'sbeCbRipple', act: 'sbeRippleSelected()', label: T('editor.ripple_delete', 'Ripple delete'), why: '',
+      title: T('editor.takes', 'Takes ') + some + T('editor.off_and_closes_the_gap', ' off and closes the gap on that track — the sounds after ')
+             + T('editor.it_on_the_same_track', 'it on the same track slide earlier. The picture and the other tracks do ')
+             + T('editor.not_move', 'not move.') + sbeKeyHint('editor.ripple') },
+    { id: 'sbeCbDup', act: 'sbeDuplicateSel()', label: T('editor.duplicate', 'Duplicate'), why: '',
+      title: (many ? T('editor.each_selected_sound_again_right', 'Each selected sound again, right after itself')
+                   : T('editor.the_same_sound_again_right', 'The same sound again, right after itself'))
+             + T('editor.on_its_own_track_or', ' on its own track — or at the next free spot on it. Trim, level, fades ')
+             + T('editor.and_points_included', 'and points included.') + sbeKeyHint('editor.duplicate') },
     { id: 'sbeCbLink', act: 'sbeToggleAudioLink()', icon: '#ic-unlink',
-      label: 'Unlink sound', why: noPic, title: noPic },
-    { id: 'sbeCbResync', act: 'sbeResyncSel()', label: 'Resync sound', why: noPic,
+      label: T('editor.unlink_sound', 'Unlink sound'), why: noPic, title: noPic },
+    { id: 'sbeCbResync', act: 'sbeResyncSel()', label: T('editor.resync_sound', 'Resync sound'), why: noPic,
       title: noPic },
     { id: 'sbeCbMute', act: 'sbeToggleClipMute()',
       icon: s.muted === true ? '#ic-sound' : '#ic-mute',
-      label: s.muted === true ? 'Unmute sound' : 'Mute sound', on: s.muted === true, why: '',
+      label: s.muted === true ? T('editor.unmute_sound', 'Unmute sound') : T('editor.mute_sound', 'Mute sound'), on: s.muted === true, why: '',
       title: s.muted === true
-        ? 'Lets ' + some + ' play again.'
-        : 'Switches ' + some + ' off — in the preview, the render and the export. The '
-          + 'strip stays where it is.' },
-    { id: 'sbeCbDelSound', act: 'sbeDeleteStripSel()', label: 'Delete sound', why: '',
-      title: 'Removes ' + some + ' from its track. Nothing else moves. Undo brings it '
+        ? T('editor.lets', 'Lets ') + some + T('editor.play_again', ' play again.')
+        : T('editor.switches', 'Switches ') + some + T('editor.off_in_the_preview_the', ' off — in the preview, the render and the export. The ')
+          + T('editor.strip_stays_where_it_is', 'strip stays where it is.') },
+    { id: 'sbeCbDelSound', act: 'sbeDeleteStripSel()', label: T('editor.delete_sound', 'Delete sound'), why: '',
+      title: T('editor.removes', 'Removes ') + some + T('editor.from_its_track_nothing_else', ' from its track. Nothing else moves. Undo brings it ')
              + 'back.' },
-    { id: 'sbeCbPoints', act: 'sbeClearPoints()', label: 'Clear points',
-      why: pts ? '' : 'This sound has no level anchors on it. Click the yellow line on '
-                      + 'the strip — or double-click the strip — to put one down.',
-      title: 'Deletes the level anchors — the dots on the yellow line — from '
-             + (many ? 'every selected sound' : 'this sound') + '. The corner fades are '
-             + 'not points and are left alone.' },
+    { id: 'sbeCbPoints', act: 'sbeClearPoints()', label: T('editor.clear_points', 'Clear points'),
+      why: pts ? '' : T('editor.this_sound_has_no_level', 'This sound has no level anchors on it. Click the yellow line on ')
+                      + T('editor.the_strip_or_double_click', 'the strip — or double-click the strip — to put one down.'),
+      title: T('editor.deletes_the_level_anchors_the', 'Deletes the level anchors — the dots on the yellow line — from ')
+             + (many ? T('editor.every_selected_sound', 'every selected sound') : T('editor.this_sound', 'this sound')) + T('editor.the_corner_fades_are', '. The corner fades are ')
+             + T('editor.not_points_and_are_left', 'not points and are left alone.') },
     { id: 'sbeCbLock', act: 'sbeToggleLock()',
       icon: s.locked === true ? '#ic-unlock' : '#ic-lock',
-      label: s.locked === true ? 'Unlock' : 'Lock', on: s.locked === true, why: '',
+      label: s.locked === true ? T('editor.unlock', 'Unlock') : T('editor.lock', 'Lock'), on: s.locked === true, why: '',
       title: s.locked === true
-        ? 'Lets ' + some + ' move and trim again.'
-        : 'Pins ' + some + ' to its place — it cannot be dragged, trimmed or shaped '
-          + 'until it is unlocked.' },
-    { id: 'sbeCbFaceFix', act: 'sbeFaceFixSel()', label: 'Face Fix ×2',
-      why: 'A sound has no picture to upscale — select a clip on the picture lane.',
-      title: 'A sound has no picture to upscale — select a clip on the picture lane.' },
+        ? T('editor.lets', 'Lets ') + some + T('editor.move_and_trim_again', ' move and trim again.')
+        : T('editor.pins', 'Pins ') + some + T('editor.to_its_place_it_cannot', ' to its place — it cannot be dragged, trimmed or shaped ')
+          + T('editor.until_it_is_unlocked', 'until it is unlocked.') },
+    { id: 'sbeCbFaceFix', act: 'sbeFaceFixSel()', label: T('editor.face_fix_2', 'Face Fix ×2'),
+      why: T('editor.a_sound_has_no_picture', 'A sound has no picture to upscale — select a clip on the picture lane.'),
+      title: T('editor.a_sound_has_no_picture', 'A sound has no picture to upscale — select a clip on the picture lane.') },
   ];
   const name = s.title || String(s.path || '').split('/').pop() || 'sound';
   return { rows: rows, count: n, many: many,
-           who: many ? (n + ' sounds selected') : (sbeNiceName(name) + ' · ' + sbeTrackLabel(f.ti)),
-           whoWhy: 'Sounds on audio tracks. Shift-click or ⌘-click a second strip to '
+           who: many ? (n + T('editor.sounds_selected', ' sounds selected')) : (sbeNiceName(name) + ' · ' + sbeTrackLabel(f.ti)),
+           whoWhy: T('editor.sounds_on_audio_tracks_shift', 'Sounds on audio tracks. Shift-click or ⌘-click a second strip to ')
                    + 'add it; click a shot to go back to the picture.' };
 }
 
@@ -9943,155 +10375,155 @@ function sbeCbarModel() {
   const split = !!(vid && w && w.split);
   const drift = c ? sbeAudioDrift(c) : 0;
   const pts = (c && w) ? sbeAfx(c, w.len).points.length : 0;
-  const some = many ? ('all ' + n + ' shots') : 'this shot';
+  const some = many ? ('all ' + n + ' shots') : T('editor.this_shot', 'this shot');
   const splitWhy = sbeSplitWhy();
-  const pick = 'Click a shot on the track. Shift-click a second one to take '
-             + 'the range between them, ⌘-click to add or drop one.';
+  const pick = T('editor.click_a_shot_on_the', 'Click a shot on the track. Shift-click a second one to take ')
+             + T('editor.the_range_between_them_click', 'the range between them, ⌘-click to add or drop one.');
   const noSel = (!n && SBE.sel === '@music')
-    ? 'The soundtrack on A2 is selected, not a shot — its file, mode and level '
-      + 'are on the A2 head, and Duplicate copies it onto an audio track. ' + pick
-    : (!n && SBE.ovSel) ? 'A title or card is selected, not a shot '
-                  + '— its own controls are in the Inspector (⌘I), and '
-                  + '⌫ removes it. ' + pick
-              : ((!n && SBE.txSel) ? 'A cut is selected, not a shot — set its '
-                  + 'transition in the Inspector (⌘I). ' + pick
+    ? T('editor.the_soundtrack_on_a2_is', 'The soundtrack on A2 is selected, not a shot — its file, mode and level ')
+      + T('editor.are_on_the_a2_head', 'are on the A2 head, and Duplicate copies it onto an audio track. ') + pick
+    : (!n && SBE.ovSel) ? T('editor.a_title_or_card_is', 'A title or card is selected, not a shot ')
+                  + T('editor.its_own_controls_are_in', '— its own controls are in the Inspector (⌘I), and ')
+                  + T('editor.removes_it', '⌫ removes it. ') + pick
+              : ((!n && SBE.txSel) ? T('editor.a_cut_is_selected_not', 'A cut is selected, not a shot — set its ')
+                  + T('editor.transition_in_the_inspector_i', 'transition in the Inspector (⌘I). ') + pick
                  : pick);
   const rows = [
-    { id: 'sbeCbSplit', act: 'sbeSplitHere()', label: 'Split',
+    { id: 'sbeCbSplit', act: 'sbeSplitHere()', label: T('editor.split', 'Split'),
       why: splitWhy,
       title: SBE_SPLIT_TITLE },
-    { id: 'sbeCbLift', act: 'sbeLiftSelected()', label: 'Lift',
+    { id: 'sbeCbLift', act: 'sbeLiftSelected()', label: T('editor.lift', 'Lift'),
       why: n ? '' : noSel,
-      title: 'Takes ' + some + ' out and LEAVES the hole, so nothing after '
-             + 'it moves.' + sbeKeyHint('editor.lift') },
-    { id: 'sbeCbRipple', act: 'sbeRippleSelected()', label: 'Ripple delete',
+      title: T('editor.takes', 'Takes ') + some + T('editor.out_and_leaves_the_hole', ' out and LEAVES the hole, so nothing after ')
+             + T('editor.it_moves', 'it moves.') + sbeKeyHint('editor.lift') },
+    { id: 'sbeCbRipple', act: 'sbeRippleSelected()', label: T('editor.ripple_delete', 'Ripple delete'),
       why: n ? '' : noSel,
-      title: 'Takes ' + some + ' out and CLOSES the gap — everything after '
-             + 'slides earlier and the film gets shorter.' + sbeKeyHint('editor.ripple') },
+      title: T('editor.takes', 'Takes ') + some + T('editor.out_and_closes_the_gap', ' out and CLOSES the gap — everything after ')
+             + T('editor.slides_earlier_and_the_film', 'slides earlier and the film gets shorter.') + sbeKeyHint('editor.ripple') },
     sbeCbarDupRow(n, many, c, noSel),
     // THE SOUND GROUP. Link and Resync are adjacent on purpose: the thing
     // that is hard to hold in your head is the difference between them, and
     // side by side both tooltips can say it.
     { id: 'sbeCbLink', act: 'sbeToggleAudioLink()',
       icon: (split && !w.linked) ? '#ic-link' : '#ic-unlink',
-      label: !vid ? 'Unlink sound'
-             : (w.linked ? 'Unlink sound'
-                : (sbeAudioIsThePicture(c) ? 'Re-link sound' : 'Link sound')),
-      why: !n ? noSel : (!vid ? 'Only a video clip has sound of its own — a '
-                                + 'still and a black slug have none to unlink.'
+      label: !vid ? T('editor.unlink_sound', 'Unlink sound')
+             : (w.linked ? T('editor.unlink_sound', 'Unlink sound')
+                : (sbeAudioIsThePicture(c) ? T('editor.re_link_sound', 'Re-link sound') : T('editor.link_sound', 'Link sound'))),
+      why: !n ? noSel : (!vid ? T('editor.only_a_video_clip_has_6', 'Only a video clip has sound of its own — a ')
+                                + T('editor.still_and_a_black_slug', 'still and a black slug have none to unlink.')
                          : ''),
       title: (w && w.linked)
-        ? 'Frees ' + (many ? 'their' : 'this clip\'s') + ' sound from the '
-          + 'picture so you can slide it under the shot before or after — the '
-          + 'J-cut and the L-cut. The picture does not move.' + sbeKeyHint('editor.link')
+        ? 'Frees ' + (many ? 'their' : T('editor.this_clip_s', 'this clip\'s')) + T('editor.sound_from_the', ' sound from the ')
+          + T('editor.picture_so_you_can_slide', 'picture so you can slide it under the shot before or after — the ')
+          + T('editor.j_cut_and_the_l', 'J-cut and the L-cut. The picture does not move.') + sbeKeyHint('editor.link')
         : ((c && sbeAudioIsThePicture(c))
-           ? 'Puts the sound back under its own picture and keeps the two '
-             + 'together from here.' + sbeKeyHint('editor.link')
-           : 'Keeps the ' + sbeDriftLabel(drift) + ' offset you made and '
-             + 'makes the pair travel together from here. Resync is the '
-             + 'button that puts it back under its own frame.' + sbeKeyHint('editor.link')) },
-    { id: 'sbeCbResync', act: 'sbeResyncSel()', label: 'Resync sound',
+           ? T('editor.puts_the_sound_back_under', 'Puts the sound back under its own picture and keeps the two ')
+             + T('editor.together_from_here', 'together from here.') + sbeKeyHint('editor.link')
+           : T('editor.keeps_the', 'Keeps the ') + sbeDriftLabel(drift) + T('editor.offset_you_made_and', ' offset you made and ')
+             + T('editor.makes_the_pair_travel_together', 'makes the pair travel together from here. Resync is the ')
+             + T('editor.button_that_puts_it_back', 'button that puts it back under its own frame.') + sbeKeyHint('editor.link')) },
+    { id: 'sbeCbResync', act: 'sbeResyncSel()', label: T('editor.resync_sound', 'Resync sound'),
       why: !n ? noSel
            : (!split ? (w && w.linked
-                        ? 'This sound travels with its picture, so it cannot '
-                          + 'be out of sync. Unlink it first.'
-                        : 'This clip has no sound of its own.')
+                        ? T('editor.this_sound_travels_with_its_2', 'This sound travels with its picture, so it cannot ')
+                          + T('editor.be_out_of_sync_unlink', 'be out of sync. Unlink it first.')
+                        : T('editor.this_clip_has_no_sound_3', 'This clip has no sound of its own.'))
               : (sbeAudioInSync(c)
-                 ? 'The sound is already under its own picture.' : '')),
-      title: 'Slides the sound back to where its own picture plays it — it is '
-             + sbeDriftLabel(drift) + ' out. The trim you gave it is kept and '
-             + 'it stays unlinked, so it can be moved again.' + sbeKeyHint('editor.resync') },
+                 ? T('editor.the_sound_is_already_under', 'The sound is already under its own picture.') : '')),
+      title: T('editor.slides_the_sound_back_to', 'Slides the sound back to where its own picture plays it — it is ')
+             + sbeDriftLabel(drift) + T('editor.out_the_trim_you_gave', ' out. The trim you gave it is kept and ')
+             + T('editor.it_stays_unlinked_so_it', 'it stays unlinked, so it can be moved again.') + sbeKeyHint('editor.resync') },
     { id: 'sbeCbMute', act: 'sbeToggleClipMute()',
       icon: (c && sbeClipMuted(c)) ? '#ic-sound' : '#ic-mute',
-      label: (c && sbeClipMuted(c)) ? 'Unmute sound' : 'Mute sound',
+      label: (c && sbeClipMuted(c)) ? T('editor.unmute_sound', 'Unmute sound') : T('editor.mute_sound', 'Mute sound'),
       on: !!(c && sbeClipMuted(c)),
-      why: !n ? noSel : (!track ? 'This clip has no sound of its own to '
-                                  + 'switch off.' : ''),
+      why: !n ? noSel : (!track ? T('editor.this_clip_has_no_sound_4', 'This clip has no sound of its own to ')
+                                  + T('editor.switch_off', 'switch off.') : ''),
       title: (c && sbeClipMuted(c))
-        ? 'Lets ' + (many ? 'their' : 'this clip\'s') + ' own sound play '
+        ? T('editor.lets', 'Lets ') + (many ? 'their' : T('editor.this_clip_s', 'this clip\'s')) + T('editor.own_sound_play', ' own sound play ')
           + 'again.'
-        : 'Switches ' + (many ? 'their' : 'this clip\'s') + ' own sound off — '
-          + 'in the preview, the render and the export. The strip stays where '
-          + 'it is and the soundtrack is not affected.' },
-    { id: 'sbeCbDelSound', act: 'sbeDeleteStripSel()', label: 'Delete sound',
+        : T('editor.switches', 'Switches ') + (many ? 'their' : T('editor.this_clip_s', 'this clip\'s')) + T('editor.own_sound_off', ' own sound off — ')
+          + T('editor.in_the_preview_the_render', 'in the preview, the render and the export. The strip stays where ')
+          + T('editor.it_is_and_the_soundtrack', 'it is and the soundtrack is not affected.') },
+    { id: 'sbeCbDelSound', act: 'sbeDeleteStripSel()', label: T('editor.delete_sound', 'Delete sound'),
       why: !n ? noSel
-           : (!split ? 'Unlink the sound first. On a clip whose sound is '
-                       + 'still attached to its picture, removing it and '
-                       + 'muting it would be the same button twice.' : ''),
-      title: 'Removes ' + (many ? 'their' : 'this clip\'s') + ' sound. The '
-             + 'picture keeps playing, silent, and does not move. Undo brings '
-             + 'it back.' },
-    { id: 'sbeCbPoints', act: 'sbeClearPoints()', label: 'Clear points',
+           : (!split ? T('editor.unlink_the_sound_first_on', 'Unlink the sound first. On a clip whose sound is ')
+                       + T('editor.still_attached_to_its_picture', 'still attached to its picture, removing it and ')
+                       + T('editor.muting_it_would_be_the', 'muting it would be the same button twice.') : ''),
+      title: T('editor.removes', 'Removes ') + (many ? 'their' : T('editor.this_clip_s', 'this clip\'s')) + T('editor.sound_the', ' sound. The ')
+             + T('editor.picture_keeps_playing_silent_and', 'picture keeps playing, silent, and does not move. Undo brings ')
+             + T('editor.it_back', 'it back.') },
+    { id: 'sbeCbPoints', act: 'sbeClearPoints()', label: T('editor.clear_points', 'Clear points'),
       why: !n ? noSel
-           : (!pts ? 'This sound has no level anchors on it. Click the yellow '
-                     + 'line on a strip — or double-click the strip — to put '
-                     + 'one down.' : ''),
-      title: 'Deletes the level anchors — the dots on the yellow line — from '
-             + (many ? 'every selected strip' : 'this strip') + '. The corner '
-             + 'fades are not points and are left alone.' },
+           : (!pts ? T('editor.this_sound_has_no_level_2', 'This sound has no level anchors on it. Click the yellow ')
+                     + T('editor.line_on_a_strip_or', 'line on a strip — or double-click the strip — to put ')
+                     + T('editor.one_down', 'one down.') : ''),
+      title: T('editor.deletes_the_level_anchors_the', 'Deletes the level anchors — the dots on the yellow line — from ')
+             + (many ? T('editor.every_selected_strip', 'every selected strip') : T('editor.this_strip', 'this strip')) + '. The corner '
+             + T('editor.fades_are_not_points_and', 'fades are not points and are left alone.') },
     { id: 'sbeCbLock', act: 'sbeToggleLock()',
       icon: (c && c.locked) ? '#ic-unlock' : '#ic-lock',
-      label: (c && c.locked) ? 'Unlock' : 'Lock',
+      label: (c && c.locked) ? T('editor.unlock', 'Unlock') : T('editor.lock', 'Lock'),
       on: !!(c && c.locked),
       why: n ? '' : noSel,
       title: (c && c.locked)
-        ? 'Lets ' + some + ' move and trim again.'
-        : 'Pins ' + some + ' to its place on the film — everything else '
-          + 'flows around it, and it cannot be dragged or trimmed until it '
-          + 'is unlocked.' },
+        ? T('editor.lets', 'Lets ') + some + T('editor.move_and_trim_again', ' move and trim again.')
+        : T('editor.pins', 'Pins ') + some + T('editor.to_its_place_on_the', ' to its place on the film — everything else ')
+          + T('editor.flows_around_it_and_it', 'flows around it, and it cannot be dragged or trimmed until it ')
+          + T('editor.is_unlocked', 'is unlocked.') },
     // UPSCALE & FACE FIX, on the clip itself. Queues the face-safe 2× of the
     // clip's file; the timeline is not touched until the person says so.
     // Short label on the bar (the full name did not fit at 1512 px and fell
     // into More); the tooltip and the right-click menu carry the full name.
-    { id: 'sbeCbFaceFix', act: 'sbeFaceFixSel()', label: 'Face Fix ×2', menuLabel: 'Upscale & Face Fix',
+    { id: 'sbeCbFaceFix', act: 'sbeFaceFixSel()', label: T('editor.face_fix_2', 'Face Fix ×2'), menuLabel: T('editor.upscale_face_fix', 'Upscale & Face Fix'),
       why: !n ? noSel
-           : (many ? 'Pick one clip — each fix is its own render.'
-              : (!vid ? 'Only a video clip can be upscaled — a still or a black '
-                        + 'slug has no frames to fix.'
-                 : (isUpscaledPath(c && c.path) ? 'This clip is already upscaled.' : ''))),
-      title: 'Upscale & Face Fix — renders this clip again at twice the size with LTX-2.5 detail, '
-             + 'keeping the face and the sound. It runs in the queue; when it '
-             + 'lands, a line above the timeline offers to swap it in — same '
-             + 'cut, same in and out points. The original file is not changed.' },
+           : (many ? T('editor.pick_one_clip_each_fix', 'Pick one clip — each fix is its own render.')
+              : (!vid ? T('editor.only_a_video_clip_can', 'Only a video clip can be upscaled — a still or a black ')
+                        + T('editor.slug_has_no_frames_to', 'slug has no frames to fix.')
+                 : (isUpscaledPath(c && c.path) ? T('editor.this_clip_is_already_upscaled', 'This clip is already upscaled.') : ''))),
+      title: T('editor.upscale_face_fix_renders_this', 'Upscale & Face Fix — renders this clip again at twice the size with LTX-2.5 detail, ')
+             + T('editor.keeping_the_face_and_the', 'keeping the face and the sound. It runs in the queue; when it ')
+             + T('editor.lands_a_line_above_the', 'lands, a line above the timeline offers to swap it in — same ')
+             + T('editor.cut_same_in_and_out', 'cut, same in and out points. The original file is not changed.') },
     // FILM-53: Retake was reachable only from the Inspector's Advanced
     // block — rare, but not THAT rare, and a right-click was the more
     // natural reach for it. Same verb, same dialog; now on the clip bar and
     // in the menu too.
-    { id: 'sbeCbRetake', act: 'sbeRetakeSel()', label: 'Retake',
+    { id: 'sbeCbRetake', act: 'sbeRetakeSel()', label: T('editor.retake', 'Retake'),
       why: !n ? noSel
-           : (many ? 'Pick one clip — each retake is its own render.'
-              : (!vid || !sbeShotForClip(c) ? 'Only a clip that came from a storyboard shot '
-                                              + 'can be retaken — it has no prompt to start from.'
+           : (many ? T('editor.pick_one_clip_each_retake', 'Pick one clip — each retake is its own render.')
+              : (!vid || !sbeShotForClip(c) ? T('editor.only_a_clip_that_came', 'Only a clip that came from a storyboard shot ')
+                                              + T('editor.can_be_retaken_it_has', 'can be retaken — it has no prompt to start from.')
                  : '')),
-      title: 'Renders a new take of this shot — same character, a new seed, the prompt to edit. '
-             + 'When it lands you choose whether it replaces this clip.' },
+      title: T('editor.renders_a_new_take_of', 'Renders a new take of this shot — same character, a new seed, the prompt to edit. ')
+             + T('editor.when_it_lands_you_choose', 'When it lands you choose whether it replaces this clip.') },
     // FILM-08: "Replace with…" picks the newest rendered alternate for the
     // SAME hole this clip sits in — not any alternate anywhere, which would
     // need a picker this menu has no room for; the unplaced list's own
     // "Swap in" button is that picker.
-    { id: 'sbeCbReplace', act: 'sbeReplaceSelWithAlt()', label: 'Replace with…',
+    { id: 'sbeCbReplace', act: 'sbeReplaceSelWithAlt()', label: T('editor.replace_with', 'Replace with…'),
       why: !n ? noSel
-           : (many ? 'Pick one clip.'
-              : (!vid ? 'Only a video clip can be replaced.'
-                 : (!sbeAltForClip(c) ? 'No rendered alternate for this shot is waiting — drag '
-                                        + 'one from the media pool, or ⌥-drop it onto this clip.'
+           : (many ? T('editor.pick_one_clip', 'Pick one clip.')
+              : (!vid ? T('editor.only_a_video_clip_can_2', 'Only a video clip can be replaced.')
+                 : (!sbeAltForClip(c) ? T('editor.no_rendered_alternate_for_this', 'No rendered alternate for this shot is waiting — drag ')
+                                        + T('editor.one_from_the_media_pool', 'one from the media pool, or ⌥-drop it onto this clip.')
                     : ''))),
-      title: 'Swaps in the newest rendered alternate for this shot. Keeps the slot, the trim, '
-             + 'adjustments and transitions — only the picture changes.' },
+      title: T('editor.swaps_in_the_newest_rendered', 'Swaps in the newest rendered alternate for this shot. Keeps the slot, the trim, ')
+             + T('editor.adjustments_and_transitions_only_the', 'adjustments and transitions — only the picture changes.') },
   ];
   // The one readout that makes the rest of the row legible.
   // A SOUND IS NAMED AS A SOUND, so "Duplicate" beside it reads as copying
   // the sound: the A2 bed, or the A1 strip of the clip that was clicked.
-  let who = 'Nothing selected';
-  if (SBE.sel === '@music') who = 'Soundtrack (A2)';
+  let who = T('editor.nothing_selected', 'Nothing selected');
+  if (SBE.sel === '@music') who = T('editor.soundtrack_a2', 'Soundtrack (A2)');
   else if (c && sbeSoundLaneSel()) {
-    who = 'Sound of ' + sbeNiceName(c.title || String(c.path || '').split('/').pop() || 'clip');
-  } else if (many) who = n + ' clips selected';
+    who = T('editor.sound_of', 'Sound of ') + sbeNiceName(c.title || String(c.path || '').split('/').pop() || 'clip');
+  } else if (many) who = n + T('editor.clips_selected', ' clips selected');
   else if (c) {
-    who = (kind === 'slug') ? 'Black'
+    who = (kind === 'slug') ? T('editor.black', 'Black')
       : sbeNiceName(c.title || String(c.path || '').split('/').pop() || 'clip');
-  } else if (SBE.ovSel) who = 'Title or card selected';
-  else if (SBE.txSel) who = 'Cut selected';
+  } else if (SBE.ovSel) who = T('editor.title_or_card_selected', 'Title or card selected');
+  else if (SBE.txSel) who = T('editor.cut_selected', 'Cut selected');
   return { rows: rows, who: who, count: n, many: many, whoWhy: noSel };
 }
 
@@ -10237,7 +10669,7 @@ function sbeCtxOpen(ev) {
     html = '<div class="sbe-ctx-h">Hole · ' + escapeHtml(dur.toFixed(2)) + 's</div>'
       + '<button type="button" class="sbe-cbar-btn" onclick="sbeCloseGapAt('
       + (at + dur / 2).toFixed(4) + ')" title="Slides everything after the '
-      + 'hole earlier by ' + escapeHtml(dur.toFixed(2)) + 's, so the film '
+      + T('editor.hole_earlier_by', 'hole earlier by ') + escapeHtml(dur.toFixed(2)) + T('editor.s_so_the_film', 's, so the film ')
       + 'gets that much shorter.">Close this hole</button>'
       + '<button type="button" class="sbe-cbar-btn" onclick="sbeGenOpen('
       + at.toFixed(4) + ',' + dur.toFixed(4) + ')" title="Render a new shot '
@@ -10261,13 +10693,13 @@ function sbeCtxOpen(ev) {
       const other = sbeSoundLane(ac) === 2 ? 1 : 2;
       html += '<button type="button" class="sbe-cbar-btn" onclick="sbeSoundLaneSet('
         + escapeHtml(JSON.stringify(String(ac.id))) + ',' + other + ')" title="Puts this '
-        + 'sound on sound lane ' + sbeLaneName(other) + '. Nothing moves in time; sounds on the '
-        + 'two lanes can overlap and crossfade.">Move sound to lane ' + sbeLaneName(other)
+        + TA('editor.sound_on_sound_lane', 'sound on sound lane ') + sbeLaneName(other) + TA('editor.nothing_moves_in_time_sounds', '. Nothing moves in time; sounds on the ')
+        + TA('editor.two_lanes_can_overlap_crossfade', 'two lanes can overlap and crossfade.') + '">' + T('editor.move_sound_to_lane', 'Move sound to lane ') + sbeLaneName(other)
         + '</button>';
     }
     html += '<button type="button" class="sbe-cbar-btn" onclick="sbeAlternateSel()" '
       + 'title="Lays every clip\'s sound A, B, A, B… in film order, so neighbouring shots '
-      + 'sit on different lanes and can overlap and crossfade. Nothing moves in time; one '
+      + T('editor.sit_on_different_lanes_and', 'sit on different lanes and can overlap and crossfade. Nothing moves in time; one ')
       + 'Undo puts it back.">Alternate sound lanes</button>';
   } else if (tsb) {
     // A SOUND ON AN AUDIO TRACK gets the same table's verbs, for sounds.
@@ -10315,7 +10747,7 @@ function sbeCtxOpen(ev) {
     }
     html += '<button type="button" class="sbe-cbar-btn" onclick="sbeAlternateSel()" '
       + 'title="Lays every clip\'s sound A, B, A, B… in film order, so neighbouring shots '
-      + 'sit on different lanes and can overlap and crossfade. Nothing moves in time; one '
+      + T('editor.sit_on_different_lanes_and', 'sit on different lanes and can overlap and crossfade. Nothing moves in time; one ')
       + 'Undo puts it back.">Alternate sound lanes</button>';
   }
   menu.innerHTML = html;
@@ -10370,14 +10802,14 @@ function sbePaintInspector() {
       const opt = (v, label) => '<option value="' + v + '"' + (kind === v ? ' selected' : '') + '>' + label + '</option>';
       const cap = Math.max(SBE_TX_MIN, Math.min(SBE_TX_MAX, 0.5 * Math.min(sbeLen(a), sbeLen(b))));
       const why = !row
-        ? 'A transition here pulls ' + 'extra picture from beyond each clip\'s trim — '
-          + 'the cut itself does not move, and neither does the sound.'
+        ? T('editor.a_transition_here_pulls', 'A transition here pulls ') + T('editor.extra_picture_from_beyond_each', 'extra picture from beyond each clip\'s trim — ')
+          + T('editor.the_cut_itself_does_not', 'the cut itself does not move, and neither does the sound.')
         : (r && r.problem ? r.problem.message
-           : (r ? SBE_TX_LABELS[r.kind] + ' over ' + r.duration.toFixed(2) + 's, centred on the cut: '
-                  + r.half.toFixed(2) + 's of handle each side. '
+           : (r ? SBE_TX_LABELS[r.kind] + ' over ' + r.duration.toFixed(2) + T('editor.s_centred_on_the_cut_2', 's, centred on the cut: ')
+                  + r.half.toFixed(2) + T('editor.s_of_handle_each_side', 's of handle each side. ')
                   + (r.kind === 'dissolve'
-                     ? 'The preview only approximates it (one picture at a time); the render is a true dissolve.'
-                     : 'The preview shows it; the render is exact.') : ''));
+                     ? T('editor.the_preview_only_approximates_it', 'The preview only approximates it (one picture at a time); the render is a true dissolve.')
+                     : T('editor.the_preview_shows_it_the', 'The preview shows it; the render is exact.')) : ''));
       box.innerHTML =
         '<b>Cut · ' + escapeHtml(name(a)) + ' \u2192 ' + escapeHtml(name(b)) + '</b>' +
         '<span>at ' + sbeNum(a.film_end).toFixed(2) + 's on the __SEQ__</span>' +
@@ -10386,8 +10818,8 @@ function sbePaintInspector() {
         '<span class="sbe-fade-row"><label for="sbeTxKind">Kind</label>' +
         '<select class="sb-input sbe-tx-kind" id="sbeTxKind" ' +
           'onchange="sbeTxCommit(this.value, sbeEl(\'sbeTxDur\').value)">' +
-        opt('none', 'None — a hard cut') + opt('dissolve', 'Dissolve') +
-        opt('fade_black', 'Fade through black') + '</select></span>' +
+        opt('none', T('editor.none_a_hard_cut', 'None — a hard cut')) + opt('dissolve', T('editor.dissolve', 'Dissolve')) +
+        opt('fade_black', T('editor.fade_through_black', 'Fade through black')) + '</select></span>' +
         '<span class="sbe-fade-row"><label for="sbeTxDur">Length</label>' +
         '<input type="number" class="sb-input sbe-fade-num" id="sbeTxDur" min="' +
           SBE_TX_MIN.toFixed(2) + '" max="' + cap.toFixed(2) + '" step="0.05" value="' + dur.toFixed(2) + '" ' +
@@ -10437,7 +10869,7 @@ function sbePaintInspector() {
           'onchange="sbeOvTextCommit(\'color\', this.value)"></span>' +
         '<span class="sbe-fade-row"><label for="sbeOvTxAlign">Align</label>' +
         '<select class="sb-input sbe-tx-kind" id="sbeOvTxAlign" onchange="sbeOvTextCommit(\'align\', this.value)">' +
-        alignOpt('left', 'Left') + alignOpt('center', 'Centre') + alignOpt('right', 'Right') + '</select></span>' +
+        alignOpt('left', T('editor.left', 'Left')) + alignOpt('center', T('editor.centre', 'Centre')) + alignOpt('right', T('editor.right', 'Right')) + '</select></span>' +
         '<span class="sbe-fade-row sbe-title-pos"><label for="sbeOvTxX">Across</label>' +
         '<input type="range" id="sbeOvTxX" min="0" max="1" step="0.01" value="' + st.x + '" ' +
           'oninput="sbeOvTextPreview(\'x\', this.value)" onchange="sbeOvTextCommit(\'x\', this.value)"></span>' +
@@ -10463,10 +10895,10 @@ function sbePaintInspector() {
       '<span>' + sbeNum(ov.film_start).toFixed(2) + '–' +
       sbeNum(ov.film_end).toFixed(2) + 's on the __SEQ__</span>' +
       '<span class="sbe-why">' + (okind === 'text'
-        ? 'Drawn over the picture by the render, in the same font the stage shows. '
-          + 'Fades and position are kept in the preview and the film.'
-        : 'Composited over the picture. Its transparency is '
-          + 'kept in the preview, the render and the export.') + '</span>' +
+        ? T('editor.drawn_over_the_picture_by', 'Drawn over the picture by the render, in the same font the stage shows. ')
+          + T('editor.fades_and_position_are_kept', 'Fades and position are kept in the preview and the film.')
+        : T('editor.composited_over_the_picture_its', 'Composited over the picture. Its transparency is ')
+          + T('editor.kept_in_the_preview_the', 'kept in the preview, the render and the export.')) + '</span>' +
       textSect +
       '<div class="sbe-sect"><div class="sbe-sect-h">Effects</div>' +
       '<div class="sbe-sect-b">' + orow('in', oe.fade_in)
@@ -10474,7 +10906,7 @@ function sbePaintInspector() {
       '<div class="sbe-sect"><div class="sbe-sect-h">Overlay</div>' +
       '<div class="sbe-sect-b">' +
       '<button type="button" class="ghost-btn" onclick="sbeOvDeleteSel()">' +
-      (okind === 'text' ? 'Remove title' : 'Remove overlay') + '</button>' +
+      (okind === 'text' ? T('editor.remove_title', 'Remove title') : T('editor.remove_overlay', 'Remove overlay')) + '</button>' +
       '</div></div>';
     return;
   }
@@ -10492,10 +10924,10 @@ function sbePaintInspector() {
     }
     if (SBE.beats && SBE.beats.bpm) {
       bits.push(Math.round(SBE.beats.bpm) + ' bpm' +
-                (guess ? ' — a guess, confidence ' + sbeNum(SBE.beats.confidence).toFixed(2) : ''));
+                (guess ? T('editor.a_guess_confidence', ' — a guess, confidence ') + sbeNum(SBE.beats.confidence).toFixed(2) : ''));
     }
     box.innerHTML = '<span class="sbe-why">' + escapeHtml(bits.join(' · ')) +
-      (n ? '. Click a clip to see why it was cut where it was.'
+      (n ? T('editor.click_a_clip_to_see', '. Click a clip to see why it was cut where it was.')
          : '.') + '</span>';
     return;
   }
@@ -10506,11 +10938,11 @@ function sbePaintInspector() {
   const why = [];
   if (a.reason) why.push(a.reason);
   if (a.snap && a.snap.kind && a.snap.kind !== 'none') {
-    why.push('snapped to the ' + a.snap.kind + ' (' + Math.round(sbeNum(a.snap.shift_ms)) + ' ms)');
+    why.push(T('editor.snapped_to_the', 'snapped to the ') + a.snap.kind + ' (' + Math.round(sbeNum(a.snap.shift_ms)) + ' ms)');
   }
   if (a.usable === false) why.push('the auto-editor did not think this window was usable');
   for (const note of (a.notes || [])) why.push(note);
-  const label = (kind === 'slug') ? 'Black'
+  const label = (kind === 'slug') ? T('editor.black', 'Black')
     : (c.title || String(c.path || '').split('/').pop() || 'clip');
   // Only a video HAS a source window; the other two are their slot and nothing
   // else, so the line that would report their in/out is the line that would
@@ -10519,8 +10951,8 @@ function sbePaintInspector() {
     ? ('<span>source ' + sbeNum(c.start).toFixed(2) + '–' + sbeNum(c.end).toFixed(2) + 's' +
        (c.duration ? ' of ' + sbeNum(c.duration).toFixed(2) + 's' : '') + '</span>')
     : ('<span>' + escapeHtml(kind === 'slug'
-        ? 'black — no file, drawn by the render'
-        : 'a still, held for its slot') +
+        ? T('editor.black_no_file_drawn_by', 'black — no file, drawn by the render')
+        : T('editor.a_still_held_for_its', 'a still, held for its slot')) +
        ' · drag a handle to change how long</span>');
   // BRIGHTNESS, AND NOT A COLOUR PAGE. One constant-per-clip value, the flat
   // Adjust panel CapCut ships, refused for a slug because a slug's colour is
@@ -10579,22 +11011,22 @@ function sbePaintInspector() {
   box.innerHTML =
     '<b>' + escapeHtml(label) + '</b>' +
     (nSel > 1
-      ? '<span class="sbe-sect-lead">' + nSel + ' clips selected \u00b7 these '
-        + 'are THIS one\'s properties. The bar above the tracks acts on all '
+      ? '<span class="sbe-sect-lead">' + nSel + T('editor.clips_selected_these', ' clips selected \u00b7 these ')
+        + T('editor.are_this_one_s_properties', 'are THIS one\'s properties. The bar above the tracks acts on all ')
         + nSel + '.</span>'
       : '') + src +
     '<span>film ' + sbeNum(c.film_start).toFixed(2) + '–' + sbeNum(c.film_end).toFixed(2) + 's</span>' +
-    '<span>' + escapeHtml(c.source === 'human' ? 'moved by hand' : 'placed by the auto-editor') + '</span>' +
+    '<span>' + escapeHtml(c.source === 'human' ? T('editor.moved_by_hand', 'moved by hand') : 'placed by the auto-editor') + '</span>' +
     // THE PAIR'S OWN LINE. An unlinked strip is either where the picture would
     // have played it or it is not, and the number is the only way to tell at
     // any zoom — this is the sentence the owner had no way to read.
     ((kind === 'video' && sbeClipAudio(c).split)
       ? '<span>' + escapeHtml(sbeClipAudio(c).coupled
-          ? 'sound linked at ' + sbeDriftLabel(sbeAudioDrift(c))
-            + ' — it travels with this picture'
+          ? T('editor.sound_linked_at', 'sound linked at ') + sbeDriftLabel(sbeAudioDrift(c))
+            + T('editor.it_travels_with_this_picture', ' — it travels with this picture')
           : (sbeAudioInSync(c)
-             ? 'sound unlinked, in sync with its picture'
-             : 'sound unlinked, ' + sbeDriftLabel(sbeAudioDrift(c)) + ' out of sync ('
+             ? T('editor.sound_unlinked_in_sync_with', 'sound unlinked, in sync with its picture')
+             : T('editor.sound_unlinked', 'sound unlinked, ') + sbeDriftLabel(sbeAudioDrift(c)) + T('editor.out_of_sync_2', ' out of sync (')
                + (sbeAudioDrift(c) > 0 ? 'late' : 'early') + ')')) + '</span>'
       : '') +
     ((kind === 'video' && !c.proxy)
@@ -10603,7 +11035,7 @@ function sbePaintInspector() {
       ? '<span>not a storyboard shot — it cannot be retaken from here, only re-cut</span>' : '') +
     '<span class="sbe-why">' + escapeHtml(why.join(' · ')) + '</span>' +
     (errs.length ? '<span style="color:var(--danger)">' + escapeHtml(errs[0].message) + '</span>' : '') +
-    sect('Clip',
+    sect(T('editor.clip', 'Clip'),
       // SPEED, AS A CONTROL AND NEVER A GUESS. A number with the four rates
       // people actually reach for beside it; the slot follows and the rest
       // of the film ripples. Only a video clip has a clock.
@@ -10616,7 +11048,7 @@ function sbePaintInspector() {
           '<span class="sbe-adj-val">x</span>' +
           [0.5, 1, 2].map(v => '<button type="button" class="ghost-btn sbe-speed-pill' +
             (Math.abs(sbeSpeed(c) - v) < 1e-6 ? ' is-on' : '') + '" onclick="sbeSpeedCommit(' + v + ')" ' +
-            'title="' + (v === 1 ? 'Normal speed' : (v < 1 ? 'Half speed — twice as long on the film' : 'Double speed — half as long on the film')) + '">' + v + 'x</button>').join('') +
+            'title="' + (v === 1 ? TA('editor.normal_speed', 'Normal speed') : (v < 1 ? TA('editor.half_speed_twice_as_long', 'Half speed — twice as long on the film') : TA('editor.double_speed_half_as_long', 'Double speed — half as long on the film'))) + '">' + v + 'x</button>').join('') +
           '</span>'
         : '') +
       // LOCK, DUPLICATE, LIFT AND RIPPLE DELETE ARE NOT HERE ANY MORE. They
@@ -10683,7 +11115,7 @@ function sbePaintInspector() {
                  // only existed once there was something to clear is a
                  // button nobody knew existed. This says how many there are.
                  + (n ? '<span class="sbe-adj-val">' + n + ' point'
-                        + (n === 1 ? '' : 's') + ' \u00b7 Clear points on the '
+                        + (n === 1 ? '' : 's') + T('editor.clear_points_on_the', ' \u00b7 Clear points on the ')
                         + 'bar above</span>'
                       : '<span class="sbe-adj-val">click the yellow line</span>')
                : '<span class="sbe-adj-val">unlink the sound to shape its '
@@ -10697,7 +11129,7 @@ function sbePaintInspector() {
     // `adjust.brightness` on disk, because a label is not worth a data
     // migration — and it is PRESENTED here, beside the fades, because this is
     // where a person looks for it.
-    sect('Effects', adjust + sbeGradeRows(c) + fadeRow('in', e.fade_in) + fadeRow('out', e.fade_out)
+    sect(T('editor.effects_2', 'Effects'), adjust + sbeGradeRows(c) + fadeRow('in', e.fade_in) + fadeRow('out', e.fade_out)
          + ((kind !== 'slug') ? (() => {
              const fr = sbeFraming(c);
              const on = !sbeFramingIsNeutral(c);
@@ -10792,11 +11224,11 @@ function sbeGradeRows(c) {
       + '<span class="sbe-adj-val" id="sbeGrade' + field + 'Val">' + fmt(g[field]) + '</span></span>';
   };
   const notNeutral = !sbeGradeIsNeutral(c);
-  return row('Exposure', 'exposure', '0.01', (v) => (v > 0 ? '+' : '') + v.toFixed(2))
-       + row('Contrast', 'contrast', '0.01', (v) => v.toFixed(2) + 'x')
-       + row('Saturation', 'saturation', '0.01', (v) => v.toFixed(2) + 'x')
-       + row('Temp', 'temp', '0.01', (v) => (v > 0 ? '+' : '') + v.toFixed(2))
-       + row('Tint', 'tint', '0.01', (v) => (v > 0 ? '+' : '') + v.toFixed(2))
+  return row(T('editor.exposure', 'Exposure'), 'exposure', '0.01', (v) => (v > 0 ? '+' : '') + v.toFixed(2))
+       + row(T('editor.contrast', 'Contrast'), 'contrast', '0.01', (v) => v.toFixed(2) + 'x')
+       + row(T('editor.saturation', 'Saturation'), 'saturation', '0.01', (v) => v.toFixed(2) + 'x')
+       + row(T('editor.temp', 'Temp'), 'temp', '0.01', (v) => (v > 0 ? '+' : '') + v.toFixed(2))
+       + row(T('editor.tint', 'Tint'), 'tint', '0.01', (v) => (v > 0 ? '+' : '') + v.toFixed(2))
        + (notNeutral
           ? '<span class="sbe-fade-row"><button type="button" class="ghost-btn" '
             + 'onclick="sbeGradeResetSel()">Reset grade</button>'
@@ -10838,14 +11270,14 @@ function sbeGradeResetSel() {
     }
     return res;
   });
-  if (ok) phosToast('Grade reset.', { duration: 3000 });
+  if (ok) phosToast(T('editor.grade_reset', 'Grade reset.'), { duration: 3000 });
 }
 function sbeCopyGradeSel() {
   const ids = sbeSelIds();
   if (!SBE.sel || ids.length < 2) return;
   const ok = sbeMutate(cs => sbeCopyGrade(cs, SBE.sel, ids));
   if (ok) {
-    phosToast('Grade copied to ' + (ids.length - 1) + ' clip(s). One Undo puts them all back.',
+    phosToast(T('editor.grade_copied_to', 'Grade copied to ') + (ids.length - 1) + T('editor.clip_s_one_undo_puts', ' clip(s). One Undo puts them all back.'),
               { kind: 'success', duration: 5000 });
   }
 }
@@ -10875,7 +11307,6 @@ function sbeSpeedCommit(v) {
 // started when you arrived. The stage's black is what a fade to black fades
 // to, so this is the whole of it on the picture lane.
 function sbeFadePaint(t) {
-  const v = sbeEl('sbeVideo');
   const img = sbeEl('sbeStill');
   const now = (t === undefined) ? SBE.playhead : sbeNum(t);
   // THE CLIP AT THE PLAYHEAD, not `curId`. `curId` is the transport's own
@@ -10893,13 +11324,15 @@ function sbeFadePaint(t) {
     if (!el) return;
     el.style.opacity = el.classList.contains('is-on') ? String(o) : '';
   };
-  paint(v);
+  // BOTH pictures: the spare is never `.is-on`, so this hands it back to the
+  // stylesheet, which is what clears a ramp it carried before the last swap.
+  for (const v of sbeVids()) paint(v);
   paint(img);
 }
 
 function sbeApplyPreviewFilter(b, frame) {
   const css = (Math.abs(sbeNum(b)) < 1e-6) ? '' : 'brightness(' + sbeBrightnessCss(b) + ')';
-  const v = sbeEl('sbeVideo');
+  const v = sbeVid();
   const i = sbeEl('sbeStill');
   if (v) v.style.filter = css;
   if (i) i.style.filter = css;
@@ -10923,8 +11356,10 @@ function sbeGradeCss(c) {
   return parts.join(' ');
 }
 function sbeApplyPreviewGrade(c, frame) {
+  // The LIVE picture only. The incoming one is graded at the handover (sbeVidHandover), so
+  // the outgoing clip is never shown wearing the incoming clip's look.
   const css = sbeGradeCss(c);
-  const v = sbeEl('sbeVideo');
+  const v = sbeVid();
   const i = sbeEl('sbeStill');
   if (v) v.style.filter = css;
   if (i) i.style.filter = css;
@@ -10939,7 +11374,7 @@ function sbeApplyPreviewFraming(frame) {
   const f = sbeFraming({ frame: frame || {} });
   const t = (Math.abs(f.zoom - 1) < 1e-9) ? '' : 'scale(' + f.zoom.toFixed(3) + ')';
   const o = (f.x * 100).toFixed(2) + '% ' + (f.y * 100).toFixed(2) + '%';
-  for (const el of [sbeEl('sbeVideo'), sbeEl('sbeStill')]) {
+  for (const el of [sbeVid(), sbeEl('sbeStill')]) {
     if (!el || !el.style) continue;
     el.style.transform = t;
     el.style.transformOrigin = t ? o : '';
@@ -10984,7 +11419,7 @@ function sbePlayGlyph(btnId, useId, playing) {
   const use = sbeEl(useId);
   if (use && use.setAttribute) use.setAttribute('href', playing ? '#ic-pause' : '#ic-play');
   const btn = sbeEl(btnId);
-  if (btn && btn.setAttribute) btn.setAttribute('aria-label', playing ? 'Pause' : 'Play');
+  if (btn && btn.setAttribute) btn.setAttribute('aria-label', playing ? T('editor.pause', 'Pause') : T('editor.play', 'Play'));
 }
 
 function sbePaintChrome() {
@@ -11042,8 +11477,8 @@ function sbePaintChrome() {
   if (pe) {
     if (SBE.clips.length) { pe.hidden = true; pe.textContent = ''; }
     else {
-      pe.textContent = 'Nothing on the timeline yet — drag a clip from the '
-                     + 'media pool, or press + on one.';
+      pe.textContent = T('editor.nothing_on_the_timeline_yet', 'Nothing on the timeline yet. Drag a clip from the ')
+                     + T('editor.media_pool_or_press_on', 'media pool, or press + on one.');
       pe.hidden = false;
     }
   }
@@ -11058,7 +11493,7 @@ function sbePaintChrome() {
   const ub = sbeEl('sbeUnplacedBtn');
   if (ub) {
     ub.hidden = !list.length || !!SBE.inspect;
-    ub.textContent = list.length + ' rendered, not placed';
+    ub.textContent = list.length + T('editor.rendered_not_placed', ' rendered, not placed');
   }
   if (list.length) {
     sbeEl('sbeUnplaced').innerHTML = list.map((u, i) => {
@@ -11078,11 +11513,11 @@ function sbePaintChrome() {
         ? '<button type="button" class="ghost-btn" onclick="sbeSwapIn(' + i + ')" ' +
           'title="Replaces shot ' + escapeHtml(String(target.n !== undefined && target.n !== null ? target.n : '')) +
           ' on the timeline with this take. Same slot, same trim, adjustments and transitions kept.">' +
-          'Swap in for shot ' + escapeHtml(String(target.n !== undefined && target.n !== null ? target.n : '?')) +
+          T('editor.swap_in_for_shot', 'Swap in for shot ') + escapeHtml(String(target.n !== undefined && target.n !== null ? target.n : '?')) +
           '</button>'
         : '';
       return '<span class="sbe-chip" title="' +
-        escapeHtml((u.title || ('shot ' + u.n)) + ' — would land at ' +
+        escapeHtml((u.title || ('shot ' + u.n)) + T('editor.would_land_at', ' — would land at ') +
                    sbeFmtTime(at)) + '">' +
         '<b>' + escapeHtml(sbeNiceName(u.title || ('shot ' + u.n))) + '</b>' +
         '<span>' + escapeHtml(u.duration_s ? sbeNum(u.duration_s).toFixed(1) + 's' : (u.pass || '')) + '</span>' +
@@ -11101,19 +11536,19 @@ function sbePaintChrome() {
     const total = sbeNum(job.total, 0);
     const pct = total ? Math.min(100, Math.round(sbeNum(job.done) / total * 100)) : 12;
     bar.querySelector('i').style.width = pct + '%';
-    const stage = { proxies: 'building proxies', peaks: 'reading the waveform',
-                    beats: 'finding the beat', start: 'starting' }[job.stage] || job.stage || 'working';
+    const stage = { proxies: T('editor.building_proxies', 'building proxies'), peaks: T('editor.reading_the_waveform', 'reading the waveform'),
+                    beats: T('editor.finding_the_beat', 'finding the beat'), start: 'starting' }[job.stage] || job.stage || 'working';
     sbeEl('sbePrepText').textContent = stage +
       (total ? ' · ' + sbeNum(job.done) + ' of ' + total : '') +
       (job.current ? ' · ' + job.current : '');
   } else if (job.state === 'failed') {
-    sbeEl('sbePrepText').textContent = 'Prepare failed: ' + (job.error || 'unknown reason');
+    sbeEl('sbePrepText').textContent = T('editor.prepare_failed', 'Prepare failed: ') + (job.error || 'unknown reason');
   } else if (job.state === 'cancelled') {
-    sbeEl('sbePrepText').textContent = 'Prepare cancelled. Whatever it built is kept.';
+    sbeEl('sbePrepText').textContent = T('editor.prepare_cancelled_whatever_it_built', 'Prepare cancelled. Whatever it built is kept.');
   } else if (job.state === 'done') {
     const failed = (job.failed || []).length;
     sbeEl('sbePrepText').textContent =
-      'Ready · ' + sbeNum(job.built) + ' proxy(s) built' +
+      T('editor.ready', 'Ready · ') + sbeNum(job.built) + ' proxy(s) built' +
       (failed ? ', ' + failed + ' clip(s) could not be read' : '') +
       (job.peaks_error ? ' · ' + job.peaks_error : '') +
       (job.beats_error ? ' · ' + job.beats_error : '') +
@@ -11121,13 +11556,13 @@ function sbePaintChrome() {
       // the auto-editor writes it into edit.json — so say that plainly instead
       // of drawing a timeline with no lines on it and letting the user wonder.
       ((job.beats && !SBE.beats)
-        ? ' · found the beat at ' + Math.round(sbeNum(job.beats.bpm)) +
-          ' bpm — this arrangement was cut without it, so Auto-edit is what ' +
-          'puts the cuts on it'
+        ? T('editor.found_the_beat_at', ' · found the beat at ') + Math.round(sbeNum(job.beats.bpm)) +
+          T('editor.bpm_this_arrangement_was_cut', ' bpm — this arrangement was cut without it, so Auto-edit is what ') +
+          T('editor.puts_the_cuts_on_it', 'puts the cuts on it')
         : '');
   } else {
     sbeEl('sbePrepText').textContent =
-      'The soundtrack drives the waveform and the beat grid.';
+      T('editor.the_soundtrack_drives_the_waveform', 'The soundtrack drives the waveform and the beat grid.');
   }
 }
 
@@ -11160,7 +11595,7 @@ function sbeOnTrackDown(ev) {
   if (slowFlag) {
     ev.preventDefault();
     if (SBE.prepare && SBE.prepare.state === 'running') {
-      phosToast('Prepare is already running — smooth scrubbing arrives when it finishes.', {});
+      phosToast(T('editor.prepare_is_already_running_smooth', 'Prepare is already running — smooth scrubbing arrives when it finishes.'), {});
     } else {
       sbePrepare();
     }
@@ -11237,10 +11672,10 @@ function sbeOnTrackDown(ev) {
     // so everything else flows around it; it is NOT the button that makes a
     // clip and its sound travel together, which is what he was reaching for
     // when he pressed it. That one is Link sound.
-    phosToast('That shot is locked to its place on the __SEQ__, so it cannot be '
-              + 'moved or trimmed from either edge — press Unlock on the bar '
-              + 'above the tracks. To move a shot and its sound TOGETHER, unlink the '
-              + 'sound, put it where you want it, then press Link sound.',
+    phosToast(T('editor.that_shot_is_locked_to_2', 'That shot is locked to its place on the __SEQ__, so it cannot be ')
+              + T('editor.moved_or_trimmed_from_either', 'moved or trimmed from either edge — press Unlock on the bar ')
+              + T('editor.above_the_tracks_to_move', 'above the tracks. To move a shot and its sound TOGETHER, unlink the ')
+              + T('editor.sound_put_it_where_you', 'sound, put it where you want it, then press Link sound.'),
               { duration: 9000 });
     return;
   }
@@ -11317,9 +11752,9 @@ function sbeOnTrackDown(ev) {
     const ids = (mode === 'movemany') ? sbeSelIds() : [id];
     const lockedId = ids.find(i => sbeSongLocked(sbeById(SBE.clips, i)));
     if (lockedId) {
-      phosToast('That shot is conditioned on the song, so moving or reordering '
-                + 'it is blocked — it would throw off the sync. Use the ♪ badge '
-                + '(Snap to song) or slip it instead, or unlink its sound first.',
+      phosToast(T('editor.that_shot_is_conditioned_on', 'That shot is conditioned on the song, so moving or reordering ')
+                + T('editor.it_is_blocked_it_would', 'it is blocked — it would throw off the sync. Use the ♪ badge ')
+                + T('editor.snap_to_song_or_slip', '(Snap to song) or slip it instead, or unlink its sound first.'),
                 { duration: 8000 });
       return;
     }
@@ -11394,11 +11829,28 @@ function sbeOnTrackMove(ev) {
     // A move or a trim always works from the SNAPSHOT: the model clamps at
     // neighbours, and re-applying deltas to an already-clamped state would
     // let a pointer that kept going drag the clip through the wall.
-    const ripple = !!(ev.metaKey || ev.ctrlKey);
+    // A SHOT WITH NO ROOM EITHER SIDE MOVES BETWEEN THE OTHERS. A plain drag
+    // only slides a clip inside its own gaps, so on a film cut end to end
+    // (SUNDAY MASS: 17 shots, no gaps) dragging a shot did nothing at all —
+    // the model clamped it to where it was and nothing said why. Boxed in,
+    // the drag is the reorder ⌘-drag already does: the shot goes where it is
+    // dropped and the others close up around it. With a gap beside it, the
+    // plain drag still slides it into the gap.
+    if (d.boxed === undefined && d.mode === 'move') {
+      const was = JSON.parse(d.before);
+      const i = was.findIndex(x => String(x.id) === String(d.id));
+      const me = was[i];
+      const prev = i > 0 ? was[i - 1] : null, next = was[i + 1] || null;
+      const tightL = prev ? Math.abs(sbeNum(prev.film_end) - sbeNum(me.film_start)) < 1e-3
+                          : sbeNum(me.film_start) < 1e-3;
+      const tightR = next ? Math.abs(sbeNum(next.film_start) - sbeNum(me.film_end)) < 1e-3 : false;
+      d.boxed = !!(me && next && tightL && tightR);
+    }
+    const ripple = !!(ev.metaKey || ev.ctrlKey) || (d.mode === 'move' && d.boxed === true);
     d.ripple = ripple;
     track.classList.toggle('is-ripple', ripple);
     SBE.clips = JSON.parse(d.before);
-    const o = { ripple: ripple };
+    const o = { ripple: ripple, tight: d.mode === 'move' && d.boxed === true && !(ev.metaKey || ev.ctrlKey) };
     if (d.mode === 'movemany') {
       // THE BLOCK SLIDES BY ONE DELTA, and it is the PRIMARY clip's own start
       // that is snapped — the beat the user is watching is the one under the
@@ -11419,7 +11871,55 @@ function sbeOnTrackMove(ev) {
       sbeTrim(SBE.clips, d.id, 'r', want, o);
     }
   }
+  sbeDragHudShow(ev, d);
   sbePaint();
+}
+
+// SAY WHAT THE DRAG IS DOING. One gesture means move, ripple, reorder, slip,
+// roll or trim depending on modifiers and on whether the clip is boxed in
+// (then a plain drag reorders). That used to happen silently; a small label
+// at the pointer now names the action and, for a move, where the shot lands.
+function sbeDragHudLabel(d, ev) {
+  if (!d) return '';
+  const c = (SBE.clips || []).find(x => String(x.id) === String(d.id));
+  const at = c ? ' · ' + sbeFmtTime(c.film_start).replace(/(\.\d)\d$/, '$1') : '';
+  if (d.mode === 'reorder') return T('editor.reorder', 'Reorder') + at;
+  if (d.mode === 'slip') return T('editor.slip_picture_inside_its_slot', 'Slip (picture inside its slot)');
+  if (d.mode === 'roll') return T('editor.roll_the_cut', 'Roll the cut');
+  if (d.mode === 'trimL' || d.mode === 'trimR') return (d.ripple ? T('editor.trim_ripple', 'Trim + ripple') : T('editor.trim', 'Trim')) + at;
+  // A block move stays inside the gaps even with ⌘ held, so it is a move.
+  if (d.mode === 'movemany') return T('editor.move_selection', 'Move selection');
+  if (d.mode === 'move') {
+    // Boxed in (joined to both neighbours) without ⌘ is the "tight" drag:
+    // the shot swaps places. d.ripple is true there too, so it cannot tell
+    // the two apart; the held key can.
+    const cmd = !!(ev && (ev.metaKey || ev.ctrlKey));
+    if (d.boxed === true && !cmd) return T('editor.reorder', 'Reorder') + at;
+    if (d.ripple) return T('editor.ripple_moves_everything_after', 'Ripple (moves everything after)') + at;
+    return T('editor.move', 'Move') + at;
+  }
+  return '';
+}
+
+function sbeDragHudShow(ev, d) {
+  const text = sbeDragHudLabel(d, ev);
+  let hud = document.getElementById('sbeDragHud');
+  if (!text) { if (hud) hud.hidden = true; return; }
+  if (!hud) {
+    hud = document.createElement('div');
+    hud.id = 'sbeDragHud';
+    hud.className = 'sbe-drag-hud';
+    document.body.appendChild(hud);
+  }
+  hud.hidden = false;
+  if (hud.textContent !== text) hud.textContent = text;
+  hud.style.left = (ev.clientX + 14) + 'px';
+  hud.style.top = (ev.clientY - 28) + 'px';
+}
+
+function sbeDragHudHide() {
+  const hud = document.getElementById('sbeDragHud');
+  if (hud) hud.hidden = true;
 }
 
 // EVERYTHING A DRAG ON THE TRACK CAN MOVE, in one string. `sbeOnTrackUp` asks
@@ -11443,6 +11943,7 @@ function sbeDragFingerprint(cs) {
 function sbeOnTrackUp(ev) {
   const d = SBE.drag;
   SBE.drag = null;
+  sbeDragHudHide();
   if (!d) return;
   document.querySelectorAll('.sbe-clip.is-drag').forEach(el => el.classList.remove('is-drag'));
   const trk = sbeEl('sbeTrack'); if (trk) trk.classList.remove('is-ripple');
@@ -11452,7 +11953,7 @@ function sbeOnTrackUp(ev) {
     const c = SBE.clips.find(x => String(x.id) === String(d.id));
     sbePaint();
     if (!sbeSrcLoadClip(c) && typeof phosToast === 'function') {
-      phosToast('Black has no picture to preview.', { duration: 3000 });
+      phosToast(T('editor.black_has_no_picture_to', 'Black has no picture to preview.'), { duration: 3000 });
     }
     return;
   }
@@ -11492,7 +11993,22 @@ function sbeOnTrackUp(ev) {
   // whichever gesture was being added at the time.
   const before = JSON.parse(d.before);
   if (sbeDragFingerprint(before) === sbeDragFingerprint(SBE.clips)) {
-    SBE.clips = before; sbePaint(); return;
+    SBE.clips = before; sbePaint();
+    // A drag that travelled but could not land used to spring back with no
+    // word. Say why, once, and what to do instead.
+    // A real drag only: a click can wobble a few pixels (and the track
+    // re-lays out when the inspector opens), which must not read as a
+    // failed move.
+    const travelled = Math.abs(sbeNum(ev && ev.clientX, d.x0) - d.x0);
+    if (d.moved && travelled >= 12 && !SBE.noRoomTold && (d.mode === 'move' || d.mode === 'movemany')
+        && typeof phosToast === 'function') {
+      SBE.noRoomTold = true;   // once per session: hard-against is common
+      phosToast(d.mode === 'movemany'
+        ? T('editor.no_room_there_for_the', 'No room there for the selection. Trim a neighbour first, or move the clips one at a time.')
+        : T('editor.no_room_there_trim_a', 'No room there. Trim a neighbour first, or hold ⌘ while ')
+          + T('editor.dragging_to_push_the_later', 'dragging to push the later shots along.'), { duration: 4000 });
+    }
+    return;
   }
   // The drag mutated SBE.clips live so the block could follow the pointer;
   // register the ONE undo step now, from the snapshot taken on pointerdown.
@@ -11500,13 +12016,27 @@ function sbeOnTrackUp(ev) {
   if (SBE.undo.length > SBE_UNDO_MAX) SBE.undo.shift();
   SBE.redo.length = 0;
   SBE.dirty = true;
-  sbeSetState('unsaved changes', 'dirty');
+  sbeSetState(T('editor.unsaved_changes', 'unsaved changes'), 'dirty');
   sbePaint();
   sbeQueueSave();
 }
 
 function sbeSeek(t) {
   const dur = Math.max(sbeFilmDuration(SBE.clips), 0);
+  // A CLICK WHILE PLAYING PLAYS ON FROM THERE, the way every editor does.
+  // It used to move the playhead and load the frame into the paused picture
+  // element while the transport still read "playing": the picture froze on
+  // that frame (no clock ran it) and the score played on from the OLD place
+  // until the next cut re-synced it. Measured in the app's web view on
+  // SUNDAY MASS (2 Nov): a click at 0:40 while playing from 0:03 left the
+  // playhead parked at 40.00 for 2.7 s with the score at 0:05.7.
+  if (SBE.playing) {
+    sbeStop();
+    SBE.playhead = Math.max(0, Math.min(dur, sbeNum(t)));
+    sbePaintHead();
+    sbeShowFrameAt(SBE.playhead).then(() => { if (!SBE.playing && SBE.open) sbePlay(); });
+    return;
+  }
   SBE.playhead = Math.max(0, Math.min(dur, sbeNum(t)));
   sbePaintHead();
   // A SCRUB LANDS ON THE RIGHT SOURCE SECOND. Forced, because the ground has
@@ -11564,8 +12094,21 @@ function sbeLoadInto(v, c, at) {
       setTimeout(() => { v.removeEventListener('seeked', done); resolve(); }, 2500);
     };
     if (v.dataset.src === url && v.readyState >= 1) { seek(); return; }
+    // THE SAME FILE, STILL ARRIVING. The preloader may have started this very
+    // file on the spare a moment ago; assigning the src again would throw that
+    // load away and start it over, which is the delay the preload exists to
+    // remove. Wait for the load already under way instead.
+    if (v.dataset.src === url && !v.error && v.networkState !== 3) {
+      const ready = () => { v.removeEventListener('loadedmetadata', ready); seek(); };
+      v.addEventListener('loadedmetadata', ready);
+      setTimeout(() => { v.removeEventListener('loadedmetadata', ready); resolve(); }, 2500);
+      return;
+    }
     v.dataset.src = url;
-    const meta = () => { v.removeEventListener('loadedmetadata', meta); seek(); };
+    // A later load may have replaced this one on the same element (the spare
+    // is shared by the preloader and the cut); only the newest file seeks.
+    const meta = () => { v.removeEventListener('loadedmetadata', meta);
+                         if (v.dataset.src === url) seek(); else resolve(); };
     v.addEventListener('loadedmetadata', meta);
     const fail = () => { v.removeEventListener('error', fail); resolve(); };
     v.addEventListener('error', fail);
@@ -11574,8 +12117,174 @@ function sbeLoadInto(v, c, at) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// TWO PICTURES, ONE ON SCREEN — why a cut is never black
+// ---------------------------------------------------------------------------
+// Pointing the visible <video> at the next clip's file is what made every cut
+// flash black: WebKit drops the old picture the moment `src` changes and paints
+// the element's own black until the new file has decoded its first frame
+// after the seek. Measured in the app's own web view on a 17-clip film: all 16
+// cuts went black, 60-200 ms each. Chrome tends to hold the old frame, which
+// is why a desktop browser never showed it.
+//
+// So the stage owns two elements, `sbeVideo` and `sbeVideoB`. One is LIVE (on
+// screen, carries the sound); the other is the SPARE. A new file is only ever
+// loaded into the spare, off screen, and the two trade places in one
+// synchronous step once the spare holds the decoded frame. The live element
+// is never handed a new `src` while it is showing, so the stage always has a
+// real picture on it. While a clip plays, the next clip is loaded and seeked
+// on the spare ahead of time (sbePreloadNext), so most cuts are a swap with
+// no wait at all.
+//
+// The spare is hidden with opacity like everything else on this stage, never
+// display:none — WebKit will not load a display:none <video>.
+function sbeVid() { return sbeEl(SBE.vidLive === 'sbeVideoB' ? 'sbeVideoB' : 'sbeVideo'); }
+function sbeVidSpare() { return sbeEl(SBE.vidLive === 'sbeVideoB' ? 'sbeVideo' : 'sbeVideoB'); }
+function sbeVids() { return [sbeEl('sbeVideo'), sbeEl('sbeVideoB')].filter(Boolean); }
+// Both pictures off: a still, a slug or a hole is on the stage. It also
+// cancels a video still being staged, so a slow load cannot land on top of
+// the still that replaced it. `pause` is for the transport; a scrub that
+// lands on a still has nothing playing to stop.
+function sbeVidsOff(pause) {
+  SBE.vidGen = (SBE.vidGen || 0) + 1;
+  for (const el of sbeVids()) {
+    if (pause !== false) { try { el.pause(); } catch (e) {} }
+    el.classList.remove('is-on');
+    if (el.style) el.style.opacity = '';
+  }
+}
+
+// The source second of `c` that film second `t` shows, clamped the way
+// sbeLoadInto clamps it, so "is the spare already there" compares like with like.
+function sbeVidTarget(c, at) {
+  return Math.max(0, Math.min(sbeNum(c.end) - 1e-3, sbeNum(at)));
+}
+// Is this element holding a decoded frame of `url` at source second `t`?
+function sbeVidHolds(el, url, t) {
+  return !!el && el.dataset.src === url && el.readyState >= 2 && !el.seeking
+      && Math.abs(sbeNum(el.currentTime) - t) < 0.5 / sbeFps();
+}
+
+// WAIT FOR THE FRAME, NOT THE SEEK. 'seeked' says the position moved; the
+// picture can still be on its way to the compositor. requestVideoFrameCallback
+// fires when a frame is ready to present; a paused, freshly seeked element in
+// WebKit may never fire it, so readyState >= 2 (the current frame is decoded)
+// plus a short ceiling is the floor of the wait.
+function sbeVidFrameReady(el) {
+  return new Promise(resolve => {
+    if (!el) { resolve(); return; }
+    let done = false;
+    const end = () => { if (!done) { done = true; resolve(); } };
+    if (el.readyState >= 2) {
+      if (typeof el.requestVideoFrameCallback === 'function') {
+        try { el.requestVideoFrameCallback(end); } catch (e) {}
+        setTimeout(end, 40);
+      } else {
+        end();
+      }
+      return;
+    }
+    const on = () => { el.removeEventListener('loadeddata', on); el.removeEventListener('canplay', on); end(); };
+    el.addEventListener('loadeddata', on);
+    el.addEventListener('canplay', on);
+    setTimeout(() => { el.removeEventListener('loadeddata', on); el.removeEventListener('canplay', on); end(); }, 400);
+  });
+}
+
+// THE SWAP. One synchronous step: the incoming element (already holding its
+// decoded frame) turns on and starts, the outgoing one turns off and pauses,
+// and the clip's look and fade go on the new live picture — so the browser
+// paints one state or the other and never a third.
+//
+// The element that just went off is NOT handed the next clip's file at once.
+// It waits a quarter of a second (SBE_VID_SETTLE_MS) before sbePreloadNext may
+// load into it: re-sourcing a <video> in the frames right after it was on
+// screen is the one step that still showed black in the app's web view.
+const SBE_VID_SETTLE_MS = 250;
+function sbeVidSwap(c, play) {
+  const live = sbeVid(), spare = sbeVidSpare();
+  if (!spare || spare === live) return live;
+  try { spare.muted = !!SBE.muted || !sbePictureCarriesSound(c); spare.playbackRate = sbeSpeed(c); } catch (e) {}
+  spare.classList.add('is-on');
+  if (play) { try { const p = spare.play(); if (p && p.catch) p.catch(() => {}); } catch (e) {} }
+  if (live) {
+    live.classList.remove('is-on');
+    if (live.style) live.style.opacity = '';
+    try { live.pause(); } catch (e) {}
+  }
+  SBE.vidLive = spare.id;
+  SBE.vidSettleAt = Date.now() + SBE_VID_SETTLE_MS;
+  sbeApplyPreviewGrade(c, sbeFraming(c));
+  sbeFadePaint();
+  return spare;
+}
+
+// PUT FILM SECOND `at` OF VIDEO CLIP `c` ON THE STAGE without the stage ever
+// going black. Resolves to the element now showing it, or null when a later
+// request overtook this one (a fast scrub) — the later one owns the stage.
+// `play`: the transport is running, so the incoming clip starts as it goes on.
+async function sbeStageVideo(c, at, play) {
+  const gen = SBE.vidGen = (SBE.vidGen || 0) + 1;
+  const url = sbeClipUrl(c);
+  const t = sbeVidTarget(c, at);
+  const live = sbeVid(), spare = sbeVidSpare();
+  if (!spare) {                       // a page without the second element
+    await sbeLoadInto(live, c, at);
+    if (live) live.classList.add('is-on');
+    return live;
+  }
+  // 1. The spare is already there (the preloader got to it first): a cut.
+  if (sbeVidHolds(spare, url, t)) return sbeVidSwap(c, play);
+  // 2. The same file is already live (a split, a scrub inside one clip): a seek
+  //    on the element that is showing holds its last frame until the new one
+  //    lands, so there is nothing to hide.
+  if (live && live.dataset.src === url && live.readyState >= 1) {
+    await sbeLoadInto(live, c, at);
+    if (gen !== SBE.vidGen) return null;
+    live.classList.add('is-on');
+    return live;
+  }
+  // 3. A file nobody has: load it OFF SCREEN, wait for its frame, then swap.
+  //    The live element keeps showing the outgoing picture the whole time.
+  await sbeLoadInto(spare, c, at);
+  if (gen !== SBE.vidGen) return null;
+  await sbeVidFrameReady(spare);
+  if (gen !== SBE.vidGen) return null;
+  return sbeVidSwap(c, play);
+}
+
+// THE NEXT CUT, PREPARED WHILE THIS CLIP PLAYS. The spare loads the next video
+// clip and seeks it to its in-point, so when the playhead reaches the cut
+// sbeStageVideo finds it waiting (case 1) and the cut costs nothing. Paused and
+// silent until then; a still, a slug or the end of the film needs nothing.
+function sbePreloadNext(c) {
+  const spare = sbeVidSpare();
+  if (!spare || !c) return;
+  // Just off screen: give it SBE_VID_SETTLE_MS before it takes a new file.
+  const wait = sbeNum(SBE.vidSettleAt, 0) - Date.now();
+  if (wait > 0) {
+    clearTimeout(SBE.preloadTimer);
+    SBE.preloadTimer = setTimeout(() => { if (SBE.curId === c.id) sbePreloadNext(c); }, wait + 5);
+    return;
+  }
+  const next = SBE.clips[SBE.clips.indexOf(c) + 1];
+  if (!next || sbeKind(next) !== 'video') return;
+  if (sbeVidHolds(spare, sbeClipUrl(next), sbeVidTarget(next, sbeNum(next.start)))) return;
+  try { spare.pause(); } catch (e) {}
+  sbeLoadInto(spare, next, sbeNum(next.start));
+}
+
+// The line under the program monitor for a video clip. Shared by the scrub
+// (sbeShowFrameAt) and the cut (sbeEnter): the line used to be written only on
+// a scrub, so during playback it kept naming the shot playback started on.
+function sbeProgInfoVideo(c) {
+  sbeProgInfo((c.title || String(c.path || '').split('/').pop()) + ' · ' + sbeNum(c.start).toFixed(2) + '–' +
+              sbeNum(c.end).toFixed(2) + (c.proxy ? '' : T('editor.source', ' · source')),
+              c.proxy ? '' : T('editor.source_slow_to_seek_run', 'SOURCE — slow to seek. Run Prepare (A2 head ▾) for proxies.'));
+}
+
 async function sbeShowFrameAt(t) {
-  const v = sbeEl('sbeVideo');
+  const v = sbeVid();
   const img = sbeEl('sbeStill');
   if (!v) return;
   // THE OVERLAY LANE IS NOT THE PICTURE'S BUSINESS, so it is painted BEFORE
@@ -11588,20 +12297,23 @@ async function sbeShowFrameAt(t) {
   const c = sbeClipAt(SBE.clips, t);
   SBE.curId = c ? c.id : '';
   if (!c) {
-    v.classList.remove('is-on');
+    sbeVidsOff(false);
     if (img) img.classList.remove('is-on');
-    sbeProgInfo(SBE.clips.length ? 'nothing plays here' : 'no clips', '');
+    sbeProgInfo(SBE.clips.length ? T('editor.nothing_plays_here', 'nothing plays here') : T('editor.no_clips', 'no clips'), '');
     return;
   }
   const kind = sbeKind(c);
-  sbeApplyPreviewGrade(c, sbeFraming(c));
+  // The grade goes on with the picture it belongs to: here for a still or a
+  // slug, at the swap for a video (sbeStageVideo), never early onto the
+  // outgoing frame.
+  if (kind !== 'video') sbeApplyPreviewGrade(c, sbeFraming(c));
   if (kind === 'slug') {
     // NO FILE, SO NOTHING TO LOAD. Both layers off leaves the stage's own
     // black, which is the frame the render will write — the one case where the
     // preview is not an approximation at all.
-    v.classList.remove('is-on');
+    sbeVidsOff(false);
     if (img) img.classList.remove('is-on');
-    sbeProgInfo('black · ' + sbeLen(c).toFixed(2) + 's', '');
+    sbeProgInfo(T('editor.black_2', 'black · ') + sbeLen(c).toFixed(2) + 's', '');
     sbePaintTrack();
     return;
   }
@@ -11609,23 +12321,24 @@ async function sbeShowFrameAt(t) {
     // An <img> cannot land on the wrong frame and cannot be slow to seek, so
     // a still never reaches the missing-proxy path the badge exists to warn
     // about. Swap the src only when it changed — reassigning it re-decodes.
-    v.classList.remove('is-on');
+    sbeVidsOff(false);
     if (img) {
       const url = sbeClipUrl(c);
       if (img.getAttribute('src') !== url) img.src = url;
       img.classList.add('is-on');
     }
-    sbeProgInfo((c.title || String(c.path || '').split('/').pop()) + ' · still · ' +
+    sbeProgInfo((c.title || String(c.path || '').split('/').pop()) + T('editor.still', ' · still · ') +
                 sbeLen(c).toFixed(2) + 's', '');
     sbePaintTrack();
     return;
   }
+  // The still (if one was up) stays on until the video has a frame to show.
+  const shown = await sbeStageVideo(c, sbeNum(c.start) + (t - sbeNum(c.film_start)) * sbeSpeed(c));
+  if (!shown) return;                 // a later scrub owns the stage now
+  shown.classList.add('is-on');
   if (img) img.classList.remove('is-on');
-  await sbeLoadInto(v, c, sbeNum(c.start) + (t - sbeNum(c.film_start)) * sbeSpeed(c));
-  v.classList.add('is-on');
-  sbeProgInfo((c.title || c.path.split('/').pop()) + ' · ' + sbeNum(c.start).toFixed(2) + '–' +
-              sbeNum(c.end).toFixed(2) + (c.proxy ? '' : ' · source'),
-              c.proxy ? '' : 'SOURCE — slow to seek. Run Prepare (A2 head ▾) for proxies.');
+  sbeApplyPreviewGrade(c, sbeFraming(c));
+  sbeProgInfoVideo(c);
   // A SCRUB SHOWS THE TRUE OPACITY at the second it landed on, which is the
   // only way a fade can be judged without playing the whole clip.
   sbeFadePaint(t);
@@ -11720,7 +12433,7 @@ async function sbeSrcPlay() {
     // the picture, and a Play button that visibly does nothing is worse still.
     if (!v.muted) {
       v.muted = true;
-      sbeSetMute(true, 'browser blocked sound — click 🔊 to unmute', false);
+      sbeSetMute(true, T('editor.browser_blocked_sound_click_to', 'browser blocked sound — click 🔊 to unmute'), false);
       try { await v.play(); } catch (e2) {}
     }
   }
@@ -11737,10 +12450,12 @@ function sbeSrcStop() {
 function sbeSrcToggle() { SBE.srcPlaying ? sbeSrcStop() : sbeSrcPlay(); }
 
 // The button under the left screen. Exactly the + on the row, by construction:
-// same function, same index, same server call.
-function sbeSrcAdd() {
+// same function, same index, same server call, and now the same PLACE (the
+// playhead; ⌥ for the end). It used to append while its tooltip promised
+// the row's behaviour.
+function sbeSrcAdd(ev) {
   if (!SBE.source || SBE.srcIndex < 0) return;
-  edPoolAdd(SBE.srcIndex);
+  edPoolAdd(SBE.srcIndex, (ev && ev.altKey) ? undefined : SBE.playhead);
 }
 
 // WHAT IS UNDER THE PLAYHEAD, in the strip under the picture. The badge on the
@@ -11774,7 +12489,7 @@ function sbePaintSource() {
   const empty = sbeEl('sbeSrcEmpty');
   if (!name) return;
   if (!row) {
-    name.textContent = 'Nothing loaded';
+    name.textContent = T('editor.nothing_loaded', 'Nothing loaded');
     if (add) add.disabled = true;
     if (play) { play.disabled = true; sbePlayGlyph('sbeSrcPlayBtn', 'sbeSrcPlayUse', false); }
     if (badge) badge.hidden = true;
@@ -11800,7 +12515,7 @@ function sbePaintSource() {
     const proxied = (SBE.clips || []).some(c => c.path === row.path && c.proxy);
     badge.hidden = false;
     badge.textContent = (row.kind === 'still') ? 'still'
-      : (proxied ? 'proxy' : 'source file');
+      : (proxied ? 'proxy' : T('editor.source_file', 'source file'));
   }
 }
 
@@ -11844,7 +12559,7 @@ function sbeSetMusicMode(v) {
   const warn = sbeEl('sbeMusicWarn');
   if (warn) {
     warn.hidden = (mode !== 'replace');
-    warn.textContent = 'any dialogue in the clips is lost';
+    warn.textContent = T('editor.any_dialogue_in_the_clips', 'any dialogue in the clips is lost');
   }
 }
 
@@ -11888,7 +12603,7 @@ async function edPoolUpload(files) {
   const list = Array.from(files || []);
   if (!list.length) return;
   const btn = document.getElementById('edPoolUploadBtn');
-  if (btn) { btn.disabled = true; btn.textContent = 'Uploading…'; }
+  if (btn) { btn.disabled = true; btn.textContent = T('editor.uploading', 'Uploading…'); }
   const bad = [];
   let done = 0;
   for (const f of list) {
@@ -11907,12 +12622,12 @@ async function edPoolUpload(files) {
       bad.push((f.name || 'file') + ' — ' + ((r && r.error) || 'upload failed'));
     }
   }
-  if (btn) { btn.disabled = false; btn.textContent = 'Upload'; }
+  if (btn) { btn.disabled = false; btn.textContent = T('editor.upload', 'Upload'); }
   if (ED.src !== 'images') edPoolSrc('images'); else await edPoolRefresh(true);
   if (done) {
-    phosToast(done + (done === 1 ? ' file is' : ' files are') +
-              ' in the pool — press + to put it at the playhead, or drag it '
-              + 'onto the track.',
+    phosToast(done + (done === 1 ? T('editor.file_is', ' file is') : T('editor.files_are', ' files are')) +
+              T('editor.in_the_pool_press_to', ' in the pool — press + to put it at the playhead, or drag it ')
+              + T('editor.onto_the_track', 'onto the track.'),
               { kind: 'success', duration: 5000 });
   }
   for (const msg of bad) phosToast(msg, { kind: 'danger', duration: 7000 });
@@ -11924,7 +12639,7 @@ function edPoolUploadRow(r) {
   return {
     path: r.path, title: r.title || String(r.path || '').split('/').pop(),
     kind: still ? 'still' : undefined,
-    sub: 'uploaded · ' + (still ? 'still' : 'clip') +
+    sub: T('editor.uploaded', 'uploaded · ') + (still ? 'still' : 'clip') +
          (r.duration_s ? ' · ' + sbeNum(r.duration_s).toFixed(1) + 's' : ''),
     duration_s: still ? SBE_STILL_SECONDS : r.duration_s,
     uploaded: true,
@@ -11947,7 +12662,7 @@ async function edPoolRefresh(force) {
       ED.rows = (SBE.pool || []).map(c => ({
         path: c.path, title: c.title || ('shot ' + c.n),
         sub: (c.pass || '') + (c.duration_s ? ' · ' + sbeNum(c.duration_s).toFixed(1) + 's' : '') +
-             (c.placed ? ' · on the track' : ''),
+             (c.placed ? T('editor.on_the_track', ' · on the track') : ''),
         duration_s: c.duration_s, placed: !!c.placed, n: c.n,
       }));
     } else if (ED.src === 'other') {
@@ -11963,7 +12678,7 @@ async function edPoolRefresh(force) {
         .filter(o => o.kind === 'image' && !o.hidden)
         .map(o => ({
           path: o.path, title: o.name, kind: 'still',
-          sub: 'still · ' + (o.engine ? String(o.engine).toUpperCase() + ' · ' : '') +
+          sub: T('editor.still_2', 'still · ') + (o.engine ? String(o.engine).toUpperCase() + ' · ' : '') +
                (o.mtime || '').slice(0, 10),
           duration_s: SBE_STILL_SECONDS,
         }));
@@ -11975,7 +12690,7 @@ async function edPoolRefresh(force) {
       try {
         const u = await (await fetch('/storyboard/edit/uploads')).json();
         mine = ((u && u.uploads) || []).map(o => ({
-          path: o.path, title: o.name, sub: 'uploaded · clip',
+          path: o.path, title: o.name, sub: T('editor.uploaded_clip', 'uploaded · clip'),
           uploaded: true,
         }));
       } catch (e) { mine = []; }
@@ -11990,7 +12705,7 @@ async function edPoolRefresh(force) {
         : null;
       ED.rows = ((r && r.sounds) || []).map(o => ({
         path: o.path, title: o.name, kind: 'sound',
-        sub: (o.where === 'film' ? 'this __SEQ__’s audio' : 'outputs') + ' · sound',
+        sub: (o.where === 'film' ? 'this __SEQ__’s audio' : 'outputs') + T('editor.sound_2', ' · sound'),
       }));
     } else {
       const r = await (await fetch('/outputs?limit=400&offset=0')).json();
@@ -12006,7 +12721,7 @@ async function edPoolRefresh(force) {
     }
   } catch (e) {
     ED.rows = [];
-    if (note) note.textContent = 'The panel did not answer.';
+    if (note) note.textContent = T('editor.the_panel_did_not_answer_2', 'The panel did not answer.');
   }
   ED.loading = false;
   edPoolPaint();
@@ -12058,6 +12773,7 @@ function edPoolPaint() {
   const list = document.getElementById('edPoolList');
   const note = document.getElementById('edPoolNote');
   if (!list) return;
+  edTrackHintRefresh();
   const q = ((document.getElementById('edPoolSearch') || {}).value || '')
     .trim().toLowerCase();
   const rows = (ED.rows || []).filter(r =>
@@ -12070,13 +12786,13 @@ function edPoolPaint() {
       // quiet reads as broken, and the four sources fail for four different
       // reasons.
       (q
-        ? 'Nothing here matches “' + escapeHtml(q) + '”. Clear the filter to see everything.'
+        ? T('editor.nothing_here_matches', 'Nothing here matches “') + escapeHtml(q) + T('editor.clear_the_filter_to_see', '”. Clear the filter to see everything.')
         : ED.src === 'gallery'
-          ? 'No generations yet. Render something in Video or Storyboard and it lands here.'
+          ? T('editor.no_generations_yet_render_something', 'No generations yet. Render something in Video or Storyboard and it lands here.')
         : ED.src === 'images'
-          ? 'No images yet — press Upload to bring one in from this Mac, or make one in the Image studio.'
+          ? T('editor.no_images_yet_press_upload', 'No images yet — press Upload to bring one in from this Mac, or make one in the Image studio.')
         : ED.src === 'sound'
-          ? 'No sound files yet. ♪ on the track heads adds one from this Mac — or lay Room tone above.'
+          ? T('editor.no_sound_files_yet_on', 'No sound files yet. ♪ on the track heads adds one from this Mac — or lay Room tone above.')
         : ED.src === 'other'
           ? (ED.films && ED.films.length
               ? 'That __SEQ__ has no rendered clips yet.'
@@ -12087,8 +12803,8 @@ function edPoolPaint() {
         // Video-tab clips can have plenty on the timeline and nothing here
         // to borrow FROM, which is a different, true sentence.
         : ((SBE.clips || []).length
-            ? 'Nothing left to add from this __SEQ__’s own shots — every clip on the timeline came from somewhere else.'
-            : 'This __SEQ__ has no rendered clips yet. Render its shots in Storyboard, or take one from another source above.')) + '</span>';
+            ? T('editor.nothing_left_to_add_from_2', 'Nothing left to add from this __SEQ__’s own shots — every clip on the timeline came from somewhere else.')
+            : T('editor.this_seq_has_no_rendered_2', 'This __SEQ__ has no rendered clips yet. Render its shots in Storyboard, or take one from another source above.'))) + '</span>';
     if (note) note.textContent = '';
     return;
   }
@@ -12173,7 +12889,7 @@ function edPoolPaint() {
          '<a href="#" onclick="event.preventDefault();edPoolShowAll();">Show all ' +
          rows.length + '</a>')
       : escapeHtml(rows.length + ' clip' + (rows.length === 1 ? '' : 's') +
-         ' · click one to watch it, + to put it at the playhead, or drag it onto the track.');
+         T('editor.click_one_to_watch_it', ' · click one to watch it, + to put it at the playhead, or drag it onto the track.'));
   }
 }
 
@@ -12223,8 +12939,9 @@ async function edPoolAdd(i, dropAt, overwriteId) {
   // A SOUND HAS NO PICTURE to put on V1 — it goes on an audio track.
   if (row.kind === 'sound') { await sbeTsAddSoundPath(row.path, '', SBE.playhead); return; }
   if (!SBE.open || !SBE.id) {
-    phosToast('Open a __SEQ__ first — the Editor holds one timeline at a time.', {});
-    return;
+    // The Editor always has a timeline; if it was lost, make one and go on.
+    await edShowPicker();
+    if (!SBE.open || !SBE.id) return;
   }
   // The row's own word first, then the file's. The server checks the suffix
   // too — this is the half that keeps the CLIENT from asking /file for a
@@ -12235,7 +12952,7 @@ async function edPoolAdd(i, dropAt, overwriteId) {
   if (note) {
     note.textContent = isStill
       ? ('reading ' + (row.title || 'that image') + '…')
-      : ('building the proxy for ' + (row.title || 'that clip') + '…');
+      : (T('editor.building_the_proxy_for', 'building the proxy for ') + (row.title || 'that clip') + '…');
   }
   // FILM-32: WHICH FILM THIS WAS FOR. The proxy build below is the slow
   // part — real footage, sometimes several seconds — and nothing stopped
@@ -12296,8 +13013,8 @@ async function edPoolAdd(i, dropAt, overwriteId) {
   // dirty document (see sbeAdoptMeta), so nothing needs the write to land
   // first.
   if (note) note.textContent = '';
-  phosToast(overwriteId ? 'Replaced the clip at ' + sbeFmtTime(sbeNum(at)) + '. Same cut, same timings.'
-            : ('Added at ' + sbeFmtTime(at) + (isStill ? ' · still' : ' · proxy ready.')),
+  phosToast(overwriteId ? T('editor.replaced_the_clip_at', 'Replaced the clip at ') + sbeFmtTime(sbeNum(at)) + '. Same cut, same timings.'
+            : (T('editor.added_at', 'Added at ') + sbeFmtTime(at) + (isStill ? T('editor.still_3', ' · still') : T('editor.proxy_ready', ' · proxy ready.'))),
             { kind: 'success', duration: 4000 });
   // The board may have gained a shot (an import), and the payload's `unplaced`
   // and `clips` are now stale. Re-read quietly; nothing on screen moves.
@@ -12327,7 +13044,13 @@ function sbeSrcDropHover(ev, playable) {
     over = r.width > 0 && ev.clientX >= r.left && ev.clientX <= r.right &&
            ev.clientY >= r.top && ev.clientY <= r.bottom;
   }
-  mon.classList.toggle('is-drop-ready', !!playable && !over);
+  // "Ready" only while the pointer is up among the monitors. Glowing for the
+  // whole drag made it look like the destination even while the user was
+  // dropping onto the timeline.
+  const tl = sbeEl('sbTimeline');
+  const aboveTimeline = !tl || !tl.getBoundingClientRect
+    || ev.clientY < tl.getBoundingClientRect().top;
+  mon.classList.toggle('is-drop-ready', !!playable && !over && aboveTimeline);
   mon.classList.toggle('is-drop-over', over);
   return over;
 }
@@ -12414,6 +13137,19 @@ function edPoolDragMove(ev) {
     sbePaintTrack(); sbePaintTracks();
     return;
   }
+  // THE OVERLAY LANE IS A TARGET. Its empty state always said "Drop a still
+  // here", and nothing handled the drop. A picture or a video (a matte, a
+  // loop) dropped on V2 becomes an overlay at that time; a sound never does.
+  const ovLane = sbeEl('sbeOverlayLane');
+  const toOv = d.row.kind !== 'sound' && edPoolOverLane(ev, ovLane);
+  if (ovLane && ovLane.classList) ovLane.classList.toggle('is-dropping', !!toOv);
+  d.ovAt = (toOv && track) ? sbeTimeFromEvent(ev, track) : null;
+  if (toOv) {
+    if (track) { track.classList.remove('is-dropping'); track.classList.remove('is-overwriting'); }
+    SBE.dropAt = null; SBE.tsDrop = null; SBE.dropOverwriteId = null;
+    sbePaintTrack(); sbePaintTracks();
+    return;
+  }
   // A SOUND lands on an audio track only; a VIDEO dropped on one gives its
   // sound; anything dropped on the picture track is a clip, as before.
   const onTracks = edPoolOverTracks(ev);
@@ -12443,6 +13179,15 @@ function edPoolDropTime(ev, track) {
   return prev ? sbeNum(prev.film_end) : 0;
 }
 
+// Strict, unlike the picture track's generous bounds: V2 sits directly
+// above V1, so any slack here would steal drops aimed at the picture.
+function edPoolOverLane(ev, el) {
+  if (!el || !el.getBoundingClientRect) return false;
+  const r = el.getBoundingClientRect();
+  return ev.clientX >= r.left && ev.clientX <= r.right &&
+         ev.clientY >= r.top && ev.clientY <= r.bottom;
+}
+
 function edPoolOverTrack(ev, track) {
   if (!track) return false;
   const r = track.getBoundingClientRect();
@@ -12460,6 +13205,8 @@ async function edPoolDragEnd(ev) {
   if (d.ghost) d.ghost.remove();
   const track = sbeEl('sbeTrack');
   if (track) { track.classList.remove('is-dropping'); track.classList.remove('is-overwriting'); }
+  const ovLaneEl = sbeEl('sbeOverlayLane');
+  if (ovLaneEl && ovLaneEl.classList) ovLaneEl.classList.remove('is-dropping');
   const at = SBE.dropAt;
   SBE.dropAt = null;
   const overwriteId = SBE.dropOverwriteId;
@@ -12478,6 +13225,7 @@ async function edPoolDragEnd(ev) {
   // monitor does nothing until you click a second time.
   ED.suppressClick = !!(d.el && ev.target && d.el.contains(ev.target));
   if (d.toSrc) { edPoolPreview(d.index); return; }
+  if (d.ovAt !== null && d.ovAt !== undefined) { await edPoolOverlay(d.index, d.ovAt); return; }
   if (tsDrop) { await edPoolSound(d.index, tsDrop.tid, tsDrop.at); return; }
   if (at === null || at === undefined) return;   // dropped in open space
   if (overwriteId) { await edPoolAdd(d.index, at, overwriteId); return; }
@@ -12491,7 +13239,7 @@ async function edPoolDragEnd(ev) {
 // geometry to probe and no proxy to build. It is a length and a kind.
 function edAddSlug() {
   if (!SBE.open || !SBE.id) {
-    phosToast('Open a __SEQ__ first — the Editor holds one timeline at a time.', {});
+    phosToast(T('editor.open_a_seq_first_the_2', 'Open a __SEQ__ first — the Editor holds one timeline at a time.'), {});
     return;
   }
   const box = document.getElementById('edSlugSecs');
@@ -12503,7 +13251,7 @@ function edAddSlug() {
   if (!ok) return;
   // FILM-29: same as edPoolAdd — sbeMutate already queued the crash backup.
   // No extra silent write to edit.json.
-  phosToast(secs.toFixed(1) + 's of black at ' + sbeFmtTime(at) + '.',
+  phosToast(secs.toFixed(1) + T('editor.s_of_black_at', 's of black at ') + sbeFmtTime(at) + '.',
             { kind: 'success', duration: 3500 });
 }
 
@@ -12531,7 +13279,7 @@ function sbePaintOffline() {
     .filter(c => sbeClipOffline(c))
     .map(c => sbeNiceName(c.title || String(c.path || '').split('/').pop()));
   sbeEl('sbeOfflineText').textContent =
-    ids.length + (ids.length === 1 ? ' clip is' : ' clips are') +
+    ids.length + (ids.length === 1 ? T('editor.clip_is', ' clip is') : T('editor.clips_are', ' clips are')) +
     ' offline' + (names.length ? ' — ' + names.slice(0, 4).join(', ') +
     (names.length > 4 ? ', …' : '') : '') + '.';
 }
@@ -12547,9 +13295,7 @@ function sbePaintRelink() {
   const takes = all.filter(r => r.retake && !sbeRetakeDismissed(r));
   bar.hidden = !rows.length;
   if (rows.length) {
-    sbeEl('sbeRelinkText').textContent = rows.length +
-      (rows.length === 1 ? ' shot was' : ' shots were') +
-      ' finished since this cut — use the finished versions.';
+    sbeEl('sbeRelinkText').textContent = TP('editor.shots_finished_since_this_cut', rows.length, {one: '{count} shot was finished since this cut — use the finished versions.', other: '{count} shots were finished since this cut — use the finished versions.'});
   }
   // A RETAKE IS ONE DECISION PER TAKE, so each gets its own line and its
   // own two answers. The old take stays until the person says otherwise.
@@ -12569,13 +13315,13 @@ function sbePaintRelink() {
       '<button type="button" class="ghost-btn" onclick="' + (r.face_fix ? 'sbeFaceFixSwap(' : 'sbeRetakeUse(')
         + arg(r.id) + ', ' + arg(r.to) + ')" ' +
         'title="' + (r.face_fix
-          ? 'Swap the clip for the fixed version. Same cut, same in and out points.'
-          : 'Replace the clip with the new take. Same cut, same timings.') + '">' +
-        (r.face_fix ? 'Swap it in' : 'Use it') + '</button>' +
+          ? T('editor.swap_the_clip_for_the', 'Swap the clip for the fixed version. Same cut, same in and out points.')
+          : T('editor.replace_the_clip_with_the', 'Replace the clip with the new take. Same cut, same timings.')) + '">' +
+        (r.face_fix ? T('editor.swap_it_in', 'Swap it in') : T('editor.use_it', 'Use it')) + '</button>' +
       '<button type="button" class="ghost-btn" onclick="sbeRetakeKeep(' + arg(r.id) + ', ' + arg(r.to) + ')" ' +
         'title="' + (r.face_fix
-          ? 'Keep the clip that is on the timeline. The fixed version stays in Outputs.'
-          : 'Keep the take that is on the timeline. The new one stays in the media pool.') + '">' +
+          ? T('editor.keep_the_clip_that_is', 'Keep the clip that is on the timeline. The fixed version stays in Outputs.')
+          : T('editor.keep_the_take_that_is', 'Keep the take that is on the timeline. The new one stays in the media pool.')) + '">' +
         'Keep the old one</button>' +
       '</span>';
   }).join('');
@@ -12604,12 +13350,12 @@ async function sbeRetakeUse(id, to) {
   // server has never seen.
   if (SBE.conflict) {
     phosToast('This film was changed in another tab — resolve that first; ' +
-              'the swap works on the saved file.',
+              T('editor.the_swap_works_on_the', 'the swap works on the saved file.'),
               { kind: 'danger', duration: 8000 });
     return;
   }
   if (SBE.dirty && !(await sbeSave(true))) {
-    phosToast('Your arrangement could not be saved, and the swap works on the saved file — fix the save first.',
+    phosToast(T('editor.your_arrangement_could_not_be', 'Your arrangement could not be saved, and the swap works on the saved file — fix the save first.'),
               { kind: 'danger', duration: 8000 });
     return;
   }
@@ -12623,7 +13369,7 @@ async function sbeRetakeUse(id, to) {
   if (!r || !r.ok) { phosToast((r && r.error) || 'The take could not be swapped in.', { kind: 'danger' }); return; }
   SBE.undo.length = 0; SBE.redo.length = 0;
   sbeAdopt(r, true);
-  phosToast('The new take is on the timeline. Same cut, same timings.', { kind: 'success', duration: 5000 });
+  phosToast(T('editor.the_new_take_is_on', 'The new take is on the timeline. Same cut, same timings.'), { kind: 'success', duration: 5000 });
 }
 
 // SWAP IN A FACE FIX — an ordinary local edit, not a server rewrite: the
@@ -12637,10 +13383,10 @@ async function sbeFaceFixSwap(id, to) {
                                            && String(x.to) === String(to));
   const c0 = sbeById(SBE.clips, id);
   if (!row || !c0 || String(c0.path) !== String(row.path)) {
-    phosToast('That clip has changed since the fix was ordered — nothing was swapped.', {});
+    phosToast(T('editor.that_clip_has_changed_since', 'That clip has changed since the fix was ordered — nothing was swapped.'), {});
     return;
   }
-  if (c0.locked) { phosToast('That clip is locked — unlock it first.', {}); return; }
+  if (c0.locked) { phosToast(T('editor.that_clip_is_locked_unlock', 'That clip is locked — unlock it first.'), {}); return; }
   const fd = new URLSearchParams();
   fd.set('id', film);
   fd.set('path', to);
@@ -12650,7 +13396,7 @@ async function sbeFaceFixSwap(id, to) {
   if (!r || !r.ok) { phosToast((r && r.error) || 'The fixed clip could not be loaded.', { kind: 'danger' }); return; }
   const c = SBE.id === film ? sbeById(SBE.clips, id) : null;
   if (!c || String(c.path) !== String(row.path) || c.locked) {
-    phosToast('That clip changed while the fixed file was loading — nothing was swapped.', {});
+    phosToast(T('editor.that_clip_changed_while_the', 'That clip changed while the fixed file was loading — nothing was swapped.'), {});
     return;
   }
   const before = sbeSnapshot();
@@ -12660,12 +13406,12 @@ async function sbeFaceFixSwap(id, to) {
   if (SBE.undo.length > SBE_UNDO_MAX) SBE.undo.shift();
   SBE.redo.length = 0;
   SBE.dirty = true;
-  sbeSetState('unsaved changes', 'dirty');
+  sbeSetState(T('editor.unsaved_changes', 'unsaved changes'), 'dirty');
   SBE.relink = (SBE.relink || []).filter(x => x !== row);
   sbePaint();
   sbePaintRelink();
   sbeQueueSave();
-  phosToast('The fixed clip is on the timeline — same cut, same in and out points. Undo puts the original back.',
+  phosToast(T('editor.the_fixed_clip_is_on', 'The fixed clip is on the timeline — same cut, same in and out points. Undo puts the original back.'),
             { kind: 'success', duration: 6000 });
 }
 
@@ -12677,28 +13423,28 @@ async function sbeFaceFixSel() {
   const film = SBE.id;
   const c = sbeById(SBE.clips, SBE.sel);
   if (!c || sbeKind(c) !== 'video' || sbeSelCount() !== 1) {
-    phosToast('Select one video clip first.', {});
+    phosToast(T('editor.select_one_video_clip_first', 'Select one video clip first.'), {});
     return;
   }
   if (SBE.saving) {
-    phosToast('Saving — press it again in a moment.', { duration: 4000 });
+    phosToast(T('editor.saving_press_it_again_in', 'Saving — press it again in a moment.'), { duration: 4000 });
     return;
   }
   if (SBE.conflict) {
-    phosToast('This film was changed in another tab — resolve that first; the fix is offered ' +
-              'against the saved timeline.', { kind: 'danger', duration: 8000 });
+    phosToast(T('editor.this_film_was_changed_in_2', 'This film was changed in another tab — resolve that first; the fix is offered ') +
+              T('editor.against_the_saved_timeline', 'against the saved timeline.'), { kind: 'danger', duration: 8000 });
     return;
   }
   if (SBE.dirty && (await sbeSave(true)) !== true) {
-    phosToast('Your arrangement could not be saved, and the fix is offered against the saved ' +
-              'timeline — fix the save first.', { kind: 'danger', duration: 8000 });
+    phosToast(T('editor.your_arrangement_could_not_be_2', 'Your arrangement could not be saved, and the fix is offered against the saved ') +
+              T('editor.timeline_fix_the_save_first', 'timeline — fix the save first.'), { kind: 'danger', duration: 8000 });
     return;
   }
   if (SBE.id !== film || !sbeById(SBE.clips, c.id)) return;   // another film opened meanwhile
   const r = await faceFixClip(c.path, {
     board: film, clip: c.id,
-    doneHint: 'Upscale & Face Fix queued for ' + sbeNiceName(c.title || String(c.path).split('/').pop())
-      + '. When it lands, a line above the timeline offers to swap it in.',
+    doneHint: T('editor.upscale_face_fix_queued_for', 'Upscale & Face Fix queued for ') + sbeNiceName(c.title || String(c.path).split('/').pop())
+      + T('editor.when_it_lands_a_line', '. When it lands, a line above the timeline offers to swap it in.'),
   });
 }
 
@@ -12726,7 +13472,7 @@ async function sbeRelink() {
   if (SBE.conflict) {
     if (btn) btn.disabled = false;
     phosToast('This film was changed in another tab — resolve that first; ' +
-              'relinking works on the saved file.',
+              T('editor.relinking_works_on_the_saved', 'relinking works on the saved file.'),
               { kind: 'danger', duration: 8000 });
     return;
   }
@@ -12736,8 +13482,8 @@ async function sbeRelink() {
   // that one writes it back over what is on screen.
   if (SBE.dirty && !(await sbeSave(true))) {
     if (btn) btn.disabled = false;
-    phosToast('Your arrangement could not be saved, and relinking works on ' +
-              'the saved file — fix the save first.',
+    phosToast(T('editor.your_arrangement_could_not_be_3', 'Your arrangement could not be saved, and relinking works on ') +
+              T('editor.the_saved_file_fix_the', 'the saved file — fix the save first.'),
               { kind: 'danger', duration: 8000 });
     return;
   }
@@ -12754,7 +13500,7 @@ async function sbeRelink() {
   SBE.undo.length = 0; SBE.redo.length = 0;
   sbeAdopt(r, true);
   phosToast((r.relinked || 0) + ' clip(s) now play the finished files. ' +
-            'Same cuts, same timings.', { kind: 'success', duration: 6000 });
+            T('editor.same_cuts_same_timings', 'Same cuts, same timings.'), { kind: 'success', duration: 6000 });
 }
 
 // ---------------------------------------------------------------------------
@@ -12789,8 +13535,17 @@ function sbeSetMute(on, note, remember) {
   if (remember !== false) {
     try { localStorage.setItem('sbeMuted', SBE.muted ? '1' : '0'); } catch (e) {}
   }
-  const v = sbeEl('sbeVideo');
-  if (v) { v.muted = SBE.muted; v.volume = 1; }
+  // The LIVE picture follows the same rule sbeLoadInto applies: a clip whose
+  // sound is off, or played by the strip, stays muted under an unmute. The
+  // spare is paused; sbeStageVideo sets its mute for its own clip at the swap.
+  {
+    const live = sbeVid();
+    const cur = sbeById(SBE.clips || [], SBE.curId);
+    for (const v of sbeVids()) {
+      v.muted = SBE.muted || (v === live && cur ? !sbePictureCarriesSound(cur) : v !== live);
+      v.volume = 1;
+    }
+  }
   // ONE OPINION ABOUT SOUND, across both monitors. A source screen with its
   // own mute would be a second source of truth for the exact state this
   // switch exists to keep single.
@@ -12802,10 +13557,10 @@ function sbeSetMute(on, note, remember) {
   if (b) {
     const use = sbeEl('sbeMuteUse');
     if (use && use.setAttribute) use.setAttribute('href', SBE.muted ? '#ic-mute' : '#ic-sound');
-    b.setAttribute('aria-label', SBE.muted ? 'Unmute the preview' : 'Mute the preview');
+    b.setAttribute('aria-label', SBE.muted ? T('editor.unmute_the_preview', 'Unmute the preview') : T('editor.mute_the_preview', 'Mute the preview'));
     b.classList.toggle('is-off', SBE.muted);
-    b.title = note || (SBE.muted ? 'Sound off — click to unmute the preview (M)'
-                                 : 'Sound on — click to mute the preview (M)');
+    b.title = note || (SBE.muted ? T('editor.sound_off_click_to_unmute', 'Sound off — click to unmute the preview (M)')
+                                 : T('editor.sound_on_click_to_mute', 'Sound on — click to mute the preview (M)'));
   }
   if (note) {
     const el = sbeEl('sbeApprox');
@@ -12818,9 +13573,9 @@ function sbeSetMute(on, note, remember) {
     }
     if (typeof phosToast === 'function' && !SBE.muteToasted) {
       SBE.muteToasted = true;
-      phosToast('The browser would not start sound without a click, so the '
-                + 'preview is muted for now — press the speaker (or M) to '
-                + 'turn it back on. Your setting has not been changed.',
+      phosToast(T('editor.the_browser_would_not_start', 'The browser would not start sound without a click, so the ')
+                + T('editor.preview_is_muted_for_now', 'preview is muted for now — press the speaker (or M) to ')
+                + T('editor.turn_it_back_on_your', 'turn it back on. Your setting has not been changed.'),
                 { kind: 'warn', duration: 9000 });
     }
   }
@@ -12832,7 +13587,7 @@ function sbeSetMute(on, note, remember) {
 function sbeUnmuteFromRefusal() {
   SBE.muteToasted = false;
   sbeSetMute(false);
-  if (SBE.playing) { const v = sbeEl('sbeVideo'); if (v) { try { v.play(); } catch (e) {} } }
+  if (SBE.playing) { const v = sbeVid(); if (v) { try { v.play(); } catch (e) {} } }
   sbeMusicPlay();
 }
 
@@ -12840,20 +13595,34 @@ function sbeUnmuteFromRefusal() {
 // seeks and plays; the other two only decide which layer is lit, because
 // there is nothing to decode, nothing to seek, and no clock to start.
 async function sbeEnter(c, at) {
-  const v = sbeEl('sbeVideo');
   const img = sbeEl('sbeStill');
-  sbeApplyPreviewGrade(c, sbeFraming(c));
   const kind = sbeKind(c);
   if (kind === 'video') {
-    if (img) img.classList.remove('is-on');
-    await sbeLoadInto(v, c, (at === undefined || at === null) ? sbeNum(c.start) : sbeNum(at));
+    // THE CUT. The incoming clip goes on the stage through the spare (already
+    // loaded by sbePreloadNext when the cut was reached by playing into it),
+    // so the outgoing picture holds until the incoming one is there to replace
+    // it — never the element's own black in between.
+    // Null means another caller changed the stage while this cut waited for
+    // its frame (a repaint during the hold); the transport still has to run,
+    // so it plays whatever is now live rather than stalling on a paused one.
+    const v = (await sbeStageVideo(c, (at === undefined || at === null) ? sbeNum(c.start) : sbeNum(at), true))
+              || sbeVid();
+    if (!v) return;
     v.classList.add('is-on');
+    if (img) img.classList.remove('is-on');
+    sbeApplyPreviewGrade(c, sbeFraming(c));
+    sbeProgInfoVideo(c);
     try { v.playbackRate = sbeSpeed(c); } catch (e) {}
     try { await v.play(); } catch (e) {}
+    sbePreloadNext(c);
     return;
   }
-  try { v.pause(); } catch (e) {}
-  v.classList.remove('is-on');
+  sbeApplyPreviewGrade(c, sbeFraming(c));
+  sbeVidsOff();
+  sbePreloadNext(c);
+  sbeProgInfo(kind === 'still'
+    ? (c.title || String(c.path || '').split('/').pop()) + T('editor.still', ' · still · ') + sbeLen(c).toFixed(2) + 's'
+    : T('editor.black_2', 'black · ') + sbeLen(c).toFixed(2) + 's', '');
   if (img) {
     if (kind === 'still' && c.path) {
       const url = sbeClipUrl(c);
@@ -12874,14 +13643,16 @@ async function sbePlay() {
   SBE.lastTs = 0;
   sbePaintChrome();
   if (!sbeClipAt(SBE.clips, SBE.playhead)) SBE.playhead = sbeNum(c.film_start);
-  const v = sbeEl('sbeVideo');
   SBE.curId = c.id;
   if (sbeKind(c) === 'video') {
     // ENTERING MID-CLIP: film seconds into the slot are `speed` source
     // seconds into the take — the review caught a 2x clip re-seeking on
     // every frame because this seek landed at the 1x position.
-    await sbeLoadInto(v, c, sbeNum(c.start) + (SBE.playhead - sbeNum(c.film_start)) * sbeSpeed(c));
+    const v = (await sbeStageVideo(c, sbeNum(c.start) + (SBE.playhead - sbeNum(c.film_start)) * sbeSpeed(c), true))
+              || sbeVid();
     v.classList.add('is-on');
+    const img = sbeEl('sbeStill');
+    if (img) img.classList.remove('is-on');
     try { v.playbackRate = sbeSpeed(c); } catch (e) {}
     try {
       await v.play();
@@ -12895,11 +13666,12 @@ async function sbePlay() {
       if (!SBE.playing || (e && e.name === 'AbortError')) { /* stopped on purpose */ }
       else if (!v.muted) {
         v.muted = true;
-        sbeSetMute(true, 'browser blocked sound — click 🔊 to unmute', false);
+        sbeSetMute(true, T('editor.browser_blocked_sound_click_to', 'browser blocked sound — click 🔊 to unmute'), false);
         try { await v.play(); } catch (e2) {}
       }
     }
     sbeApplyPreviewGrade(c, sbeFraming(c));
+    sbePreloadNext(c);
   } else {
     await sbeEnter(c);
   }
@@ -12912,8 +13684,7 @@ function sbeStop() {
   SBE.playing = false;
   SBE.lastTs = 0;
   if (SBE.raf) { cancelAnimationFrame(SBE.raf); SBE.raf = 0; }
-  const v = sbeEl('sbeVideo');
-  if (v) { try { v.pause(); } catch (e) {} }
+  for (const v of sbeVids()) { try { v.pause(); } catch (e) {} }
   sbeMusicStop();
   sbeStripStop();
   if (SBE.open) sbePaintChrome();
@@ -12921,7 +13692,7 @@ function sbeStop() {
 
 async function sbeFrame() {
   if (!SBE.playing) return;
-  const v = sbeEl('sbeVideo');
+  const v = sbeVid();
   // THE WALL CLOCK, for the clips that do not carry one. A still and a slug
   // have no <video> whose currentTime the playhead can be read off, so without
   // this the transport froze the instant a film reached its first black.
@@ -12960,14 +13731,35 @@ async function sbeFrame() {
       const wantV = sbeNum(c.start) + Math.max(0, songT - sbeNum(c.film_start)) * sbeSpeed(c);
       const drift = wantV - v.currentTime;
       const oneFrame = 1 / sbeFps();
+      // A CLIP THAT HAS JUST COME ON is allowed one seek at two frames: the
+      // hold at the cut leaves it exactly that far behind the score, and a
+      // seek in the first instant of a shot is invisible, where a rate ramp
+      // would play the whole shot late (a 2 % ramp needs 5 s to close a
+      // tenth of a second, longer than most shots are).
+      const fresh = SBE.chaseId !== c.id;
+      if (fresh) SBE.chaseId = c.id;
+      // A SEEK TAKES TIME, and the score does not wait for it: landing on
+      // where the score WAS leaves the picture behind by the seek's own
+      // latency. `seekLead` is that latency, learned from the residual the
+      // last seek left (half-step average, 0-0.4 s), and the next seek aims
+      // that far ahead.
+      if (SBE.chaseLearn === c.id && !v.seeking && !v.paused) {
+        SBE.chaseLearn = null;
+        SBE.seekLead = Math.max(0, Math.min(0.4, sbeNum(SBE.seekLead, 0) + 0.5 * drift));
+      }
       try {
-        if (Math.abs(drift) >= 0.5) {
+        if (Math.abs(drift) >= 0.5 || (fresh && Math.abs(drift) > 2 * oneFrame)) {
           // Bigger than a rate ramp should ever have to close (a scrub, a
           // stall, the clip that just loaded) — a seek is honest here.
-          v.currentTime = wantV;
+          const lead = drift > 0 ? sbeNum(SBE.seekLead, 0) : 0;
+          v.currentTime = Math.min(sbeNum(c.end) - 1e-3, wantV + lead);
           v.playbackRate = sbeSpeed(c);
+          SBE.chaseLearn = c.id;
         } else if (Math.abs(drift) > oneFrame) {
-          v.playbackRate = sbeSpeed(c) * (drift > 0 ? 1.02 : 0.98);
+          // PROPORTIONAL, capped at 5 %: pitch is preserved, so the ramp is
+          // a hair of tempo on the clip's own sound, never a pitch bend.
+          const k = Math.max(0.02, Math.min(0.05, Math.abs(drift) * 0.5));
+          v.playbackRate = sbeSpeed(c) * (drift > 0 ? 1 + k : 1 - k);
         } else {
           v.playbackRate = sbeSpeed(c);
         }
@@ -12991,7 +13783,7 @@ async function sbeFrame() {
   } else {
     // A hole: the picture goes black and the clock keeps running, which is
     // exactly what the render will do if the gap is ever filled.
-    v.classList.remove('is-on');
+    for (const el of sbeVids()) el.classList.remove('is-on');
     const img = sbeEl('sbeStill');
     if (img) img.classList.remove('is-on');
     const nxt = SBE.clips.find(x => sbeNum(x.film_start) > SBE.playhead);
@@ -13018,10 +13810,15 @@ async function sbeFrame() {
 // in this browser.
 function sbeSyncMusic() {
   const path = (SBE.audio || {}).path || '';
+  if (SBE.music === path && (SBE.musicEl || !path)) return;
+  // A changed or removed soundtrack must not keep playing: the old element
+  // was dropped while still audible, so a song swapped (or removed, or
+  // undone) during playback carried on underneath the new one.
+  if (SBE.musicEl) { try { SBE.musicEl.pause(); } catch (e) {} }
   if (!path) { SBE.musicEl = null; SBE.music = ''; return; }
-  if (SBE.music === path && SBE.musicEl) return;
   SBE.music = path;
   SBE.musicOk = true;
+  if (typeof Audio === 'undefined') { SBE.musicEl = null; return; }
   const a = new Audio('/file?path=' + encodeURIComponent(path));
   a.preload = 'auto';
   a.muted = !!SBE.muted;
@@ -13031,7 +13828,7 @@ function sbeSyncMusic() {
     if (el && el.dataset.musicNoted !== '1') {
       el.dataset.musicNoted = '1';
       el.title = el.title +
-        ' The soundtrack cannot be played from here (it lives outside mlx_outputs) — the waveform, the beat grid and the render still use it.';
+        T('editor.the_soundtrack_cannot_be_played', ' The soundtrack cannot be played from here (it lives outside mlx_outputs) — the waveform, the beat grid and the render still use it.');
       if (el.classList) el.classList.add('is-noted');
     }
   });
@@ -13055,11 +13852,25 @@ function sbeMusicAt(t) {
 // (`audio_start_time`), so the song's own position is the ground truth for
 // where every clip's mouth SHOULD be — and it is the one clock in this page
 // a browser does not stall, seek or decode-jitter the way a <video> can.
-// Only while there is a song actually playing under everything: a board
-// with no soundtrack, or the "Under" mode where clips keep their own sound,
-// has no such ground truth and the picture stays the clock it always was.
+//
+// ...AND IN UNDER MODE TOO (2 Nov), for the second half of that reason. The
+// rule used to be Replace only, on the grounds that a film whose clips keep
+// their own sound has no musical ground truth. It does not need one: what it
+// needs is a clock that keeps running across a cut, and the picture is not
+// that clock. Every cut holds the transport while the next clip loads, so a
+// picture-driven playhead lost the length of that hold at every cut while the
+// score played straight on — then `sbeMusicSync` yanked the score back once
+// the gap passed its quarter-second tolerance. Measured on SUNDAY MASS (17
+// shots, clip sound under a score) in WebKit: 9 jumps of the score in one
+// play-through, the score up to 0.83 s away from the picture, which is what
+// "there are problems with the sound... it's not the same as the version you
+// have" was. The render has no such hold: its film clock is continuous, which
+// is the score's clock. So whenever a soundtrack is actually playing, it
+// drives the playhead and the picture (with its own sound) chases it.
+// A film with no soundtrack, or a stretch the bed does not cover, keeps the
+// picture as its clock — `sbeSongPlayhead` returns null there.
 function sbeMusicMaster() {
-  return !!(SBE.audio && SBE.audio.mode === 'replace' && SBE.musicOk
+  return !!(SBE.audio && SBE.audio.path && SBE.musicOk
             && SBE.musicEl && !SBE.musicEl.paused);
 }
 // The inverse of `sbeMusicAt`: the film second the song's own `currentTime`
@@ -13079,6 +13890,7 @@ function sbeMusicPlay() {
   const a = SBE.musicEl;
   if (!a || !SBE.musicOk) return;
   const at = sbeMusicAt(SBE.playhead);
+  sbeMusicLevelSync();
   try {
     if (at === null) { a.pause(); return; }
     a.currentTime = at;
@@ -13102,16 +13914,36 @@ function sbeMusicSync() {
   //
   // ON THE BED'S OWN CLOCK, which is the played window and not the track: the
   // playhead less the film second the music starts at.
-  const bw = sbeMusicWindow(SBE.audio, SBE.peaks ? SBE.peaks.duration : 0);
-  a.volume = sbeBedGainAt(SBE.audio || {}, SBE.clips,
-                          sbeFilmDuration(SBE.clips),
-                          SBE.playhead - bw.film_start);
+  sbeMusicLevelSync();
   try {
     if (a.paused) a.play().catch(() => {});
-    if (Math.abs(a.currentTime - want) > 0.25) a.currentTime = want;
+    // THE MASTER IS NOT CORRECTED BY ITS FOLLOWER. While the score drives
+    // the playhead, the only gap between them is the hold at a cut (the
+    // playhead parked on the next clip's first second while it loads) — and
+    // pulling the score back across that gap is the audible jump this rule
+    // removed. However long the hold (a slow machine, a cold proxy), the
+    // score plays on and the picture catches up to it. A real move while
+    // playing (a marker click) re-seeks the score in `sbeSeek`.
+    if (!sbeMusicMaster() && Math.abs(a.currentTime - want) > 0.25) a.currentTime = want;
   } catch (e) {}
 }
 function sbeMusicStop() { const a = SBE.musicEl; if (a) { try { a.pause(); } catch (e) {} } }
+
+// THE BED'S LEVEL, EVERY FRAME. It used to be set only in `sbeMusicSync`,
+// which runs at the cuts — so the first shot played the score at the
+// element's default 1.0 whatever its fader said (SUNDAY MASS, 2 Nov: the
+// score at 0.6 under the clips came in at full level for the opening three
+// seconds), and a fade or keyframe on the bed between two cuts was never
+// heard. Same curve as the render's `volume` and the level line.
+function sbeMusicLevelSync() {
+  const a = SBE.musicEl;
+  if (!a || !SBE.musicOk) return;
+  const bw = sbeMusicWindow(SBE.audio, SBE.peaks ? SBE.peaks.duration : 0);
+  const g = sbeBedGainAt(SBE.audio || {}, SBE.clips, sbeFilmDuration(SBE.clips),
+                         SBE.playhead - bw.film_start);
+  const want = Math.max(0, Math.min(1, sbeNum(g, 1)));
+  try { if (Math.abs(a.volume - want) > 1e-3) a.volume = want; } catch (e) {}
+}
 
 // ---- THE STRIP PLAYER ---------------------------------------------------
 // A POOL, NOT AN ELEMENT. The music bed is one track and one <audio>; clip
@@ -13203,6 +14035,29 @@ function sbeStripSync(force) {
       else if (!a.paused) a.pause();
     } catch (e) {}
   }
+  sbePictureGainSync();
+  sbeMusicLevelSync();
+}
+
+// THE PICTURE'S OWN SOUND GETS ITS ENVELOPE TOO. A linked clip is heard
+// through the picture element, and that element was held at volume 1 — so a
+// clip's level line, its keyframes and its fades were in the render (the
+// clip lane's `volume` term) and in the export, and missing from the one
+// place the person cutting listens. An agent's cut that set clip sound at
+// 0.9 under the score played at 1.0 here and 0.9 in the file. Same curve,
+// same clock as the strip voices above: film seconds into the strip.
+// Runs wherever the strips are synced (every frame, every scrub).
+function sbePictureGainSync() {
+  // The picture element on screen. (With two stage videos this is the LIVE
+  // one — the black-flash fix's `sbeVid()`.)
+  const v = sbeVid();
+  if (!v) return;
+  const c = sbeClipAt(SBE.clips, SBE.playhead);
+  if (!c || !sbePictureCarriesSound(c)) return;
+  const win = sbeClipAudio(c);
+  const g = sbeGainAt(c, win.len, Math.max(0, SBE.playhead - win.film_start));
+  const want = Math.max(0, Math.min(1, sbeNum(g, 1)));
+  try { if (Math.abs(v.volume - want) > 1e-3) v.volume = want; } catch (e) {}
 }
 
 function sbeStripStop() {
@@ -13292,7 +14147,7 @@ function sbeToggleSnap() {
   if (!box) return;
   box.checked = !box.checked;
   sbePaint();
-  phosToast(box.checked ? 'Snap to beat is on.' : 'Snap to beat is off — clips move freely.',
+  phosToast(box.checked ? T('editor.snap_to_beat_is_on', 'Snap to beat is on.') : T('editor.snap_to_beat_is_off', 'Snap to beat is off — clips move freely.'),
             { duration: 2000 });
 }
 
@@ -13376,7 +14231,7 @@ function sbeTsDuplicateSel() {
     from = 'soundtrack';
   } else if (sbeSoundLaneSel()) {
     src = sbeTsFromClip(sbeById(SBE.clips, SBE.sel));
-    from = 'clip\'s sound';
+    from = T('editor.clip_s_sound', 'clip\'s sound');
   } else {
     return false;
   }
@@ -13386,8 +14241,8 @@ function sbeTsDuplicateSel() {
     const i = (SBE.tracks || []).findIndex(t => String(t.id) === String(r.track));
     sbeTsSelectOne(r.added.id);
     sbePaint();
-    phosToast('Copied the ' + from + ' onto ' + sbeTrackLabel(i) + ' at '
-              + sbeFmtTime(r.added.film_start) + ', right after the original. It plays '
+    phosToast(T('editor.copied_the', 'Copied the ') + from + ' onto ' + sbeTrackLabel(i) + ' at '
+              + sbeFmtTime(r.added.film_start) + T('editor.right_after_the_original_it', ', right after the original. It plays ')
               + 'with everything above it; drag it wherever it belongs.',
               { duration: 7000 });
   }
@@ -13461,7 +14316,7 @@ function sbeSplitHere() {
       return at > w.film_start && at < w.film_end;
     });
     if (!under.length) {
-      phosToast('Put the playhead inside the selected sound first — Split cuts it there.', {});
+      phosToast(T('editor.put_the_playhead_inside_the', 'Put the playhead inside the selected sound first — Split cuts it there.'), {});
       return;
     }
     sbeTsMutateEach(under, (tracks, id) => sbeTsSplit(tracks, id, at));
@@ -13503,7 +14358,7 @@ function sbeToggleLock() {
   if (SBE.undo.length > SBE_UNDO_MAX) SBE.undo.shift();
   SBE.redo.length = 0;
   SBE.dirty = true;
-  sbeSetState('unsaved changes', 'dirty');
+  sbeSetState(T('editor.unsaved_changes', 'unsaved changes'), 'dirty');
   sbePaint();
   sbeQueueSave();
 }
@@ -13541,12 +14396,12 @@ function sbeReplaceSelWithAlt() {
   const c = sbeById(SBE.clips, SBE.sel);
   if (!c) return;
   const u = sbeAltForClip(c);
-  if (!u) { phosToast('No rendered alternate for this shot is waiting.', {}); return; }
+  if (!u) { phosToast(T('editor.no_rendered_alternate_for_this_2', 'No rendered alternate for this shot is waiting.'), {}); return; }
   const item = { path: u.path, proxy: u.proxy || null, duration_s: u.duration_s, n: u.n, title: u.title };
   const ok = sbeMutate(cs => sbeReplaceClip(cs, c.id, item));
   if (ok) {
     SBE.unplaced = (SBE.unplaced || []).filter(x => x !== u);
-    phosToast('Replaced with the rendered alternate. Same cut, same timings.',
+    phosToast(T('editor.replaced_with_the_rendered_alternate', 'Replaced with the rendered alternate. Same cut, same timings.'),
               { kind: 'success', duration: 5000 });
     sbePaint();
   }
@@ -13561,13 +14416,13 @@ function sbeSwapIn(i) {
   if (!u || !u.slot || u.slot.film_start === undefined) return;
   const target = (SBE.clips || []).find(
     x => Math.abs(sbeNum(x.film_start) - sbeNum(u.slot.film_start)) < 0.05);
-  if (!target) { phosToast('That slot is empty now — use Place instead.', {}); return; }
+  if (!target) { phosToast(T('editor.that_slot_is_empty_now', 'That slot is empty now — use Place instead.'), {}); return; }
   const item = { path: u.path, proxy: u.proxy || null,
                  duration_s: u.duration_s, n: u.n, title: u.title };
   const ok = sbeMutate(cs => sbeReplaceClip(cs, target.id, item));
   if (ok) {
     SBE.unplaced = SBE.unplaced.filter((_, k) => k !== i);
-    phosToast('Swapped in for shot ' + (target.n !== undefined && target.n !== null ? target.n : '')
+    phosToast(T('editor.swapped_in_for_shot', 'Swapped in for shot ') + (target.n !== undefined && target.n !== null ? target.n : '')
               + '. Same cut, same timings.', { kind: 'success', duration: 5000 });
     sbePaint();
   }
@@ -13576,9 +14431,71 @@ function sbeSwapIn(i) {
 // ---------------------------------------------------------------------------
 // PREPARE / AUTO / GENERATE / RENDER
 // ---------------------------------------------------------------------------
+// The soundtrack the DOCUMENT holds: what Save, export, reload and Render use.
+function sbeCommittedMusic() {
+  return String((SBE.audio && SBE.audio.path) || '');
+}
+
+// A new soundtrack is ONE document edit (one undo step, one save). Before
+// this, Prepare only wrote peaks beside the board: the preview kept the old
+// song, Render took the typed path, and Save/export/reload kept the old one.
+function sbeMusicAdopt(path) {
+  path = String(path || '').trim();
+  const owned = String((SBE.edit && SBE.edit.audio && SBE.edit.audio.path) || '');
+  if (!path || path === owned) return false;
+  const old = SBE.audio || {};
+  const before = JSON.stringify(SBE.audio || null);
+  const beforeEdit = JSON.stringify((SBE.edit && SBE.edit.audio) || null);
+  // The track already on screen (discovered from peaks.json, never saved)
+  // keeps its placement and cuts; a different song starts clean.
+  const same = path === sbeCommittedMusic();
+  const next = same ? Object.assign({}, old)
+                    : { path: path, offset: 0, peaks: 'peaks.json' };
+  if (!same && old.mode) next.mode = old.mode;          // keep the mix choices,
+  if (!same && old.mix) next.mix = Object.assign({}, old.mix); // drop the cuts
+  sbeSetAudio(next);
+  if (!same) { SBE.peaks = null; SBE.peaksFor = ''; }
+  if (typeof sbeSyncMusic === 'function') sbeSyncMusic();
+  sbeMusicUndoPush(before, beforeEdit);
+  sbePaintMusicName();
+  return true;
+}
+
+function sbeMusicRemove() {
+  if (!sbeCommittedMusic()) return;
+  const before = JSON.stringify(SBE.audio || null);
+  const beforeEdit = JSON.stringify((SBE.edit && SBE.edit.audio) || null);
+  sbeSetAudio(null);
+  SBE.edit.audio = { removed: true };   // no `path`: every reader sees no track
+  SBE.peaks = null; SBE.peaksFor = '';
+  if (typeof sbeSyncMusic === 'function') sbeSyncMusic();
+  const box = sbeEl('sbeMusic'); if (box) box.value = '';
+  sbeMusicUndoPush(before, beforeEdit);
+  sbePaintMusicName();
+  phosToast('Soundtrack removed. Undo brings it back.', { kind: 'info' });
+}
+
+// sbeMusicCommit compares objects and expects one before; a track appearing
+// or disappearing is always a change, so push the step directly, recording
+// what the DOCUMENT held before (it may differ from what was on screen).
+function sbeMusicUndoPush(beforeJson, beforeEditJson) {
+  const snap = JSON.parse(sbeSnapshot(JSON.parse(beforeJson)));
+  snap.edit_audio = JSON.parse(beforeEditJson);
+  SBE.undo.push(JSON.stringify(snap));
+  if (SBE.undo.length > SBE_UNDO_MAX) SBE.undo.shift();
+  SBE.redo.length = 0;
+  SBE.dirty = true;
+  sbeSetState(T('editor.unsaved_changes', 'unsaved changes'), 'dirty');
+  sbePaint();
+  sbeQueueSave();
+}
+
 async function sbePrepare() {
   const fd = new URLSearchParams();
   fd.set('id', SBE.id);
+  // The film (and draft) this Prepare belongs to: another one may be open
+  // by the time the server answers.
+  const forId = SBE.id, forDraft = SBE.activeDraft || '';
   const music = (sbeEl('sbeMusic').value || '').trim();
   if (music) fd.set('music', music);
   let r;
@@ -13589,6 +14506,10 @@ async function sbePrepare() {
     if (r.prepare) { SBE.prepare = r.prepare; sbePaintChrome(); }
     return;
   }
+  // Only a path the server accepted becomes the film's soundtrack; a typo
+  // or a missing file must not replace a good one.
+  if (SBE.id !== forId || (SBE.activeDraft || '') !== forDraft) return;
+  if (music) sbeMusicAdopt(music);
   SBE.prepare = r.prepare || { state: 'running', stage: 'start' };
   sbePaintChrome();
 }
@@ -13599,10 +14520,10 @@ async function sbePrepareCancel() {
 }
 
 async function sbeAuto() {
-  if (!confirm('Re-cut this film from scratch?\n\n' +
-      'The auto-editor picks the best window of every clip and cuts on the beat. ' +
-      'It THROWS AWAY the arrangement on screen — every trim, every move, every split.\n\n' +
-      'The clips themselves are untouched.')) return;
+  if (!confirm(T('editor.re_cut_this_film_from', 'Re-cut this film from scratch?\n\n') +
+      T('editor.the_auto_editor_picks_the', 'The auto-editor picks the best window of every clip and cuts on the beat. ') +
+      T('editor.it_throws_away_the_arrangement', 'It THROWS AWAY the arrangement on screen — every trim, every move, every split.\n\n') +
+      T('editor.the_clips_themselves_are_untouched', 'The clips themselves are untouched.'))) return;
   const fd = new URLSearchParams();
   fd.set('id', SBE.id);
   const music = (sbeEl('sbeMusic').value || '').trim();
@@ -13613,7 +14534,7 @@ async function sbeAuto() {
   if (!r.ok) { phosToast(r.error || 'The auto-edit failed.', { kind: 'danger' }); return; }
   SBE.undo.length = 0; SBE.redo.length = 0;
   sbeAdopt(r, true);
-  phosToast('Re-cut · ' + (r.edit.clips || []).length + ' clips.', { kind: 'success' });
+  phosToast(T('editor.re_cut', 'Re-cut · ') + (r.edit.clips || []).length + ' clips.', { kind: 'success' });
 }
 
 // EDITOR-13 (Codex 4.17.0): THE ARRANGEMENT AN ANALYSIS MEASURES. Match
@@ -13670,20 +14591,20 @@ async function sbeAutoAlign() {
   // never folded into "already matches".
   const skipped = (r.skipped || []).length;
   const unmeasured = skipped
-    ? (skipped + (skipped === 1 ? ' singing shot' : ' singing shots') + ' could not be ' +
-       'measured (no face held, or too little voice to compare) and ' +
-       (skipped === 1 ? 'was' : 'were') + ' left alone.')
+    ? (skipped + (skipped === 1 ? T('editor.singing_shot', ' singing shot') : T('editor.singing_shots', ' singing shots')) + T('editor.could_not_be', ' could not be ') +
+       T('editor.measured_no_face_held_or', 'measured (no face held, or too little voice to compare) and ') +
+       (skipped === 1 ? 'was' : 'were') + T('editor.left_alone', ' left alone.'))
     : '';
   if (!props.length) {
     if (skipped) {
       phosToast(unmeasured + (sbeNum(r.checked, 0)
-                  ? ' The rest already match the song within a frame.' : ''),
+                  ? T('editor.the_rest_already_match_the', ' The rest already match the song within a frame.') : ''),
                 { icon: 'ph-info', duration: 8000 });
     } else if (!sbeNum(r.checked, 0)) {
-      phosToast('There are no singing (lip-sync) shots on this film to align.',
+      phosToast(T('editor.there_are_no_singing_lip', 'There are no singing (lip-sync) shots on this film to align.'),
                 { duration: 5000 });
     } else {
-      phosToast('Every singing shot already matches the song within a frame.',
+      phosToast(T('editor.every_singing_shot_already_matches', 'Every singing shot already matches the song within a frame.'),
                 { kind: 'success', duration: 5000 });
     }
     return;
@@ -13691,15 +14612,14 @@ async function sbeAutoAlign() {
   const deltas = {};
   const ids = [];
   for (const p of props) { deltas[p.id] = sbeNum(p.delta_sec); ids.push(p.id); }
-  const el = phosToast(props.length + (props.length === 1 ? ' shot is' : ' shots are')
-                       + ' off the song by more than a frame.'
+  const el = phosToast(TP('editor.shots_off_the_song', props.length, {one: '{count} shot is off the song by more than a frame.', other: '{count} shots are off the song by more than a frame.'})
                        + (unmeasured ? ' ' + unmeasured : ''),
                        { icon: 'ph-info', duration: 20000 });
   if (!el) return;
   const a = document.createElement('a');
   a.href = '#';
   a.className = 'phos-toast-action';
-  a.textContent = 'Accept all (' + ids.length + ')';
+  a.textContent = T('editor.accept_all', 'Accept all (') + ids.length + ')';
   a.onclick = (ev) => {
     ev.preventDefault();
     el.remove();
@@ -13708,14 +14628,14 @@ async function sbeAutoAlign() {
     const live = ids.filter(id => sbeAnalysisFresh(id, fp, true));
     const stale = ids.length - live.length;
     if (!live.length) {
-      phosToast('Those shots changed after they were measured — run Auto-align again.',
+      phosToast(T('editor.those_shots_changed_after_they', 'Those shots changed after they were measured — run Auto-align again.'),
                 { duration: 6000 });
       return;
     }
     const ok = sbeMutateEach(live, (cs, id) => sbeSlip(cs, id, deltas[id]));
     if (ok) {
-      phosToast('Snapped ' + live.length + ' shot(s) to the song. One Undo puts them all back.'
-                + (stale ? ' ' + stale + ' changed after they were measured and were left alone.' : ''),
+      phosToast(T('editor.snapped', 'Snapped ') + live.length + T('editor.shot_s_to_the_song', ' shot(s) to the song. One Undo puts them all back.')
+                + (stale ? ' ' + stale + T('editor.changed_after_they_were_measured', ' changed after they were measured and were left alone.') : ''),
                 { kind: 'success', duration: 6000 });
     }
   };
@@ -13735,7 +14655,7 @@ async function sbeMatchColourOpen() {
   sbeEl('sbeMatchGo').disabled = true;
   sbeEl('sbeMatchStrength').value = 100;
   sbeEl('sbeMatchStrengthHint').textContent = '100%';
-  sbeEl('sbeMatchWhere').textContent = 'Reading one frame from every clip…';
+  sbeEl('sbeMatchWhere').textContent = T('editor.reading_one_frame_from_every', 'Reading one frame from every clip…');
   const heroId = (sbeSelCount() === 1) ? SBE.sel : '';
   const fd = new URLSearchParams();
   fd.set('id', SBE.id);
@@ -13750,11 +14670,11 @@ async function sbeMatchColourOpen() {
   }
   _sbeMatchProposals = (r.proposals || []).filter(p => sbeAnalysisFresh(p.id, _sbeMatchFp, false));
   const hero = heroId ? sbeNiceName((sbeById(SBE.clips, heroId) || {}).title || 'this clip')
-                      : "the film's median";
+                      : T('editor.the_film_s_median', "the film's median");
   sbeEl('sbeMatchWhere').textContent = _sbeMatchProposals.length
     ? (_sbeMatchProposals.length + ' of ' + (r.proposals || []).length + (heroId ? '' : ' other')
-       + ' clip(s) differ from ' + hero + ' by more than a touch.')
-    : ('Every clip already matches ' + hero + '.');
+       + ' clip(s) differ from ' + hero + T('editor.by_more_than_a_touch', ' by more than a touch.'))
+    : (T('editor.every_clip_already_matches', 'Every clip already matches ') + hero + '.');
   sbeEl('sbeMatchGo').disabled = !_sbeMatchProposals.length;
 }
 function sbeMatchClose() { sbeEl('sbeMatchModal').classList.remove('show'); }
@@ -13770,7 +14690,7 @@ function sbeMatchApply() {
   const stale = _sbeMatchProposals.length - ids.length;
   if (!ids.length) {
     sbeMatchClose();
-    phosToast('Those clips changed after they were sampled — open Match colour again.',
+    phosToast(T('editor.those_clips_changed_after_they', 'Those clips changed after they were sampled — open Match colour again.'),
               { duration: 6000 });
     return;
   }
@@ -13788,9 +14708,9 @@ function sbeMatchApply() {
   });
   sbeMatchClose();
   if (ok) {
-    phosToast('Colour matched on ' + ids.length + ' clip(s) at ' + Math.round(k * 100)
-              + '%. One Undo puts them all back.'
-              + (stale ? ' ' + stale + ' changed after they were sampled and were left alone.' : ''),
+    phosToast(T('editor.colour_matched_on', 'Colour matched on ') + ids.length + ' clip(s) at ' + Math.round(k * 100)
+              + T('editor.one_undo_puts_them_all', '%. One Undo puts them all back.')
+              + (stale ? ' ' + stale + T('editor.changed_after_they_were_sampled', ' changed after they were sampled and were left alone.') : ''),
               { kind: 'success', duration: 6000 });
   }
 }
@@ -13822,7 +14742,7 @@ let _sbeRetakePath = '';
 function sbeRetakeSel() {
   const c = sbeById(SBE.clips, SBE.sel);
   const shot = c ? sbeShotForClip(c) : null;
-  if (!c || !shot) { phosToast('Only a clip that came from a shot can be retaken.', {}); return; }
+  if (!c || !shot) { phosToast(T('editor.only_a_clip_that_came_2', 'Only a clip that came from a shot can be retaken.'), {}); return; }
   const len = Math.max(0.5, sbeNum(shot.duration_s, 0) || (sbeLen(c) * sbeSpeed(c) + 1));
   sbeGenOpen(sbeNum(c.film_start), len, { retakeOf: c.id, retakePath: c.path,
                                           prompt: shot.prompt || '',
@@ -13845,9 +14765,9 @@ function sbeRetakeSummary(shot) {
     const t1 = t0 + sbeNum(shot.duration_s, 0);
     bits.push('song ' + sbeFmtTime(t0) + '-' + sbeFmtTime(t1));
   }
-  bits.push('new seed');
+  bits.push(T('editor.new_seed', 'new seed'));
   const est = (shot.est_min || {}).draft;
-  if (est) bits.push('~' + (est < 1 ? '<1' : Math.round(est)) + ' min (draft)');
+  if (est) bits.push('~' + (est < 1 ? '<1' : Math.round(est)) + T('editor.min_draft', ' min (draft)'));
   return bits.join(' · ');
 }
 
@@ -13857,20 +14777,20 @@ function sbeGenOpen(filmStart, duration, opts) {
   _sbeRetakePath = (opts && opts.retakePath) || '';
   sbeEl('sbeGenWhere').textContent = _sbeRetakeOf
     ? (((opts && opts.summary) ? opts.summary + ' — ' : '')
-       + 'A new take of ' + (opts.name || 'this clip') + ': the same shot and character, a new ' +
-       'seed, the prompt below to edit. When it lands, a line above the timeline offers it ' +
-       'against this clip — Use it, or keep the old one.')
-    : ('Nothing plays between ' + sbeFmtTime(filmStart) + ' and ' +
-       sbeFmtTime(sbeNum(filmStart) + sbeNum(duration)) + '. This shot is written to the ' +
-       'storyboard and rendered like any other.');
+       + T('editor.a_new_take_of', 'A new take of ') + (opts.name || 'this clip') + T('editor.the_same_shot_and_character', ': the same shot and character, a new ') +
+       T('editor.seed_the_prompt_below_to', 'seed, the prompt below to edit. When it lands, a line above the timeline offers it ') +
+       T('editor.against_this_clip_use_it', 'against this clip — Use it, or keep the old one.'))
+    : (T('editor.nothing_plays_between', 'Nothing plays between ') + sbeFmtTime(filmStart) + ' and ' +
+       sbeFmtTime(sbeNum(filmStart) + sbeNum(duration)) + T('editor.this_shot_is_written_to', '. This shot is written to the ') +
+       T('editor.storyboard_and_rendered_like_any', 'storyboard and rendered like any other.'));
   const ttl = sbeEl('sbeGenTitle');
-  if (ttl) ttl.textContent = _sbeRetakeOf ? 'Retake this shot' : 'Fill this hole';
+  if (ttl) ttl.textContent = _sbeRetakeOf ? T('editor.retake_this_shot', 'Retake this shot') : T('editor.fill_this_hole', 'Fill this hole');
   const after = sbeEl('sbeGenAfter');
   if (after) after.hidden = !!_sbeRetakeOf;
   const box = sbeEl('sbeGenPrompt');
   if (box) box.value = (opts && opts.prompt) ? opts.prompt : '';
   const go = sbeEl('sbeGenGo');
-  if (go) go.textContent = _sbeRetakeOf ? 'Queue the retake' : 'Queue the shot';
+  if (go) go.textContent = _sbeRetakeOf ? T('editor.queue_the_retake', 'Queue the retake') : T('editor.queue_the_shot', 'Queue the shot');
   // FLOOR, not round: a shot longer than the hole it was ordered for pushes
   // everything after it off the beat the moment it is placed.
   sbeEl('sbeGenDuration').value =
@@ -13885,7 +14805,7 @@ function sbeGenClose() { sbeEl('sbeGenModal').classList.remove('show'); }
 
 async function sbeGenSubmit() {
   const prompt = (sbeEl('sbeGenPrompt').value || '').trim();
-  if (!prompt) { phosToast('Write what the shot shows.', {}); return; }
+  if (!prompt) { phosToast(T('editor.write_what_the_shot_shows', 'Write what the shot shows.'), {}); return; }
   const btn = sbeEl('sbeGenGo');
   btn.disabled = true;
   const fd = new URLSearchParams();
@@ -13910,10 +14830,10 @@ async function sbeGenSubmit() {
   // them here rather than echoing the request.
   const box = sbeEl('sbeGenParams');
   box.hidden = false;
-  box.textContent = 'queued as shot ' + r.n + ' (job ' + r.job_id + ')\n' +
+  box.textContent = T('editor.queued_as_shot', 'queued as shot ') + r.n + ' (job ' + r.job_id + ')\n' +
     Object.keys(r.params || {}).map(k => k + ': ' + r.params[k]).join('\n');
   SBE.awaitingClip = Date.now();
-  phosToast('Shot ' + r.n + ' is in the queue. It appears under the timeline when it lands.',
+  phosToast(T('editor.shot', 'Shot ') + r.n + T('editor.is_in_the_queue_it', ' is in the queue. It appears under the timeline when it lands.'),
             { kind: 'success', duration: 6000 });
 }
 
@@ -13928,9 +14848,11 @@ function sbeDeliverGet() {
   return { format: SBE_DELIVER_FORMATS.indexOf(d.format) >= 0 ? d.format : 'h264',
            size: SBE_DELIVER_SIZES.indexOf(d.size) >= 0 ? d.size : 'native',
            finish: SBE_DELIVER_FINISH.indexOf(d.finish) >= 0 ? d.finish : 'none',
-           // FILM-28: off by default — a mix graded by ear is not something
-           // a render should quietly retarget without being asked.
-           loudnorm: !!d.loudnorm };
+           // MASTER LOUDNESS IS ON BY DEFAULT (2 Nov). Off, the editor's film
+           // came out 3-4 dB quieter than the agent's cut of the same film
+           // and ~8 dB quieter in the dialogue: every film made by hand
+           // sounded weak next to everything else. Unticking is remembered.
+           loudnorm: d.loudnorm !== false };
 }
 // FILM-14: unlike Deliver's format/size/finish (a client preference posted
 // with each render), the Film look rides IN THE DOCUMENT — `edit.settings`,
@@ -13942,7 +14864,7 @@ function sbeSetFilmLook(value) {
   SBE.edit = SBE.edit || {};
   SBE.edit.settings = Object.assign({}, SBE.edit.settings || {}, { film_look: value || 'none' });
   SBE.dirty = true;
-  sbeSetState('unsaved changes', 'dirty');
+  sbeSetState(T('editor.unsaved_changes', 'unsaved changes'), 'dirty');
   sbePaintChrome();
   sbeQueueSave();
 }
@@ -13973,14 +14895,16 @@ function sbeDeliverPaint() {
   if (btn && !SBE.rendering) {
     const short = ({ h264: '', hevc: 'HEVC', prores: 'ProRes' })[d.format];
     const size = d.size === 'native' ? '' : (d.size === '2160p' ? '4K' : '1080p');
-    const fin = d.finish === 'none' ? '' : (d.finish === 'heavy_grain' ? 'heavy grain' : 'grain');
-    const ln = d.loudnorm ? '-14 LUFS' : '';
+    const fin = d.finish === 'none' ? '' : (d.finish === 'heavy_grain' ? T('editor.heavy_grain', 'heavy grain') : 'grain');
+    // On is the default, so the button names only the exception.
+    const ln = d.loudnorm ? '' : T('editor.no_master', 'no master');
     const tag = [short, size, fin, ln].filter(Boolean).join(' ');
-    btn.textContent = tag ? ('Render · ' + tag) : 'Render';
-    btn.title = 'Assemble the film as ' + ({ h264: 'H.264', hevc: 'HEVC', prores: 'ProRes 422 HQ' })[d.format]
-      + (d.size === 'native' ? ', as cut' : (d.size === '2160p' ? ' at 4K' : ' at 1080p'))
-      + (d.loudnorm ? ', normalized to -14 LUFS' : '')
-      + '. Change it under the arrow.';
+    btn.textContent = tag ? (T('editor.render', 'Render · ') + tag) : T('editor.render_2', 'Render');
+    btn.title = T('editor.assemble_the_film_as', 'Assemble the film as ') + ({ h264: 'H.264', hevc: 'HEVC', prores: T('editor.prores_422_hq', 'ProRes 422 HQ') })[d.format]
+      + (d.size === 'native' ? T('editor.as_cut', ', as cut') : (d.size === '2160p' ? ' at 4K' : ' at 1080p'))
+      + (d.loudnorm ? ', mastered to -15 LUFS with a -2 dB peak limit'
+                    : T('editor.without_the_loudness_master', ', without the loudness master'))
+      + T('editor.change_it_under_the_arrow', '. Change it under the arrow.');
   }
 }
 
@@ -13990,8 +14914,8 @@ async function sbeRenderFilm() {
   // previous cut — a film that is silently not the one on screen, which is
   // the worst possible way to find out about a failing save.
   if (SBE.dirty && !(await sbeSave(true))) {
-    phosToast('The timeline could not be saved, and the render builds from ' +
-              'the saved file — it would make the previous cut. Fix the save ' +
+    phosToast(T('editor.the_timeline_could_not_be', 'The timeline could not be saved, and the render builds from ') +
+              T('editor.the_saved_file_it_would', 'the saved file — it would make the previous cut. Fix the save ') +
               'first.', { kind: 'danger', duration: 8000 });
     return;
   }
@@ -14005,10 +14929,10 @@ async function sbeRenderFilm() {
     sbePaintOffline();
     const names = (SBE.clips || []).filter(c => sbeClipOffline(c))
       .map(c => sbeNiceName(c.title || String(c.path || '').split('/').pop()));
-    phosToast((SBE.offline.length === 1 ? '1 clip is' : SBE.offline.length + ' clips are') +
+    phosToast((SBE.offline.length === 1 ? T('editor.1_clip_is', '1 clip is') : SBE.offline.length + T('editor.clips_are', ' clips are')) +
               ' offline' + (names.length ? ' — ' + names.slice(0, 4).join(', ') +
               (names.length > 4 ? ', …' : '') : '') +
-              '. Relink or replace them before rendering.',
+              T('editor.relink_or_replace_them_before', '. Relink or replace them before rendering.'),
               { kind: 'danger', duration: 9000 });
     return;
   }
@@ -14024,18 +14948,20 @@ async function sbeRenderFilm() {
   const prev = btn.textContent;
   SBE.rendering = true;
   btn.disabled = true;
-  btn.textContent = 'Starting…';
+  btn.textContent = T('editor.starting', 'Starting…');
   sbeEl('sbeRenderNote').textContent =
-    'One ffmpeg pass over ' + SBE.clips.length + ' clips. This takes as long as an encode takes.';
+    T('editor.one_ffmpeg_pass_over', 'One ffmpeg pass over ') + SBE.clips.length + T('editor.clips_this_takes_as_long', ' clips. This takes as long as an encode takes.');
   const fd = new URLSearchParams();
   fd.set('id', SBE.id);
-  const music = (sbeEl('sbeMusic').value || '').trim();
+  // Render the DOCUMENT's soundtrack, the same one Save and export carry. A
+  // path typed but never prepared is not part of the film.
+  const music = String((SBE.audio && SBE.audio.path) || '');
   if (music) { fd.set('music', music); fd.set('music_mode', sbeMusicMode()); }
   const dl = sbeDeliverGet();
   fd.set('format', dl.format);
   fd.set('size', dl.size);
   fd.set('finish', dl.finish);
-  if (dl.loudnorm) fd.set('loudnorm', 'on');
+  fd.set('loudnorm', dl.loudnorm ? 'on' : 'off');
   // FILM-28: A JOB, NOT A BLOCKED REQUEST. The route used to hold the whole
   // fetch open until ffmpeg finished — no progress, and closing the tab (or
   // just impatience) had no way to say "stop". `edit/render/start` answers
@@ -14056,7 +14982,8 @@ async function sbeRenderFilm() {
     return;
   }
   SBE.renderJob = started.job;
-  btn.textContent = 'Assembling…';
+  sbePaintRenderProgress(0);
+  btn.textContent = T('editor.assembling', 'Assembling…');
   // EDITOR-12: THE FILM THIS RENDER IS OF, kept with the job — by the time
   // it lands the Editor may be showing another film.
   sbeRenderPoll(started.job, btn, prev, SBE.id, SBE.title || '');
@@ -14081,29 +15008,50 @@ async function sbeRenderPoll(job, btn, prev, boardId, boardTitle) {
   }
   if (r.state === 'running') {
     sbeEl('sbeRenderNote').innerHTML =
-      'Rendering — ' + Math.round(sbeNum(r.elapsed_sec)) + 's so far. '
+      T('editor.rendering', 'Rendering — ') + Math.round(sbeNum(r.elapsed_sec)) + T('editor.s_so_far', 's so far. ')
       + '<a href="#" class="phos-toast-action" onclick="sbeRenderCancel();return false;">Cancel</a>';
+    sbePaintRenderProgress(sbeNum(r.elapsed_sec));
     SBE.renderPollTimer = setTimeout(() => sbeRenderPoll(job, btn, prev, boardId, boardTitle), 1200);
     return;
   }
   sbeRenderSettle(btn, prev);
   if (r.state === 'canceled') {
     sbeEl('sbeRenderNote').textContent = '';
-    phosToast('Render canceled.', { duration: 4000 });
+    phosToast(T('editor.render_canceled', 'Render canceled.'), { duration: 4000 });
     return;
   }
   if (r.state !== 'done' || !r.result || !r.result.ok) {
     sbeEl('sbeRenderNote').textContent = '';
     phosToast((r.result && r.result.error) || r.error ||
-              'The film could not be assembled.', { kind: 'danger', duration: 8000 });
+              T('editor.the_film_could_not_be', 'The film could not be assembled.'), { kind: 'danger', duration: 8000 });
     return;
   }
   sbeRenderFinish(r.result, boardId, boardTitle);
 }
 
+// PROGRESS WHERE IT CAN BE SEEN. The note above lives inside the ▾ menu,
+// which closes the moment Render is pressed, so a render ran with no visible
+// progress and no reachable Cancel. The header chip is always on screen; it
+// shows the running render, then goes back to "Last render" when it ends.
+function sbePaintRenderProgress(sec) {
+  const chip = sbeEl('sbeRenderChip');
+  if (!chip) return;
+  chip.hidden = false;
+  chip.innerHTML = '';
+  const label = document.createElement('span');
+  label.className = 'sbe-render-chip-label';
+  label.textContent = T('editor.rendering_2', 'Rendering · ') + Math.round(sec || 0) + 's';
+  chip.appendChild(label);
+  const stop = document.createElement('button');
+  stop.type = 'button'; stop.textContent = T('editor.cancel', 'Cancel');
+  stop.onclick = () => sbeRenderCancel();
+  chip.appendChild(stop);
+}
+
 function sbeRenderSettle(btn, prev) {
   SBE.rendering = false;
   SBE.renderJob = '';
+  sbeRenderChipFor(SBE.id);
   if (SBE.renderPollTimer) { clearTimeout(SBE.renderPollTimer); SBE.renderPollTimer = null; }
   btn.disabled = false;
   btn.textContent = prev;
@@ -14112,7 +15060,7 @@ function sbeRenderSettle(btn, prev) {
 function sbeRenderCancel() {
   const job = SBE.renderJob;
   if (!job) return;
-  sbeEl('sbeRenderNote').textContent = 'Canceling…';
+  sbeEl('sbeRenderNote').textContent = T('editor.canceling', 'Canceling…');
   const fd = new URLSearchParams();
   fd.set('job', job);
   fetch('/storyboard/edit/render/cancel', { method: 'POST', body: fd }).catch(() => {});
@@ -14130,7 +15078,7 @@ function sbeRenderFinish(r, boardId, boardTitle) {
   const here = (id === SBE.id);
   if (here) {
     sbeEl('sbeRenderNote').textContent = (r.gaps_note || '') +
-      ' Wrote ' + Math.round(sbeNum(r.duration)) + 's to ' + (r.path || '').split('/').pop();
+      T('editor.wrote', ' Wrote ') + Math.round(sbeNum(r.duration)) + 's to ' + (r.path || '').split('/').pop();
   }
   // FILM-24: THE RENDER STAYS ON THE TIMELINE. This used to end by switching
   // to Storyboard and opening the Film screen — which, combined with the
@@ -14143,19 +15091,19 @@ function sbeRenderFinish(r, boardId, boardTitle) {
   SBE.lastRenders = SBE.lastRenders || {};
   SBE.lastRenders[id] = { focus: focus, r: r };
   if (here) sbePaintRenderChip(id, focus, r);
-  const toastEl = phosToast((here ? 'Film ready' : '"' + (boardTitle || 'The other film') + '" is ready')
+  const toastEl = phosToast((here ? T('editor.film_ready', 'Film ready') : '"' + (boardTitle || 'The other film') + T('editor.is_ready', '" is ready'))
             + ' · ' + Math.round(sbeNum(r.duration)) + 's' +
             (r.deliver && r.deliver.label ? ' · ' + r.deliver.label : '') +
             (r.deliver && r.deliver.format === 'prores'
-              ? ' — a ProRes .mov: it opens in an NLE or QuickTime, not in this preview' : '') +
+              ? T('editor.a_prores_mov_it_opens', ' — a ProRes .mov: it opens in an NLE or QuickTime, not in this preview') : '') +
             (r.gaps_note ? ' — ' + r.gaps_note : ''),
             { kind: 'success', duration: (r.gaps_note || (r.deliver && r.deliver.format === 'prores')) ? 11000 : 6000 });
   if (toastEl) {
     const open = document.createElement('a');
-    open.href = '#'; open.className = 'phos-toast-action'; open.textContent = 'Open';
+    open.href = '#'; open.className = 'phos-toast-action'; open.textContent = T('editor.open_3', 'Open');
     open.onclick = (ev) => { ev.preventDefault(); sbeOpenFilmScreen(id, focus); };
     const reveal = document.createElement('a');
-    reveal.href = '#'; reveal.className = 'phos-toast-action'; reveal.textContent = 'Show in Finder';
+    reveal.href = '#'; reveal.className = 'phos-toast-action'; reveal.textContent = T('editor.show_in_finder', 'Show in Finder');
     reveal.onclick = (ev) => { ev.preventDefault(); sbeRevealRender(id, focus); };
     toastEl.appendChild(open);
     toastEl.appendChild(reveal);
@@ -14193,14 +15141,14 @@ function sbePaintRenderChip(id, focus, r) {
   if (chip.dataset) chip.dataset.board = String(id || '');
   const label = document.createElement('span');
   label.className = 'sbe-render-chip-label';
-  label.textContent = 'Last render · ' + Math.round(sbeNum(r.duration)) + 's';
+  label.textContent = T('editor.last_render', 'Last render · ') + Math.round(sbeNum(r.duration)) + 's';
   chip.appendChild(label);
   const open = document.createElement('button');
-  open.type = 'button'; open.textContent = 'Open';
+  open.type = 'button'; open.textContent = T('editor.open_3', 'Open');
   open.onclick = () => sbeOpenFilmScreen(id, focus);
   chip.appendChild(open);
   const reveal = document.createElement('button');
-  reveal.type = 'button'; reveal.textContent = 'Show in Finder';
+  reveal.type = 'button'; reveal.textContent = T('editor.show_in_finder', 'Show in Finder');
   reveal.onclick = () => sbeRevealRender(id, focus);
   chip.appendChild(reveal);
 }
@@ -14225,15 +15173,15 @@ async function sbeExportNle() {
   if (!SBE.open || !SBE.id) return;
   // Same rule as the render: the project is written from the saved file.
   if (SBE.dirty && !(await sbeSave(true))) {
-    phosToast('The timeline could not be saved, and the project is written ' +
-              'from the saved file — fix the save first.',
+    phosToast(T('editor.the_timeline_could_not_be_2', 'The timeline could not be saved, and the project is written ') +
+              T('editor.from_the_saved_file_fix', 'from the saved file — fix the save first.'),
               { kind: 'danger', duration: 8000 });
     return;
   }
   const btn = sbeEl('sbeNleBtn');
   const prev = btn.textContent;
   btn.disabled = true;
-  btn.textContent = 'Writing the project…';
+  btn.textContent = T('editor.writing_the_project', 'Writing the project…');
   const fd = new URLSearchParams();
   fd.set('id', SBE.id);
   let r;
@@ -14250,11 +15198,11 @@ async function sbeExportNle() {
   // WHAT CAME OUT AND WHAT DID NOT, in the note rather than in a support
   // thread later: the audio is stems, and a slug is a gap the NLE draws black.
   sbeEl('sbeRenderNote').textContent =
-    folder + ' · ' + r.clips + ' clips · open the .xml in Premiere or Resolve, ' +
-    'run the _ae.jsx from After Effects. Sound comes out as STEMS — clip audio ' +
-    'and the soundtrack on separate tracks, not the ducked mix.' +
+    folder + ' · ' + r.clips + T('editor.clips_open_the_xml_in', ' clips · open the .xml in Premiere or Resolve, ') +
+    T('editor.run_the_ae_jsx_from', 'run the _ae.jsx from After Effects. Sound comes out as STEMS — clip audio ') +
+    T('editor.and_the_soundtrack_on_separate', 'and the soundtrack on separate tracks, not the ducked mix.') +
     ((r.missing || []).length ? ' ' + r.missing.length + ' file(s) were gone and left out.' : '');
-  phosToast('Project folder ready · ' + r.clips + ' clips, ' +
+  phosToast(T('editor.project_folder_ready', 'Project folder ready · ') + r.clips + ' clips, ' +
             (r.linked || 0) + ' hardlinked' +
             ((r.copied || 0) ? ', ' + r.copied + ' copied' : ''),
             { kind: 'success', duration: 8000 });
@@ -14295,9 +15243,9 @@ async function sbeTick() {
     if (!SBE.backingUp && !SBE.saveTimer) sbeQueueSave();
     if (SBE.dirtyAt && Date.now() - SBE.dirtyAt > SBE_SAVE_GRACE_MS
         && SBE.backedUpAt < SBE.dirtyAt) {
-      sbeSaveAlarm('these changes have not been backed up for ' +
+      sbeSaveAlarm(T('editor.these_changes_have_not_been', 'these changes have not been backed up for ') +
                    Math.round((Date.now() - SBE.dirtyAt) / 1000) +
-                   ' seconds — press Save to store them');
+                   T('editor.seconds_press_save_to_store', ' seconds — press Save to store them'));
     }
   }
   // FILM-57: the undo stack rides the same clock. Cheap when nothing has
@@ -14337,7 +15285,7 @@ async function sbeTick() {
           landed.forEach(j => { SBE.fixHandled[j.id] = 1; });
           const now = (SBE.relink || []).filter(x => x.face_fix && !sbeRetakeDismissed(x)).length;
           if (now > before) {
-            phosToast('Upscale & Face Fix is ready — swap it in from the line above the timeline.',
+            phosToast(T('editor.upscale_face_fix_is_ready', 'Upscale & Face Fix is ready — swap it in from the line above the timeline.'),
                       { kind: 'success', duration: 6000 });
           }
         }
@@ -14356,7 +15304,7 @@ async function sbeTick() {
     await sbeLoad(true);
     if ((SBE.unplaced || []).length > before) {
       SBE.awaitingClip = 0;
-      phosToast('The new shot has landed — place it on the timeline.', { kind: 'success' });
+      phosToast(T('editor.the_new_shot_has_landed', 'The new shot has landed — place it on the timeline.'), { kind: 'success' });
     } else if (Date.now() - SBE.awaitingClip > 45 * 60 * 1000) {
       SBE.awaitingClip = 0;
     }
@@ -14754,6 +15702,8 @@ document.addEventListener('click', (ev) => {
 document.getElementById('sbStyle') && document.getElementById('sbStyle')
   .addEventListener('input', () => {});
 
+let _videoModeBeforeImages = 't2v';
+
 function workflowSwitch(name) {
   // 2026-05-17 — Characters is no longer its own top-level tab. The
   // chip strip is integrated into Manual (T2V). If we get a stale
@@ -14775,6 +15725,9 @@ function workflowSwitch(name) {
   const edTab = document.getElementById('edSectionTab');
   const osTab = document.getElementById('oneshotSectionTab');
   const characters = document.getElementById('charactersSection');  // dead HTML; hide defensively
+  const remoteTab = document.getElementById('remoteSection');
+  if (remoteTab) remoteTab.hidden = (name !== 'remote');
+  if (name !== 'remote' && typeof remoteTabLeave === 'function') { try { remoteTabLeave(); } catch (e) {} }
   // Set body data attribute so CSS can switch the layout per workflow.
   document.body.setAttribute('data-workflow', name);
   // All non-Manual panes start hidden; the active branch re-shows its own.
@@ -14812,6 +15765,7 @@ function workflowSwitch(name) {
     // hide #genForm + show #studioSection on top of that.
     if (manual) manual.style.display = 'none';
     if (studio) studio.classList.add('show');
+    if (currentMode !== 'image') _videoModeBeforeImages = currentMode;
     if (typeof setMode === 'function') setMode('image');
   } else if (name === 'train') {
     // Train Character is its own workflow tier. Hide the manual render
@@ -14827,6 +15781,10 @@ function workflowSwitch(name) {
     if (manual) manual.style.display = 'none';
     if (audioTab) audioTab.style.display = 'block';
     if (typeof audioStudioInit === 'function') audioStudioInit();
+  } else if (name === 'remote') {
+    // Remote Control: a page, not a tool. Its own file (webapp/js/remote.js).
+    if (manual) manual.style.display = 'none';
+    if (typeof remoteTabEnter === 'function') { try { remoteTabEnter(); } catch (e) { console.warn('remoteTabEnter failed', e); } }
   } else if (name === 'oneshot') {
     // One Shot: its own composer and its own API (webapp/js/oneshot.js,
     // POST /oneshot). A shot that never cuts is a different thing to make
@@ -14841,17 +15799,21 @@ function workflowSwitch(name) {
     if (edTab) edTab.style.display = 'flex';
     if (typeof edInit === 'function') edInit();
   } else {
-    // Manual — show the video form, restore the previous video mode.
+    // Restore Video's mode before repainting its picker, including when
+    // returning from Images through another workflow tab.
+    if (currentMode === 'image' && typeof setMode === 'function') {
+      setMode(_videoModeBeforeImages);
+    }
     if (manual) manual.style.display = '';
   }
   // The Ideogram edit canvas belongs to the Images workflow only — re-sync
   // so leaving suspends it (player/outputs restored) and returning to
   // Images with Ideogram active brings it back with its boxes intact.
   if (typeof ideoSyncStage === 'function') ideoSyncStage();
-  // The engine switcher is a Video-form control (each ENGINES row names the
-  // `surfaces` it belongs to). Offering a render engine while the user is in
-  // Images or Train Character would be a choice that changes nothing, so the
-  // switcher and its divider fold away with the form they belong to.
+  // The Model picker re-draws for the surface just entered: each ENGINES row
+  // names the `surfaces` it belongs to (video, image, music), so Video lists
+  // the video models, Images the image models, Compose YuE2; a tab with no
+  // model choice (Train Character, Storyboard) folds it away.
   if (typeof renderEngineSwitch === 'function') {
     try { renderEngineSwitch(); } catch (e) {}
   }
@@ -14900,7 +15862,7 @@ Object.assign(globalThis, {
   sbeBedGainPoints, sbeBedGainAt, sbeMixWrite, sbeBedAfxWrite,
   sbeSetBedFade, sbeBedPointsWrite, sbeBedAddKeyframe, sbeBedMoveKeyframe,
   sbeBedDeleteKeyframe, sbeAfxWrite, sbeAddKeyframe, sbeMoveKeyframe,
-  sbeDeleteKeyframe, sbeDeleteStrip, sbeSetAudioFade, sbeOvKind,
+  sbeDeleteKeyframe, sbeDeleteStrip, sbeSetAudioFade, sbeOvKind, sbeOvLayerOf, sbeClipShortName,
   sbeOvAt, sbeOvById, sbeOvFits, sbeOvMove,
   sbeOvTrim, sbeOvAdd, sbeOvDelete, sbeStripOwned,
   // Editor v2: speed on the clip, titles on the overlay lane, transitions on
@@ -14969,7 +15931,7 @@ Object.assign(globalThis, {
   sbeStripStop, sbeZoomMin, sbeZoomTo, sbeZoom,
   sbeZoomSlide, sbeZoomFit, sbeJumpCut, sbeToggleSnap, sbeKeyHint,
   sbeOnTlWheel, sbePrepare, sbePrepareCancel,
-  sbeAuto, sbeGenClose, sbeGenSubmit, sbeRenderFilm, sbeRenderCancel,
+  sbeAuto, sbeGenClose, sbeGenSubmit, sbeRenderFilm, sbeRenderCancel, sbeMusicRemove,
   sbeExportNle, sbeTick, workflowSwitch,
   // inline-handler targets: generated markup resolves these through the
   // global scope (the v4.9.0 regression, PR #69)
@@ -14989,7 +15951,7 @@ Object.assign(globalThis, {
   sbeSplitWhy, sbeCbarPlayhead,
   sbeCtxOpen, sbeReorderSel, sbeSplitHere, sbeGenOpen,
   // The header's film switcher (index.html onclicks + generated rows).
-  sbeFilmsToggle, sbeFilmsPick, sbeFilmsAll,
+  sbeFilmsToggle, sbeFilmsPick, sbeFilmsAll, sbeFilmsNew, sbeRename, edPoolAddAll,
   // THE AUDIO TRACKS — the model (for the harnesses) and every name the
   // generated heads, strips, inspector and pool rows call back into.
   sbeTrackLabel, sbeUnitGain, sbeTrackGain, sbeTsGain, sbeTsWindow, sbeTsGainPoints,

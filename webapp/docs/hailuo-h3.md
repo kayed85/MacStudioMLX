@@ -7,14 +7,21 @@ Hailuo H3 is Phosphene's second video engine. It creates video, dialogue and sou
 You install H3 separately because it needs a large download.
 
 [[pinokio]]
-- **What it needs:** an Apple Silicon Mac with **36 GB of memory or more**, and about **97 GB free** on the drive where you store models. This covers the 75 GB download and the 22 GB compact engine built during installation.
+- **What it needs:** an Apple Silicon Mac with **16 GB of memory or more**, and about **97 GB free** on the drive where you store models. This covers the 75 GB download and the 22 GB compact engine built during installation.
 - **How:** first, in the panel, click the **Hailuo H3** side of the engine switch, choose **Read the licence** and tick **I accept**. Then select Phosphene in Pinokio and click **Install Hailuo H3 (second video engine, ~75 GB)** in the sidebar; until you accept, the installer stops with a `FATAL` line.
-- **On a 36–59 GB Mac**, installation ends by preparing H3's compact engine, which uses less memory. This takes about 5 more minutes and downloads nothing. If you already have the downloaded model files but not the compact engine, click **Build Hailuo H3 compact engine** in the sidebar.
+- **On a 16–59 GB Mac**, installation ends by preparing H3's compact engine, which uses less memory. This takes about 5 more minutes and downloads nothing. If you already have the downloaded model files but not the compact engine, click **Build Hailuo H3 compact engine** in the sidebar.
+- **Memory, by Mac:** H3 now runs from 16 GB. From 16 GB you make Draft and Standard clips, from 18 GB also High. A Mac with less memory than a clip needs is told so in plain words before the render starts, so it does not slow to a crawl. **Clean up sound** and the long chained clips need more memory and stay at 36 GB and up.
+- **How it fits:** below 36 GB, H3 reads the model from your drive one block at a time instead of holding it all in memory. In our test a Standard 5 s clip used 7.7 GB of working memory instead of 26.9 GB, and the clip came out the same, frame for frame and sound for sound. That test ran on a 64 GB Mac limited to the memory of a 16 GB one. We have not run it on a real 16 GB Mac yet, so a first render there is a first. A base chip is slower than the M4 Max we measured on, so expect a longer wait.
+- **Getting it if H3 is already installed:** press **Update**, then restart. The new engine is fetched and your model files stay.
 [[/pinokio]]
 [[mac-app]]
-- Hailuo H3 is not available in the Mac app yet. Everything else works without it. Render on LTX.
+- **What it needs:** an Apple Silicon Mac with **16 GB of memory or more**, and about **100 GB free** on the drive where you store models. This covers the 75 GB download and the 22 GB compact engine Phosphene builds after it.
+- **How:** click the **Hailuo H3** side of the engine switch. Its card shows the size, the free space on your Mac and the licence. Click **Download Hailuo H3**, read the licence and tick **I accept**, and the download starts. Keep using Phosphene meanwhile; H3 turns on by itself when it is ready.
+- **If you quit or the Mac restarts,** the download carries on from where it stopped the next time Phosphene opens. Nothing already downloaded is fetched again. **Stop** on the card pauses it until you click **Resume download**.
+- **At the end** Phosphene builds H3's compact engine, which uses less memory (about 5 minutes, no download).
+- **Memory, by Mac:** from 16 GB you make Draft and Standard clips, from 18 GB also High. **Clean up sound** and the long chained clips need 36 GB and up. Below 36 GB, H3 reads the model from your drive one block at a time; we measured that on a 64 GB Mac limited to the memory of a 16 GB one, not yet on a real 16 GB Mac.
 [[/mac-app]]
-- **Licence:** H3 uses the MiniMax H3 Community License, which does not cover the European Union, the United Kingdom, South Korea or the United States. The licence screen asks you to accept once per Mac; your acceptance is saved, and you are asked again only if the licence changes. If H3 is already installed, it keeps working and asks once before your next H3 render. Phosphene shows the notice for you to confirm; it does not check your location. While H3 is selected, the panel shows **MiniMax H3** with **Licence** and **Report misuse** links; reports go through a GitHub issue.
+- **Licence:** H3 uses the MiniMax H3 Community License, which does not cover the European Union, the United Kingdom, South Korea or the United States. The licence screen asks you to accept once per Mac; your acceptance is saved, and you are asked again only if the licence changes. If H3 is already installed, it keeps working and asks once before your next H3 render. Phosphene shows the notice for you to confirm; it does not check your location. While H3 is selected, the panel shows **MiniMax H3** with a **Licence** link. The licence details include the reporting link.
 
 [[pinokio]]
 After installation, the sidebar entry becomes **Repair Hailuo H3** or **Update Hailuo H3 runner**. These repair or update H3's supporting software and keep your downloaded model files. You do not need to download those files again. If installation stops, look for the `FATAL error:` line in Pinokio's terminal. See [When an install stops](#docs/install/fatal).
@@ -107,6 +114,39 @@ On **High**, **Best** can use **lightx2v v1.3**, an adapter by LightX2V. In our 
 - **Use the old Best:** choose a **Steps** count under Best to use the full sampler.
 - **Credit and licence:** lightx2v v1.3 is by [LightX2V](https://huggingface.co/lightx2v/Minimax-h3-Turbo). Code: Apache-2.0. Weights: MiniMax H3 Community License, the same as H3.
 
+## H3 Flex (preview) {#flex}
+
+**H3 Flex** is Pika H3 Flex by Pika Labs: a six-step version of H3, about 2.2× faster than Best at the same size. It is a **preview**: new on Mac, so tell us how it goes.
+
+- **Pick it:** choose **H3 Flex** in the engine picker at the top, right after Hailuo H3.
+- **Get it:** if its adapter is not on your Mac yet, the same click downloads it (2.8 GB, from Pika's own Hugging Face page at a fixed version) and prepares it on your Mac. The picker shows the progress. You need Hailuo H3 installed; if it isn't, the picker offers H3 first.
+- **What it makes:** Text and Image (first frame), with dialogue and sound, on every 5-second length (10 s and 15 s are 5 s pieces joined, and later pieces can drift).
+- **Times on an M4 Max, 64 GB, per 5 s:** Draft about 5 minutes, High about 16 minutes (Best: 36.5 minutes on the same shot). Full size (1344×768) runs; its timing is still to come.
+- **Tip:** name every person who should stay in the scene. Flex drops people the prompt doesn't mention.
+- **Back to H3's own Fast / Best:** pick **Hailuo H3** in the picker.
+
+Powered by MiniMax H3. Pika H3 Flex by Pika Labs (Mellis, Inc.): the weights are a MiniMax H3 Model Derivative under the MiniMax H3 Community License; Pika's code is Apache-2.0. Phosphene converts the file on your Mac and marks it as modified. Mac weights are also on Hugging Face: [Mrbizarro/Pika-H3-Flex-MLX](https://huggingface.co/Mrbizarro/Pika-H3-Flex-MLX).
+
+## H3 Flex Turbo (faster draft, Pro) {#flex-turbo}
+
+**H3 Flex Turbo** is a faster H3 Flex draft, about 1.4× quicker than H3 Flex at the same size and a little softer. It is part of **Phosphene Pro**. For the final render, use H3 Flex or Best.
+
+- **Pick it:** choose **H3 Flex Turbo** in the engine picker, right after H3 Flex. Without Pro, the click opens the Pro panel.
+- **Get it:** the same click downloads it (0.3 GB, from its author's Hugging Face page at a fixed version). You need Hailuo H3 installed; the H3 Flex adapter is not needed.
+- **What it makes:** Text and Image (first frame), with dialogue and sound, on every 5-second length, like H3 Flex.
+- **Times on an M4 Max, 64 GB, per 5 s:** Draft about 3.5 minutes, High about 10 to 12 minutes (H3 Flex: about 16 minutes on the same shots).
+- **Good to know:** pictures come out a little softer than H3 Flex, and very fast motion can wobble a little more. Faces and speech held in our tests.
+
+Powered by MiniMax H3. H3 Flex Turbo runs the Pika H3 Flex Turbo LoRA by akhaliq, which fuses Pika H3 Flex (Pika Labs) with LightX2V's MiniMax-H3 Turbo; the weights are a MiniMax H3 Model Derivative under the MiniMax H3 Community License. Phosphene downloads the published file unchanged.
+
+## Faster Hailuo H3 (Pro) {#faster-h3}
+
+**Faster Hailuo H3** is part of **Phosphene Pro**. Picture-to-video clips of 5, 10 and 15 seconds render about 1.15 to 1.23 times faster than on Free, with the same faces, motion, voice and joins in our tests. It needs Apple Silicon with 36 GB of memory or more.
+
+- **What you do:** nothing. Turn Pro on in Settings and render picture-to-video as usual.
+- **Not sped up:** text-to-video renders exactly as on Free, so Pro is never worse than Free.
+- **Measured on an M4 Max with 64 GB.** Other chips get a smaller gain, and Macs under 36 GB, and Intel Macs, use the Free path.
+
 ## How long it takes {#times}
 
 Each quality and length option shows an estimated time for your Mac, based on completed videos from similar Macs. The table shows median times from Phosphene's anonymous usage counts: half finished sooner and half took longer. A dash means there are too few completed videos to give a time.
@@ -128,7 +168,7 @@ Each quality and length option shows an estimated time for your Mac, based on co
 Times are minutes:seconds, measured from 2026-08-10 to 2026-10-20. For all Mac chips, clip lengths and memory sizes, see the [speed benchmarks](https://phosphene.video/benchmarks/) page.
 
 - Your first video after starting the panel takes longer because the model also needs to load.
-- On a 36–59 GB Mac, 10 s and 15 s clips take about a third longer than on a 64 GB Mac. Quit other apps first. If your Mac needs to use disk space as extra memory, creating the video can take far longer.
+- On a 36–59 GB Mac, 10 s and 15 s clips take about a third longer than on a 64 GB Mac. Below 36 GB the model is read from your drive as it renders; the picture and sound are the same, and a slower chip takes longer. Quit other apps first. If your Mac needs to use disk space as extra memory, creating the video can take far longer.
 - For Fast HD, allow time for both the Draft video on Fast and Face Fix. Together, they take about two thirds of the time for High on Fast.
 
 ## Writing prompts for H3 {#prompting}
@@ -159,7 +199,7 @@ Open **After the render → Upscale** to choose the export size: **Native**, **7
 
 | What you see | What to do |
 |---|---|
-| No engine switch in the header | Your Mac has less than 36 GB of memory. H3 cannot run on it. Use LTX |
+| No engine switch in the header | Your Mac has less than 16 GB of memory. H3 cannot run on it. Use LTX |
 [[pinokio]]
 | *"Hailuo H3 runs on this Mac … it is not built here yet"* | Click **Build Hailuo H3 compact engine** in the Pinokio sidebar (about 5 minutes, no download) |
 | A mode or length is missing on H3, or a mode switches back to LTX | H3's supporting software needs an update. Click **Update Hailuo H3 runner** in Pinokio's sidebar. Your downloaded model files are kept |
@@ -167,9 +207,10 @@ Open **After the render → Upscale** to choose the export size: **Native**, **7
 | A render is refused with a **Repair** button | H3's supporting software has incompatible versions. Click **Repair**, or **Repair Hailuo H3** in Pinokio's sidebar |
 [[/pinokio]]
 [[mac-app]]
-| *"Hailuo H3 runs on this Mac … it is not built here yet"* | Hailuo H3 is not available in the Mac app yet. Render on LTX |
-| A mode or length is missing on H3, or a mode switches back to LTX | Hailuo H3 is not available in the Mac app yet. Render on LTX |
-| *"the installed Hailuo H3 runner is behind this panel"* | Hailuo H3 is not available in the Mac app yet. Render on LTX |
+| *"Hailuo H3 can run on this Mac … Download it from its card"* | Click **Hailuo H3** in the engine switch and click **Download Hailuo H3** |
+| The download stopped with a message | Read the message (usually the internet connection or free space), fix it, then click **Resume download**. Nothing already downloaded is lost |
+| A mode or length is missing on H3, or a mode switches back to LTX | Phosphene brings H3's supporting software up to date by itself a moment after it opens. Quit and reopen Phosphene if it stays |
+| *"the installed Hailuo H3 runner is behind this panel"* | The same: quit and reopen Phosphene. Your downloaded model files are kept |
 | A render is refused with a **Repair** button | Click **Repair** |
 [[/mac-app]]
 | The render is killed for lack of memory | Quit other apps, pick a shorter length or a smaller size, or set **Settings → Hailuo H3 model** to **Compact** |

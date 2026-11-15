@@ -47,6 +47,7 @@ async function refreshVersionPill() {
   // landing under a long-lived panel) is untouched and still shows.
   if (_versionRestartPending && _versionState
       && !_versionState.stale_process
+      && !(_versionState.post_update && _versionState.post_update.outcome === 'pending')
       && !(((_versionState.behind_by) | 0) > 0)) {
     _versionRestartPending = false;
   }
@@ -96,10 +97,21 @@ function renderVersionPill() {
   if (isMacApp() || s.app_updates) {
     pill.classList.add('pill-app');
     const sha = s.local_short || '';
-    pill.innerHTML = _phEsc(local) + (sha ? `<span class="vp-detail"> · ${_phEsc(sha)}</span>` : '');
+    // The version is the first thing in the header (owner, 8 Nov): "v5.0.7", clear and not grey.
+    const vlabel = /^\d/.test(local) ? 'v' + local : local;
+    pill.innerHTML = `<b class="vp-ver">${_phEsc(vlabel)}</b>` + (sha ? `<span class="vp-detail"> · ${_phEsc(sha)}</span>` : '');
+    _renderAppUpdatePill(s);
     pill.title = `Phosphene ${_versionBuildLabel(s.local_version, s.local_short)}. `
-      + 'To update, use Phosphene \u2192 Check for Updates\u2026'
-      + '\nClick to copy your build details for a bug report.';
+      + T('health.to_update_use_phosphene_check', 'To update, use Phosphene \u2192 Check for Updates\u2026')
+      + T('health.click_to_copy_your_build', '\nClick to copy your build details for a bug report.');
+    return;
+  }
+
+  const repair = s.post_update || {};
+  if (repair.outcome === 'pending' && repair.state !== 'done') {
+    pill.classList.add('pill-busy');
+    pill.textContent = repair.state === 'failed' ? T('health.retry_update', 'Retry update') : T('health.preparing_update', 'Preparing update');
+    pill.title = repair.error || 'Waiting for dependency repair to finish.';
     return;
   }
 
@@ -119,8 +131,8 @@ function renderVersionPill() {
     // (panelRestart(), same as the stale-process case below) instead of
     // asking for a manual Stop -> Start.
     pill.title = s.pull_requires_full_update
-      ? `Pulled ${v}. This update touched dependencies — use Pinokio's Update button (not just Stop+Start).`
-      : `Pulled ${v}. Click to restart and apply it.`;
+      ? T('health.pulled_this_update_touched_dependencies', 'Pulled {v}. This update touched dependencies — use Pinokio\'s Update button (not just Stop+Start).', {v})
+      : T('health.pulled_click_to_restart_and', 'Pulled {v}. Click to restart and apply it.', {v});
     return;
   }
   // Same restart affordance for a checkout that advanced UNDER this
@@ -138,7 +150,7 @@ function renderVersionPill() {
     // process loaded 4.6.0" — an alarm that names nothing.
     pill.title = `Running ${_versionBuildLabel(s.local_version, s.local_short)}`
       + ` — but ${_versionBuildLabel(s.disk_version, s.disk_short)} is on disk.`
-      + ` Click Stop → Start in Pinokio (or restart the panel) to load it.`;
+      + T('health.click_stop_start_in_pinokio', ' Click Stop → Start in Pinokio (or restart the panel) to load it.');
     return;
   }
   // Suppressed (dev branch / dirty tree / no git).
@@ -166,36 +178,38 @@ function renderVersionPill() {
     // budget and clips the health chip; below 1400px CSS hides .vp-detail.
     const _esc = (t) => String(t).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
     pill.innerHTML = `${_esc(local)} · ${_esc(branchLabel)}<span class="vp-detail">${_esc(trail)}</span>`;
-    pill.title = `Update check paused: ${s.suppress_reason}.`
+    pill.title = T('health.update_check_paused', 'Update check paused: {suppress_reason}.', {suppress_reason: s.suppress_reason})
       + (sha ? `\nFull SHA: ${s.local_sha || sha}` : '')
-      + `\nClick to copy a paste-ready debug string.`;
+      + T('health.click_to_copy_a_paste', '\nClick to copy a paste-ready debug string.');
     return;
   }
   // Behind origin/main — eye-catching action prompt.
   if (!s.error && s.checked_ts && (s.behind_by | 0) > 0) {
     pill.classList.add('pill-update');
     pill.innerHTML = `<svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-arrow-up"/></svg>Update to ${remote}`;
-    pill.title = `You're on ${local}; latest is ${remote}. Click to pull the update.`;
+    pill.title = T('health.you_re_on_latest_is', 'You\'re on {local}; latest is {remote}. Click to pull the update.', {local, remote});
     return;
   }
   // Last check errored (offline).
   if (s.error) {
     pill.classList.add('pill-dev');
     pill.textContent = `${local} · offline`;
-    pill.title = `Couldn't reach github.com (${s.error}). Click to retry.`;
+    pill.title = T('health.couldn_t_reach_github_com', 'Couldn\'t reach github.com ({error}). Click to retry.', {error: s.error});
     return;
   }
   // Current with origin/main.
   if (s.checked_ts && (s.behind_by | 0) === 0) {
     pill.classList.add('pill-current');
-    pill.innerHTML = `<svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-check-bold"/></svg>Up to date · ${local}`;
-    pill.title = `You're on ${local}, the latest version. Click to re-check now.`;
+    // The words sit in their own span so a narrow title bar can drop them and
+    // keep the tick and the number (the tick already says "up to date").
+    pill.innerHTML = `<svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-check-bold"/></svg><span class="vp-state">${T('health.up_to_date', 'Up to date ·')} </span>${local}`;
+    pill.title = T('health.you_re_on_the_latest', 'You\'re on {local}, the latest version. Click to re-check now.', {local});
     return;
   }
   // First poll hasn't landed yet.
   pill.classList.add('pill-checking');
   pill.textContent = `Checking · ${local}`;
-  pill.title = 'Checking for updates…';
+  pill.title = T('health.checking_for_updates', 'Checking for updates…');
 }
 
 
@@ -207,6 +221,12 @@ function renderVersionPill() {
 // the app" is the intended behaviour, verbatim). The broadcast is the
 // maintainer's channel: BROADCAST.json on public main, fetched by the same
 // 30-minute server poll, shown ONCE per message id, dismissed forever.
+// The one Phosphene loading mark, small: the header's own markup (footer mark), cloned.
+// CSS .ph-mark-mini sets the size; Reduce Motion stops it like every other mark.
+window.phosMiniMark = function phosMiniMark() {
+  const src = document.querySelector('header .ph-mark');
+  return '<span class="ph-mark ph-mark-mini" aria-hidden="true">' + (src ? src.innerHTML : '') + '</span>';
+};
 window._phModalOpen = false;
 window._updModalShownThisLoad = false;
 window._bcHandled = Object.create(null);
@@ -223,11 +243,7 @@ function _phModalShow(opts) {
   document.getElementById('phModalKicker').textContent = opts.kicker || '';
   document.getElementById('phModalKicker').className = toneClass;
   document.getElementById('phModalTitle').textContent = opts.title || '';
-  if (opts.htmlBody) {
-    document.getElementById('phModalBody').innerHTML = opts.htmlBody;
-  } else {
-    document.getElementById('phModalBody').textContent = opts.body || '';
-  }
+  document.getElementById('phModalBody').textContent = opts.body || '';
   const prim = document.getElementById('phModalPrimary');
   const sec = document.getElementById('phModalSecondary');
   prim.textContent = opts.primaryLabel || 'OK';
@@ -246,6 +262,7 @@ function _phModalShow(opts) {
   wrap.onclick = (ev) => {
     if (ev.target === wrap) { _phModalClose(); if (opts.onCancel) opts.onCancel(); }
   };
+  wrap._cancelModal = () => { _phModalClose(); if (opts.onCancel) opts.onCancel(); };
   wrap.hidden = false;
   window._phModalOpen = true;
   return true;
@@ -297,17 +314,17 @@ function _maybeShowUpdateModal(st) {
   window._updModalShownThisLoad = true;
   _uiEvent('update_prompt', {action: 'shown'});
   _phModalShow({
-    kicker: 'Update available',
+    kicker: T('health.update_available', 'Update available'),
     title: `Phosphene ${remote} is out — you're on ${local}`,
-    body: 'Updates are mostly bug fixes: renders that fail less and explain '
-        + 'themselves better. Updating takes about a minute and keeps your '
-        + 'queue, settings and models.',
-    primaryLabel: 'Update now',
-    secondaryLabel: 'Later',
+    body: T('health.updates_are_mostly_bug_fixes', 'Updates are mostly bug fixes: renders that fail less and explain ')
+        + T('health.themselves_better_updating_takes_about', 'themselves better. Updating takes about a minute and keeps your ')
+        + T('health.queue_settings_and_models', 'queue, settings and models.'),
+    primaryLabel: T('health.update_now', 'Update now'),
+    secondaryLabel: T('health.later', 'Later'),
     onPrimary: () => {
       _uiEvent('update_prompt', {action: 'update_now'});
       const go = document.getElementById('ubUpdate');
-      if (go) { go.disabled = true; go.textContent = 'Updating…'; }
+      if (go) { go.disabled = true; go.textContent = T('health.updating', 'Updating…'); }
       versionDoPull({skipConfirm: true});
     },
     // Later = this page load only. The banner (per-version dismissal)
@@ -325,10 +342,10 @@ function _maybeShowBroadcastModal(st) {
   window._bcHandled[b.id] = true;
   _phModalShow({
     broadcast: true,
-    kicker: 'From the developer',
+    kicker: T('health.from_the_developer', 'From the developer'),
     title: b.title || 'A note from Phosphene',
     body: b.body || '',
-    primaryLabel: 'Got it',
+    primaryLabel: T('health.got_it', 'Got it'),
     onPrimary: () => {
       _uiEvent('broadcast_seen', {});
       const ids = seen.concat([b.id]).slice(-50);
@@ -357,6 +374,12 @@ window._ubStarSettings = null;
 function _ubRender(s) {
   const el = document.getElementById('updateBanner');
   if (!el) return;
+  const repair = (s && s.post_update) || {};
+  if (!isMacApp() && !(s && s.app_updates) && repair.outcome === 'pending') {
+    el.hidden = false;
+    _ubRestartState(s.disk_version || s.pull_pulled_to_version || 'the candidate', false);
+    return;
+  }
   // Never under the Mac app: its own updater (Sparkle) owns updates.
   const behind = !isMacApp() && !(s && s.app_updates)
     && (s && !s.error && s.checked_ts && (s.behind_by | 0) > 0);
@@ -372,7 +395,7 @@ function _ubRender(s) {
   document.getElementById('ubTitle').textContent =
     `Phosphene ${remote} is available`;
   document.getElementById('ubSub').textContent =
-    `You are on ${local}.` + (s.behind_more_than ? ' 30+ commits behind.' : '');
+    T('health.you_are_on', 'You are on {local}.', {local}) + (s.behind_more_than ? T('health.30_commits_behind', ' 30+ commits behind.') : '');
   const star = document.getElementById('ubStar');
   if (star) star.hidden = !!cfg.star_prompt_done;
   el.hidden = false;
@@ -390,7 +413,7 @@ function _ubRestartState(newVersion, requiresFullUpdate) {
   const sub = document.getElementById('ubSub');
   const go = document.getElementById('ubUpdate');
   const later = document.getElementById('ubLater');
-  if (title) title.textContent = `Updated to ${newVersion} — restart to finish`;
+  if (title) title.textContent = `Version ${newVersion} is ready to start`;
   // SYS-29: this used to hide `go` and tell the user to go click Stop
   // then Start in Pinokio themselves -- a second, manual mechanism
   // sitting right next to panelRestart() (the one-click, 409-guarded
@@ -408,16 +431,16 @@ function _ubRestartState(newVersion, requiresFullUpdate) {
   const pu = ((_versionState || {}).post_update) || {};
   if (pu.pending || pu.active || pu.state === 'failed') {
     if (title) title.textContent = pu.state === 'failed'
-      ? 'The update did not finish'
-      : `Updated to ${newVersion} \u2014 finishing the update\u2026`;
+      ? T('health.the_update_did_not_finish', 'The update did not finish')
+      : `Preparing version ${newVersion}...`;
     if (sub) sub.textContent = pu.state === 'failed'
-      ? (pu.error || 'post_update.sh failed') + ' \u2014 use Pinokio\u2019s Update (Stop, then Update), or try again.'
-      : 'Installing what the new version needs (the same step Pinokio\u2019s Update runs). '
-        + 'Restart becomes available when it finishes. ' + ((pu.log || []).slice(-1)[0] || '');
+      ? (pu.error || 'post_update.sh failed') + T('health.use_pinokio_s_update_stop', ' \u2014 use Pinokio\u2019s Update (Stop, then Update), or try again.')
+      : T('health.installing_what_the_new_version', 'Installing what the new version needs (the same step Pinokio\u2019s Update runs). ')
+        + T('health.restart_becomes_available_when_it', 'Restart becomes available when it finishes. ') + ((pu.log || []).slice(-1)[0] || '');
     if (go) {
       go.hidden = pu.state !== 'failed';
       go.disabled = false;
-      go.textContent = 'Try again';
+      go.textContent = T('health.try_again', 'Try again');
       go.onclick = async () => {
         go.disabled = true;
         try { await fetch('/version/finish', { method: 'POST' }); } catch (e) {}
@@ -426,18 +449,18 @@ function _ubRestartState(newVersion, requiresFullUpdate) {
     }
     if (pu.state !== 'failed') _ubFollowPostUpdate(newVersion);
   } else if (requiresFullUpdate && !pu.state) {
-    if (sub) sub.textContent = 'This update touched Python dependencies, so use Pinokio\u2019s Update button (not just Stop and Start) so they reinstall.';
+    if (sub) sub.textContent = T('health.this_update_touched_python_dependencies', 'This update touched Python dependencies, so use Pinokio\u2019s Update button (not just Stop and Start) so they reinstall.');
     if (go) go.hidden = true;
   } else {
-    if (sub) sub.textContent = 'Your queue and settings are preserved across the restart.';
+    if (sub) sub.textContent = T('health.your_queue_and_settings_are', 'Your queue and settings are preserved across the restart.');
     if (go) {
       go.hidden = false;
       go.disabled = false;
-      go.textContent = 'Restart now';
+      go.textContent = T('health.restart_now', 'Restart now');
       go.onclick = async () => {
         _uiEvent('update_prompt', {action: 'banner_restart'});
         go.disabled = true;
-        go.textContent = 'Restarting\u2026';
+        go.textContent = T('health.restarting', 'Restarting\u2026');
         // Codex UI-10: a refused restart (409 while a render runs) or a
         // failed one used to leave this button disabled on "Restarting…"
         // for good. panelRestart() says whether a restart is under way;
@@ -445,12 +468,12 @@ function _ubRestartState(newVersion, requiresFullUpdate) {
         const started = await panelRestart();
         if (!started) {
           go.disabled = false;
-          go.textContent = 'Restart now';
+          go.textContent = T('health.restart_now', 'Restart now');
         }
       };
     }
   }
-  if (later) { later.textContent = 'Dismiss'; }
+  if (later) { later.textContent = T('health.dismiss', 'Dismiss'); }
   el.classList.add('ub-done');
   return true;
 }
@@ -490,7 +513,7 @@ function _ubWire() {
   if (go) go.onclick = () => {
     _uiEvent('update_prompt', {action: 'banner_update'});
     go.disabled = true;
-    go.textContent = 'Updating…';
+    go.textContent = T('health.updating', 'Updating…');
     // Straight to the pull, with no confirm: this button already said what it
     // does. Reuses the pill's implementation, not a second copy of it.
     versionDoPull({skipConfirm: true});
@@ -523,10 +546,22 @@ document.addEventListener('DOMContentLoaded', () => {
   _ubWire();
   // Same anonymous count as the banner's link, so the two places agree.
   const sl = document.getElementById('starLink');
-  if (sl) sl.addEventListener('click', () => {
-    _ubSaveSetting({star_prompt_done: true});   // retire the banner ask too
-    try { fetch('/star-click', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({via: 'link'})}); } catch (e) {}
+  // The header star opens a short thank-you first; the GitHub link lives inside it.
+  if (sl) sl.addEventListener('click', (e) => {
+    e.preventDefault();
+    const ask = document.getElementById('starAsk');
+    if (!ask) { window.open(sl.href, '_blank', 'noopener'); return; }
+    ask.classList.add('show');
+    document.getElementById('starAskGo')?.focus();
   });
+  const go = document.getElementById('starAskGo');
+  if (go) go.addEventListener('click', () => {
+    _ubSaveSetting({star_prompt_done: true});   // retire the banner ask and the twinkle
+    sl?.classList.remove('is-calling');
+    try { fetch('/star-click', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({via: 'link'})}); } catch (e) {}
+    setTimeout(starAskClose, 300);
+  });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && document.getElementById('starAsk')?.classList.contains('show')) starAskClose(); });
   // The banner needs two settings before it can decide anything, and the
   // Settings modal may never be opened — so read them here rather than
   // relying on _settingsCache, which is only populated when that opens.
@@ -539,6 +574,8 @@ document.addEventListener('DOMContentLoaded', () => {
         star_prompt_done: !!st.star_prompt_done,
         broadcast_seen_ids: st.broadcast_seen_ids || [],
       };
+      // Until they have starred, the header star twinkles now and then (CSS, reduced-motion aware).
+      if (!st.star_prompt_done) document.getElementById('starLink')?.classList.add('is-calling');
       if (_versionState) { try { _ubRender(_versionState); } catch (e) {} }
     })
     .catch(() => {});
@@ -658,6 +695,7 @@ window.addEventListener('resize', closeHealthPop);
 async function panelRestart() {
   const pill = document.getElementById('versionPill');
   const say = (t) => { if (pill) pill.textContent = t; };
+  const expectedCandidate = ((_versionState || {}).post_update || {}).candidate;
   try {
     const r = await fetch('/restart', {method: 'POST'});
     const d = await r.json().catch(() => ({}));
@@ -678,42 +716,257 @@ async function panelRestart() {
     await new Promise(r => setTimeout(r, 700));
     try {
       const r = await fetch('/version', {cache: 'no-store'});
-      if (r.ok) { location.reload(); return true; }
+      if (r.ok) {
+        const state = await r.json();
+        const result = state.post_update || {};
+        if (!expectedCandidate || (result.candidate === expectedCandidate && result.outcome === 'ok')) {
+          location.reload(); return true;
+        }
+      }
     } catch (e) { /* still down */ }
   }
-  phosToast(distText('Panel did not come back within 60s — start it from Pinokio.',
-                     'The studio did not come back within 60s — use Studio \u2192 Restart Engine.'), 'error');
+  phosToast(distText(T('health.panel_did_not_come_back', 'Panel did not come back within 60s — start it from Pinokio.'),
+                     T('health.the_studio_did_not_come', 'The studio did not come back within 60s — use Studio \u2192 Restart Engine.')), 'error');
   return false;
 }
 
-// The pill's click inside the Mac app: never a git pull. Name the build (for a
-// bug report) and point at the app's own updater.
+// ---- Mac app: the update pill -----------------------------------------------------------------
+// ONE JUDGE (app review 10 Nov, section 2). The app knows what is behind, what was refused and
+// what failed, and pushes it: window.phosAppUpdate + the 'phos-app-update' event. The contract
+// is docs/APP_UPDATE_STATES.md. For an app that sends caps: ['updateAll'] the pill comes ONLY
+// from that push. The studio's own /app-latest (a public, unsigned hint that knows nothing of
+// min_app, a quarantined manifest or a failed install) is asked only by apps older than the push,
+// and is dropped for good the moment a push with that cap arrives. It used to be a fallback for
+// everyone, and kept "Update to vX" up forever on an app the update had refused (U2).
+let _appLatest = null;
+let _appUpdateShownKey = '';
+
+function _appPushesUpdates(a) {
+  return !!(a && Array.isArray(a.caps) && a.caps.includes('updateAll'));
+}
+
+// What is behind, as [{kind: 'studio'|'app', version}]. A new app sends `parts`; the 5.0.5-5.0.10
+// push carries only the sentence ("Pro 5.0.13 and the app 5.0.11"), which is read here. The Pro
+// pack IS the Studio a Pro user runs, so it is named Studio: the number matches the label beside it.
+function appUpdateParts(a) {
+  const out = [];
+  const add = (kind, version) => {
+    const k = /^(app|the app)$/i.test(String(kind || '')) ? 'app' : 'studio';
+    const v = String(version || '').replace(/^v/i, '').split('-')[0];
+    if (v && !out.some(p => p.kind === k)) out.push({ kind: k, version: v });
+  };
+  if (a && Array.isArray(a.parts)) a.parts.forEach(p => p && add(p.kind, p.version));
+  if (!out.length && a && a.what) {
+    const rx = /(Studio|Pro|the app)\s+v?(\d[\w.\-]*)/gi;
+    let m;
+    while ((m = rx.exec(String(a.what)))) add(m[1], m[2]);
+  }
+  if (!out.length && a && a.target) add('studio', a.target);
+  return out.sort((x, y) => (x.kind === 'studio' ? 0 : 1) - (y.kind === 'studio' ? 0 : 1));
+}
+
+// "Studio to v5.0.14", "app to v5.0.11", or both. Never one bare number for two things (U10).
+function appUpdateName(parts, joiner) {
+  return (parts || []).map(p => (p.kind === 'app' ? 'app' : 'Studio') + (joiner || ' to ') + 'v' + p.version)
+    .join(' and ');
+}
+
+const APP_UPDATE_WAITS = {
+  render: T('health.the_clip_that_is_rendering', 'the clip that is rendering finishes'),
+  queue: T('health.the_queue_is_empty', 'the queue is empty'),
+  model_download: T('health.the_model_download_finishes', 'the model download finishes'),
+  engine_install: T('health.the_engine_install_finishes', 'the engine install finishes'),
+  app_quit: T('health.you_quit_phosphene_and_open', 'you quit Phosphene and open it again'),
+};
+
+// Everything the pill and the toast say, from the app's push alone. Pure: (push) -> view.
+//   show    is there a pill          label/title   its words
+//   action  what a click sends: 'updateAll' | 'checkUpdate' | null
+//   toast   {text, kind} to show when `key` changes, or null     key   identity of this outcome
+function appUpdateView(a) {
+  a = a || {};
+  const parts = appUpdateParts(a);
+  const name = appUpdateName(parts);                  // "Studio to v5.0.14"
+  const thing = appUpdateName(parts, ' ');            // "Studio v5.0.14"
+  let state = String(a.state || '').toLowerCase();
+  if (!['available', 'downloading', 'waiting', 'needs_app', 'failed', 'done'].includes(state)) {
+    state = (a.behind && parts.length) ? 'available' : 'idle';     // the 5.0.5-5.0.10 push has no state
+  }
+  const key = state + '|' + thing + '|' + (a.reason || '') + '|' + (a.message || '');
+  const said = String(a.message || '').trim();
+  const v = { state, parts, key, show: false, label: '', title: '', action: null, toast: null, busy: false };
+  if (state === 'idle') return v;
+  if (state === 'done') {
+    v.toast = { kind: 'success', text: said || (thing ? `${thing} is installed.` : T('health.phosphene_is_up_to_date', 'Phosphene is up to date.')) };
+    return v;
+  }
+  v.show = true;
+  if (state === 'available') {
+    v.label = T('health.update', 'Update ') + name;
+    v.title = T('health.a_newer_version_is_out', 'A newer version is out. Click to install it.');
+    v.action = 'updateAll';
+  } else if (state === 'downloading') {
+    const pct = Number.isFinite(a.progress) ? ` ${Math.round(Math.max(0, Math.min(1, a.progress)) * 100)}%` : '';
+    v.label = `Downloading ${thing}${pct}`;
+    v.title = T('health.the_update_is_downloading_nothing', 'The update is downloading. Nothing to do.');
+    v.busy = true;
+    v.toast = { kind: 'info', text: said || `Downloading ${thing}.` };
+  } else if (state === 'waiting') {
+    const why = APP_UPDATE_WAITS[a.reason] || 'Phosphene is idle';
+    v.label = `${thing} is ready`;
+    v.title = said || `${thing} is downloaded. It switches over when ${why}.`;
+    v.busy = true;
+    v.toast = { kind: 'info', text: v.title };
+  } else if (state === 'needs_app') {
+    const need = a.need_app ? ` (v${String(a.need_app).replace(/^v/i, '')} or newer)` : '';
+    v.label = T('health.update_the_phosphene_app_first', 'Update the Phosphene app first');
+    v.title = said || `${thing || 'This update'} needs a newer Phosphene app${need}. Click to update the app.`;
+    v.action = 'checkUpdate';
+    v.toast = { kind: 'warning', text: v.title };
+  } else if (state === 'failed') {
+    v.label = T('health.update_failed_try_again', 'Update failed. Try again');
+    v.title = said || `${thing || 'The update'} could not be installed. Click to try again.`;
+    v.action = 'updateAll';
+    v.toast = { kind: 'danger', text: v.title };
+  }
+  return v;
+}
+
+// The pill's source. A pushing app is the only judge; /app-latest answers only for older apps.
+function _appUpdateCurrent() {
+  const a = window.phosAppUpdate;
+  if (_appPushesUpdates(a)) { _appLatest = null; return appUpdateView(a); }
+  if (a && a.behind && a.target) return appUpdateView(a);
+  if (_appLatest && _appLatest.behind && _appLatest.latest) {
+    return appUpdateView({ behind: true, target: _appLatest.latest });
+  }
+  return appUpdateView(null);
+}
+
+function _renderAppUpdatePill(s) {
+  const pill = document.getElementById('versionPill');
+  if (!pill) return;
+  let up = document.getElementById('appUpdatePill');
+  const v = (isMacApp() || (s || {}).app_updates) ? _appUpdateCurrent() : appUpdateView(null);
+  if (!v.show) { if (up) up.remove(); return; }
+  if (!up) {
+    up = document.createElement('span');
+    up.id = 'appUpdatePill';
+    up.className = 'pill pill-appupdate';
+    up.setAttribute('role', 'button');
+    up.tabIndex = 0;
+    up.addEventListener('click', _appUpdatePillClick);
+    up.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); _appUpdatePillClick(); } });
+    pill.insertAdjacentElement('afterend', up);
+  }
+  up.textContent = v.label;
+  up.title = v.title;
+  up.dataset.state = v.state;
+  up.classList.toggle('is-busy', !!v.busy);
+  up.classList.toggle('is-problem', v.state === 'failed' || v.state === 'needs_app');
+  up.setAttribute('aria-disabled', v.action ? 'false' : 'true');
+}
+
+// The toast follows the app's answer and changes when the answer changes. Each outcome is said
+// once, also across the reload a finished update causes (the key is remembered in this window).
+function _appUpdateAnnounce() {
+  const a = window.phosAppUpdate;
+  if (!_appPushesUpdates(a) || !a.state) return;
+  const v = appUpdateView(a);
+  let last = _appUpdateShownKey;
+  try { last = sessionStorage.getItem('phosAppUpdateKey') || last; } catch (e) { /* private window */ }
+  if (v.key === last) return;
+  _appUpdateShownKey = v.key;
+  try { sessionStorage.setItem('phosAppUpdateKey', v.key); } catch (e) { /* private window */ }
+  if (v.toast) phosToast(v.toast.text, { kind: v.toast.kind, duration: v.state === 'failed' || v.state === 'needs_app' ? 0 : 6000 });
+}
+
+async function _refreshAppLatest() {
+  if (!isMacApp() && !(_versionState || {}).app_updates) return;
+  if (_appPushesUpdates(window.phosAppUpdate)) { _appLatest = null; return; }   // the app is the judge
+  try {
+    const r = await fetch('/app-latest', {cache: 'no-store'});
+    if (r.ok) _appLatest = await r.json();
+  } catch (e) { return; }
+  renderVersionPill();
+}
+
+function _appUpdatePillClick() {
+  const a = window.phosAppUpdate;
+  const v = _appUpdateCurrent();
+  const canAll = _appPushesUpdates(a);
+  if (canAll && !v.action) { if (v.title) phosToast(v.title, 'info'); return; }   // downloading / waiting
+  try {
+    window.webkit.messageHandlers.phosphene.postMessage({type: canAll ? (v.action || 'updateAll') : 'checkUpdate'});
+  } catch (e) { /* not inside the app */ }
+  // Nothing is promised before the app answers (U8): no "Updating…" here. An app that reports
+  // states says what happened through _appUpdateAnnounce; an older one cannot, so the page says
+  // only what it did. The answer to THIS click is always spoken, even if it repeats the last one
+  // (a second failure with the same sentence).
+  if (canAll && a.state) {
+    _appUpdateShownKey = '';
+    try { sessionStorage.setItem('phosAppUpdateKey', ''); } catch (e) { /* private window */ }
+    return;
+  }
+  const name = appUpdateName(v.parts) || 'the newest version';
+  phosToast(canAll
+    ? T('health.asked_phosphene_to_update_this', 'Asked Phosphene to update {name}. This button goes away when it is installed.', {name})
+    : T('health.asked_phosphene_to_update_if', 'Asked Phosphene to update {name}. If this stays, quit Phosphene (⌘Q) and open it again — it updates when it opens.', {name}), 'info');
+}
+window.addEventListener('phos-app-update', () => {
+  try { renderVersionPill(); } catch (e) {}
+  try { _appUpdateAnnounce(); } catch (e) {}
+});
+setTimeout(_refreshAppLatest, 3000);
+setInterval(_refreshAppLatest, 10 * 60 * 1000);
+
+// The pill's click inside the Mac app: never a git pull. It starts the app's real updater (the
+// native bridge, "checkUpdate" -> Updater.checkForUpdates) and still copies the build name for a bug report.
+function _macCheckForUpdates() {
+  try { window.webkit.messageHandlers.phosphene.postMessage({ type: 'checkUpdate' }); return true; }
+  catch (e) { return false; }
+}
 async function _appVersionPillClick() {
+  if (typeof openWhatsNew === 'function') openWhatsNew(true);
   const s = _versionState || {};
-  const debug = `Phosphene ${s.local_version || '?'} · mac-app`
-    + (phEdition() ? ` · ${phEdition()}` : '')
-    + ` · ${s.local_short || 'sha?'}`;
-  let copied = false;
-  try { await navigator.clipboard.writeText(debug); copied = true; } catch (e) {}
-  phosToast((copied ? `Copied "${debug}". ` : `${debug}. `)
-    + 'To update, use Phosphene \u2192 Check for Updates\u2026', 'info');
+  const debug = `Phosphene ${s.local_version || '?'} \u00b7 mac-app`
+    + (phEdition() ? ` \u00b7 ${phEdition()}` : '')
+    + ` \u00b7 ${s.local_short || 'sha?'}`;
+  try { await navigator.clipboard.writeText(debug); } catch (e) {}
+  if (_macCheckForUpdates()) phosToast(T('health.checking_for_updates', 'Checking for updates\u2026'), 'info');
+  else phosToast(`${debug}. To update, use Phosphene \u2192 Check for Updates\u2026`, 'info');
 }
 
 async function versionPillClick() {
   if (isMacApp() || (_versionState || {}).app_updates) return _appVersionPillClick();
+  { // Up to date, nothing pending: the pill opens this version's "What's new" card.
+    const s0 = _versionState || {};
+    if (typeof openWhatsNew === 'function' && !_versionRestartPending && !s0.stale_process
+        && (s0.behind_by | 0) <= 0 && !(s0.post_update && s0.post_update.outcome === 'pending')) {
+      return openWhatsNew(true);
+    }
+  }
+  const recovery = (_versionState || {}).post_update || {};
+  if (recovery.outcome === 'pending' && recovery.state === 'failed') {
+    const r = await fetch('/version/finish', {method: 'POST'});
+    const d = await r.json();
+    if (!r.ok || !d.ok) phosToast(d.error || 'Update could not resume.', 'warn');
+    await refreshVersionPill();
+    return;
+  }
   if (_versionRestartPending) {
     const s = _versionState || {};
     const _pu = s.post_update || {};
     if (_pu.pending || _pu.active || _pu.state === 'failed') {
       phosToast(_pu.state === 'failed'
-        ? 'The update did not finish: ' + (_pu.error || '') + ' Use Pinokio\u2019s Update.'
-        : 'Finishing the update first \u2014 restart becomes available when it is done.', 'warn');
+        ? T('health.the_update_did_not_finish_2', 'The update did not finish: ') + (_pu.error || '') + T('health.use_pinokio_s_update', ' Use Pinokio\u2019s Update.')
+        : T('health.finishing_the_update_first_restart', 'Finishing the update first \u2014 restart becomes available when it is done.'), 'warn');
       return;
     }
     if (s.pull_requires_full_update && !_pu.state) {
       // Genuinely can't self-restart into this one -- dependencies /
       // patches changed, and only Pinokio's own Update reinstalls those.
-      alert("Pulled. Because this update touched Python deps / patches, use Pinokio's Update button (it reinstalls + reapplies patches). After that click Start.");
+      alert(T('health.pulled_because_this_update_touched', "Pulled. Because this update touched Python deps / patches, use Pinokio's Update button (it reinstalls + reapplies patches). After that click Start."));
       return;
     }
     // SYS-29: same fix as the update banner's button -- finish the update
@@ -733,10 +986,10 @@ async function versionPillClick() {
   if (false) {
     const s = _versionState || {};
     alert(`Phosphene ${s.disk_version || s.disk_short || '(newer)'} is on `
-      + `disk, but this running panel loaded `
+      + T('health.disk_but_this_running_panel', 'disk, but this running panel loaded ')
       + `${s.local_version || s.local_short || 'an older build'} before the `
-      + `update landed.\n\nClick Stop, then Start in Pinokio (or restart `
-      + `the panel process) to load it. Your queue and settings are `
+      + T('health.update_landed_click_stop_then', 'update landed.\n\nClick Stop, then Start in Pinokio (or restart ')
+      + T('health.the_panel_process_to_load', 'the panel process) to load it. Your queue and settings are ')
       + `preserved.`);
     return;
   }
@@ -751,22 +1004,22 @@ async function versionPillClick() {
       + `· ${s.local_branch || 'branch?'} `
       + `· ${s.local_short || 'sha?'}`
       + (s.local_commit_date ? ` (${s.local_commit_date})` : '')
-      + (s.local_dirty ? ' · dirty tree' : '')
+      + (s.local_dirty ? T('health.dirty_tree', ' · dirty tree') : '')
       // The whole point of this string is "which build produced the bug".
       // If the tree has moved on, the panel is running neither what the
       // header first suggested nor what a maintainer would check out.
       + (s.stale_process ? ` · NOT RESTARTED, disk is at ${s.disk_short || '?'}` : '');
     try {
       await navigator.clipboard.writeText(debug);
-      alert(`Update check is paused: ${s.suppress_reason}.\n\n`
-        + `Copied this debug string to your clipboard so you can paste `
+      alert(T('health.update_check_is_paused', 'Update check is paused: {suppress_reason}.\n\n', {suppress_reason: s.suppress_reason})
+        + T('health.copied_this_debug_string_to', 'Copied this debug string to your clipboard so you can paste ')
         + `it into a bug report:\n\n${debug}`);
     } catch (e) {
-      alert(`Update check is paused: ${s.suppress_reason}.\n\n`
+      alert(T('health.update_check_is_paused', 'Update check is paused: {suppress_reason}.\n\n', {suppress_reason: s.suppress_reason})
         + `Your build:\n${debug}\n\n`
-        + `Phosphene only checks GitHub when you're on a clean main `
-        + `branch. Commit your local changes (or switch back to main) `
-        + `to re-enable updates.`);
+        + T('health.phosphene_only_checks_github_when', 'Phosphene only checks GitHub when you\'re on a clean main ')
+        + T('health.branch_commit_your_local_changes', 'branch. Commit your local changes (or switch back to main) ')
+        + T('health.to_re_enable_updates', 'to re-enable updates.'));
     }
     return;
   }
@@ -782,7 +1035,7 @@ async function versionPillClick() {
 async function versionDoRefresh() {
   const pill = document.getElementById('versionPill');
   pill.classList.add('pill-busy');
-  pill.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px;animation:phSpin 1.2s linear infinite"><use href="#ph-arrow-clockwise-bold"/></svg>checking…';
+  pill.innerHTML = phosMiniMark() + 'checking…';
   try {
     const r = await fetch('/version/check', { method: 'POST' });
     const data = await r.json();
@@ -798,7 +1051,8 @@ async function versionDoRefresh() {
 async function versionDoPull(opts) {
   opts = opts || {};
   if (isMacApp()) {               // the server refuses it too (409 app_updates)
-    phosToast('To update Phosphene, use Phosphene \u2192 Check for Updates\u2026', 'info');
+    if (_macCheckForUpdates()) phosToast(T('health.checking_for_updates', 'Checking for updates\u2026'), 'info');
+    else phosToast(T('health.to_update_phosphene_use_phosphene', 'To update Phosphene, use Phosphene \u2192 Check for Updates\u2026'), 'info');
     return;
   }
   const s = _versionState || {};
@@ -809,16 +1063,16 @@ async function versionDoPull(opts) {
   // that also does four other things depending on state.
   if (!opts.skipConfirm) {
     const ok = confirm(
-      `Pull update from ${local} → ${target}?\n\n` +
-      `This runs git pull on your phosphene install. After it succeeds, ` +
-      `you'll need to click Stop, then Start in Pinokio to load the new code. ` +
-      `Your queue and settings are preserved across restarts.`
+      T('health.pull_update_from', 'Pull update from {local} → {target}?\n\n', {local, target}) +
+      T('health.this_runs_git_pull_on', 'This runs git pull on your phosphene install. After it succeeds, ') +
+      T('health.you_ll_need_to_click', 'you\'ll need to click Stop, then Start in Pinokio to load the new code. ') +
+      T('health.your_queue_and_settings_are_2', 'Your queue and settings are preserved across restarts.')
     );
     if (!ok) return;
   }
   const pill = document.getElementById('versionPill');
   pill.classList.add('pill-busy');
-  pill.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px;animation:phSpin 1.2s linear infinite"><use href="#ph-arrow-clockwise-bold"/></svg>pulling…';
+  pill.innerHTML = phosMiniMark() + 'pulling…';
   // Tell poll() not to flash the offline banner during this call —
   // /version/pull is single-threaded server-side and blocks /status for
   // ~30s while git fetch + git pull + remote-check run. Without this
@@ -833,21 +1087,21 @@ async function versionDoPull(opts) {
       pill.classList.remove('pill-busy');
       renderVersionPill();
       alert(`Pull failed:\n\n${(data && data.error) || 'unknown error'}\n\n` +
-            `Tip: try the full Pinokio Update button instead — it also handles ` +
-            `cases where you have local changes that block a fast-forward.`);
+            T('health.keep_your_local_edits_save', 'Keep your local edits. Save or commit them before retrying Update.'));
       return;
     }
     // 4.17.5: a pull that moved nothing is not an update - no restart, no
     // "Updated to" banner (the restart came back on the same build and was
     // counted as a failed update). A stale process still gets its own pill.
-    if (data.moved === false) {
+    if (data.moved === false && !(data.state && data.state.post_update
+        && data.state.post_update.outcome === 'pending') && !(data.state && data.state.stale_process)) {
       pill.classList.remove('pill-busy');
       renderVersionPill();
       const go = document.getElementById('ubUpdate');
-      if (go) { go.disabled = false; go.textContent = 'Update now'; }
+      if (go) { go.disabled = false; go.textContent = T('health.update_now', 'Update now'); }
       try { _ubRender(_versionState); } catch (e) {}
       if (typeof phosToast === 'function') {
-        phosToast('Already up to date - nothing to restart.', { kind: 'success' });
+        phosToast(T('health.already_up_to_date_nothing', 'Already up to date - nothing to restart.'), { kind: 'success' });
       }
       return;
     }
@@ -857,11 +1111,11 @@ async function versionDoPull(opts) {
     const newVersion = (data.state && (data.state.pull_pulled_to_version || data.state.pull_pulled_to_short)) || 'new version';
     const _puNow = (data.state && data.state.post_update) || {};
     const fullUpdateNote = (_puNow.pending || _puNow.active)
-      ? `\n\nPhosphene is now finishing the update in the background (the same ` +
-        `step Pinokio's Update runs). Restart once the banner says it is done.`
+      ? T('health.phosphene_is_now_finishing_the', '\n\nPhosphene is now finishing the update in the background (the same ') +
+        T('health.step_pinokio_s_update_runs', 'step Pinokio\'s Update runs). Restart once the banner says it is done.')
       : data.state && data.state.pull_requires_full_update
-      ? `\n\n⚠ This update touched Python dependencies / patches. Use ` +
-        `Pinokio's Update button (not just Stop+Start) so deps reinstall.`
+      ? T('health.this_update_touched_python_dependencies_2', '\n\n⚠ This update touched Python dependencies / patches. Use ') +
+        T('health.pinokio_s_update_button_not', 'Pinokio\'s Update button (not just Stop+Start) so deps reinstall.')
       : '';
     // Inline, not a modal: the banner is already on screen and is where the
     // user is looking. An alert here was the second click in "I had to click
@@ -870,7 +1124,7 @@ async function versionDoPull(opts) {
         && _ubRestartState(newVersion, !!(data.state && data.state.pull_requires_full_update))) {
       // handled inline
     } else {
-      alert(`Pulled to ${newVersion}.\n\nClick Stop, then Start in Pinokio to apply.${fullUpdateNote}`);
+      alert(T('health.pulled_to_click_stop_then', 'Pulled to {newVersion}.\n\nClick Stop, then Start in Pinokio to apply.{fullUpdateNote}', {newVersion, fullUpdateNote}));
     }
   } catch (e) {
     pill.classList.remove('pill-busy');
@@ -919,8 +1173,10 @@ setInterval(refreshVersionPill, 5 * 60 * 1000);
   // did not know the `show` class at all: Storyboard's re-plan dialog and the
   // Editor's Generate-shot dialog open with classList.add('show'), so Escape,
   // the Tab trap and the scroll lock all ignored them.
-  const MODAL_SEL = '.models-modal, .model-browser-modal, .expand-lightbox, .modal-bg';
+  const MODAL_SEL = '.models-modal, .model-browser-modal, .expand-lightbox, .modal-bg, #phModalWrap';
   const isVisible = el => {
+    if (el.id === 'phModalWrap') return !el.hidden;
+    if (el.hidden) return false;
     const d = el.style.display;
     // Some modals open by adding an .open class (.model-browser-modal), the
     // .modal-bg family by adding .show; others toggle the inline style.
@@ -929,13 +1185,60 @@ setInterval(refreshVersionPill, 5 * 60 * 1000);
   };
   const visibleModals = () =>
     Array.from(document.querySelectorAll(MODAL_SEL)).filter(isVisible);
-  const topVisible = () => {
-    const v = visibleModals();
-    return v.length ? v[v.length - 1] : null;
+  const stack = [];
+  let opener = null;
+  let inertNodes = [];
+  document.addEventListener('click', e => {
+    opener = e.target.closest('button, a, input, [tabindex]') || document.activeElement;
+  }, true);
+  const topVisible = () => stack.length ? stack[stack.length - 1].el : null;
+  window.phosTopModal = topVisible;
+  const FOCUSABLE = 'summary, button:not([disabled]), [href], input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  const focusables = el => Array.from(el.querySelectorAll(FOCUSABLE))
+    .filter(n => !n.closest('[inert]') && n.getClientRects().length);
+  const focusFirst = el => {
+    const target = focusables(el)[0] || el;
+    if (target === el) el.tabIndex = -1;
+    target.focus();
   };
-  const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
   const refreshScrollLock = () => {
-    document.body.classList.toggle('modal-open', visibleModals().length > 0);
+    const visible = visibleModals();
+    let returnTo = null;
+    for (let i = stack.length - 1; i >= 0; i--) {
+      if (!visible.includes(stack[i].el)) {
+        const closed = stack.splice(i, 1)[0];
+        closed.el.style.zIndex = closed.zIndex;
+        returnTo = closed.opener;
+      }
+    }
+    for (const el of visible) {
+      if (!stack.some(item => item.el === el)) {
+        stack.push({el, opener: opener || document.activeElement, zIndex: el.style.zIndex});
+        el.style.zIndex = String(10000 + stack.length);
+      }
+    }
+    // Inert siblings along the whole ancestor path, including lower dialogs.
+    for (const [node, value] of inertNodes) node.inert = value;
+    inertNodes = [];
+    const top = topVisible();
+    if (top) {
+      for (let node = top; node && node !== document.body; node = node.parentElement) {
+        for (const sibling of node.parentElement.children) {
+          if (sibling !== node) { inertNodes.push([sibling, sibling.inert]); sibling.inert = true; }
+        }
+      }
+    }
+    opener = null;
+    document.body.classList.toggle('modal-open', !!top);
+    // Polling may have replaced the opener while its child dialog was up.
+    if (returnTo && !returnTo.isConnected && top) {
+      const action = returnTo.getAttribute('onclick');
+      returnTo = focusables(top).find(el =>
+        (returnTo.id && el.id === returnTo.id) ||
+        (action && el.getAttribute('onclick') === action)) || null;
+    }
+    if (returnTo && returnTo.isConnected && (!top || top.contains(returnTo))) returnTo.focus();
+    if (top && !top.contains(document.activeElement)) focusFirst(top);
   };
   // Wire a single MutationObserver per modal element. Cheaper than a
   // global subtree observer and avoids the cost of body-wide attribute
@@ -947,7 +1250,7 @@ setInterval(refreshVersionPill, 5 * 60 * 1000);
     watched.add(el);
     new MutationObserver(refreshScrollLock).observe(el, {
       attributes: true,
-      attributeFilter: ['style', 'class'],
+      attributeFilter: ['style', 'class', 'hidden'],
     });
   };
   document.querySelectorAll(MODAL_SEL).forEach(watch);
@@ -971,7 +1274,8 @@ setInterval(refreshVersionPill, 5 * 60 * 1000);
     const top = topVisible();
     if (!top) return;
     e.preventDefault();
-    e.stopPropagation();
+    e.stopImmediatePropagation();
+    if (top._cancelModal) { top._cancelModal(); return; }
     // Case-insensitive: sbCloseReplan() / sbeGenClose() are the class-based
     // dialogs' own close functions and never matched a lower-case "close".
     const closeBtn =
@@ -986,18 +1290,17 @@ setInterval(refreshVersionPill, 5 * 60 * 1000);
       // outrank `.modal-bg.show` and the dialog could never open again.
       top.classList.remove('show', 'open');
     } else { top.style.display = 'none'; }
-  });
+  }, true);
 
   // Focus trap — when a modal is visible, Tab cycles inside it.
   document.addEventListener('keydown', e => {
     if (e.key !== 'Tab') return;
     const top = topVisible();
     if (!top) return;
-    const focusables = Array.from(top.querySelectorAll(FOCUSABLE))
-      .filter(el => el.offsetWidth > 0 || el.offsetHeight > 0);
-    if (!focusables.length) return;
-    const first = focusables[0];
-    const last = focusables[focusables.length - 1];
+    const controls = focusables(top);
+    if (!controls.length) { e.preventDefault(); focusFirst(top); return; }
+    const first = controls[0];
+    const last = controls[controls.length - 1];
     const active = document.activeElement;
     if (e.shiftKey && (active === first || !top.contains(active))) {
       e.preventDefault();
@@ -1018,10 +1321,289 @@ Object.assign(globalThis, {
   // SYS-19: closeHealthPop wasn't published -- openTierModal (settings.js)
   // and openModelsModal (preview.js) need it so clicking a health-popover
   // row closes the popover before its modal opens on top of it.
-  closeHealthPop,
+  closeHealthPop, starAskClose,
   // The update/broadcast pop-up is the panel's only real dialog component
   // (kicker/title/body/two buttons, one at a time via _phModalOpen) — VC-35's
   // fix is "one in-app confirm/undo component", not a second modal shape, so
   // Stop's confirm-with-cost (queue.js) reuses this rather than inventing one.
   _phModalShow, _phModalClose,
 });
+
+function starAskClose() { document.getElementById('starAsk')?.classList.remove('show'); }
+
+// ---- The one-time "star us on GitHub" card (owner, 2 Nov 2026; v2 4 Nov) --
+// After the third finished render the server sets `star_prompt_due` on
+// /status (see _star_prompt_after_job), with `star_prompt_variant`: on a Mac
+// that paired Phosphene Remote ("remote") the same card is one quiet line
+// asking for an App Store review instead (review nudge, 12 Nov 2026; no
+// GitHub check, no star button). Either answer ends both for good. v2, learned from how T3 Code asks
+// (our own code):
+//   1. Ask the server first (/star-prompt/github): if this Mac's GitHub CLI
+//      says the account already starred us, the card is retired unseen.
+//   2. Wait until the person has been idle 30 s with the page visible and
+//      focused. Any pointer, key, wheel or typing restarts the wait, so it
+//      never lands mid-typing or mid-drag.
+//   3. One button, "Star on GitHub | <live count>" (no number when unknown).
+//      Where gh is signed in it stars in place and the card says thank you
+//      with a short burst, then closes; otherwise it opens GitHub.
+// The quiet close X and Escape record `not_now`. The card says `shown` when
+// it really goes up, so it is never put up again on this Mac.
+const STAR_CARD_URL = 'https://github.com/mrbizarro/Phosphene';
+// The App Store app, straight on Phosphene Remote's write-a-review sheet; the
+// server falls back to the same sheet on the web when nothing opens it.
+const STAR_CARD_REVIEW_URL = 'itms-apps://apps.apple.com/app/id6827562294?action=write-review';
+const STAR_CARD_REVIEW_WEB_URL = 'https://apps.apple.com/app/id6827562294?action=write-review';
+const STAR_CARD_IDLE_MS = 30000;
+const STAR_CARD_THANKS_MS = 5000;
+const STAR_CARD_ACTIVITY = ['pointerdown', 'pointermove', 'keydown', 'wheel',
+                            'touchstart', 'input', 'compositionstart', 'focus'];
+let _starCardUp = false;       // on screen
+let _starCardArmed = false;    // due seen this session: checking or waiting
+let _starCardDone = false;     // answered; the card only closes now
+let _starCardInfo = null;      // {gh, starred, stars} from the server
+let _starCardVariant = 'github'; // 'remote': the App Store review line
+function _starCardPost(action) {
+  try {
+    return fetch('/star-prompt', {method: 'POST', body: new URLSearchParams({action}),
+                                  keepalive: true}).catch(() => {});
+  } catch (_) { return Promise.resolve(); }
+}
+function _starCardCheck() {
+  try {
+    return fetch('/star-prompt/github', {cache: 'no-store'})
+      .then((r) => (r && r.ok ? r.json() : null)).catch(() => null);
+  } catch (_) { return Promise.resolve(null); }
+}
+function _starCardCount(n) {
+  if (typeof n !== 'number' || !isFinite(n) || n < 0) return '';
+  if (n < 1000) return String(Math.round(n));
+  const k = n / 1000;
+  return (k < 10 ? k.toFixed(1).replace(/\.0$/, '') : String(Math.round(k))) + 'k';
+}
+function _starCardSetCount(n) {
+  const c = document.getElementById('starCardCount');
+  if (!c) return;
+  const t = _starCardCount(n);
+  c.textContent = t;
+  c.hidden = !t;
+}
+// Resolves once the page has been idle STAR_CARD_IDLE_MS while visible and
+// focused. A timer that ends while the page is hidden or unfocused waits for
+// the next focus / visibility change and starts over.
+function _starCardWaitIdle() {
+  return new Promise((resolve) => {
+    let timer = null;
+    const restart = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        if (document.hidden || (typeof document.hasFocus === 'function' && !document.hasFocus())) return;
+        for (const t of STAR_CARD_ACTIVITY) window.removeEventListener(t, restart, true);
+        document.removeEventListener('visibilitychange', restart, true);
+        resolve();
+      }, STAR_CARD_IDLE_MS);
+    };
+    for (const t of STAR_CARD_ACTIVITY) window.addEventListener(t, restart, {capture: true, passive: true});
+    document.addEventListener('visibilitychange', restart, true);
+    restart();
+  });
+}
+function _starCardShow() {
+  const el = document.getElementById('starCard');
+  if (!el || _starCardUp || _starCardDone) return;
+  if (_starCardVariant === 'remote') {
+    el.classList.add('is-review');
+    const line = document.getElementById('starCardReview');
+    if (line) line.hidden = false;
+    if (typeof el.setAttribute === 'function') {
+      el.setAttribute('aria-labelledby', 'starCardReview');
+      el.removeAttribute('aria-describedby');
+    }
+  } else {
+    _starCardSetCount(_starCardInfo && _starCardInfo.stars);
+  }
+  _starCardUp = true;
+  el.hidden = false;
+  _starCardPost('shown');
+}
+function starCardPoll(s) {
+  if (_starCardArmed || _starCardUp || !s || !s.star_prompt_due) return;
+  if (!document.getElementById('starCard')) return;
+  _starCardArmed = true;
+  _starCardVariant = s.star_prompt_variant === 'remote' ? 'remote' : 'github';
+  if (_starCardVariant === 'remote') return _starCardWaitIdle().then(_starCardShow);
+  return _starCardCheck().then((info) => {
+    _starCardInfo = info || null;
+    if (info && info.starred === true) {           // they already starred
+      _starCardDone = true;
+      return _starCardPost('already');
+    }
+    return _starCardWaitIdle().then(_starCardShow);
+  });
+}
+function _starCardClose() {
+  const el = document.getElementById('starCard');
+  if (el) { el.hidden = true; el.classList.remove('is-thanks'); }
+  _starCardUp = false;
+}
+async function _starCardOpenReview() {
+  try {
+    const r = await fetch('/external/open', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'url=' + encodeURIComponent(STAR_CARD_REVIEW_URL),
+    });
+    if (r.ok) { try { phosToast && phosToast(T('health.opening_the_app_store', 'Opening the App Store…')); } catch (_) {} return; }
+  } catch (_) {}
+  try { window.open(STAR_CARD_REVIEW_WEB_URL, '_blank', 'noopener'); } catch (_) {}
+}
+function starCardAnswer(action) {
+  if (!_starCardUp) { _starCardClose(); return; }
+  if (_starCardDone) { _starCardClose(); return; }  // the thank-you, closed early
+  _starCardDone = true;
+  _starCardClose();
+  if (action === 'star') {
+    document.getElementById('starLink')?.classList.remove('is-calling');
+    if (typeof openExternal === 'function') openExternal(STAR_CARD_URL);
+    else window.open(STAR_CARD_URL, '_blank', 'noopener');
+  } else if (action === 'review' && _starCardVariant === 'remote') {
+    _starCardOpenReview();
+  } else if (action === 'waitlist') {
+    const url = siteLink('/pricing/', 'get-pro', 'star-card');
+    if (typeof openExternal === 'function') openExternal(url);
+    else window.open(url, '_blank', 'noopener');
+  } else {
+    action = 'not_now';
+  }
+  _starCardPost(action);
+}
+// The one button. In place where gh is signed in, GitHub otherwise (and on
+// any failure). Only ever on the person's click.
+async function starCardStar() {
+  if (!_starCardUp || _starCardDone || _starCardVariant === 'remote') return;
+  const btn = document.getElementById('starCardStar');
+  if (_starCardInfo && _starCardInfo.gh) {
+    const label = btn && btn.querySelector('.star-card-label');
+    if (btn) btn.disabled = true;
+    if (label) label.textContent = T('health.starring', 'Starring…');
+    let r = null;
+    try {
+      r = await fetch('/star-prompt/star', {method: 'POST',
+        headers: {'Content-Type': 'application/json'}, body: '{}'})
+        .then((x) => x.json()).catch(() => null);
+    } catch (_) { r = null; }
+    if (btn) btn.disabled = false;
+    if (label) label.textContent = T('health.star_on_github', 'Star on GitHub');
+    if (r && r.ok) { _starCardThank(r.stars); return; }
+  }
+  starCardAnswer('star');
+}
+function _starCardThank(stars) {
+  _starCardDone = true;                           // the server recorded star_inapp
+  const el = document.getElementById('starCard');
+  if (!el) return;
+  _starCardSetCount(stars);
+  el.classList.add('is-thanks');
+  const ask = el.querySelector('.star-card-ask');
+  if (ask) ask.hidden = true;
+  const ty = document.getElementById('starCardThanks');
+  if (ty) ty.hidden = false;
+  _starCardBurst(el);
+  setTimeout(_starCardClose, STAR_CARD_THANKS_MS);
+}
+// A short burst of little stars and sparks out of the lamp's bulb (the lamp
+// lights up as the card says thank you), drawn on the card's own canvas, no
+// library. Skipped under prefers-reduced-motion.
+function _starCardBurst(card) {
+  const reduce = typeof matchMedia === 'function'
+    && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const cv = document.getElementById('starCardBurst');
+  if (reduce || !cv || !cv.getContext) return false;
+  const rect = card.getBoundingClientRect();
+  const bulb = card.querySelector && card.querySelector('.lamp-bulb');
+  const bb = bulb && bulb.getBoundingClientRect ? bulb.getBoundingClientRect() : null;
+  const b = bb && bb.width ? bb : {left: rect.left + rect.width / 2 - 1, top: rect.top + rect.height / 2 - 1, width: 2, height: 2};
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  cv.width = Math.round(rect.width * dpr); cv.height = Math.round(rect.height * dpr);
+  const ctx = cv.getContext('2d');
+  if (!ctx) return false;
+  ctx.scale(dpr, dpr);
+  const ox = b.left - rect.left + b.width / 2, oy = b.top - rect.top + b.height / 2;
+  const colors = ['#ffd391', '#ffe5b4', '#5eeaff', '#b14aff', '#f4f4f5'];
+  const parts = [];
+  for (let i = 0; i < 44; i++) {
+    const a = (Math.PI * 2 * i) / 44 + Math.random() * 0.3;
+    const v = 1.8 + Math.random() * 3.6;
+    parts.push({x: ox, y: oy, vx: Math.cos(a) * v * 1.25, vy: Math.sin(a) * v - 1.6,
+                r: 1.2 + Math.random() * 2, c: colors[i % colors.length],
+                star: i % 3 === 0, spin: Math.random() * 6});
+  }
+  const t0 = performance.now(), life = 1400;
+  const star = (x, y, r, rot) => {
+    ctx.beginPath();
+    for (let k = 0; k < 10; k++) {
+      const rr = k % 2 ? r * 0.45 : r, an = rot + (Math.PI * k) / 5;
+      ctx.lineTo(x + Math.cos(an) * rr, y + Math.sin(an) * rr);
+    }
+    ctx.closePath(); ctx.fill();
+  };
+  const frame = (now) => {
+    const t = (now - t0) / life;
+    ctx.clearRect(0, 0, rect.width, rect.height);
+    if (t >= 1) return;
+    ctx.globalAlpha = 1 - t * t;
+    for (const p of parts) {
+      p.vy += 0.16; p.vx *= 0.985; p.vy *= 0.985;
+      p.x += p.vx; p.y += p.vy;
+      ctx.fillStyle = p.c;
+      if (p.star) star(p.x, p.y, p.r * 1.9, p.spin + t * 6);
+      else { ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill(); }
+    }
+    requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+  return true;
+}
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || !_starCardUp) return;
+  const el = document.getElementById('starCard');
+  if (el && el.contains(document.activeElement)) starCardAnswer('not_now');
+});
+Object.assign(globalThis, { starCardPoll, starCardAnswer, starCardStar });
+
+
+// ---- "Notify everyone": one signed notice from the maintainer (Pinokio only; the Mac app shows its own) ----
+// The server (app_notice.py) only serves a notice whose Ed25519 signature checks, inside its version window.
+// Each notice id shows once; Dismiss (or the action) remembers it in this browser.
+async function noticeRefresh() {
+  if (isMacApp()) return;
+  let n = null;
+  try { const r = await fetch('/notice', { cache: 'no-store' }); n = (await r.json()).notice; } catch (e) { return; }
+  const old = document.getElementById('phosNotice');
+  if (!n || !n.id) { if (old) old.remove(); return; }
+  let seen = [];
+  try { seen = JSON.parse(localStorage.getItem('phos_notice_seen') || '[]'); } catch (e) {}
+  if (seen.indexOf(n.id) >= 0 || old) return;
+  const remember = () => { try { seen.push(n.id); localStorage.setItem('phos_notice_seen', JSON.stringify(seen.slice(-50))); } catch (e) {} };
+  const bar = document.createElement('div');
+  bar.id = 'phosNotice'; bar.setAttribute('role', 'status');
+  bar.style.cssText = 'position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:9999;max-width:640px;display:flex;gap:12px;align-items:center;'
+    + 'padding:10px 14px;border-radius:10px;background:#1b1f2e;color:#e8ebf5;border:1px solid #394060;box-shadow:0 8px 28px rgba(0,0,0,.45);font:13px/1.4 system-ui,sans-serif';
+  const t = document.createElement('span'); t.textContent = n.text; t.style.flex = '1';
+  bar.appendChild(t);
+  if (n.action === 'update' || (n.action === 'link' && n.link)) {
+    const b = document.createElement('button');
+    b.textContent = n.action === 'update' ? T('health.update_now', 'Update now') : T('health.read_more', 'Read more');
+    b.style.cssText = 'padding:5px 10px;border-radius:7px;border:0;background:#8b5cf6;color:#fff;cursor:pointer';
+    b.onclick = () => { remember(); bar.remove();
+      if (n.action === 'link') window.open(n.link, '_blank', 'noopener'); else versionPillClick(); };
+    bar.appendChild(b);
+  }
+  const x = document.createElement('button');
+  x.textContent = '\u2715'; x.title = T('health.dismiss', 'Dismiss'); x.setAttribute('aria-label', T('health.dismiss', 'Dismiss'));
+  x.style.cssText = 'border:0;background:transparent;color:#9aa3b8;cursor:pointer;font-size:14px';
+  x.onclick = () => { remember(); bar.remove(); };
+  bar.appendChild(x);
+  document.body.appendChild(bar);
+}
+setTimeout(noticeRefresh, 12000);
+setInterval(noticeRefresh, 600000);

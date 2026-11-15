@@ -16,7 +16,7 @@ character names.
 | | |
 |---|---|
 | **What identifies you** | One random UUID, generated on your Mac, tied to nothing |
-| **How often** | Once ever when the install is new, once per panel start, plus once per finished render. No heartbeats |
+| **How often** | Once ever when the install is new, once per panel start, plus once per finished render, and Phosphene Bench results only when you press Submit ([`bench_result`](#bench_result)). No heartbeats |
 | **Where it goes** | PostHog (`us.i.posthog.com`), or a self-hosted endpoint you choose |
 | **Location** | None sent. Country and city are *derived* from the address your computer connects from, and kept — [details](#location) |
 | **How to turn it off** | Settings → *Anonymous usage analytics* → **Turn off**, or `PHOSPHENE_ANALYTICS_DISABLED=1` |
@@ -148,6 +148,47 @@ your Mac.
 
 ---
 
+## Super properties (5.0.3)
+
+Phosphene runs in two places: through Pinokio, and as the Phosphene Mac app. Both
+run the same Studio, so an event on its own could not say which. From 5.0.3 every
+event below also carries these, unless the event already names the field itself:
+
+| Property | Values | Why |
+|---|---|---|
+| `distribution` | `mac-app` or `pinokio` | A bug in the app is not a bug in Pinokio, and the other way round |
+| `edition` | `free` or `pro` | Pro runs a different render path |
+| `app_version`, `app_build` | e.g. `1.0.3`, `27`; Mac app only | The app and the Studio update separately |
+| `studio_version` | e.g. `5.0.3` | The Studio build that sent it (same as `version`) |
+| `os_version`, `chip_family`, `ram_gb` | `26.4`, `M4 Max`, `64` | The coarse machine class, so any event can be split by hardware |
+
+All are closed words, version numbers or whole numbers. No path, no name, no
+prompt. The Mac app also sends its own few events (`mac_*`, below) with the same
+rules and the same off switch. The Settings toggle and
+`PHOSPHENE_ANALYTICS_DISABLED=1` switch both off. When the Mac app minted this
+Mac's random id before the Studio first ran, the Studio keeps that same id
+(`PHOSPHENE_ANALYTICS_INSTALL_ID`), so one install is one id.
+
+### The Mac app's own events (`mac_*`)
+
+Sent by the app itself, not the Studio, to the same place, only while analytics is
+on. Properties: the super properties above (without the Studio-only ones) plus:
+
+| Event | When | Extra properties |
+|---|---|---|
+| `mac_launch` | each time the app opens | `first_launch` (true on the first ever open) |
+| `mac_setup` | setup, before the Studio exists: the plan and the install; and (app 5.0.11+) the background download of the video model after the Studio opens | `step` (`plan`, `install` or `models`), `outcome` (`started`, `ok`, `failed`), on a failure `error_class` (closed words such as `disk_full`, `network`, `download_failed`, `timeout`) and `error_signature` (one line, 120 characters, paths / URLs / e-mails / keys / ids / your user name removed), `seconds_bucket` |
+| `mac_engine` | the app starting the Studio | `step` is `studio`, `outcome` (`ok`, `failed`, `exited` when it quit by itself), `error_class`, `error_signature`, `exit_status`, `seconds_bucket` |
+| `mac_update` | Sparkle, the app's updater | `stage` `check` with `outcome` `found` or `failed` (with `error_domain` and `error_code`, numbers only, never the message; at most once per cause per six hours), or `stage` `installed` with `outcome` `ok`, `from_version`, `to_version` (noticed the next time the new app opens) |
+| `mac_crash` | the app did not quit cleanly last time | `outcome` is `crashed` |
+| `mac_pro` | (app 5.0.24) the app's own Pro window (top bar Pro chip, the Phosphene Pro menu item) | `action` (`open`, `get`, `restore`, `key`, `close`); on `open`, `where` (`topbar`, `menu`, `automation`); on `get`, `plan` (`monthly`, `yearly`, `founding`). `key` means a licence key was submitted; the key never leaves the Mac. Same closed words as the Studio's `pro_click`, below |
+
+A copy of every `mac_*` event is written, as sent, to `mac-usage-log.jsonl` in the app's
+`state` folder (the key is not in it). Success steps are reported once per launch; nothing
+repeats on a timer.
+
+---
+
 ## Events
 
 Seven events. That's the whole list. (An eighth is described at the end
@@ -199,8 +240,8 @@ including image and training jobs.
 
 | Field | Type | Example | Notes |
 |---|---|---|---|
-| `engine` | string | `"ltx"` | `ltx` or `h3` |
-| `mode` | string | `"i2v"` | `t2v`, `i2v`, `extend`, `keyframe`, `a2v`, `restore`, `ingredients`, `control`, `upscale`, `image`, `train` |
+| `engine` | string | `"ltx"` | `ltx`, `h3`, `music`, `speech`, an image engine (`flux3`, `mflux/<family>`), or `image` for an image job that failed before its engine was chosen (before 4.19.16 failed image jobs said `ltx`) |
+| `mode` | string | `"i2v"` | `t2v`, `i2v`, `extend`, `keyframe`, `a2v`, `restore`, `ingredients`, `control`, `upscale`, `image`, `train`, `music`, `speech` (a Speech job sends only the counts every render sends: never the script, the voice, a character name or the clip) |
 | `tier` | string | `"standard"` | LTX quality (`quick`/`balanced`/`standard`/`high`) or the H3 composite cell (`standard_5s`, `high_10s`, …) |
 | `duration_bucket` | string | `"5-15m"` | Legacy 5-value bucket, kept one more release for dashboard continuity, then removed in favour of `wall_sec_bucket` |
 | `wall_sec_bucket` | int | `480` | The lower edge of a log-spaced ladder (`15, 30, 45, 60, 90, 120, 180, 240, 300, 420, 600, 900, 1200, 1800, 2400, 3600, 5400`). Sharp enough to see a performance regression, far too coarse to be a timing fingerprint. Absent when the wall clock is unknown |
@@ -223,14 +264,16 @@ including image and training jobs.
 | `lora_kinds` | string | `"style"` | Closed vocabulary: `none` / `style` / `character` / `mixed` |
 | `character_used` | bool | `true` | A cast character drove this render |
 | `audio_mode` | string | `"joint"` | `joint` / `none` (external audio replaces the generated track) / `a2v_dub` / `h3_native` |
-| `h3_sampler` | string | `"v13"` | 4.19.11 — H3 renders only: which sampler ran. **Closed vocabulary**: `best` (the full sampler), `fast`, `turbo`, `v13` (lightx2v v1.3 on Best at High). Keeps the timing lanes apart, which `steps` alone cannot |
+| `h3_sampler` | string | `"v13"` | 4.19.11 — H3 renders only: which sampler ran. **Closed vocabulary**: `best` (the full sampler), `fast`, `turbo`, `v13` (lightx2v v1.3 on Best at High), `flex` (Pika H3 Flex, its six-step re-noise sampler), `flex_turbo` (5.0: H3 Flex Turbo, Pro, four euler steps). Keeps the timing lanes apart, which `steps` alone cannot |
 | `first_render` | bool | `true` | Present once per install, on its first successful render ever — the activation funnel without a join |
 | `gpu_steps` | string | `"short"` | 4.17.5 — present only when the render ran in **short GPU steps** (one Metal op per command buffer), the path a macOS GPU-watchdog kill switches a setting to. Closed vocabulary: `short`. Absent = default steps. Answers "does the short path stop the watchdog loop" |
 | `watchdog_retry` | bool | `true` | 4.17.5 — present only when a GPU-watchdog kill was re-run inside the same job (once, on short steps). On `render_completed` it means the retry saved the render |
 | `watchdog_phase` | string | `"load"` | 4.17.5 — present only when macOS's GPU watchdog stopped this job (on `render_completed`, the run that was then re-run): which phase the GPU was in, from the helper's own step lines. **Closed vocabulary**: `encode` (Gemma prompt encoding), `load` (the transformer loading), `denoise`, `decode` |
-| `gpu_abort_retry` | bool | `true` | 4.19.6 — present only when a GPU abort that was not the watchdog (crash_line `gpu_internal` / `gpu_victim` / `gpu_other`) stopped prompt encoding and the job was re-run once in a fresh engine process after a pause. On `render_completed` it means the re-run saved the render |
+| `gpu_abort_retry` | bool | `true` | 4.19.6 — present only when a GPU abort that was not the watchdog (crash_line `gpu_internal` / `gpu_victim` / `gpu_other`) stopped prompt encoding and the job was re-run once in a fresh engine process after a pause. 5.0.23 — also set, together with `watchdog_retry`, when a GPU-watchdog kill in prompt encoding had no mitigation left to try (short steps and the shorter encode were already on) and got that same paused re-run. On `render_completed` it means the re-run saved the render |
 | `helper_warm` | bool | `false` | 4.19.6 — LTX renders that ran in the warm engine process: `true` when the (last) run started in a process that had already finished a render, `false` when it started fresh. Absent for engines that do not use it. Tells whether prompt-encoding GPU aborts follow a warm process |
-| `source` | string | `"storyboard"` | v4.9.7 — which surface queued the job. **Closed vocabulary**: `form`, `batch`, `storyboard`, `characters`, `image_studio`, `retry`, `api`, `chain` (an Upscale ×2 queued automatically behind an H3 draft), `unknown`. Makes "how much of the rendering is Storyboard" a one-click breakdown |
+| `mem_pressure` | int | `1` | 4.19.16 — LTX renders: macOS's memory pressure level when the render started (`1` normal, `2` warning, `4` critical). Absent when unread. Tells memory pressure apart from the render itself in the 16 GB Metal-watchdog kills |
+| `mem_avail_gb` | int | `8` | 4.19.16 — LTX renders: the memory the kernel reported available when the render started, as the lower edge of `0, 2, 4, 6, 8, 12, 16, 24, 32, 64` GB. Absent when unread |
+| `source` | string | `"storyboard"` | v4.9.7 — which surface queued the job. **Closed vocabulary**: `form`, `batch`, `storyboard`, `characters`, `image_studio`, `retry`, `api`, `chain` (an Upscale ×2 queued automatically behind an H3 draft), `bench` (a Phosphene Bench step, see [`bench_result`](#bench_result)), `unknown`. Makes "how much of the rendering is Storyboard" a one-click breakdown |
 
 ### `render_failed`
 
@@ -243,7 +286,8 @@ Same as `render_completed` (minus `first_render`), plus:
 | `error_signature` | string | `"RuntimeError: helper exited before first frame"` | **The only free-text field the panel sends**, see the scrubbing rules below. Kept for ONE transition release alongside `error_class`, then removed |
 | `crash_line` | string | `"gpu_timeout"` | 4.19.2 — only when the LTX render helper died from a signal (SIGABRT, SIGSEGV, …): the **class** of the last native error line it printed, never the line. **Closed vocabulary**: `gpu_timeout`, `gpu_interactivity` (the two GPU-watchdog names), `gpu_hang`, `gpu_page_fault`, `gpu_oom`, `gpu_victim`, `gpu_internal`, `gpu_submissions_ignored`, `gpu_invalid_resource`, `gpu_not_permitted`, `gpu_device_removed` (4.19.4 - the remaining IOGPU/Metal command-buffer error names, split out of `gpu_other`), `gpu_other` (any other Metal command-buffer error), `resource_limit`, `cxx_exception`, `assertion`, `none` (no such line reached the panel). Why: until 4.19.2 the generic SIGABRT sentence quoted the watchdog line as an example, so every unexplained abort was counted as `metal_watchdog` (24 of 4.19.1's 37); those now count as `native_crash`, and this says what they were |
 | `crash_phase` | string | `"start"` | 4.19.2 — same condition as `crash_line`: how far the helper got, from its own step lines. **Closed vocabulary**: `encode`, `load`, `denoise`, `decode` (as `watchdog_phase`), `start` (before its first step line) |
-| `train_error` | string | `"oom"` | 4.19.1 — only on a failed **training** job (`mode: train`): why it stopped. **Closed vocabulary**: `oom` (MLX/Metal could not allocate, or macOS killed the trainer with SIGKILL), `missing_file` (incl. the LTX-2.3 training weights not downloaded: the trainer now checks them first and stops within seconds), `caption_check` (the captions carry another trigger), `disk_full`, `import_error` (the venv is missing a package), `nan_loss` (the loss stopped being a number for 10 steps in a row; the trainer now stops there), `other`. The trainer classifies its own exception by TYPE first and then by MLX's fixed allocation-failure fragments (`lora_lab/failure.py`), sends the word in its `error` event, and the panel forwards it only if it is on this list. Never a path, caption, trigger or message: those stay in the Logs tab and `<dataset>/train.log`. Before 4.19.1 every one of these reached the fleet as `helper_exit` + "training exited with code 1"; that sentence and its `error_class` are unchanged, so the old series continues and `train_error` splits it |
+| `train_error` | string | `"oom"` | 4.19.1 — only on a failed **training** job (`mode: train`): why it stopped. **Closed vocabulary**: `oom` (MLX/Metal could not allocate, or macOS killed the trainer with SIGKILL), `missing_file` (incl. the LTX-2.3 training weights not downloaded: the trainer now checks them first and stops within seconds), `caption_check` (the captions carry another trigger), `disk_full`, `import_error` (the venv is missing a package), `nan_loss` (the loss stopped being a number for 10 steps in a row; the trainer now stops there), `other`. The trainer classifies its own exception by TYPE first and then by MLX's fixed allocation-failure fragments (`lora_lab/failure.py`), sends the word in its `error` event, and the panel forwards it only if it is on this list. Never a path, caption, trigger or message: those stay in the Logs tab and `<dataset>/train.log`. Before 4.19.1 every one of these reached the fleet as `helper_exit` + "training exited with code 1"; that sentence and its `error_class` stayed until 4.19.17, when the card started showing the trainer's own sentence (so `error_class` for a training failure now follows that sentence, and `error_signature` is the fixed line described under `train_stage`). Read training failures by `train_error` + `train_stage`, not `error_class` |
+| `train_stage` | string | `"preprocess"` | 4.19.17 — only on a failed **training** job, next to `train_error`: where the trainer stopped. **Closed vocabulary** (`lora_lab/failure.py` `TRAIN_STAGES`): `models`, `caption`, `config`, `ingest`, `crop`, `preprocess`, `train`, `publish`, `sidecar`, `validate`, `verify`, `unknown` (the trainer died before it said; then `train_error` is read from the last traceback line's exception TYPE). From 4.19.17 a training failure's `error_signature` is the fixed line `training stopped: <train_error> (stage <train_stage>)` built from these two words, because the card now shows the trainer's own sentence (which can quote a trigger or file name) and that text never leaves the Mac. A run that died with no word and no traceback still sends "training exited with code N" |
 
 Cancelled jobs are **not** reported — a user cancelling is not a signal about
 the software.
@@ -292,7 +336,7 @@ The surfaces render events cannot see. One event per action, no free text.
 
 | prop | type | example | why |
 |---|---|---|---|
-| `feature` | string | `"storyboard_plan"` | **Closed vocabulary**: `storyboard_plan`, `storyboard_export`, `editor_open`, `editor_export`, `civitai_download`, `sample_character`, `train_start`, `enhance_prompt`, `train_refused`, `enhance_prompt` is sent by the server when an Enhance succeeds, with the mode (`t2v`, `i2v`, `a2v`) as `detail` (from 2026-10-19; before that nothing sent it, so earlier zeros mean unmeasured, not unused). `share` (the clip toolbar's Share: a caption with the Phosphene link copied and the file selected in Finder; only that the button was used is sent, never which clip). Unknown names are dropped locally, never sent. `train_start` fires only past `/train/start`'s RAM refusal (SYS-41) — a refused click counts as `train_refused` with `detail: "ram"` instead |
+| `feature` | string | `"storyboard_plan"` | **Closed vocabulary**: `storyboard_plan`, `storyboard_export`, `editor_open`, `editor_export`, `civitai_download`, `sample_character`, `train_start`, `enhance_prompt`, `train_refused`, `enhance_prompt` is sent by the server when an Enhance succeeds, with the mode (`t2v`, `i2v`, `a2v`) as `detail` (from 2026-10-19; before that nothing sent it, so earlier zeros mean unmeasured, not unused). `share` (the clip toolbar's Share: a caption with the Phosphene link copied and the file selected in Finder; only that the button was used is sent, never which clip). Unknown names are dropped locally, never sent. `train_start` fires only past `/train/start`'s RAM refusal (SYS-41) — a refused click counts as `train_refused` with `detail: "ram"` instead, or (4.19.17+) `detail: "models"` when the LTX-2.3 training weights are not downloaded |
 | `detail` | string | `"nle"` | Optional, lowercase `[a-z0-9_.-]` only, ≤32 chars — a sub-choice within the feature |
 | `version` | string | `"4.9.7"` | As on `app_boot` |
 
@@ -406,7 +450,11 @@ One event when a developer broadcast (`BROADCAST.json`) is acknowledged. No text
 
 ### `queue_paused_breaker` (v4.9.7)
 
-The queue paused itself after three identical failures in a row.
+The queue paused itself after three identical failures in a row - or, from
+5.0.14 (4.19.19), after ONE when the render helper could not start because a package in
+the engine will not import (`helper failed to start: ... ImportError`): a
+broken install no retry renders through. Those fire with `n_failed: 1` and
+`error_class: "helper_start_timeout"`.
 
 | prop | type | example | why |
 |---|---|---|---|
@@ -414,7 +462,7 @@ The queue paused itself after three identical failures in a row.
 | `queued` | int | `12` | Jobs left waiting |
 | `error_class` | string | `"model_missing"` | The same closed taxonomy as `render_failed` |
 
-The browser reports `update_prompt`, `broadcast_seen`, the `feature_used` values `editor_open`, `editor_export`, `enhance_prompt` and `share`, and the single `install_step` value `first_use` through **one** route, `POST /analytics/ui`, which allowlists every (event, value) pair and answers 400 to anything else. Everything else is emitted server-side.
+The browser reports `update_prompt`, `broadcast_seen`, `pro_click` (its `where`, `action` and `plan` words only), the `feature_used` values `editor_open`, `editor_export`, `enhance_prompt` and `share`, and the single `install_step` value `first_use` through **one** route, `POST /analytics/ui`, which allowlists every (event, value) pair and answers 400 to anything else. Everything else is emitted server-side.
 
 ### `render_refused`
 
@@ -423,7 +471,7 @@ Once per job the panel **declined on purpose**. Same fields as
 
 | Field | Type | Example | Notes |
 |---|---|---|---|
-| `refusal` | string | `"ingredients_generation"` | **A closed vocabulary** — `ingredients_generation`, `hardware_tier`, `h3_ram`, `h3_mode`, `h3_lora_slots`, `stale_engine` (v4.9+: a 2.5 render refused because the vendored engine predates the Gemma 4 tower — remedy is a second Update click). `image_ram` (v4.9.3+: the Image Studio memory guard — the engine holds more weights than this Mac can hold, or too little is free right now). `pack_missing` (v4.9.3+: High / Keyframes / Extend chosen on a Mac that has not downloaded the Q8 add-on — remedy is Settings → Models). `vocal_separator` (4.17.x+: Lip-sync with "Listen to the voice only" on an install whose vocal separation is missing — remedy is the form's own Install button). `licence_required` (4.19.8+: a model whose licence asks for an "I accept" - Hailuo H3, Ideogram 4, YuE2, FLUX.1 Krea [dev], Bria FIBO - before it was accepted on this Mac; remedy is the licence screen, once). Which guard said no. No free text, no fingerprint: the message is our own copy, so there is nothing to scrub and nothing unknown to count |
+| `refusal` | string | `"ingredients_generation"` | **A closed vocabulary** — `ingredients_generation`, `hardware_tier`, `h3_ram` (5.0.20+ also the H3 runner's own "This Mac cannot make this clip:" admission sentence, exit 76), `h3_mode`, `h3_lora_slots`, `stale_engine` (v4.9+: a 2.5 render refused because the vendored engine predates the Gemma 4 tower — remedy is a second Update click). `image_ram` (v4.9.3+: the Image Studio memory guard — the engine holds more weights than this Mac can hold, or too little is free right now). `pack_missing` (v4.9.3+: High / Keyframes / Extend chosen on a Mac that has not downloaded the Q8 add-on — remedy is Settings → Models). `vocal_separator` (4.17.x+: Lip-sync with "Listen to the voice only" on an install whose vocal separation is missing — remedy is the form's own Install button). `licence_required` (4.19.8+: a model whose licence asks for an "I accept" - Hailuo H3, Ideogram 4, YuE2, FLUX.1 Krea [dev], Bria FIBO - before it was accepted on this Mac; remedy is the licence screen, once). `speech_ram`, `speech_installing`, `speech_consent` (Audio → Speech: a Mac under the 16 GB floor, a line queued while Speech installs, a cloned voice without the voice-owner confirmation). `pack_incomplete` (4.19.16+: an LTX render on a pack that is not completely on disk and is not downloading, named file by file; remedy is Repair. Before 4.19.16 these were `render_failed`; a pack that is still downloading now waits instead). `memory_low` (4.19.16+: a Mac with 24 GB or less whose prompt encoding macOS stopped in the last 30 minutes, still short of memory after a 90 s wait; remedy is quitting other apps. 5.0.20+: also Hailuo H3 on the low-memory plan when the runner says other apps hold the memory it needs, still so after a 5-minute wait, and the runner's own exit-77 sentence; before that these were `render_failed`, "This Mac can make this clip, but other apps are using the memory right now"). `train_models` (4.19.17+: a training run whose LTX-2.3 weights - the base pack or the full-precision dev transformer - are not on this Mac; refused at Start, at Retry and before the trainer spawns, with the Train tab's Download all. Before 4.19.17 these were `render_failed` with `train_error: missing_file`, one Mac 22 times in an hour). `lora_mismatch` (4.19.17+: an Image render with a FLUX.2 LoRA made for another FLUX.2 size - a [klein] 9B or [dev] adapter on the [klein] 4B that Auto and Klein-Edit run - stopped before the engine starts; remedy is un-picking it. Before 4.19.17 these were `render_failed` with mflux's `[matmul] Last dimension of first input`). `image_refs` (4.19.17+: an Image render with more reference images than its engine takes - 3, FLUX 3 10 - reaching the worker; /queue/add refuses it first. Before 4.19.17 these were `render_failed`, "This engine supports at most 3 reference images."). `image_disk` (4.19.17+: an Image engine whose first download does not fit on the disk that holds the image models - the model's real download size, less what an interrupted download left, plus 2 GB; remedy is freeing space. Before 4.19.17 these were `render_failed`, "pre-flight: only N GB free on the HF cache volume", against a flat 10 GB). `input_unreadable` (5.0.14+ / 4.19.19+: a Control or Colorize source clip that is on disk but cannot be read as a video - incomplete, damaged, no video track - refused before any model loads and at /queue/add, with the reason. Before that these were `render_failed` with a bare `ffprobe failed:` from the engine). Which guard said no. No free text, no fingerprint: the message is our own copy, so there is nothing to scrub and nothing unknown to count |
 
 #### The rule — a refusal is not a failure
 
@@ -444,6 +492,17 @@ adding a chart:
 count, and is not in the engine mix — neither numerator nor denominator.** A
 refusal did not render, so counting it as a render (successful *or* failed)
 makes both numbers lie.
+
+The capture boundary checks known refusal signatures as well as the worker's
+typed refusal. This applies to both asynchronous and synchronous capture,
+before the local log or network delivery, and removes fault fields from a
+refusal event. Ingredients on an incompatible generation is refused before
+generation setup. Existing events on the server are not rewritten by this fix.
+
+An image subprocess exiting with SIGABRT is a `native_crash` unless its log
+explicitly reports an allocation failure, in which case it is `metal_oom`.
+A download progress line alone does not establish either a network fault or
+an out-of-memory fault.
 
 **Why a separate event rather than an `error_class` value.** Both were built
 and the event won. A class value keeps one event and one funnel, but it makes
@@ -521,13 +580,63 @@ ignored or dismissed.
 
 | Field | Type | Example |
 |---|---|---|
-| `via` | string | `"link"` — one of `link` (opened the repo) or `already` (said they had already starred) |
+| `via` | string | `"link"` — one of `link` (opened the repo) or `already` (said they had already starred) from the update banner and the header star; or, from the one-time card after the third finished render (2 Nov 2026; the fifth until 12 Nov 2026), `card_shown`, `card_star` (opened GitHub), `card_star_inapp` (starred in place with one click, through the Mac's own signed-in GitHub CLI; 4 Nov 2026), `card_waitlist` (the quiet Pro waitlist link, 5.0 line only) `card_not_now` (the close button or Escape) or `card_review` (opened Phosphene Remote's write-a-review page in the App Store from the review line; 12 Nov 2026). A card retired unseen because GitHub says that account already starred sends nothing |
+| `variant` | string | `"github"` — card values only (12 Nov 2026): `github` (the star card) or `remote` (the one review line shown instead on a Mac that has paired Phosphene Remote, known only from whether `state/remote/devices.json` lists a confirmed phone). Fixed when the card is shown. No device name, id or count |
 
-A closed two-value vocabulary, coerced in the handler: anything else becomes
-`link`. No account, no username, no repo state — the panel cannot see whether
+The banner's two values are coerced in their handler: anything else becomes
+`link`. The card's values come from `POST /star-prompt`, which refuses
+anything else with 400 and sends each at most once per install: `card_shown`
+when the card goes up, then one answer. The card is the one exception to
+"nothing fires when the ask is ignored": `card_shown` is what makes its
+answer rate measurable. No account, no username, no repo state — the panel cannot see whether
 a star was actually given, and does not ask GitHub. `via` exists only to keep
 "a click we caused" separate from "a click that told us we did not need to
 ask", which is the whole question the ask was added to answer.
+
+### `bench_result`
+
+**Only on a click.** Sent when someone presses *Submit to the leaderboard* in
+Phosphene Bench (Settings → Phosphene Bench) and confirms. Never sent by a run
+on its own, never sent while analytics is off (the button says so instead), and
+never sent for an incomplete run. One event per run: a submit sends **every**
+complete run of the current suite stored on the Mac that has not been sent
+before (`state/bench/`, `submitted.json` records which), so the leaderboard can
+take each install's median rather than its best run. The panel delivers these on the click itself and marks a run as sent only when the receiver accepted it, so an offline click leaves the run for the next one.
+
+Unlike `render_completed`, times here are exact seconds, not buckets: the person
+asked for them to be published. Everything is still a hardware class or a
+measurement; no prompt (the suite's prompts are fixed and are not sent anyway),
+no seed, no path, no file name, no clip.
+
+| Field | Type | Example |
+|---|---|---|
+| `schema` | string | `"phosphene-bench/1"` |
+| `suite_id`, `suite_fp` | string | `"PB1"`, `"170df0bdfe5a"` — the frozen suite and the hash of its settings |
+| `run_id` | string | `"9185f62deeec4ab4"` — random per run, so a re-sent run is counted once |
+| `run_index`, `runs_total` | int | `2`, `3` — this run's place in the submit batch |
+| `version`, `edition`, `distribution` | string | `"4.19.12"`, `"free"`, `"pinokio"` |
+| `chip_family` | string | `"M4 Max"` |
+| `gpu_cores`, `cpu_p`, `cpu_e` | int | `40`, `12`, `4` |
+| `ram_gb` | int | `64` |
+| `model_id` | string | `"Mac16,9"` — the model identifier, a hardware class shared by every Mac of that model |
+| `os_version` | string | `"26.4"` (major.minor) |
+| `power` | string | `"ac"`, `"battery"` or `"unknown"` |
+| `low_power` | bool | `false` |
+| `thermal_worst` | string | `"nominal"`, `"fair"`, `"serious"`, `"critical"` or `"unknown"` |
+| `warmup_sec` | float | `42.0` — the untimed engine warm-up |
+| `complete`, `eligible` | bool | `true`, `true` |
+| `st_<step>` | string | `"done"`, `"failed"`, `"skipped"` or `"cancelled"` |
+| `s_<step>` | float or null | `139.4` — wall seconds, the same job timer as `render_completed` |
+| `mem_<step>`, `add_<step>` | float or null | `36.0`, `18.0` — GB of the Mac's memory in use at the step's peak, and how much the step added |
+| `cv_<step>` | string | `"1024×576"` — the canvas that ran |
+
+`<step>` is one of `ltx_quick_5s`, `ltx_balanced_5s`, `image_klein`,
+`h3_draft_5s`. The full local record (the JSON file the Bench saves) has a few
+more fields — macOS build, swap, the engine's own memory peak — that are **not**
+sent. The public page (phosphene.video/bench) shows per chip and memory size
+the median of each install's median, and how many installs; never an install
+id. The renders a Bench run makes are ordinary renders and send their own
+`render_completed` with `source: "bench"`.
 
 ### `engine_selected` — not implemented, on purpose
 
@@ -798,3 +907,27 @@ select bucket, count() as installs from (select distinct_id, multiIf(c=0,'0', c<
 select toDate(timestamp) as day, count() as fires, count(distinct distinct_id) as installs
 from events where event='queue_paused_breaker' and timestamp > now() - interval 14 day group by day order by day
 ```
+
+### `pro_click`
+
+(5.0.7, owner 8 Nov 2026; widened in 5.0.24, owner 14 Nov 2026: "I want to know how many people
+are opening it".) Someone opened the Pro window, pressed **Get Pro** or a plan, or used a button
+inside the Pro window. Closed fields only:
+
+| prop | type | values | why |
+|---|---|---|---|
+| `where` | string | `topbar`, `remote_hint`, `remote_panel`, `pro_modal`, `star_card`, `speedup_line`, `feature_gate`, `settings`, `whats_new`, `whats_new_speed`, `your_pro` | The surface. On `action: open` it is the door the window was opened from: `topbar` (the header Pro button), `remote_hint` (Remote Control's "Open Pro settings"), `your_pro` (Your Pro's "Your licence" button), `feature_gate` (a locked Pro feature, e.g. AI fill or a Pro engine answering 402). Inside the window it is `pro_modal`. `whats_new_speed` (What's new's "How it was measured" link) and `your_pro` were added in 5.0.24; before that the page sent `whats_new_speed` and the server dropped it |
+| `action` | string | `open`, `get`, `restore`, `key`, `close` | `open`: the Pro window opened (once per opening). `get`: a Get Pro / See Pro / plan link was pressed. 5.0.24, Pro window only: `restore` (the Restore Pro link), `key` (a licence key was submitted; the key itself never leaves the Mac, and nothing says whether it worked), `close` (the window closed by its X, Close, Escape or a click outside) |
+| `plan` | string | `monthly`, `yearly`, `founding` | 5.0.24. Only on `where: pro_modal`, `action: get`, and only from the window's plan buttons; the footer Get Pro link carries none |
+
+Nothing else; the usual super properties (edition, chip family, RAM) ride along. Same opt-out
+as every event. Every plan button opens the same page with the same tags as before
+(`utm_campaign=get-pro`, `utm_content=pro-modal`), so the site funnel reads them as one door.
+
+### `pro_hint`
+
+(5.0.7.) The one quiet "Pro would have made this faster" line under a finished Free render.
+`action` is `shown`, `dismissed` or `opened` (once each per line); `lane` names the measured
+setting it was for (`h3_high_i2v_5s`, `h3_high_i2v_10s`, `ltx_high_t2v_5s`, `ltx_high_i2v_5s`).
+No times, no prompt, no file. The line itself appears only on a Mac and settings with a measured
+speed-up, at most once a day, and ends after three dismissals.

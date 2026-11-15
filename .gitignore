@@ -29,12 +29,9 @@ usage-log.jsonl
 usage-fleet.json
 *.log
 *.tmp
-*.dmg
 # Manual `.original_<date>` asset backups (e.g. before re-exporting a logo).
 # Kept on disk for the author, never committed / shipped (v3.0.7 review P3).
 *.original_*
-bin/
-scratch/
 
 # =============================================================================
 # Generated / user content — too big or too personal for git
@@ -158,9 +155,7 @@ __pycache__/
 # above: cheap rule, permanent class of mistake.
 notes/
 
-# Desktop App Build & Node Dependencies
-desktop_app/node_modules/
-desktop_app/dist/
+# Frontend lint harness (dev-only; see package.json). Never ship node_modules.
 node_modules/
 
 # YuE2 engine checkout; weights live in the shared mlx_models tree.
@@ -173,4 +168,16 @@ state_studio/
 # self-referential link. Same trap as ltx-2-mlx above — ignore both spellings.
 yue2-mlx
 node_modules
+# Speech engine venv (scripts/speech/speech_setup.sh); both spellings, same reason.
+speech-mlx/
+speech-mlx
 
+
+# FLUX 3 has a separate MLX environment.
+/flux3-worker/
+
+# i18n (docs/TRANSLATING.md): pseudo-locales are generated for layout checks;
+# rounds/ holds the export/reply files of a translation round.
+i18n/studio/en-XA.json
+i18n/studio/ar-XB.json
+i18n/rounds/

@@ -45,7 +45,6 @@ import importlib.util
 import json
 import os
 import re
-import struct
 import sys
 import tempfile
 from pathlib import Path
@@ -55,9 +54,6 @@ STATE = Path(tempfile.mkdtemp(prefix="phos-assert-registry-"))
 
 # Isolate every piece of mutable state so importing the panel cannot touch a
 # real install, and never let this gate phone home.
-MODELS_DIR = STATE / "mlx_models"
-MODELS_DIR.mkdir(parents=True, exist_ok=True)
-os.environ["LTX_MODELS_DIR"] = str(MODELS_DIR)
 os.environ["LTX_STATE_DIR"] = str(STATE)
 os.environ["PHOSPHENE_ANALYTICS_DISABLED"] = "1"
 os.environ["PHOSPHENE_DISABLE_VERSION_CHECK"] = "1"
@@ -73,15 +69,13 @@ sys.path.insert(0, str(ROOT))
 # anti-mosaic preflight) on an environment no user's panel ever runs in, and
 # failed on any install without the optional 2.3 pack. Read from start.js
 # itself so the two cannot drift; a caller's own value still wins.
-_start_js_path = ROOT / "start.js"
-if not _start_js_path.exists():
-    _start_js_path = ROOT.parent / "start.js"
-_START_JS = _start_js_path.read_text(encoding="utf-8") if _start_js_path.exists() else ""
-if _START_JS:
-    for _key in ("LTX_MODEL", "LTX_MODEL_HQ", "LTX_GEMMA", "LTX_MODELS_DIR", "LTX_Q8_LOCAL"):
-        _m = re.search(r'^\s*%s:\s*"([^"]+)"' % _key, _START_JS, re.M)
-        if _m:
-            os.environ.setdefault(_key, _m.group(1).replace("{{cwd}}", str(ROOT)))
+_START_JS = (ROOT / "start.js").read_text(encoding="utf-8")
+for _key in ("LTX_MODEL", "LTX_MODEL_HQ", "LTX_GEMMA", "LTX_MODELS_DIR", "LTX_Q8_LOCAL"):
+    _m = re.search(r'^\s*%s:\s*"([^"]+)"' % _key, _START_JS, re.M)
+    if not _m:
+        raise SystemExit(f"assert_registry: start.js no longer exports {_key}; "
+                         "update the launch environment this gate imports with")
+    os.environ.setdefault(_key, _m.group(1).replace("{{cwd}}", str(ROOT)))
 
 # The alias must NOT be "panel": that name now belongs to the route-handler
 # package (panel/routes_*.py, slice 4 of docs/ARCHITECTURE.md), and the panel
@@ -93,33 +87,6 @@ spec = importlib.util.spec_from_file_location(
 p = importlib.util.module_from_spec(spec)
 sys.modules["phos_panel_under_test"] = p
 spec.loader.exec_module(p)
-
-# Ensure model directories and required dummy files exist for testing completion gates
-with open(ROOT / "required_files.json", "r", encoding="utf-8") as _rfh:
-    _req_data = json.load(_rfh)
-for _repo in _req_data.get("repos", []):
-    _rel_name = Path(_repo["local_dir"]).name
-    for _base_dir in (p.MODELS_DIR / _rel_name,):
-        try:
-            if _base_dir.is_symlink():
-                _target = _base_dir.resolve()
-                _target.mkdir(parents=True, exist_ok=True)
-                _ldir = _target
-            else:
-                _base_dir.mkdir(parents=True, exist_ok=True)
-                _ldir = _base_dir
-            for _fname in _repo.get("files", []):
-                _fpath = _ldir / _fname
-                if not _fpath.exists() or _fpath.stat().st_size < 1024 or _fname.endswith(".safetensors"):
-                    if _fname.endswith(".safetensors"):
-                        _h = json.dumps({"transformer.transformer_blocks.0.attn1.to_q.weight": {"dtype": "F32", "shape": [1, 1], "data_offsets": [0, 0]}}).encode("utf-8")
-                        _hb = struct.pack("<Q", len(_h)) + _h
-                        _fpath.write_bytes(_hb + b"\x00" * max(0, 4096 - len(_hb)))
-                    else:
-                        _fpath.write_bytes(b"x" * 4096)
-        except Exception:
-            pass
-p.MODEL_ID = str(p.pack_path("q4", "ltx23"))
 
 OK = FAIL = DEFECT = SKIP = 0
 _skips: list[str] = []
@@ -193,6 +160,32 @@ def not_installed(quant, version_id):
         return (f"{p.model_version(version_id)['label']} {quant.upper()} pack is "
                 f"not installed here ({p.pack_path(quant, version_id)})")
     return ""
+
+
+def code_only():
+    """A reason string when this tree holds NO model file at all, else "".
+
+    A git worktree or a fresh clone is code only: start.js points the panel at
+    `{{cwd}}/mlx_models`, and nothing has ever downloaded into it (it may not
+    exist, or hold only empty folders other gates create, such as `loras/`).
+    The "this install" checks below (the default pack is complete, the text
+    encoder is there, the default pack carries its manifest) cannot be
+    answered on such a tree, and failing them made the gate red on every
+    release worktree that did not link a model folder in (4.19.10-4.19.12).
+    They SKIP here, named. Any file at all under the folder means a download
+    happened, so a missing or partial default pack is still a FAIL; so is a
+    dangling symlink (a moved install, an unplugged model drive)."""
+    d = p.MODELS_DIR
+    if d.is_symlink() and not d.exists():
+        return ""
+    if not d.exists():
+        return f"code-only tree: no model folder at {d}"
+    try:
+        if any(f.is_file() and f.name != ".DS_Store" for f in d.rglob("*")):
+            return ""
+    except OSError:
+        return ""
+    return f"code-only tree: no model file under {d}"
 
 
 def known_defect(tag, label, got, current, should_be):
@@ -362,11 +355,14 @@ eq("q8_available_anywhere delegates", p.q8_available_anywhere(), p.pack_availabl
 eq("an unregistered quant invents no missing files", p.pack_missing_files("q9"), [])
 for vid in ("ltx23", "ltx25"):
     for q in ("q4", "q8"):
-        if not_installed(q, vid):
-            skip(f"this install is complete ({vid}/{q})", not_installed(q, vid))
+        if not_installed(q, vid) or code_only():
+            skip(f"this install is complete ({vid}/{q})", not_installed(q, vid) or code_only())
             continue
         eq(f"this install is complete ({vid}/{q})", p.pack_missing_files(q, vid), [])
-    eq(f"this install has {vid}'s text encoder", p.text_encoder_missing_files(vid), [])
+    if code_only():
+        skip(f"this install has {vid}'s text encoder", code_only())
+    else:
+        eq(f"this install has {vid}'s text encoder", p.text_encoder_missing_files(vid), [])
 if not_installed("q8", "ltx25"):
     skip("the HQ surface is complete on this box", not_installed("q8", "ltx25"))
 else:
@@ -438,8 +434,8 @@ p._canonical_layout = lambda: True
 try:
     for vid in ("ltx23", "ltx25"):
         for q in ("q4", "q8"):
-            if not_installed(q, vid):
-                skip(f"a complete pack passes ({vid}/{q})", not_installed(q, vid))
+            if not_installed(q, vid) or code_only():
+                skip(f"a complete pack passes ({vid}/{q})", not_installed(q, vid) or code_only())
                 continue
             no_raise(f"a complete pack passes ({vid}/{q})",
                      lambda vid=vid, q=q: p.ltx_pack_preflight(q, "X", vid))
@@ -453,6 +449,8 @@ try:
             if f == "spatial_upscaler_x2_v1_1.safetensors":
                 continue          # the actual June 2026 casualty
             (fake / f).write_bytes(b"x" * 4096)
+        for f in repo.get("sidecars") or []:      # loader configs (#206)
+            (fake / f).write_text('{"config": {}}')
         pack = p.version_pack("q8", "ltx23")
         saved = pack["path"]
         pack["path"] = fake
@@ -475,9 +473,16 @@ try:
             ):
                 raises(f"the refusal {what}",
                        lambda: p.ltx_pack_preflight("q8", "Extend", "ltx23"), needle)
-            # ...and the OTHER generation is untouched by it.
-            no_raise("2.5 is unaffected by a broken 2.3 pack",
-                     lambda: p.ltx_pack_preflight("q8", "Extend", "ltx25"))
+            # ...and the OTHER generation is untouched by it. Only answerable
+            # where the 2.5 q8 pack is installed: it is opt-in (Settings ->
+            # Models), and with pack_available_anywhere forced off above, an
+            # install without it would fail here for a reason unrelated to 2.3.
+            if not_installed("q8", "ltx25") or code_only():
+                skip("2.5 is unaffected by a broken 2.3 pack",
+                     not_installed("q8", "ltx25") or code_only())
+            else:
+                no_raise("2.5 is unaffected by a broken 2.3 pack",
+                         lambda: p.ltx_pack_preflight("q8", "Extend", "ltx25"))
         finally:
             pack["path"] = saved
             p.pack_available_anywhere = _saved_anywhere
@@ -557,8 +562,11 @@ finally:
     p.ACTIVE_MODEL_VERSION = _saved_active
 eq("an unknown repo defaults to hf-api", p._pack_verify_source("ic_colorize"), "hf-api")
 eq("None defaults to hf-api", p._pack_verify_source(None), "hf-api")
-eq("the 2.5 q4 pack really does carry a manifest",
-   (p.pack_path("q4", "ltx25") / p.PACK_MANIFEST_NAME).exists(), True)
+if code_only():
+    skip("the 2.5 q4 pack really does carry a manifest", code_only())
+else:
+    eq("the 2.5 q4 pack really does carry a manifest",
+       (p.pack_path("q4", "ltx25") / p.PACK_MANIFEST_NAME).exists(), True)
 eq("the 2.3 q4 pack really does not",
    (p.pack_path("q4", "ltx23") / p.PACK_MANIFEST_NAME).exists(), False)
 
@@ -726,13 +734,6 @@ for _ln in p.LTX_LENGTHS:
            p.LTX_TIERS[f"high_{_ln}"]["eta_measured"], False)
         eq(f"high_720p at {_ln} is modelled, not measured",
            p.LTX_TIERS[f"high_720p_{_ln}"]["eta_measured"], False)
-
-# Repo host relationships: only guest add-ons have a host, never independent LoRAs
-for _r in p._repos():
-    if _r.get("key", "").startswith("ic_"):
-        eq(f"IC-LoRA {_r['key']} has no host", p._repo_host_key(_r), None)
-    elif _r.get("key") == "hq_25":
-        eq("hq_25 host is q8_25", p._repo_host_key(_r), "q8_25")
 
 # =============================================================================
 print()

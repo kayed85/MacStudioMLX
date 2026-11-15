@@ -49,6 +49,10 @@ def post_upload_delete(h, path, qs, ctype) -> None:
         h._json({"ok": False, "error": "path must be an imported image"}, 400); return
     if not target.is_file():
         h._json({"ok": False, "error": "no such upload"}, 404); return
+    # A picture a waiting render needs stays until that render is done.
+    in_use = P.delete_in_use_refusal([target], "picture")
+    if in_use:
+        h._json({"ok": False, "error": in_use, "in_use": True}, 409); return
     try:
         target.unlink()
     except OSError as exc:
@@ -89,9 +93,15 @@ def get_file(h, parsed) -> None:
     # Strict containment via Path.is_relative_to — str.startswith
     # would let "mlx_outputs_evil/" slip past since the prefix string
     # match is true even though the directory is a sibling, not a child.
+    # OUTPUT or UPLOADS, the same two roots /image, /file/exists and the
+    # poster route already serve. The Editor imports videos into
+    # UPLOADS/timeline and previews them here; with OUTPUT alone, an imported
+    # clip showed black in the media pool and the Source monitor.
     try:
-        _ = path.relative_to(P.OUTPUT.resolve())
-    except ValueError:
+        roots = [P.OUTPUT.resolve(), P.UPLOADS.resolve()]
+    except Exception:
+        h.send_error(500); return
+    if not any(path.is_relative_to(r) for r in roots):
         h.send_error(404); return
     if not path.exists():
         h.send_error(404); return
@@ -656,6 +666,13 @@ def post_output_delete(h, path, qs, ctype) -> None:
     if not candidates:
         h._json({"error": "no files to delete"}, 404); return
 
+    # A clip or picture a waiting render takes as its input (Extend, Upscale
+    # & Face Fix, an Image-to-video reference picked from the gallery) stays
+    # until that render is done - it used to fail at its turn instead.
+    in_use = P.delete_in_use_refusal(candidates)
+    if in_use:
+        h._json({"error": in_use, "in_use": True}, 409); return
+
     trashed = []
     ts = P.time.strftime("%Y%m%d-%H%M%S")
     for c in candidates:
@@ -823,7 +840,25 @@ def post_external_open(h, path, qs, ctype) -> None:
     _ALLOWED_HOSTS = {
         "huggingface.co", "civitai.com", "github.com",
         "ideogram.ai", "pinokio.co", "pinokio.computer",
+        # The Docs live on the website (owner, 1 Nov 2026).
+        "phosphene.video",
+        # Phosphene Remote's App Store page (the review nudge, 12 Nov 2026).
+        "apps.apple.com",
     }
+    # The one non-https link: Phosphene Remote's write-a-review sheet in the
+    # App Store app, exactly this URL. If nothing handles itms-apps, the same
+    # sheet on the web (review nudge, owner 12 Nov 2026).
+    if url == P.REMOTE_REVIEW_APP_URL:
+        try:
+            r = P.subprocess.run(["open", url], check=False, timeout=5)
+            if r.returncode != 0:
+                P.subprocess.run(["open", P.REMOTE_REVIEW_WEB_URL], check=False, timeout=5)
+                h._json({"ok": True, "opened": P.REMOTE_REVIEW_WEB_URL})
+                return
+            h._json({"ok": True, "opened": url})
+        except Exception as e:
+            h._json({"error": f"open failed: {e}"}, 500)
+        return
     try:
         _pp = P.urllib.parse.urlparse(url)
         _host = (_pp.netloc or "").lower().split("@")[-1].split(":")[0]
@@ -1001,7 +1036,12 @@ def get_asset(h, parsed) -> None:
     ctype = {
         ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
         ".webp": "image/webp", ".gif": "image/gif", ".svg": "image/svg+xml",
+        ".mp4": "video/mp4", ".json": "application/json",
     }.get(ext, "application/octet-stream")
+    if ext == ".mp4":
+        # WKWebView's <video> needs byte ranges (the Remote page's film).
+        h._serve_video_with_range(path)
+        return
     h.send_response(200)
     h.send_header("Content-Type", ctype)
     h.send_header("Content-Length", str(path.stat().st_size))
@@ -1032,6 +1072,7 @@ def get_webapp_file(h, parsed) -> None:
         ".mjs": "text/javascript; charset=utf-8",
         ".html": "text/html; charset=utf-8",
         ".svg": "image/svg+xml",
+        ".woff2": "font/woff2",
         # The Docs pages (webapp/docs/*.md), rendered in the browser.
         ".md": "text/markdown; charset=utf-8",
     }.get(ext, "application/octet-stream")

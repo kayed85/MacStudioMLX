@@ -68,6 +68,12 @@ import urllib.request
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+import image_diagnostics
+
+_DIAGNOSTIC_BEGIN = None
+_MFLUX_STALL_SECONDS = 1800.0
+_MFLUX_WATCHDOG_POLL = 15.0
+
 import distribution as _dist   # Pinokio vs the Mac app wording
 
 
@@ -177,6 +183,76 @@ def hf_repo_partial_download(repo_id: str, env: "dict | None" = None) -> "dict |
             "repo_dir": repo_dir}
 
 
+def clear_download_litter(repo_id: str, env: "dict | None", before: float) -> int:
+    """Delete `.incomplete` blobs untouched since `before`; returns how many.
+
+    Call ONLY after an engine run on this repo exited 0: the model loaded, so
+    every file this revision needs is complete, and a leftover the run never
+    touched belongs to no file it wants (an older revision, a renamed file).
+    Left alone, it keeps hf_repo_partial_download() reporting the model as
+    unfinished forever (fleet: "stuck at 4.6 GB" about a 4.6 GB model). The
+    mtime guard keeps a download another process is running right now."""
+    blobs = _hf_hub_root(env) / ("models--" + str(repo_id).replace("/", "--")) / "blobs"
+    n = 0
+    try:
+        entries = list(blobs.iterdir())
+    except OSError:
+        return 0
+    for p in entries:
+        if not p.name.endswith(".incomplete"):
+            continue
+        try:
+            if p.stat().st_mtime < before:
+                p.unlink()
+                n += 1
+        except OSError:
+            pass
+    if n:
+        _REPAIR_MEMO.pop(str(repo_id), None)
+    return n
+
+
+def download_progress_step(prev_gb: float, now_gb: float) -> "tuple[bool, str | None]":
+    """One 15-second sample of a model download folder: (moved, log line).
+
+    `moved` is any change of more than 1 MB either way - a download that
+    restarts an unfinished file is alive. huggingface_hub's Xet downloader
+    (hf_xet, which every repo uploaded since 2025 uses) cannot resume: it
+    truncates the file's `.incomplete` to 0 and fetches it again, so the
+    folder SHRINKS when a retry starts. -1 means the folder does not exist."""
+    if now_gb < 0.0:
+        return False, None
+    if prev_gb < 0.0:
+        return now_gb > 0.001, None             # the folder appeared: alive, nothing to compare
+    if now_gb > prev_gb + 0.001:
+        return True, f"[download] model weights: {now_gb:.1f} GB"
+    if now_gb < prev_gb - 0.001:
+        return True, (f"[download] an unfinished file is being fetched again from "
+                      f"its start (the Hugging Face downloader cannot resume it), "
+                      f"so the model folder dropped to {now_gb:.1f} GB")
+    return False, None
+
+
+def _download_stopped_note(repo_id, env, cause: str = "") -> "str | None":
+    """The first line of an engine failure whose model download is unfinished,
+    or None. Names the model, how far it got and the engine's own last line,
+    and says the next Generate continues it (it does - the repair is never
+    refused, see repair_partial_hf_download)."""
+    if not _is_hf_repo_id(repo_id):
+        return None
+    try:
+        info = hf_repo_partial_download(str(repo_id), env)
+    except Exception:  # noqa: BLE001
+        info = None
+    if not info:
+        return None
+    why = f" The engine's last line: {cause[:220]}." if cause else ""
+    return (f"The model download for {repo_id} stopped at "
+            f"{float(info.get('on_disk_gb') or 0.0):.1f} GB before it finished "
+            f"({info.get('incomplete')} file(s) unfinished).{why} Generate again to "
+            f"continue it; if it stops again, check the network and free disk space.")
+
+
 _REPAIR_MEMO: dict = {}   # repo_id -> on_disk_gb at the last repair attempt
 
 
@@ -198,46 +274,36 @@ def repair_partial_hf_download(repo_id: str, env: "dict | None" = None) -> "dict
     if not info:
         _REPAIR_MEMO.pop(str(repo_id), None)
         return None
-    # Bounded (review 2026-09-02): if the previous attempt in this process
-    # left the download exactly where it was, wiping and re-fetching again
-    # on every render just burns time — say what's stuck instead.
+    # 4.19.18 (fleet, incident fw-20261102-1838): this used to REFUSE the
+    # render when the size had not moved since the previous repair ("The
+    # download for X is stuck at N GB - it did not grow on the last try") and
+    # it never forgot that verdict, so every later Generate in the same panel
+    # session failed in under a second without trying the download at all,
+    # while the message told the user to "Generate again to resume it". One
+    # M2 Max hit it 16 times on Ideogram 4 (16.7 -> 23.3 -> 30.1 GB): the
+    # download only moved after a panel restart cleared the memo. Two facts
+    # made the verdict wrong in the first place:
+    #   - a pass that was Stopped (or killed) before the downloader wrote a
+    #     byte is not a stalled download; cancelled jobs are not even reported;
+    #   - the Hub's Xet downloader (hf_xet, every repo uploaded since 2025)
+    #     cannot resume: it truncates an unfinished `.incomplete` to 0 and
+    #     fetches that file again, so the folder's size is not a progress
+    #     meter (measured on cocktailpeanut/ideogram-4-fp8: 58.7 MB -> 0 ->
+    #     the whole file).
+    # So a repair is never refused before it runs. The run itself says what
+    # went wrong: a network or disk error from the engine, and, when it
+    # exits with the download unfinished, `_download_stopped_note` names the
+    # download on the error's first line.
+    # Leftover `.incomplete` files that belong to no file this revision
+    # needs used to be deleted here when the previous pass had re-linked
+    # `snapshots/`. That proves only that the pass reached the Hub and
+    # finished ONE file: a Stop after the first small file, or a blocked Xet
+    # server, deleted partials the model still needed, the cache then read
+    # complete, and mflux crashed in its weight loader on every render (#73).
+    # Only a render that SUCCEEDED proves the download is whole; the litter
+    # is cleared there (clear_download_litter, called by _generate_mflux).
     on_disk = round(float(info.get("on_disk_gb") or 0.0), 2)
     import time as _time
-    prev = _REPAIR_MEMO.get(str(repo_id))
-    if prev is not None and prev[0] == on_disk:
-        # A whole download pass ran since the last repair. huggingface_hub
-        # resumes a blob it needs by APPENDING to its `.incomplete`, so a
-        # leftover older than that pass belongs to no file this revision wants
-        # (an older revision, a renamed file) — IF the pass actually reached
-        # the Hub, which is what a re-linked `snapshots/` proves. Then the
-        # download is complete and the leftovers are litter. Without that proof
-        # (offline, Hub down) nothing is deleted and the stall is reported.
-        try:
-            leftovers = [p for p in (info["repo_dir"] / "blobs").iterdir()
-                         if p.name.endswith(".incomplete")]
-        except OSError:
-            leftovers = []
-
-        def _mtime(p):
-            try:
-                return p.stat().st_mtime
-            except OSError:
-                return None
-        untouched = [p for p in leftovers if (_mtime(p) or 0.0) < prev[1]]
-        if (leftovers and len(untouched) == len(leftovers)
-                and (info["repo_dir"] / "snapshots").is_dir()):
-            for p in untouched:
-                try:
-                    p.unlink()
-                except OSError:
-                    pass
-            _REPAIR_MEMO.pop(str(repo_id), None)
-            return None
-        raise RuntimeError(
-            f"The download for {repo_id} is stuck at {on_disk:.1f} GB — it did "
-            f"not grow on the last try. Check free disk space and the network, "
-            f"then Generate again to resume it."
-        )
     _REPAIR_MEMO[str(repo_id)] = (on_disk, _time.time())
     snaps = info["repo_dir"] / "snapshots"
     if snaps.is_dir():
@@ -347,6 +413,9 @@ class ImageEngineConfig:
     # _load_agent_image_config in mlx_ltx_panel.py).
     kind: str = "mflux"                             # "mock" | "mflux" | "bfl" | "hidream"
 
+    # FLUX 3 always runs in its own worker environment.
+    flux3_variant: str = "distilled"
+
     # BFL (cloud)
     bfl_api_key: str = ""
     bfl_model: str = "flux-dev"                     # flux-dev | flux-pro | flux-pro-1.1 | flux-schnell
@@ -442,6 +511,28 @@ class ImageEngineConfig:
     hidream_fb_threshold: float = 0.15
     hidream_fb_keep_last: int = 8
 
+    # P-H3-Image (Pruna, on MiniMax H3), run by the H3 engine's own runner as a subprocess.
+    # The panel fills the paths (it owns the H3 install); `ph3image_mp` is the quality tier:
+    # Fast 1.5 / Draft 2 / Standard 4 / High 8 megapixels.
+    ph3image_python_path: str = ""
+    ph3image_script_path: str = ""
+    ph3image_root: str = ""          # folder made by fetch_ph3_image.py
+    ph3image_dit: str = ""           # MiniMax-H3 FL2VA transformer (our Q8 pack)
+    ph3image_mp: float = 1.5
+    ph3image_warm_service: bool = False  # Studio enables on qualified 64 GB hosts
+    ph3image_pro_profile: bool = False  # private runner, admitted by the shared Pro gate
+    ph3image_warm_batch: bool = False  # experimental until real-weight speed/parity validation
+
+    # MiniMax-H3-Image, run by the H3 engine's scripts/generate_h3_image.py as a subprocess
+    # (staged only, no warm worker). The panel fills the paths; `h3image_mp` is the quality
+    # tier in megapixels: Draft 4 / Standard 8 / High 16.
+    h3image_python_path: str = ""
+    h3image_script_path: str = ""
+    h3image_root: str = ""           # folder made by fetch_h3_image.py (dit/, vae/, pdd_*)
+    h3image_text_dir: str = ""       # the H3 video lane's text-encoder folder (ddalcu-q8)
+    h3image_text_config: str = ""    # upstream-meta/FL2VA/text_encoder/config.json
+    h3image_mp: float = 8.0
+
     def to_public_dict(self) -> dict:
         d = asdict(self)
         if d.get("bfl_api_key"):
@@ -452,31 +543,27 @@ class ImageEngineConfig:
         return d
 
 
-def align_dim_64(val: Any, default: int = 512) -> int:
-    """Ensure dimension is a positive integer multiple of 64, minimum 256."""
-    try:
-        n = int(val or default)
-        if n <= 0:
-            n = default
-        return max(256, int(round(n / 64.0)) * 64)
-    except (TypeError, ValueError):
-        return default
-
-
-# Aspect ratios → (width, height) — strictly aligned to 64-pixel stride for all
-# diffusion/DiT models (Draw Things, Qwen-Image 2.1, Krea 2 Turbo, Flux.2, MiniMax H3, HiDream, SDXL).
-# Multiples of 64 prevent latent tensor shape assertion crashes (SIGTRAP).
+# Aspect ratios → (width, height). Picks favor larger dimensions because
+# Qwen-Image-Edit-2509 is documented to be best at 1024² and 1280×720;
+# the previous 1024×576 default for 16:9 was a Flux-era artifact and
+# visibly degrades qwen_edit output. Flux2 / Z-Image fine here too — they
+# scale gracefully past 1024.
 ASPECT_DIMS = {
-    "16:9":  (1280, 704),
+    "16:9":  (1280, 720),
     "4:3":   (1024, 768),
     "1:1":   (1024, 1024),
-    "9:16":  (704, 1280),
+    "9:16":  (720, 1280),
     "3:4":   (768, 1024),
-    "21:9":  (1344, 576),
-    # Small variants (value suffixed "s") — fast preview, low RAM (multiples of 64):
-    "16:9s": (768, 448),
+    "21:9":  (1280, 544),
+    "3:2":   (1248, 832),
+    "2:3":   (832, 1248),
+    # Small variants (value suffixed "s") — ~1/3–1/4 the pixels so weaker
+    # Apple GPUs render fast and stay under the Metal watchdog. The client
+    # CSS ratio uses parseFloat, which reads "9s" as 9, so the stage still
+    # shows the right shape. Requested by cocktailpeanut.
+    "16:9s": (768, 432),
     "1:1s":  (512, 512),
-    "9:16s": (448, 768),
+    "9:16s": (432, 768),
 }
 
 
@@ -485,7 +572,8 @@ def generate(*, prompt: str, n: int, output_dir: Path,
              base_seed: int | None = None,
              refs: list[str] | None = None,
              config: ImageEngineConfig,
-             on_log: "callable | None" = None) -> list[dict]:
+             on_log: "callable | None" = None,
+             diagnostic=None, install_env: dict | None = None) -> list[dict]:
     """Generate `n` candidate images for one shot. Saves under `output_dir`.
 
     Args:
@@ -516,17 +604,18 @@ def generate(*, prompt: str, n: int, output_dir: Path,
     Returns a list of `{png_path, seed, engine, width, height, ...}`
     dicts in submission order.
     """
+    if config.kind != "ph3image":
+        import ph3_image_service
+        ph3_image_service.evict()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    raw_w, raw_h = ASPECT_DIMS.get(aspect, ASPECT_DIMS["16:9"])
-    width = align_dim_64(raw_w, 1280)
-    height = align_dim_64(raw_h, 704)
+    width, height = ASPECT_DIMS.get(aspect, ASPECT_DIMS["16:9"])
 
     refs = list(refs or [])
     # Validate ref paths up-front so we fail fast — Qwen-Edit-2509 supports
     # 1-3 input images; more than 3 is unsupported by the model.
     if refs:
-        if len(refs) > 3:
+        if len(refs) > (10 if config.kind == "flux3" else H3IMAGE_MAX_REFERENCES if config.kind == "h3image" else 3):
             raise ValueError(
                 f"refs: Qwen-Image-Edit-2509 supports 1-3 input images, got {len(refs)}"
             )
@@ -534,42 +623,56 @@ def generate(*, prompt: str, n: int, output_dir: Path,
             if not Path(r).is_file():
                 raise FileNotFoundError(f"ref image not found: {r}")
 
+    if config.kind == "flux3":
+        import flux3_engine
+        return flux3_engine.generate(prompt, n, width, height, output_dir, base_seed,
+                                     config, refs, on_log, install_env)
     if config.kind == "mock":
         return _generate_mock(prompt, n, width, height, output_dir, base_seed, refs=refs)
     if config.kind == "mflux":
-        return _generate_mflux(prompt, n, width, height, output_dir, base_seed, config, refs=refs, on_log=on_log)
+        if diagnostic is None and _DIAGNOSTIC_BEGIN is not None:
+            try:
+                diagnostic = _DIAGNOSTIC_BEGIN()
+            except Exception:
+                pass
+        image_diagnostics.attempt(diagnostic, "prepare", prompt, refs, width, height)
+        try:
+            return _generate_mflux(prompt, n, width, height, output_dir, base_seed, config, refs=refs, on_log=on_log, diagnostic=diagnostic)
+        except ImageJobCancelled:
+            image_diagnostics.attempt(diagnostic, "finish", "cancelled")
+            raise
+        except Exception:
+            image_diagnostics.attempt(diagnostic, "finish", "failed")
+            raise
     if config.kind == "bfl":
         return _generate_bfl(prompt, n, width, height, output_dir, base_seed, config)
     if config.kind == "hidream":
         return _generate_hidream(prompt, n, width, height, output_dir, base_seed, config, refs=refs, on_log=on_log)
-    if config.kind == "drawthings":
-        return _generate_drawthings(prompt, n, width, height, output_dir, base_seed, config, refs=refs, on_log=on_log)
+    if config.kind == "ph3image":
+        return _generate_ph3image(prompt, n, aspect, output_dir, base_seed, config, refs=refs, on_log=on_log)
+    if config.kind == "h3image":
+        return _generate_h3image(prompt, n, aspect, output_dir, base_seed, config, refs=refs, on_log=on_log)
     raise ValueError(f"unknown image engine kind: {config.kind!r}")
 
 
 def health_check(config: ImageEngineConfig) -> tuple[bool, str]:
     """Light readiness probe for the configured backend."""
+    if config.kind == "flux3":
+        import flux3_engine
+        return True, ("FLUX 3 ready" if flux3_engine.worker_ready()
+                      else "FLUX 3 installs on first use")
     if config.kind == "mock":
         try:
             from PIL import Image  # noqa: F401
             return True, "mock engine ready (PIL available)"
         except ImportError:
             return False, "PIL not installed — pip install Pillow"
-    if config.kind == "drawthings":
-        try:
-            import drawthings_bridge
-            if drawthings_bridge.is_server_running():
-                return True, "Draw Things gRPC server active on 127.0.0.1:7859"
-            if drawthings_bridge.CLI_SERVER_PATH.is_file() and drawthings_bridge.DRAWTHINGS_MODELS_DIR.is_dir():
-                return True, "Draw Things headless server ready"
-            return False, "Draw Things CLI or Models dir not found"
-        except Exception as e:
-            return False, f"Draw Things probe error: {e}"
     if config.kind == "mflux":
         bin_path = _resolve_mflux_bin(config)
         if not bin_path:
-            return False, ("mflux not installed. Run: "
-                           "ltx-2-mlx/env/bin/pip install mflux")
+            fam = _resolve_mflux_family(config)
+            return False, mflux_missing_message(
+                MFLUX_FAMILY_BIN.get(fam, "mflux-generate"), fam)
         return True, f"mflux ready at {bin_path}; model={config.mflux_model}"
     if config.kind == "bfl":
         if not config.bfl_api_key:
@@ -585,6 +688,16 @@ def health_check(config: ImageEngineConfig) -> tuple[bool, str]:
             return False, (f"HiDream model not found at {config.hidream_model_path or HIDREAM_DEFAULT_MODEL}. "
                            "Run the lab's converter or override hidream_model_path.")
         return True, f"HiDream ready: model={Path(model).name}, steps={config.hidream_steps}"
+    if config.kind == "ph3image":
+        missing = ph3image_missing(config)
+        if missing:
+            return False, "P-H3-Image is not installed: " + "; ".join(missing)
+        return True, f"P-H3-Image ready ({config.ph3image_mp:g} MP, {5 if config.ph3image_pro_profile else 8} steps)"
+    if config.kind == "h3image":
+        missing = h3image_missing(config)
+        if missing:
+            return False, "MiniMax-H3-Image is not installed: " + "; ".join(missing)
+        return True, f"MiniMax-H3-Image ready ({config.h3image_mp:g} MP, 6 steps)"
     return False, f"unknown engine kind: {config.kind!r}"
 
 
@@ -622,7 +735,6 @@ MFLUX_FAMILY_BIN = {
     # (the prompt is a JSON document, so it can't go on the shell as
     # --prompt). fp8 weights at ideogram-ai/ideogram-4-fp8. mflux 0.18+.
     "ideogram":       "mflux-generate-ideogram4",
-    "krea2":          "mflux-generate-krea2",
 }
 
 # Sensible per-family defaults so a user who picks a model from the
@@ -644,10 +756,24 @@ MFLUX_FAMILY_DEFAULTS = {
     "z_image_turbo": {"steps": 9,  "guidance": 0.0,  "base_model": ""},
     "fibo":          {"steps": 30, "guidance": 5.0,  "base_model": ""},
     "qwen":          {"steps": 30, "guidance": 5.0,  "base_model": ""},
+    # qwen_edit default: 8 steps. The Qwen card recommends 30-40 for
+    # final-quality, but the agent + Image Studio are iteration tools —
+    # ~1 min/image at Q4-8steps, then bump to 30 steps once the user
+    # picks a composition they like. Pair with a Lightning 4-step LoRA
+    # (mflux_lora_paths) to drop further to ~10-15 s. Guidance 4.0 from
+    # the model card.
     "qwen_edit":     {"steps": 8,  "guidance": 4.0,  "base_model": ""},
     "kontext":       {"steps": 30, "guidance": 4.5,  "base_model": ""},
+    # Ideogram 4: steps + guidance are INERT — the preset (V4_TURBO_12 /
+    # V4_DEFAULT_20 / V4_QUALITY_48) defines the step count and guidance
+    # schedule, and the CLI warns-and-ignores --steps / --guidance. The
+    # values below are placeholders only (the ideogram argv branch in
+    # _generate_mflux never reads them). base_model points the loader at
+    # the fp8 weights when --model is an HF id / path.
+    # base_model feeds the mflux `--base-model` ARCHITECTURE enum (dev/…/ideogram4),
+    # NOT the HF repo path (that's config.mflux_model → `--model`). Must be the enum
+    # or argparse exits 2. steps/guidance are inert (Ideogram presets define them).
     "ideogram":      {"steps": 20, "guidance": 0.0,  "base_model": "ideogram4"},
-    "krea2":         {"steps": 8,  "guidance": 1.0,  "base_model": "krea2"},
 }
 
 
@@ -672,19 +798,17 @@ def _infer_mflux_family(model: str) -> str:
         return "z_image_turbo"
     if "z-image" in s or "z_image" in s or "tongyi-mai/z-image" in s:
         return "z_image"
-    if ("flux2" in s or "flux.2" in s or "flux-2" in s or "klein" in s) and ("edit" in s):
-        return "flux2_edit"
-    if "flux2" in s or "flux.2" in s or "flux-2" in s or "klein" in s:
+    if "flux2" in s or "flux.2" in s or "flux-2" in s:
         return "flux2"
     if "kontext" in s:
         return "kontext"
     if "fibo" in s or "briaai/fibo" in s:
         return "fibo"
-    if "krea2" in s or "krea-2" in s or "krea_2" in s:
-        return "krea2"
+    # qwen_edit must be matched BEFORE plain qwen — "qwen-image-edit-2509"
+    # contains "qwen" + "image" so the plain qwen branch would steal it.
     if "qwen" in s and ("image-edit" in s or "image_edit" in s or "qwen-edit" in s):
         return "qwen_edit"
-    if "qwen" in s and ("image" in s or "2.1" in s or "2" in s):
+    if "qwen" in s and "image" in s:
         return "qwen"
     if "ideogram" in s:
         return "ideogram"
@@ -698,6 +822,49 @@ def _resolve_mflux_family(config: ImageEngineConfig) -> str:
     if fam == "auto" or fam not in MFLUX_FAMILY_BIN:
         return _infer_mflux_family(config.mflux_model)
     return fam
+
+
+#: The Mac app only (set by the studio's __main__, never on import, so a test
+#: or a gate never pip-installs into a real venv). Called as
+#: ``MFLUX_AUTOINSTALL(on_log)`` when an image job finds no mflux CLI; returns
+#: None once the engine is in place, else a short reason it is not.
+#: Fleet 8 Nov (fw-20261107-1904): the app's setup never installed mflux (only
+#: Pinokio's install.js did), so every FLUX.2 / Qwen-Edit / Ideogram image on a
+#: Mac-app install that had not copied a Pinokio engine failed, and the message
+#: said "quit and reopen so setup can put it back", which did nothing.
+MFLUX_AUTOINSTALL = None
+
+
+def mflux_missing_message(bin_name: str, fam: str, install_problem: str | None = None) -> str:
+    """What an image job says when the mflux CLI is not there.
+
+    The image-engine pack (scripts/pinokio/mflux_pack.sh) is optional at
+    install, so a failed or skipped pack leaves no mflux CLI. This used to say
+    "<bin> not found ... `pip install -U mflux>=0.17` (see
+    docs/AGENTIC_FLOWS.md)": a terminal command, an eager upgrade this repo
+    forbids (it re-resolves transformers and breaks video), and a deleted doc
+    (fleet fw-20261107-0907: 11 failures on 7 Macs). It names the one-click
+    way back; on the Mac app, when the studio tried to add the engine itself,
+    it says that and why it did not work. The CLI name stays at the end for
+    logs and the fleet's grouping."""
+    if install_problem:
+        head = ("The image engine is not installed and Phosphene could not add it "
+                f"({install_problem.rstrip('.')}). ")
+        way = _dist.say(
+            "In Pinokio, click \"Install/repair image engines (Ideogram 4 + "
+            "Qwen-Edit)\" in Phosphene's menu; it keeps every model. ",
+            "Check that this Mac is online and has a few GB free, then make the "
+            "image again; if it keeps happening, report it with "
+            f"{_dist.MAC_REPORT_MENU} ")
+    else:
+        head = "The image engine is not installed, so images cannot start. "
+        way = _dist.say(
+            "In Pinokio, click \"Install/repair image engines (Ideogram 4 + "
+            "Qwen-Edit)\" in Phosphene's menu; it keeps every model. ",
+            "Quit Phosphene and open it again so setup can put it back; if "
+            "it keeps happening, report it with "
+            f"{_dist.MAC_REPORT_MENU} ")
+    return head + way + f"Video renders are not affected. ({bin_name} missing, family {fam})"
 
 
 def _resolve_mflux_bin(config: ImageEngineConfig) -> str | None:
@@ -842,6 +1009,216 @@ def mflux_env_fault(bin_path) -> str:
     return ""
 
 
+# ---- LoRAs: what reaches mflux, and what must stop before it ----------------
+def mflux_lora_stack(config: ImageEngineConfig, fam: str | None = None,
+                     on_log=None) -> tuple[list[str], list[float]]:
+    """The LoRA paths + scales the mflux CLI will really be handed.
+
+    One function for the command builder AND the pre-launch check, so the
+    two can never disagree about which adapters ride along.
+
+    2026-05-31 review fix (C2): the default config ships the Qwen-Edit
+    Lightning LoRA (qwen_edit is the UI default). If the engine is switched
+    to a FLUX family (e.g. via engine_override="auto") while that LoRA is
+    still in the config, mflux would load a Qwen-architecture LoRA onto a
+    FLUX transformer — a ~50s model load followed by a no-op or crash. A
+    Qwen LoRA cannot apply to a non-Qwen model, so drop cross-family LoRAs
+    (and their paired scales, kept index-aligned) up front and log it."""
+    fam = fam or _resolve_mflux_family(config)
+    paths = list(config.mflux_lora_paths or [])
+    scales = list(config.mflux_lora_scales or [])
+
+    def _log(msg: str) -> None:
+        if on_log is not None:
+            try: on_log(msg)
+            except Exception:  # noqa: BLE001
+                pass
+
+    if fam == "ideogram" and paths:
+        # Ideogram 4 CANNOT consume external LoRAs: its transformer key
+        # names share zero overlap with Qwen/FLUX LoRA keys, so mflux's
+        # loader matches 0/2304 keys yet prints "applied successfully" — a
+        # silent no-LoRA render that makes users blame Ideogram for ignoring
+        # their character. Drop ALL user LoRAs (not just Qwen ones) and log
+        # honestly. This one chokepoint covers every entry path: the picker,
+        # a selection carried over from an engine switch, and /image/agent.
+        for lp in paths:
+            _log(f"[lora] Ideogram cannot use external LoRAs — ignoring: {lp}")
+        return [], []
+    if fam != "qwen_edit" and paths:
+        kept_p: list = []
+        kept_s: list = []
+        for i, lp in enumerate(paths):
+            if "qwen" in str(lp).lower():
+                _log(f"[lora] skipping Qwen LoRA on {fam} family (incompatible): {lp}")
+                continue
+            kept_p.append(lp)
+            if i < len(scales):
+                kept_s.append(scales[i])
+        paths, scales = kept_p, kept_s
+    return paths, scales
+
+
+def _mflux_lora_resolvable(path: str) -> bool:
+    """Would mflux's own LoRA resolver find `path`? Mirrors the rule table of
+    mflux 0.18 (models/common/resolution/lora_resolution.py) minus the
+    in-process registry, which no Phosphene caller fills: a file on disk; a
+    `repo:file` / `hf:` collection; an `org/repo` id. Anything else — above
+    all an absolute path whose file has gone — is
+    `error: LoRA file not found`, raised by the CLI's argparse (exit 2)."""
+    s = str(path or "").strip()
+    if not s:
+        return False
+    try:
+        if Path(s).expanduser().exists():
+            return True
+    except (OSError, ValueError):
+        return False
+    if s.startswith(("/", "~", "./", "../")):
+        return False                    # a filesystem path, and it is not there
+    if s.startswith("hf:"):
+        rest = s[3:]
+        return (":" in rest and "/" in rest) or rest.count("/") == 2
+    if ":" in s and "/" in s:
+        return True                     # repo:filename collection
+    return s.count("/") == 1            # org/repo
+
+
+#: How wide the FLUX.2 transformers are (attention heads x 128), from mflux
+#: 0.18 model_config.py `transformer_overrides`: [klein] 4B 24 heads, [klein]
+#: 9B 32 heads; FLUX.2 [dev] 48 heads.
+FLUX2_WIDTH_NAMES = {3072: "FLUX.2 [klein] 4B", 4096: "FLUX.2 [klein] 9B",
+                     6144: "FLUX.2 [dev]"}
+
+
+def flux2_transformer_width(config: ImageEngineConfig) -> int | None:
+    """The width of the FLUX.2 transformer this config runs, or None when it
+    is not a FLUX.2 config or the variant cannot be told from its names."""
+    fam = _resolve_mflux_family(config)
+    if fam not in ("flux2", "flux2_edit"):
+        return None
+    base = (config.mflux_base_model
+            or MFLUX_FAMILY_DEFAULTS.get(fam, {}).get("base_model") or "")
+    for name in (str(config.mflux_model or ""), str(base)):
+        s = name.lower()
+        if "9b" in s:
+            return 4096
+        if "4b" in s or "klein" in s:
+            return 3072
+        if "flux.2-dev" in s or "flux2-dev" in s:
+            return 6144
+    return None
+
+
+def lora_input_width(path) -> int | None:
+    """The width a LoRA was trained on: the most common input size of its
+    down/A matrices (attention q/k/v/out and the MLP input all read the
+    model's hidden width, so it dominates any full or attention-only
+    adapter). Reads the safetensors header only. None when the file has no
+    plain lora_A/lora_down pairs (LoKr, LoHa) or no width clearly leads."""
+    import lora_compat
+    header = lora_compat.read_tensor_header(path)
+    counts: dict[int, int] = {}
+    for key, meta in header.items():
+        if not key.endswith((".lora_A.weight", ".lora_down.weight")):
+            continue
+        shape = meta.get("shape") if isinstance(meta, dict) else None
+        if isinstance(shape, list) and len(shape) == 2:
+            try:
+                w = int(shape[1])
+            except (TypeError, ValueError):
+                continue
+            counts[w] = counts.get(w, 0) + 1
+    if not counts:
+        return None
+    width, hits = max(counts.items(), key=lambda kv: kv[1])
+    return width if hits * 5 >= sum(counts.values()) * 2 else None   # >= 40 %
+
+
+_SHAPE_ERROR_MARKS = ("[broadcast_shapes]", "[matmul]", "[addmm]", "Shapes (")
+
+
+def _lora_shape_note(config: ImageEngineConfig, lora_paths, cause: str) -> "str | None":
+    """The first line of an engine failure that a picked LoRA caused, or None.
+
+    mflux attaches LoRAs by key name and never compares shapes, so a LoRA made
+    for another model dies mid-denoise with an MLX shape error. The pre-launch
+    check (mflux_lora_problem) reads the width of plain lora_A/lora_down
+    adapters; LoKr/LoHa and full-delta files have none and pass it. Fleet
+    4.19.16: "ValueError: [broadcast_shapes] Shapes (1,1024,18432) ..." five
+    times on one Mac, every time with a style LoRA picked on Auto (18432 is
+    [klein] 4B's feed-forward width, 3072 x 3 x 2). The card said only
+    "mflux-generate-flux2 failed (exit 1)"; it now names the LoRA."""
+    # The engine presets' own step-distillation adapters (Lightning) are made
+    # for their model and are never the user's pick: they are not blamed.
+    picked = [lp for lp in (lora_paths or [])
+              if not any(k in str(lp).lower() for k in ("lightning", "lightx2v"))]
+    if not picked or not cause or not any(m in cause for m in _SHAPE_ERROR_MARKS):
+        return None
+    names = [Path(str(lp)).name or str(lp) for lp in picked]
+    want = flux2_transformer_width(config)
+    model = FLUX2_WIDTH_NAMES.get(want) if want else None
+    model = model or str(getattr(config, "mflux_model", "") or "this model")
+    which = (f"the LoRA {names[0]}" if len(names) == 1 else
+             "one of the LoRAs you picked (" + ", ".join(names) + ")")
+    return (f"The render stopped on a layer-size mismatch, most likely because {which} "
+            f"does not fit {model} (the engine said: {cause[:160]}). Un-pick it"
+            f"{'' if len(names) == 1 else ', one at a time to find which'}, or pick a "
+            f"LoRA made for {model}.")
+
+
+def mflux_lora_problem(config: ImageEngineConfig) -> tuple[str, str] | None:
+    """Why the LoRAs on this config would make mflux fail, or None.
+
+    Returns (kind, message); kind is "missing", "damaged" or "mismatch".
+    Checked BEFORE the engine starts, because each of these failed after it
+    had (fleet 4.19.16):
+
+    - "missing": an absolute LoRA path whose file has gone (a chip restored
+      from a draft or Load Params after the LoRA was deleted or renamed).
+      mflux-generate-qwen-edit / run_mflux_with_teacache.py exited 2 with
+      "error: LoRA file not found" — 13 renders on one Mac in two days.
+    - "damaged": a download cut short (the header says more bytes follow).
+    - "mismatch": a FLUX.2 LoRA trained on a different FLUX.2 size. mflux
+      attaches it by key name without comparing shapes, then the first
+      denoise step dies with "ValueError: [matmul] Last dimension of first
+      input ..." (a [klein] 9B or [dev] adapter, 4096/6144 wide, on the
+      3072-wide [klein] 4B that Auto and Klein-Edit run).
+    """
+    if config.kind != "mflux":
+        return None
+    paths, _ = mflux_lora_stack(config)
+    want = flux2_transformer_width(config)
+    for lp in paths:
+        s = str(lp or "").strip()
+        name = Path(s).name or s
+        if not _mflux_lora_resolvable(s):
+            return ("missing",
+                    f"The LoRA {name} is no longer on disk ({s}). It was moved, "
+                    "renamed or deleted after it was picked - un-pick it in the "
+                    "LoRA list (or pick it again), then generate again.")
+        p = Path(s).expanduser()
+        if not (p.is_file() and p.suffix.lower() == ".safetensors"):
+            continue
+        try:
+            have = lora_input_width(p)
+        except Exception as exc:                               # noqa: BLE001
+            if type(exc).__name__ == "LoraCompatibilityError":
+                return ("damaged", str(exc))
+            continue
+        if want and have and have != want:
+            made_for = FLUX2_WIDTH_NAMES.get(have)
+            runs = FLUX2_WIDTH_NAMES[want]
+            made = (f"was made for {made_for}" if made_for else
+                    f"was made for a different model (its layers are {have} "
+                    f"wide, {runs}'s are {want})")
+            return ("mismatch",
+                    f"The LoRA {name} {made} and cannot load on {runs}, the "
+                    f"model this image engine runs. Un-pick it in the LoRA "
+                    f"list, or pick a LoRA made for {runs}.")
+    return None
+
+
 # ---- Backends ---------------------------------------------------------------
 def _generate_mock(prompt: str, n: int, width: int, height: int,
                    output_dir: Path, base_seed: int | None,
@@ -920,106 +1297,6 @@ def _generate_mock(prompt: str, n: int, width: int, height: int,
     return results
 
 
-def _normalize_multiref_prompt(p: str, width: int = 0, height: int = 0) -> str:
-    if not p:
-        return p
-    import re
-    res = p
-    replacements = [
-        (r"(?i)من\s+الصورة\s+الأولى|من\s+الصورة\s+الاولى|من\s+صورة\s+1|من\s+الصورة\s+1", "from image 1"),
-        (r"(?i)من\s+الصورة\s+الثانية|من\s+الصورة\s+الثانيه|من\s+صورة\s+2|من\s+الصورة\s+2", "from image 2"),
-        (r"(?i)من\s+الصورة\s+الثالثة|من\s+الصورة\s+الثالثه|من\s+صورة\s+3|من\s+الصورة\s+3", "from image 3"),
-        (r"(?i)الصورة\s+الأولى|الصورة\s+الاولى|صورة\s+1|الصورة\s+1", "image 1"),
-        (r"(?i)الصورة\s+الثانية|الصورة\s+الثانيه|صورة\s+2|الصورة\s+2", "image 2"),
-        (r"(?i)الصورة\s+الثالثة|الصورة\s+الثالثه|صورة\s+3|الصورة\s+3", "image 3"),
-    ]
-    for pat, repl in replacements:
-        res = re.sub(pat, repl, res)
-
-    # Convert Eastern Arabic digits (٠-٩) to Western (0-9) for dimension parsing
-    digits_map = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
-    norm_p = res.translate(digits_map)
-
-    # Detect physical dimensions (e.g. 15cm height x 5cm width / طولها 15 سم وعرضها 5 سم)
-    h_val, w_val, unit = None, None, "cm"
-    ar_h_m = re.search(r"(?:طول|ارتفاع)(?:ها|ه)?\s*[:=]?\s*(\d+(?:\.\d+)?)\s*(سم|ملم|متر|cm|mm|m)?", norm_p, re.IGNORECASE)
-    ar_w_m = re.search(r"(?:عرض)(?:ها|ه)?\s*[:=]?\s*(\d+(?:\.\d+)?)\s*(سم|ملم|متر|cm|mm|m)?", norm_p, re.IGNORECASE)
-
-    if ar_h_m and ar_w_m:
-        try:
-            h_val = float(ar_h_m.group(1))
-            w_val = float(ar_w_m.group(1))
-            unit = ar_h_m.group(2) or ar_w_m.group(2) or "cm"
-        except (ValueError, TypeError):
-            pass
-    else:
-        en_h_m = re.search(r"(\d+(?:\.\d+)?)\s*(cm|mm|m|inches|inch|\")?\s*(?:height|tall|long)", norm_p, re.IGNORECASE) or \
-                 re.search(r"(?:height|tall|long)\s*[:=]?\s*(\d+(?:\.\d+)?)\s*(cm|mm|m|inches|inch|\")?", norm_p, re.IGNORECASE)
-        en_w_m = re.search(r"(\d+(?:\.\d+)?)\s*(cm|mm|m|inches|inch|\")?\s*(?:width|wide)", norm_p, re.IGNORECASE) or \
-                 re.search(r"(?:width|wide)\s*[:=]?\s*(\d+(?:\.\d+)?)\s*(cm|mm|m|inches|inch|\")?", norm_p, re.IGNORECASE)
-        if en_h_m and en_w_m:
-            try:
-                h_val = float(en_h_m.group(1))
-                w_val = float(en_w_m.group(1))
-                unit = en_h_m.group(2) or en_w_m.group(2) or "cm"
-            except (ValueError, TypeError):
-                pass
-
-    dim_rule = ""
-    if h_val and w_val and h_val > 0 and w_val > 0:
-        ratio = round(h_val / w_val, 2)
-        if ratio >= 1.2:
-            shape_desc = f"tall, slender vertical object with {ratio:g}:1 height-to-width proportions"
-        elif ratio <= 0.83:
-            inv_ratio = round(w_val / h_val, 2)
-            shape_desc = f"wide, low-profile horizontal object with {inv_ratio:g}:1 width-to-height proportions"
-        else:
-            shape_desc = "symmetrical cube-like object with balanced 1:1 proportions"
-
-        dim_rule = (
-            f"Product physical dimensions are specified as height: {h_val:g}{unit}, width: {w_val:g}{unit} "
-            f"(physical aspect ratio {ratio:g}:1). Render the product as a {shape_desc}. "
-            "Do not distort or stretch these specified physical proportions."
-        )
-
-    # Append aspect & orientation preservation directive for reference editing and text generation
-    # Prevents FLUX.2 Klein / Qwen-Edit / Flux2-Edit from distorting or reshaping products to match canvas orientation (e.g. 16:9 widescreen YouTube format)
-    if width > 0 and height > 0:
-        if height > width:
-            # Vertical / Reel format (e.g. 9:16)
-            rule = (
-                "Preserve exact natural physical proportions, height-to-width ratio, and correct scale of the product or subject. "
-                "Do not stretch, squeeze, warp, or deform the product vertically to fill the tall 9:16 frame. "
-                "Render the product with correct natural un-distorted scale and original proportions centered vertically."
-            )
-        elif width > height:
-            # Horizontal / YouTube format (e.g. 16:9)
-            rule = (
-                "Preserve exact natural physical proportions, height-to-width ratio, and correct scale of the product or subject. "
-                "Do not stretch, flatten, warp, or widen the product horizontally to fill the wide 16:9 frame (do not make the product shorter and wider). "
-                "Render the product with correct un-distorted vertical height and natural proportions centered horizontally with balanced framing."
-            )
-        else:
-            # Square (1:1)
-            rule = (
-                "Preserve exact natural physical proportions, height-to-width ratio, and correct scale of the product or subject. "
-                "Do not stretch, warp, or deform the product to fit the square frame."
-            )
-
-        if dim_rule:
-            rule = f"{dim_rule} {rule}"
-
-        if "proportions" not in res.lower() and "aspect ratio" not in res.lower() and "stretch" not in res.lower():
-            res = f"{res}\n\n[Composition Rule: {rule}]"
-        elif dim_rule and "Product physical dimensions" not in res:
-            res = f"{res}\n\n[Product Dimension Rule: {dim_rule}]"
-
-    elif dim_rule and "Product physical dimensions" not in res:
-        res = f"{res}\n\n[Product Dimension Rule: {dim_rule}]"
-
-    return res
-
-
 _EXC_LINE_RX = re.compile(r"^[A-Za-z_][\w.]*(?:Error|Exception|Interrupt|Exit)\s*:\s*\S")
 _NOISE_PREFIXES = ("Traceback", 'File "', "During handling", "The above exception",
                    "^^^", "~~~", "[", "step")
@@ -1046,7 +1323,7 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
                     output_dir: Path, base_seed: int | None,
                     config: ImageEngineConfig,
                     refs: list[str] | None = None,
-                    on_log: "callable | None" = None) -> list[dict]:
+                    on_log: "callable | None" = None, diagnostic=None) -> list[dict]:
     """Subprocess the right `mflux-generate-*` binary ONCE for all `n` seeds.
 
     Pre-2026-05-08 this spawned one subprocess per candidate, paying the
@@ -1086,23 +1363,23 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
     import subprocess
     import sys  # sys.executable used by the TeaCache wrap fallback below
 
-    width = align_dim_64(width, 1280)
-    height = align_dim_64(height, 704)
-
     bin_path = _resolve_mflux_bin(config)
     fam = _resolve_mflux_family(config)
     bin_name = MFLUX_FAMILY_BIN.get(fam, "mflux-generate")
     fam_defaults = MFLUX_FAMILY_DEFAULTS.get(fam, MFLUX_FAMILY_DEFAULTS["flux1"])
 
+    install_problem = None
+    if not bin_path and MFLUX_AUTOINSTALL is not None:
+        # The Mac app's studio adds the missing engine itself, once, inside
+        # this job (fw-20261107-1904), then carries on with the image.
+        try:
+            install_problem = MFLUX_AUTOINSTALL(on_log)
+        except Exception as exc:                                  # noqa: BLE001
+            install_problem = f"the install could not run: {exc}"
+        bin_path = _resolve_mflux_bin(config)
+
     if not bin_path:
-        raise RuntimeError(
-            f"{bin_name} not found (family: {fam}). Install or upgrade "
-            f"mflux into the panel's venv: "
-            f"`ltx-2-mlx/env/bin/pip install -U mflux>=0.17` "
-            f"(see docs/AGENTIC_FLOWS.md § Image generation backends). "
-            f"First-run model download is 4-34 GB to ~/.cache/huggingface "
-            f"depending on family."
-        )
+        raise RuntimeError(mflux_missing_message(bin_name, fam, install_problem))
 
     # 4.19.6: a Pillow the engine cannot import stops HERE, in a second, with
     # the way out - not 30 s later as an ImportError from inside mflux.
@@ -1121,10 +1398,6 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
             "the Engine dropdown to FLUX.2 [klein] / Z-Image-Turbo for "
             "text-only generation."
         )
-
-    # Normalize prompt aspect ratio & composition preservation for FLUX.2 Klein,
-    # FLUX.2 Edit, Qwen Edit, and all mflux generations to prevent product flattening/widening in 16:9
-    prompt = _normalize_multiref_prompt(prompt, width=width, height=height)
 
     # Effective steps + guidance: prefer user-set values if non-zero,
     # otherwise fall back to the family default.
@@ -1306,62 +1579,16 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
     # with "Could not find LoRA file ... in downloaded files". Paths that
     # look like real files or that don't contain a colon are passed
     # through untouched.
-    # 2026-05-31 review fix (C2): the default config ships the Qwen-Edit
-    # Lightning LoRA (qwen_edit is the UI default). If the engine is switched
-    # to a FLUX family (e.g. via engine_override="auto") while that LoRA is
-    # still in the config, mflux would load a Qwen-architecture LoRA onto a
-    # FLUX transformer — a ~50s model load followed by a no-op or crash. A
-    # Qwen LoRA cannot apply to a non-Qwen model, so drop cross-family LoRAs
-    # (and their paired scales, kept index-aligned) up front and log it.
-    _lora_paths_in = list(config.mflux_lora_paths or [])
-    _lora_scales_in = list(config.mflux_lora_scales or [])
-    if fam == "ideogram" and _lora_paths_in:
-        # Ideogram 4 CANNOT consume external LoRAs: its transformer key
-        # names share zero overlap with Qwen/FLUX LoRA keys, so mflux's
-        # loader matches 0/2304 keys yet prints "applied successfully" — a
-        # silent no-LoRA render that makes users blame Ideogram for ignoring
-        # their character. Drop ALL user LoRAs (not just Qwen ones) and log
-        # honestly. This one chokepoint covers every entry path: the picker,
-        # a selection carried over from an engine switch, and /image/agent.
-        for _lp in _lora_paths_in:
-            if on_log is not None:
-                try: on_log(f"[lora] Ideogram cannot use external LoRAs — ignoring: {_lp}")
-                except Exception:  # noqa: BLE001
-                    pass
-        _lora_paths_in, _lora_scales_in = [], []
-    elif fam not in ("qwen_edit", "qwen") and _lora_paths_in:
-        _kept_p: list = []
-        _kept_s: list = []
-        for _i, _lp in enumerate(_lora_paths_in):
-            lp_str = str(_lp)
-            lp_lower = lp_str.lower()
-            if "qwen" in lp_lower:
-                if on_log is not None:
-                    try: on_log(f"[lora] skipping Qwen LoRA on {fam} family (incompatible): {_lp}")
-                    except Exception:  # noqa: BLE001
-                        pass
-                continue
-            if fam in ("flux2", "flux2_edit"):
-                is_flux1 = any(k in lp_lower for k in ("flux1", "flux-1", "flux.1", "fluxv1", "flux_v1"))
-                if not is_flux1 and Path(lp_str).exists():
-                    try:
-                        from lora_compat import read_tensor_header
-                        hdr = read_tensor_header(lp_str)
-                        hdr_keys = " ".join(hdr.keys())
-                        if "single_transformer_blocks" in hdr_keys or "double_blocks" in hdr_keys or "lora_unet" in hdr_keys:
-                            is_flux1 = True
-                    except Exception:  # noqa: BLE001
-                        pass
-                if is_flux1:
-                    if on_log is not None:
-                        try: on_log(f"[lora] skipping FLUX.1 LoRA on {fam} family (incompatible architecture): {_lp}")
-                        except Exception:  # noqa: BLE001
-                            pass
-                    continue
-            _kept_p.append(_lp)
-            if _i < len(_lora_scales_in):
-                _kept_s.append(_lora_scales_in[_i])
-        _lora_paths_in, _lora_scales_in = _kept_p, _kept_s
+    # Which adapters ride along (cross-family drops) is mflux_lora_stack's
+    # call, shared with the pre-launch check below so the two cannot drift.
+    _lora_paths_in, _lora_scales_in = mflux_lora_stack(config, fam, on_log)
+    # 4.19.17 (fleet 4.19.16): a LoRA that cannot load stops HERE, before the
+    # engine spends a model load on it - see mflux_lora_problem. The panel's
+    # queue worker asks the same question first and answers as a refusal; this
+    # is the backstop for every other caller (/image/generate, agents).
+    _lora_problem = mflux_lora_problem(config)
+    if _lora_problem:
+        raise ValueError(_lora_problem[1])
     if _lora_paths_in:
         resolved_paths: list[str] = []
         for lp in _lora_paths_in:
@@ -1373,8 +1600,7 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
                 try:
                     repo_id, filename = lp_str.split(":", 1)
                 except ValueError:
-                    if Path(lp_str).exists():
-                        resolved_paths.append(lp_str)
+                    resolved_paths.append(lp_str)
                     continue
                 try:
                     from huggingface_hub import hf_hub_download
@@ -1386,53 +1612,25 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
                     resolved_paths.append(cached)
                 except Exception as e:        # noqa: BLE001
                     if on_log is not None:
-                        try: on_log(f"[lora] WARN: skipping unresolvable LoRA {lp_str}: {e}")
+                        try: on_log(f"[lora] WARN: could not resolve {lp_str}: {e}")
                         except Exception:  # noqa: BLE001
                             pass
-            else:
-                if Path(lp_str).exists() or not ":" in lp_str:
                     resolved_paths.append(lp_str)
-        if fam in ("flux2", "flux2_edit"):
-            _filtered_paths: list[str] = []
-            _filtered_scales: list[float] = []
-            for _idx, rp in enumerate(resolved_paths):
-                is_incompatible = False
-                if Path(rp).exists():
-                    try:
-                        from lora_compat import read_tensor_header
-                        hdr = read_tensor_header(rp)
-                        hdr_keys = " ".join(hdr.keys())
-                        if "single_transformer_blocks" in hdr_keys or "double_blocks" in hdr_keys or "lora_unet" in hdr_keys:
-                            is_incompatible = True
-                    except Exception:  # noqa: BLE001
-                        pass
-                if is_incompatible:
-                    if on_log is not None:
-                        try: on_log(f"[lora] skipping incompatible FLUX.1 LoRA on {fam} engine: {rp}")
-                        except Exception:  # noqa: BLE001
-                            pass
-                    continue
-                _filtered_paths.append(rp)
-                if _idx < len(_lora_scales_in):
-                    _filtered_scales.append(_lora_scales_in[_idx])
-            resolved_paths = _filtered_paths
-            _lora_scales_in = _filtered_scales
-
-        if resolved_paths:
-            cmd.append("--lora-paths")
-            cmd.extend(resolved_paths)
-            if _lora_scales_in:
-                # 2026-05-31 review fix (C3): catch a scales/paths length mismatch
-                # HERE rather than letting mflux discover it after a ~50s model
-                # load and crash with an opaque error.
-                if len(_lora_scales_in) != len(resolved_paths):
-                    raise ValueError(
-                        f"LoRA scales/paths length mismatch: {len(_lora_scales_in)} "
-                        f"scales vs {len(resolved_paths)} paths. Adjust "
-                        f"mflux_lora_scales / mflux_lora_paths in the engine config"
-                    )
-                cmd.append("--lora-scales")
-                cmd.extend(str(s) for s in _lora_scales_in)
+            else:
+                resolved_paths.append(lp_str)
+        cmd.append("--lora-paths")
+        cmd.extend(resolved_paths)
+        if _lora_scales_in:
+            # 2026-05-31 review fix (C3): catch a scales/paths length mismatch
+            # HERE rather than letting mflux discover it after a ~50s model
+            # load and crash with an opaque error.
+            if len(_lora_scales_in) != len(resolved_paths):
+                raise ValueError(
+                    f"LoRA scales/paths length mismatch: {len(_lora_scales_in)} "
+                    f"scale(s) vs {len(resolved_paths)} path(s) — check "
+                    f"mflux_lora_scales / mflux_lora_paths in the engine config")
+            cmd.append("--lora-scales")
+            cmd.extend(str(s) for s in _lora_scales_in)
     # When `--model` is a HuggingFace id or local path (contains a
     # slash or starts with `~`), mflux needs `--base-model` to know
     # which architecture to instantiate. Fall through to the per-family
@@ -1546,8 +1744,9 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
             try:
                 on_log(f"[download] {config.mflux_model} was interrupted at "
                        f"{_partial['on_disk_gb']} GB ({_partial['incomplete']} files "
-                       f"unfinished) — resuming it before this render; nothing "
-                       f"already downloaded is fetched again.")
+                       f"unfinished) — continuing it before this render. "
+                       f"Finished files are kept; an unfinished one may start "
+                       f"again from its beginning.")
             except Exception:  # noqa: BLE001
                 pass
 
@@ -1556,6 +1755,8 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
     last_lines: collections.deque[str] = collections.deque(maxlen=64)
     stderr_tail = ""
     timed_out = False
+    image_diagnostics.attempt(diagnostic, "spawn", cmd)
+    _spawned_at = time.time()
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -1569,8 +1770,8 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
         start_new_session=True,
     )
     # Register before the wait loop so /stop can find this proc.
-    _register_active_proc(proc)
     try:
+        _register_active_proc(proc)
         # Activity-based (stall) timeout, NOT a fixed total deadline: the model
         # download runs INSIDE this subprocess, and on a slow connection a
         # 20-34 GB first-run pull can exceed any fixed render budget. The old
@@ -1580,7 +1781,7 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
         # stream per file; render emits step lines every few seconds), so we
         # only abort on a genuine STALL — no output for `stall_budget`. A
         # generous absolute cap is the runaway backstop.
-        stall_budget = 1800.0                              # 30 min of silence = stuck
+        stall_budget = _MFLUX_STALL_SECONDS                  # 30 min of silence = stuck
         hard_cap = time.time() + max(timeout_s, 14400.0)   # 4 h absolute backstop
         # The download writes to disk for many minutes while its stdout is
         # silent OR floods \r-progress that readline() blocks on — either way
@@ -1591,8 +1792,9 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
         # read loop stamps `_alive` on each render line (render alive). It kills
         # the subprocess only on a GENUINE stall — neither disk nor stdout for
         # stall_budget — and emits a GB readout. (HiDream uses the same idea.)
-        _hf_home = env.get("HF_HOME") or os.path.expanduser("~/.cache/huggingface")
-        dl_dir = ((Path(_hf_home) / "hub"
+        # Same hub root as the repair (HF_HUB_CACHE, then HF_HOME, then the
+        # default): it used to read HF_HOME only.
+        dl_dir = ((_hf_hub_root(env)
                    / ("models--" + config.mflux_model.replace("/", "--")))
                   if getattr(config, "mflux_model", None) else None)
         def _dl_gb() -> float:
@@ -1616,15 +1818,21 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
         _wd_killed = [False]
         def _watchdog() -> None:
             _last = _dl_gb()
-            while not _wd_stop.wait(15.0):
+            while not _wd_stop.wait(_MFLUX_WATCHDOG_POLL):
                 _sz = _dl_gb()
-                if _sz > _last + 0.001:                  # >1 MB on disk → download alive
+                # Compared with the LAST SAMPLE, not the largest one seen
+                # (4.19.18): the Xet downloader restarts an unfinished file
+                # from 0, the folder shrinks by gigabytes, and a max-so-far
+                # test showed no progress (and stamped no liveness) until
+                # the file had grown back past its old size.
+                _moved, _line = download_progress_step(_last, _sz)
+                if _moved:
                     _alive[0] = time.time()
-                    if _last >= 0.0 and on_log is not None:
-                        try: on_log(f"[download] model weights: {_sz:.1f} GB")
+                    if _line and on_log is not None:
+                        try: on_log(_line)
                         except Exception:  # noqa: BLE001
                             pass
-                    _last = max(_last, _sz)
+                _last = _sz
                 if (time.time() - _alive[0] > stall_budget) or (time.time() > hard_cap):
                     _wd_killed[0] = True
                     try: os.killpg(os.getpgid(proc.pid), 15)   # SIGTERM tree → readline EOFs
@@ -1655,6 +1863,7 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
                     line = raw.rstrip("\n")
                     if line:
                         _alive[0] = time.time()                 # render/output activity → alive
+                        image_diagnostics.attempt(diagnostic, "line", line)
                         last_lines.append(line)
                         if on_log is not None:
                             try:
@@ -1701,6 +1910,7 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
             )
         rc = proc.wait(timeout=30)
     except subprocess.TimeoutExpired as e:
+        timed_out = True
         try:
             proc.kill()
         except OSError:
@@ -1717,6 +1927,14 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
                 proc.stdout.close()
             except OSError:
                 pass
+        try:
+            cancelled = bool(_CANCEL_CHECK and _CANCEL_CHECK())
+        except Exception:
+            cancelled = False
+        image_diagnostics.attempt(diagnostic, "finish",
+            "cancelled" if cancelled else "timeout" if timed_out else
+            "completed" if getattr(proc, "returncode", None) == 0 else "failed",
+            getattr(proc, "returncode", None))
         _unregister_active_proc(proc)
         # Ideogram's temp --prompt-file outlives the child (read during
         # model setup); remove it now that the subprocess has exited.
@@ -1733,7 +1951,7 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
     # stdout/stderr:" - two Macs, 21 FLUX.2 failures since 4.16, and not one
     # word of why. The tail still follows in full for the user and the Logs.
     cause = _subprocess_cause_line(last_lines)
-    cause_note = f" — last line: {cause[:220]}" if cause else ""
+    cause_note = f"; last line: {cause[:220]}" if cause else ""
     # SIGTERM/SIGKILL → user hit /stop. Surface as a typed cancellation
     # so the queue worker marks the job 'cancelled' rather than 'failed'.
     if rc in (-15, 143, -9, 137):
@@ -1769,23 +1987,36 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
         )
         if looks_like_abort or looks_like_oom:
             hint = (
-                "GPU/Metal abort detected — almost always means the model "
-                "was too big for available memory."
-                if looks_like_oom or rc in (-6, 134)
-                else "GPU/Metal error from MLX. Could be OOM or a kernel limit."
+                "The engine reported that it ran out of memory."
+                if looks_like_oom
+                else "The image engine aborted in native code. Memory pressure "
+                "or a Metal error may be involved, but this log does not confirm the cause."
             )
+            signal_note = "SIGABRT; " if rc in (-6, 134) else ""
             raise RuntimeError(
-                f"{bin_name} aborted on batch of {n} seeds (exit {rc}){cause_note}. {hint}\n\n"
+                f"{bin_name} aborted on batch of {n} seeds ({signal_note}exit {rc}){cause_note}. {hint}\n\n"
                 f"Try one of:\n"
                 f"  - Smaller engine (FLUX.2 [klein] 4B / Z-Image-Turbo) "
                 f"if you picked a 9B/edit model.\n"
-                f"  - Lower resolution (1024×1024 instead of 1280×720).\n"
+                f"  - Choose a small canvas: 768×432 for wide images or 512×512 for square images.\n"
                 f"  - Lower quantization (Q4 instead of Q6/Q8) for tight RAM.\n"
                 f"  - Quit other big apps (browsers + IDEs eat 8-15 GB).\n"
-                f"A crash report was saved to ~/Library/Logs/DiagnosticReports/"
-                f"python3.11-*.ips — useful for a bug report.\n\n"
+                f"If it happens again, check ~/Library/Logs/DiagnosticReports/"
+                f"for a Python .ips crash report and attach it to your bug report.\n\n"
                 f"Tail of stdout/stderr:\n{stderr_tail[-800:]}"
             )
+        # The engine exited with its model download unfinished (4.19.18):
+        # say THAT on the first line - the line the user reads and the
+        # fleet keeps - not only whatever mflux printed last.
+        _dl_note = _download_stopped_note(getattr(config, "mflux_model", None),
+                                          env, cause)
+        if _dl_note:
+            raise RuntimeError(
+                f"{_dl_note}\n\nTail of stdout/stderr:\n{stderr_tail[-1200:]}")
+        _shape_note = _lora_shape_note(config, _lora_paths_in, cause)
+        if _shape_note:
+            raise RuntimeError(
+                f"{_shape_note}\n\nTail of stdout/stderr:\n{stderr_tail[-1200:]}")
         # Generic non-zero exit — pass through the tail so the user sees
         # whatever mflux printed last. Keep the END of the tail: a Python
         # traceback puts the exception on its last line, and the head-slice
@@ -1794,6 +2025,13 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
             f"{bin_name} failed (exit {rc}) on batch of {n} seeds{cause_note}. "
             f"Tail of stdout/stderr:\n{stderr_tail[-1200:]}"
         )
+
+    # The run loaded the model, so its download is whole: clear leftovers.
+    if _is_hf_repo_id(getattr(config, "mflux_model", None)):
+        try:
+            clear_download_litter(config.mflux_model, env, _spawned_at)
+        except Exception:  # noqa: BLE001
+            pass
 
     # Build results from whatever files actually landed. If the
     # subprocess errored partway through (e.g. one seed's generation
@@ -2277,62 +2515,356 @@ def _generate_hidream(prompt: str, n: int, width: int, height: int,
     return results
 
 
-def _generate_drawthings(prompt: str, n: int, width: int, height: int,
-                         output_dir: Path, base_seed: int | None,
-                         config: ImageEngineConfig,
-                         refs: list[str] | None = None,
-                         on_log: "callable | None" = None) -> list[dict]:
-    """Generate candidates via Draw Things gRPC service."""
-    import asyncio
-    import drawthings_bridge
+# ---------------------------------------------------------------------------------------------
+# P-H3-Image (Pruna), on MiniMax H3. One subprocess per image: the H3 engine's generate_image.py
+# runs staged (text encoder, then the DiT with the adapter, then the decoder) so a 64 GB Mac
+# never holds all three. Text-to-image only for now; refs fall back to a warning, like the other
+# backends without multi-ref support.
+# ---------------------------------------------------------------------------------------------
 
-    model = config.mflux_model or "qwen_image_2.1_i8x.ckpt"
-    lora = (config.mflux_lora_paths[0] if (config.mflux_lora_paths and len(config.mflux_lora_paths) > 0) else
-            ("qwen_image_2.16step_lora_f16.ckpt" if "qwen" in model.lower() else
-             "krea2_turbo_4step_lora_f16.ckpt" if "krea" in model.lower() else "none"))
-    steps = config.mflux_steps or (6 if "qwen" in model.lower() else 4)
-    ref_img = refs[0] if refs and len(refs) > 0 else None
+# Aspect keys of the Image Studio -> the seven ratios the model was trained at.
+PH3IMAGE_RATIOS = {"1:1": "1:1", "4:3": "4:3", "3:4": "3:4", "3:2": "3:2", "2:3": "2:3",
+                   "16:9": "16:9", "9:16": "9:16"}
+PH3IMAGE_ADAPTER = "loras/p-h3-image_lora_bf16.safetensors"
+# Megapixel tiers: Draft (2), Standard (4), High (8). Below 8 the author warns of more artifacts.
+PH3IMAGE_TIERS = (2.0, 4.0, 8.0)
 
-    aligned_w = align_dim_64(width, 1280)
-    aligned_h = align_dim_64(height, 704)
 
+def ph3image_missing(config: ImageEngineConfig) -> list[str]:
+    """What is not on disk yet, in plain words ([] = ready)."""
+    out: list[str] = []
+    py, script = config.ph3image_python_path, config.ph3image_script_path
+    if not py or not Path(py).exists():
+        out.append("the H3 engine is not installed")
+    if not script or not Path(script).is_file():
+        out.append("this H3 engine build has no image runner")
+    root = Path(config.ph3image_root) if config.ph3image_root else None
+    if root is None or not (root / PH3IMAGE_ADAPTER).is_file():
+        out.append("the P-H3-Image adapter is not downloaded")
+    if root is None or not (root / "vae" / "decoder.safetensors").is_file():
+        out.append("the image decoder is not downloaded")
+    if root is None or not (root / "text_encoder").is_dir():
+        out.append("the text encoder is not downloaded")
+    if not config.ph3image_dit or not Path(config.ph3image_dit).exists():
+        out.append("the H3 video engine weights are missing")
+    return out
+
+
+def _ph3image_aspect(aspect: str) -> str:
+    return PH3IMAGE_RATIOS.get(aspect, "16:9")
+
+
+# Studio installs its existing signed-token authority. Standalone callers fail closed.
+_ph3image_pro_status = lambda: {"active": False}
+
+
+def ph3image_resident_headroom_gb(config):
+    # Weights are already resident: reserve additional working space by canvas size.
+    return max(6.0, min(12.0, float(config.ph3image_mp) * 2.0))
+
+
+# What a private profile must not leave beside a picture: the schedule that makes it faster.
+# The profile name stays (it is how a render proves which path ran); the method does not.
+_PH3IMAGE_PRIVATE_METRIC_KEYS = ("sigmas", "forwards", "steps", "schedule", "timesteps")
+
+
+def _ph3image_scrub_private_metrics(path) -> None:
+    try:
+        p = Path(path)
+        data = json.loads(p.read_text())
+        if isinstance(data, dict) and any(k in data for k in _PH3IMAGE_PRIVATE_METRIC_KEYS):
+            for k in _PH3IMAGE_PRIVATE_METRIC_KEYS:
+                data.pop(k, None)
+            p.write_text(json.dumps(data, indent=2))
+    except (OSError, ValueError):
+        pass
+
+
+def ph3image_pro_active():
+    try:
+        return bool(_ph3image_pro_status().get("active"))
+    except Exception:
+        return False
+
+
+def _generate_ph3image(prompt: str, n: int, aspect: str, output_dir: Path, base_seed: int | None,
+                       config: ImageEngineConfig, refs: list[str] | None = None,
+                       on_log: "callable | None" = None) -> list[dict]:
+    import json as _json
+    import os
+    import random
+    import subprocess
+
+    missing = ph3image_missing(config)
+    if missing:
+        raise FileNotFoundError("P-H3-Image is not ready: " + "; ".join(missing))
+    if refs and on_log:
+        on_log("[p-h3-image] reference images are not used yet (text-to-image only); rendering from the prompt")
+    if (config.ph3image_pro_profile or Path(config.ph3image_script_path).name == "generate_image_pro.py") and not ph3image_pro_active():
+        import ph3_image_service
+        ph3_image_service.evict()
+        raise RuntimeError("Pro is no longer active. Select Fast again to use the Free profile.")
+    mp = float(config.ph3image_mp or 1.5)
+    ratio = _ph3image_aspect(aspect)
     results: list[dict] = []
+    ts = int(time.time() * 1000)
+    requests = []
     for i in range(n):
-        seed = (base_seed + i) if base_seed is not None else -1
+        seed = (base_seed + i) if base_seed is not None else random.randint(0, 2**31 - 1)
+        png = output_dir / f"cand_{i:02d}_ph3image_{ts}.png"
+        metrics = output_dir / f"cand_{i:02d}_ph3image_{ts}.json"
+        requests.append(dict(prompt=prompt, output=str(png), metrics=str(metrics), seed=seed,
+                             aspect=ratio, mp=mp))
+    service_script = Path(config.ph3image_script_path).with_name("serve_image_pro.py" if config.ph3image_pro_profile else "serve_image.py")
+    if config.ph3image_warm_service and service_script.is_file():
+        import ph3_image_service
+        import hostinfo
+        command = [config.ph3image_python_path, str(service_script),
+                   "--root", config.ph3image_root, "--dit", config.ph3image_dit]
+        def memory_preflight(reusing):
+            # Selection and admission share the worker mutex, so idle eviction
+            # cannot turn a warm budget check into an unchecked cold load.
+            if hostinfo.total_ram_bytes() < 64 * 1024**3:
+                raise ph3_image_service.ResidencyUnavailable("Warm image retention needs 64 GB")
+            required = (ph3image_resident_headroom_gb(config) if reusing else 40) * 1024**3
+            if hostinfo.available_bytes() < required:
+                raise ph3_image_service.ResidencyUnavailable("Not enough free memory for image retention")
+        for index, request in enumerate(requests):
+            try:
+                info = ph3_image_service.WORKER.request(command, request, _clean_subprocess_env(),
+                    timeout=float(os.environ.get("PHOSPHENE_PH3IMAGE_TIMEOUT_S", "3600")),
+                    on_log=on_log, register=_register_active_proc, unregister=_unregister_active_proc,
+                    preflight=memory_preflight)
+            except ph3_image_service.ResidencyUnavailable:
+                # request() reaps the resident process before propagating admission
+                # failure. A staged image is still allowed if its smaller budget fits.
+                if hostinfo.available_bytes() < 26 * 1024**3:
+                    raise RuntimeError("P-H3-Image needs more free memory. Close other apps and retry.")
+                if on_log:
+                    on_log("[p-h3-image] releasing warm models; rendering with staged memory")
+                requests = requests[index:]
+                break
+            if config.ph3image_pro_profile:
+                _ph3image_scrub_private_metrics(request["metrics"])
+            results.append({"png_path": request["output"], "seed": request["seed"], "engine": "p-h3-image",
+                            "width": int(info.get("width") or 0), "height": int(info.get("height") or 0),
+                            "seconds": float(info.get("request_seconds") or 0.0)})
+        else:
+            return results
+    # A staged request must evict a worker left by an earlier warm request,
+    # including when the service was disabled or the installed script changed.
+    import ph3_image_service
+    ph3_image_service.evict()
+    # One subprocess per batch also bounds residency to this caller's GPU-lock lifetime.
+    warm = config.ph3image_warm_batch and len(requests) > 1
+    groups = [requests[i:i + 16] for i in range(0, len(requests), 16)] if warm else [[r] for r in requests]
+    for i, group in enumerate(groups):
+        request = group[0]
+        seed = request["seed"]
+        png, metrics = Path(request["output"]), Path(request["metrics"])
+        cmd = [config.ph3image_python_path, config.ph3image_script_path]
+        batch_file = None
+        if warm:
+            batch_file = output_dir / f"ph3image_batch_{ts}.json"
+            batch_file.write_text(_json.dumps(group))
+            cmd += ["--batch-json", str(batch_file)]
+        else:
+            cmd += [prompt, "-o", str(png), "--aspect", ratio, "--mp", f"{mp:g}",
+                    "--seed", str(seed), "--metrics", str(metrics)]
+        cmd += ["--root", config.ph3image_root, "--dit", config.ph3image_dit]
         if on_log:
-            on_log(f"Rendering candidate {i+1}/{n} via Draw Things ({model})...")
-
+            on_log(f"[p-h3-image] image {i + 1}/{n}: {ratio} at {mp:g} MP, seed {seed}")
         try:
-            frames = asyncio.run(
-                drawthings_bridge.generate_dt_image(
-                    prompt=prompt,
-                    model=model,
-                    lora_file=lora,
-                    steps=steps,
-                    width=aligned_w,
-                    height=aligned_h,
-                    seed=seed,
-                    init_image=ref_img,
-                    on_log=on_log,
-                )
-            )
-        except Exception as e:
-            if on_log:
-                on_log(f"Draw Things candidate {i+1} error: {e}")
-            raise RuntimeError(f"Draw Things generation error: {e}")
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                    errors="replace", env=_clean_subprocess_env(), start_new_session=True)
+        except OSError:
+            if batch_file is not None:
+                batch_file.unlink(missing_ok=True)
+            raise
+        _register_active_proc(proc)
+        deadline = float(os.environ.get("PHOSPHENE_PH3IMAGE_TIMEOUT_S", "3600")) * len(group)
+        timed_out = {"v": False}
 
-        if not frames:
-            raise RuntimeError(f"Draw Things candidate {i+1} produced no output.")
+        def _kill():
+            timed_out["v"] = True
+            # The image CLI creates no children; stop only the process we started.
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
 
-        cand_path = output_dir / f"candidate_{i}.png"
-        frames[0].to_file(str(cand_path))
-        results.append({
-            "png_path": str(cand_path),
-            "seed": seed,
-            "engine": f"drawthings:{model}",
-            "width": aligned_w,
-            "height": aligned_h,
-            "aspect": f"{aligned_w}:{aligned_h}",
-        })
+        wd = threading.Timer(deadline, _kill)
+        wd.daemon = True
+        wd.start()
+        try:
+            if proc.stdout is not None:
+                for line in proc.stdout:
+                    line = line.rstrip()
+                    if line and on_log:
+                        on_log(f"[p-h3-image] {line}")
+            rc = proc.wait()
+        except BaseException:
+            proc.kill()
+            proc.wait()
+            raise
+        finally:
+            wd.cancel()
+            _unregister_active_proc(proc)
+            if batch_file is not None:
+                batch_file.unlink(missing_ok=True)
+            if proc.stdout is not None:
+                proc.stdout.close()
+        if timed_out["v"]:
+            raise RuntimeError(f"P-H3-Image exceeded its {deadline:.0f}s deadline and was stopped")
+        if rc in (-15, 143, -9, 137):
+            raise ImageJobCancelled(f"P-H3-Image cancelled by /stop (rc={rc})")
+        if rc != 0:
+            raise RuntimeError(f"P-H3-Image failed with rc={rc}")
+        for request in group:
+            png, metrics = Path(request["output"]), Path(request["metrics"])
+            if not png.exists():
+                raise RuntimeError(f"P-H3-Image finished but no PNG at {png}")
+            info: dict = {}
+            try:
+                info = _json.loads(metrics.read_text())
+            except Exception:
+                pass
+            if config.ph3image_pro_profile:
+                _ph3image_scrub_private_metrics(metrics)
+            results.append({"png_path": str(png), "seed": request["seed"], "engine": "p-h3-image",
+                            "width": int(info.get("width") or 0), "height": int(info.get("height") or 0),
+                            "seconds": float(info.get("total_seconds") or 0.0)})
+    return results
 
+
+# ---------------------------------------------------------------------------------------------
+# MiniMax-H3-Image, the H3 family's own image model. One subprocess per image: the H3 engine's
+# generate_h3_image.py runs staged (text encoder, then the DiT, then the decoder) so a 64 GB Mac
+# never holds all three. Text to image, or an edit: reference pictures go to the runner as
+# --reference (Picture 1 first), and the "match" aspect asks for the shape of Picture 1. No warm worker.
+# ---------------------------------------------------------------------------------------------
+
+# Aspect keys of the Image Studio -> the ratios the runner takes. The "s" (small) variants are
+# the same shape: the megapixel tier, not the aspect key, sets the size.
+H3IMAGE_RATIOS = {"1:1": "1:1", "4:3": "4:3", "3:4": "3:4", "3:2": "3:2", "2:3": "2:3",
+                  "16:9": "16:9", "9:16": "9:16", "21:9": "21:9",
+                  "16:9s": "16:9", "1:1s": "1:1", "9:16s": "9:16"}
+# Megapixel tiers: Draft (4, the model's floor), Standard (8), High (16).
+H3IMAGE_TIERS = (4.0, 8.0, 16.0)
+# Edit: the engine takes 16 reference pictures (the release's limit); Picture 1 is the one edited.
+H3IMAGE_MAX_REFERENCES = 16
+# The Studio aspect key for "the shape of Picture 1" (edit only; the runner's --match-reference).
+H3IMAGE_MATCH_ASPECT = "match"
+
+
+def h3image_missing(config: ImageEngineConfig) -> list[str]:
+    """What is not on disk yet, in plain words ([] = ready)."""
+    out: list[str] = []
+    py, script = config.h3image_python_path, config.h3image_script_path
+    if not py or not Path(py).exists():
+        out.append("the H3 engine is not installed")
+    if not script or not Path(script).is_file():
+        out.append("this H3 engine build has no MiniMax-H3-Image runner")
+    root = Path(config.h3image_root) if config.h3image_root else None
+    if root is None or not (root / "dit" / "adaln_cache.safetensors").is_file():
+        out.append("the MiniMax-H3-Image model is not downloaded")
+    if root is None or not (root / "vae" / "diffusion_pytorch_model.safetensors").is_file():
+        out.append("the image decoder is not downloaded")
+    if root is None or not (root / "pdd_fused_heads.safetensors").is_file():
+        out.append("the output heads are not downloaded")
+    if not config.h3image_text_dir or not Path(config.h3image_text_dir).is_dir():
+        out.append("the H3 text encoder is missing")
+    if not config.h3image_text_config or not Path(config.h3image_text_config).is_file():
+        out.append("the H3 text encoder config is missing")
+    return out
+
+
+def _h3image_aspect(aspect: str) -> str:
+    return H3IMAGE_RATIOS.get(aspect, "16:9")
+
+
+def _generate_h3image(prompt: str, n: int, aspect: str, output_dir: Path, base_seed: int | None,
+                      config: ImageEngineConfig, refs: list[str] | None = None,
+                      on_log: "callable | None" = None) -> list[dict]:
+    import json as _json
+    import os
+    import random
+    import subprocess
+
+    missing = h3image_missing(config)
+    if missing:
+        raise FileNotFoundError("MiniMax-H3-Image is not ready: " + "; ".join(missing))
+    refs = list(refs or [])
+    match = bool(refs) and aspect == H3IMAGE_MATCH_ASPECT
+    mp = float(config.h3image_mp or 8.0)
+    ratio = _h3image_aspect(aspect)
+    if refs and on_log:
+        on_log(f"[h3-image] editing with {len(refs)} reference picture{'s' if len(refs) != 1 else ''}"
+               + (", in the shape of Picture 1" if match else f", output {ratio}"))
+    results: list[dict] = []
+    ts = int(time.time() * 1000)
+    for i in range(n):
+        seed = (base_seed + i) if base_seed is not None else random.randint(0, 2**31 - 1)
+        png = output_dir / f"cand_{i:02d}_h3image_{ts}.png"
+        metrics = output_dir / f"cand_{i:02d}_h3image_{ts}.json"
+        cmd = [config.h3image_python_path, config.h3image_script_path, prompt, "-o", str(png),
+               "--root", config.h3image_root, "--text-dir", config.h3image_text_dir,
+               "--text-config", config.h3image_text_config,
+               "--aspect", ratio, "--mp", f"{mp:g}", "--seed", str(seed), "--metrics", str(metrics)]
+        for ref in refs:
+            cmd += ["--reference", str(ref)]
+        if match:
+            cmd.append("--match-reference")
+        if on_log:
+            on_log(f"[h3-image] image {i + 1}/{n}: {'Picture 1 shape' if match else ratio} at {mp:g} MP, seed {seed}")
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                errors="replace", env=_clean_subprocess_env(), start_new_session=True)
+        _register_active_proc(proc)
+        deadline = float(os.environ.get("PHOSPHENE_H3IMAGE_TIMEOUT_S", "3600"))
+        timed_out = {"v": False}
+
+        def _kill():
+            timed_out["v"] = True
+            # The image CLI creates no children; stop only the process we started.
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+
+        wd = threading.Timer(deadline, _kill)
+        wd.daemon = True
+        wd.start()
+        try:
+            if proc.stdout is not None:
+                for line in proc.stdout:
+                    line = line.rstrip()
+                    if line and on_log:
+                        on_log(f"[h3-image] {line}")
+            rc = proc.wait()
+        except BaseException:
+            proc.kill()
+            proc.wait()
+            raise
+        finally:
+            wd.cancel()
+            _unregister_active_proc(proc)
+            if proc.stdout is not None:
+                proc.stdout.close()
+        if timed_out["v"]:
+            raise RuntimeError(f"MiniMax-H3-Image exceeded its {deadline:.0f}s deadline and was stopped")
+        if rc in (-15, 143, -9, 137):
+            raise ImageJobCancelled(f"MiniMax-H3-Image cancelled by /stop (rc={rc})")
+        if rc != 0:
+            raise RuntimeError(f"MiniMax-H3-Image failed with rc={rc}")
+        if not png.exists():
+            raise RuntimeError(f"MiniMax-H3-Image finished but no PNG at {png}")
+        info: dict = {}
+        try:
+            info = _json.loads(metrics.read_text())
+        except Exception:
+            pass
+        results.append({"png_path": str(png), "seed": seed, "engine": "h3-image",
+                        "references": len(refs), "refs_ignored": False,
+                        "width": int(info.get("width") or 0), "height": int(info.get("height") or 0),
+                        "seconds": float(info.get("request_seconds") or info.get("total_seconds") or 0.0)})
     return results

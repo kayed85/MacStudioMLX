@@ -14,6 +14,24 @@ from panel.routes import get, post
 P = None  # the running mlx_ltx_panel module; assigned at wiring time
 
 
+@post("/models/video")
+def post_models_video(h, path, qs, ctype) -> None:
+    if h._read_form_body() is None:
+        return
+    code, payload = P.request_video_models()
+    h._json(payload, code)
+
+
+@post("/models/reuse-pinokio")
+def post_models_reuse_pinokio(h, path, qs, ctype) -> None:
+    _rb = h._read_form_body()
+    if _rb is None:
+        return
+    body, form = _rb
+    key = (form.get("repo_key", [""])[0] or "").strip()
+    h._json(*P.pinokio_reuse_pack(key))
+
+
 @post("/models/download")
 def post_models_download(h, path, qs, ctype) -> None:
     _rb = h._read_form_body()
@@ -35,12 +53,18 @@ def post_models_download(h, path, qs, ctype) -> None:
     # binary must not block the one lane that never needed it.
     # Mac app: the app is fetching this pack itself (app_models.json). Two
     # fetchers writing (or a repair deleting) one folder is not safe - refuse.
+    reason = P.model_path_problem(repo, write=True)
+    if reason:
+        h._json({"error": reason}, 409); return
     if P.app_models_owns(repo):
         h._json({"error": "This model is already downloading in the background.",
                  "app_downloading": True}, 409); return
     if P.HF_BIN is None and (repo.get("mirror") or {}).get("kind") != "github-release":
         h._json({"error": "hf binary not found. Reinstall Phosphene "
                              "or install huggingface_hub>=1.0 in the venv."}, 500); return
+    reason = P.model_download_room([repo])
+    if reason:
+        h._json({"error": reason}, 507); return
     with P.DOWNLOAD_LOCK:
         busy = P.DOWNLOAD["active"]
         busy_key = P.DOWNLOAD.get("key")
@@ -219,12 +243,17 @@ def post_models_cancel(h, path, qs, ctype) -> None:
     # process alone made the attempt look failed and the worker started the
     # next one. The slot itself stays held until the worker releases it, so a
     # new download cannot start and be wiped by the old worker's cleanup.
+    pending = P.deferred_pending_keys()
+    P.install_plan.stop_requested_packs(P.STATE_DIR)
+    P.DEFERRED_WAKE.set()
     with P.DOWNLOAD_LOCK:
         was_active = P.DOWNLOAD["active"]
         rid = P.DOWNLOAD.get("repo_id")
         if was_active:
             P.DOWNLOAD["cancelled"] = True
     if not was_active:
+        if pending:
+            h._json({"ok": True}); return
         h._json({"error": "no active download"}, 404); return
     P._kill_active_download()
     P.push(f"[hf] cancel requested for {rid}")
@@ -346,40 +375,6 @@ def post_models_repair(h, path, qs, ctype) -> None:
     h._json({"ok": True, "deleted": deleted, "repo_id": repo["repo_id"]}, 202); return
 
 
-@get("/system/recommended_models")
-def get_system_recommended_models(h, path, qs) -> None:
-    ram = P.SYSTEM_RAM_GB
-    tier = P.SYSTEM_TIER
-    if ram < 24:
-        rec = {
-            "ram_gb": round(ram, 1),
-            "tier": tier,
-            "recommended_ltx": "q4",
-            "recommended_h3": "q4_compact",
-            "badge_text": "⭐ Recommended for 16GB RAM",
-            "description": "16 GB Unified Memory detected. Q4 Distilled & H3 Compact Tiers are optimal for high speed and zero swap memory overhead."
-        }
-    elif ram < 48:
-        rec = {
-            "ram_gb": round(ram, 1),
-            "tier": tier,
-            "recommended_ltx": "q4",
-            "recommended_h3": "q8",
-            "badge_text": "⭐ Recommended for 32GB RAM",
-            "description": "32 GB Unified Memory detected. Q4 Fast / Q8 Balanced tiers are recommended."
-        }
-    else:
-        rec = {
-            "ram_gb": round(ram, 1),
-            "tier": tier,
-            "recommended_ltx": "q8",
-            "recommended_h3": "bf16",
-            "badge_text": "⭐ Recommended for 64GB+ RAM",
-            "description": "64+ GB Unified Memory detected. High Precision Q8 & Full BF16 tiers recommended."
-        }
-    h._json({"ok": True, "system": rec})
-
-
 @post("/music/install")
 def post_music_install(h, path, qs, ctype) -> None:
     # Audio → Compose's "Install music engine" / "Repair music engine". Runs
@@ -474,9 +469,70 @@ def post_music_lora_fetch(h, path, qs, ctype) -> None:
     h._json(payload, code); return
 
 
+@post("/h3/app-install")
+def post_h3_app_install(h, path, qs, ctype) -> None:
+    # 5.0.9, Mac app only: the Hailuo H3 card's "Download Hailuo H3" / "Resume".
+    # Runner, weights (resumable, checksummed), compact engine, as a background task;
+    # progress rides /status.h3.app_install. The H3 licence screen comes first (451).
+    _rb = h._read_form_body()
+    if _rb is None:
+        return
+    _lic = P.licence_refusal_for("h3")
+    if _lic:
+        h._json(_lic, 451); return
+    code, payload = P.h3_app_install_start("install")
+    h._json(payload, code); return
+
+
+@post("/h3/app-install/stop")
+def post_h3_app_install_stop(h, path, qs, ctype) -> None:
+    if not P.h3_app_install_stop():
+        h._json({"error": "no Hailuo H3 download is running"}, 404); return
+    P.push("[h3-install] stop requested")
+    h._json({"ok": True}); return
+
+
 @post("/music/install/stop")
 def post_music_install_stop(h, path, qs, ctype) -> None:
     if not P.music_install_stop():
         h._json({"error": "no music engine install is running"}, 404); return
     P.push("[music-install] stop requested")
     h._json({"ok": True}); return
+
+
+@post("/storage/cleanup")
+def post_storage_cleanup(h, path, qs, ctype) -> None:
+    reason = P.model_path_problem(write=True)
+    if reason:
+        h._json({"error": reason}, 409); return
+
+    import model_storage
+    read = h._read_form_body()
+    if read is None:
+        return
+    _, form = read
+    if form.get("confirmed") != ["yes"]:
+        h._json({"error": "Confirm the superseded files before removing them."}, 400)
+        return
+    locks = []
+    try:
+        # Acquire every candidate folder lock before re-reading the snapshot.
+        for name in model_storage.RETIRED:
+            folder = P.MODELS_DIR / name
+            if not folder.is_dir() or folder.is_symlink():
+                continue
+            fd = P.pack_folder_lock(folder)
+            if fd is None or fd < 0:
+                h._json({"error": "A model folder is busy or cannot be locked. Try again later."}, 409)
+                return
+            locks.append(fd)
+        args = P.storage_inventory_args()
+        freed = model_storage.cleanup(P.MODELS_DIR, form.get("confirmation", [""])[0],
+                                      args["protected"], args["required"])
+        h._json({"ok": True, "freed": freed, "freed_label": P._fmt_gb(freed)})
+    except ValueError as exc:
+        h._json({"error": str(exc)}, 409)
+    except OSError:
+        h._json({"error": "Cleanup could not finish. Refresh Storage to see what remains."}, 500)
+    finally:
+        P.pack_folder_unlock(locks)

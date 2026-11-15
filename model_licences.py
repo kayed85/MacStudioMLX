@@ -18,7 +18,8 @@ explicit "I accept"). The acceptance is stored on this Mac in
 `<state>/model_licences.json` - model, licence version, time, app version -
 and asked again when the licence version changes. A marker file
 `<state>/licence-<key>-<version>.accepted` is written alongside, because the
-Pinokio installer (scripts/pinokio/h3_licence_gate.sh) checks it from bash.
+Pinokio installer checks the same matching pair through this module from bash.
+Missing, corrupt or mismatched records require explicit acceptance again.
 
 Territory: Phosphene shows the H3 territory notice and the user confirms it in
 the accept box. It does not look up the user's location - the licence asks
@@ -34,6 +35,8 @@ Stdlib only; no import of the panel (the panel imports this).
 from __future__ import annotations
 
 import json
+import fcntl
+import uuid
 import os
 import threading
 import time
@@ -45,6 +48,15 @@ REPORT_MISUSE_URL = ("https://github.com/mrbizarro/Phosphene/issues/new"
 # Static facts per model. `version` is the licence's own date: change it when
 # the licence text changes and everyone is asked again.
 LICENCES: dict[str, dict] = {
+    "flux3": {
+        "model": "FLUX 3 Klein by Black Forest Labs",
+        "licence": "FLUX Kommunity License v1.0",
+        "licensor": "Black Forest Labs Inc.",
+        "version": "flux-kommunity-1.0",
+        "url": "https://huggingface.co/black-forest-labs/flux-3-image-klein/blob/main/LICENSE.md",
+        "non_commercial": False,
+        "covers": "FLUX 3 Image Klein and Klein Base, including quantized weights",
+    },
     "h3": {
         "model": "MiniMax H3 (Hailuo H3)",
         "licence": "MiniMax H3 Community License Agreement",
@@ -53,6 +65,18 @@ LICENCES: dict[str, dict] = {
         "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE",
         "non_commercial": False,
         "covers": "the Hailuo H3 engine and its Turbo / Fast speed adapters",
+        "report_url": REPORT_MISUSE_URL,
+        "excluded_territories": ["European Union", "United Kingdom",
+                                 "South Korea", "United States"],
+    },
+    "minimax-h3-image": {
+        "model": "MiniMax-H3-Image",
+        "licence": "MiniMax-H3-Image Community License Agreement",
+        "licensor": "MiniMax",
+        "version": "2026-11-10",
+        "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/blob/main/LICENSE",
+        "non_commercial": False,
+        "covers": "the MiniMax-H3-Image engine and its converted weights",
         "report_url": REPORT_MISUSE_URL,
         "excluded_territories": ["European Union", "United Kingdom",
                                  "South Korea", "United States"],
@@ -196,6 +220,46 @@ COPY: dict = {'modal_title': 'Model licence',
           'accept_label': 'I have read and accept the Bria FIBO licence for '
                           'non-commercial use only.'}}
 
+COPY["flux3"] = {
+    "title": "FLUX 3 Klein licence",
+    "summary": "The app is MIT. These model weights have a separate licence from Black Forest Labs.",
+    "badge": "Commercial outputs below USD 5M revenue",
+    "terms": [
+        "Commercial output generation is permitted only while your gross annualized revenue, including affiliates, is below USD 5 million. Otherwise obtain commercial terms from Black Forest Labs.",
+        "Review outputs for unlawful or infringing content before sharing or displaying them. Disclose AI generation or modification where the law requires it.",
+        "Follow the full licence, including its use restrictions. Rights to the model are granted directly to you by Black Forest Labs, not by Phosphene.",
+        "When sharing model weights, include the full licence and the Black Forest Labs attribution notice. The community quantizations are modified models, not official Black Forest Labs products.",
+    ],
+    "accept_label": "I have read and accept the FLUX Kommunity License and will review outputs before sharing them.",
+}
+
+COPY["minimax-h3-image"] = {
+    "title": "MiniMax-H3-Image licence",
+    "summary": "You agree to the MiniMax-H3-Image Community License, including its territory "
+               "limits, revenue limit and Acceptable Use Policy.",
+    "terms": [
+        "Use, copy, share or display MiniMax-H3-Image and its outputs only within the licence's "
+        "territory. It does not cover the European Union, the United Kingdom, South Korea or the "
+        "United States.",
+        "If you and your affiliates have more than USD 1M in annualized revenue, or you offer a hosted "
+        "service to third parties, get MiniMax's prior written authorization.",
+        "Follow the Acceptable Use Policy: no unauthorized impersonation, harm to minors, election "
+        "disinformation, harassment or military use.",
+        "Do not use MiniMax-H3-Image or its outputs to improve any other AI model.",
+        "Clearly and prominently label content as machine-generated when you publish it publicly.",
+    ],
+    "badge": "Territory and revenue restrictions",
+    "accept_label": "I have read and accept the MiniMax-H3-Image Community License and will only "
+                    "use MiniMax-H3-Image and its outputs inside the licence's territory.",
+    "territory_notice": "This licence does not cover use of MiniMax-H3-Image or its outputs in the "
+                        "European Union, United Kingdom, South Korea or United States. Phosphene "
+                        "does not check your location. Contact MiniMax about a licence for these "
+                        "regions.",
+    "report_line": "Report suspected misuse of MiniMax-H3-Image outputs made with Phosphene "
+                   "through a GitHub issue on the Phosphene repo.",
+    "credit_line": "MiniMax-H3-Image",
+}
+
 STORE_NAME = "model_licences.json"
 _LOCK = threading.Lock()
 
@@ -220,7 +284,17 @@ def is_accepted(state_dir, key: str) -> bool:
     if key not in LICENCES:
         return True
     rec = load(state_dir).get(key)
-    return bool(isinstance(rec, dict) and rec.get("version") == LICENCES[key]["version"])
+    if not isinstance(rec, dict) or rec.get("version") != LICENCES[key]["version"]:
+        return False
+    try:
+        marker = json.loads(marker_path(state_dir, key).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    # Both representations must describe the same explicit acceptance. Never
+    # repair either from weights or from an unpaired/stale record.
+    return bool(marker == rec and rec.get("accepted_at")
+                and rec.get("licence") == LICENCES[key]["licence"]
+                and rec.get("statement") == COPY[key]["accept_label"])
 
 
 def accept(state_dir, key: str, app_version: str | None = None) -> dict:
@@ -228,6 +302,7 @@ def accept(state_dir, key: str, app_version: str | None = None) -> dict:
     if key not in LICENCES:
         raise KeyError(f"unknown licence {key!r}")
     rec = {
+        "acceptance_id": uuid.uuid4().hex,
         "licence": LICENCES[key]["licence"],
         "version": LICENCES[key]["version"],
         "accepted_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -240,18 +315,28 @@ def accept(state_dir, key: str, app_version: str | None = None) -> dict:
         # Two panels can share one state dir: lock the read-modify-write
         # across processes too, and give every writer its own temp file.
         with open(state / (STORE_NAME + ".lock"), "a") as lockf:
-            try:
-                import fcntl
-                fcntl.flock(lockf, fcntl.LOCK_EX)
-            except (ImportError, OSError):
-                pass
+            fcntl.flock(lockf, fcntl.LOCK_EX)
             data = load(state)
             data[key] = rec
-            tmp = state / f".{STORE_NAME}.{os.getpid()}.{threading.get_ident()}.tmp"
-            tmp.write_text(json.dumps(data, indent=1, sort_keys=True), encoding="utf-8")
-            os.replace(tmp, _store(state))
-            marker_path(state, key).write_text(json.dumps(rec) + "\n", encoding="utf-8")
+            # Publish the marker first and JSON last. A partial save cannot
+            # authorize: readers require an identical pair. Unique IDs keep
+            # same-second attempts distinct. Lock failure must fail closed.
+            _atomic_write(marker_path(state, key), rec)
+            _atomic_write(_store(state), data)
     return rec
+
+
+def _atomic_write(path: Path, data: dict) -> None:
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with tmp.open("x", encoding="utf-8") as f:
+            json.dump(data, f, indent=1, sort_keys=True)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def describe(state_dir, key: str) -> dict:
@@ -274,6 +359,12 @@ def describe_all(state_dir) -> dict:
 # ---- which licence a piece of work needs --------------------------------------
 def licence_for_image_cfg(cfg) -> str | None:
     """The licence an image-engine config needs, from its mflux family/model."""
+    if cfg is not None and getattr(cfg, "kind", "") == "flux3":
+        return "flux3"
+    if cfg is not None and getattr(cfg, "kind", "") == "ph3image":
+        return "h3"      # a MiniMax H3 Model Derivative: the same screen as H3 itself
+    if cfg is not None and getattr(cfg, "kind", "") == "h3image":
+        return "minimax-h3-image"   # its own licence (1 M USD limit, own AUP): its own screen
     if cfg is None or getattr(cfg, "kind", "") != "mflux":
         return None
     family = str(getattr(cfg, "mflux_family", "") or "").lower()
@@ -325,3 +416,12 @@ def refusal(state_dir, key: str | None) -> dict | None:
     return {"ok": False, "code": "licence_required", "licence": key,
             "error": tmpl.replace("{title}", info["model"]),
             "url": info["url"]}
+
+
+if __name__ == "__main__":
+    import sys
+    # Read-only shell gate. Unknown keys or interpreter/read failures refuse.
+    if len(sys.argv) != 4 or sys.argv[2] not in LICENCES:
+        sys.exit(1)
+    sys.exit(0 if (sys.argv[3] == LICENCES[sys.argv[2]]["version"]
+                   and is_accepted(sys.argv[1], sys.argv[2])) else 1)

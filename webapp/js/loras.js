@@ -48,6 +48,7 @@ function _currentLoraModeFilter() {
   }
   // Image Studio: read the engine override + map to compat tag.
   const eng = (document.getElementById('imgStudioEngine')?.value || 'auto').toLowerCase();
+  if (eng.startsWith('flux3_')) return 'image:flux3';
   if (eng.startsWith('qwen_edit')) return 'image:qwen';
   if (eng.startsWith('ideogram'))  return 'image:ideogram';
   if (eng.startsWith('flux2_edit') || eng.startsWith('flux2'))  return 'image:flux2';
@@ -79,25 +80,33 @@ function _currentLoraModeFilter() {
 // _currentLoraModeFilter return values.
 function _loraFilterLabel(tag) {
   switch (tag) {
-    case 'video':         return 'LTX-Video LoRAs (active video mode)';
-    case 'video:h3':      return 'Hailuo H3 LoRAs (MiniMax H3 base — separate library)';
-    case 'image':         return 'image LoRAs (any mflux family — auto engine)';
-    case 'image:qwen':    return 'Qwen-Image / Qwen-Image-Edit LoRAs';
-    case 'image:ideogram': return 'Ideogram 4 LoRAs (community formats — none validated yet)';
+    case 'video':         return T('loras.ltx_video_loras_active_video', 'LTX-Video LoRAs (active video mode)');
+    case 'video:h3':      return T('loras.hailuo_h3_loras_minimax_h3', 'Hailuo H3 LoRAs (MiniMax H3 base — separate library)');
+    case 'image':         return T('loras.image_loras_any_mflux_family', 'image LoRAs (any mflux family — auto engine)');
+    case 'image:flux3':   return T('loras.flux_3_loras_are_not', 'FLUX 3: LoRAs are not available in this image engine yet');
+    case 'image:qwen':    return T('loras.qwen_image_qwen_image_edit', 'Qwen-Image / Qwen-Image-Edit LoRAs');
+    case 'image:ideogram': return T('loras.ideogram_4_loras_community_formats', 'Ideogram 4 LoRAs (community formats — none validated yet)');
     case 'image:flux2':   return 'FLUX.2 LoRAs';
     case 'image:flux1':   return 'FLUX.1 LoRAs';
-    case 'image:kontext': return 'FLUX.1 Kontext LoRAs';
-    case 'image:z_image': return 'Z-Image LoRAs (none expected — most LoRAs trained for other families)';
-    case 'image:sdxl':    return 'SDXL LoRAs';
-    case 'image:hidream': return 'HiDream LoRAs (LoRA support not yet implemented — picked LoRAs are ignored)';
-    default:              return 'all installed LoRAs';
+    case 'image:kontext': return T('loras.flux_1_kontext_loras', 'FLUX.1 Kontext LoRAs');
+    case 'image:z_image': return T('loras.z_image_loras_none_expected', 'Z-Image LoRAs (none expected — most LoRAs trained for other families)');
+    case 'image:sdxl':    return T('loras.sdxl_loras', 'SDXL LoRAs');
+    case 'image:hidream': return T('loras.hidream_loras_lora_support_not', 'HiDream LoRAs (LoRA support not yet implemented — picked LoRAs are ignored)');
+    default:              return T('loras.all_installed_loras', 'all installed LoRAs');
   }
 }
 
 // Which LoRA library directory the picker is currently pointed at. Filled by
 // refreshLoras() from /loras — one fetch carries both, so flipping engine
 // re-labels the empty state without a round-trip.
-globalThis._lorasDirs = { ltx: 'mlx_models/loras/', h3: '' };
+globalThis._lorasDirs = { ltx: '', h3: '' };
+// The LTX LoRA folder as text. Before /loras has answered with the real path it
+// is the folder's name for this install: Pinokio's `mlx_models/`, the Mac app's
+// `models/` (the app has no mlx_models folder; app review 10 Nov, polish 7).
+function ltxLorasDirText() {
+  if (_lorasDirs.ltx) return _lorasDirs.ltx;
+  return (typeof isMacApp === 'function' && isMacApp()) ? 'models/loras/' : 'mlx_models/loras/';
+}
 // Whether the INSTALLED H3 pack's runner takes `--lora` at all. An older
 // checkout renders every tier and cannot take an adapter, and offering the
 // picker there would be a lie the user only discovers 30 s into a render.
@@ -131,7 +140,7 @@ function _syncLoraPickerForEngine() {
   if (dirEl) {
     dirEl.textContent = (tag === 'video:h3')
       ? (_lorasDirs.h3 || 'the Hailuo H3 pack’s loras/ folder')
-      : (_lorasDirs.ltx || 'mlx_models/loras/');
+      : ltxLorasDirText();
   }
   const importBtn = document.getElementById('h3LoraImportBtn');
   if (importBtn) importBtn.hidden = tag !== 'video:h3';
@@ -164,7 +173,7 @@ async function importH3Lora(file) {
   // restoring a string would leave the icon permanently gone after the first
   // import — a one-way UI decay that only shows up on the SECOND use.
   const original = btn ? btn.innerHTML : '';
-  if (btn) { btn.disabled = true; btn.textContent = 'Importing…'; }
+  if (btn) { btn.disabled = true; btn.textContent = T('loras.importing', 'Importing…'); }
   const fd = new FormData();
   fd.append('file', file, file.name);
   try {
@@ -178,7 +187,7 @@ async function importH3Lora(file) {
     const _det = document.getElementById('lorasDetails');
     if (_det) _det.open = true;
     const pairs = `${data.pairs} module pair${data.pairs === 1 ? '' : 's'}`;
-    const converted = data.converted ? ' Key namespace converted safely.' : '';
+    const converted = data.converted ? T('loras.key_namespace_converted_safely', ' Key namespace converted safely.') : '';
     // The H3 loader applies no alpha, so when a file's own scale isn't 1.0 the
     // strength control is where it gets applied — say the number rather than
     // leaving it in the sidecar for nobody to find.
@@ -193,9 +202,9 @@ async function importH3Lora(file) {
       // Name what the user actually did wrong, not the engineering reason
       // for the refusal — "PEFT's alpha/rank is not in the file" answers a
       // question nobody but us asked.
-      phosToast("This looks like an LTX LoRA, not an H3 one — its layout "
-               + "only exists in LTX/diffusers exports. Move the file into "
-               + "mlx_models/loras/ to use it on LTX instead; it can't run "
+      phosToast(T('loras.this_looks_like_an_ltx', "This looks like an LTX LoRA, not an H3 one — its layout ")
+               + T('loras.only_exists_in_ltx_diffusers', "only exists in LTX/diffusers exports. Move the file into ")
+               + ltxLorasDirText() + " to use it on LTX instead; it can't run "
                + "on H3.", { icon: 'ph-warning-fill', kind: 'danger', duration: 9000 });
     } else {
       phosToast(`H3 LoRA import failed: ${msg}`,
@@ -247,7 +256,7 @@ function renderH3LoraSlot() {
   if (note) {
     note.textContent = ((H3 && H3.loras && H3.loras.note) ||
       "H3's runner has one adapter slot, so a LoRA and Turbo can't both run.")
-      + ' Choosing your LoRA turns Turbo off and renders at this shape’s own step count.';
+      + T('loras.choosing_your_lora_turns_turbo', ' Choosing your LoRA turns Turbo off and renders at this shape’s own step count.');
   }
   const cur = (document.getElementById('h3_lora_slot') || {}).value || 'turbo';
   document.querySelectorAll('#h3LoraSlotGroup .pill-btn').forEach(b =>
@@ -301,7 +310,7 @@ function _serializeLoras() {
   // `scale_v` rides along only on a strength replayed from an older recipe
   // (Load Params / Finish, _restoreLoraPicker): it tells the server which
   // meaning of "strength" that number was written in (Codex H3-03).
-  const slim = _activeLoras.filter(_inLane)
+  const slim = _activeLoras.filter(l => _tag !== 'image:flux3' && _inLane(l))
     .map(l => (typeof l.scale_v === 'number')
       ? { path: l.path, strength: l.strength, scale_v: l.scale_v }
       : { path: l.path, strength: l.strength });
@@ -316,6 +325,28 @@ function _serializeLoras() {
   // Picking (or un-picking) an H3 LoRA is the other half of the
   // single-adapter-slot conflict, so the Adapter row follows the selection.
   if (typeof renderH3LoraSlot === 'function') { try { renderH3LoraSlot(); } catch (_) {} }
+}
+
+// The LoRAs an Image Studio render posts: the active ones the image picker
+// shows for the chosen engine (_loraRowMatchesMode), never the rest of
+// _activeLoras. That list survives every mode switch on purpose, so it can
+// hold LTX / H3 video adapters and chips hidden for another image family;
+// the Studio submit used to post all of it (4.19.16), handing mflux files it
+// could never load. FLUX 3 takes no LoRAs at all.
+function imageLorasForSubmit() {
+  const tag = _currentLoraModeFilter();
+  if (tag === 'image:flux3') return [];
+  const known = Array.isArray(_knownUserLoras) ? _knownUserLoras : [];
+  return (Array.isArray(_activeLoras) ? _activeLoras : []).filter(l => {
+    if (!l || !l.path) return false;
+    const u = known.find(x => x.path === l.path) || {};
+    return _loraRowMatchesMode({
+      path: l.path, name: l.name, filename: u.filename,
+      kind: !u.path ? 'remote' : (u.kind === 'train_character' ? 'trained' : 'user'),
+      lane: u.lane || l.lane || 'ltx',
+      compatible_modes: u.compatible_modes || l.compatible_modes || ['unknown'],
+    }, tag);
+  }).map(l => ({ path: l.path, strength: l.strength }));
 }
 
 function updateQualityChipsForLora() {
@@ -333,7 +364,7 @@ function updateQualityChipsForLora() {
     const incompat = trained && (q === 'quick' || q === 'standard');
     b.classList.toggle('disabled', incompat);
     if (incompat) {
-      b.title = 'Trained character LoRA needs the dev transformer (High quality). Quick/Standard run the distilled model — different fine-tune, so the LoRA can\'t reproduce the character faithfully.';
+      b.title = T('loras.trained_character_lora_needs_the', 'Trained character LoRA needs the dev transformer (High quality). Quick/Standard run the distilled model — different fine-tune, so the LoRA can\'t reproduce the character faithfully.');
     } else if (b.dataset.tooltipDefault) {
       b.title = b.dataset.tooltipDefault;
     } else {
@@ -421,7 +452,7 @@ function onIngredientCharChange() {
     trigHint.innerHTML = picked
       ? (trigger
           ? 'Trigger word <code>' + escapeHtml(trigger) + '</code> is added to your Action automatically so the character fires.'
-          : 'No trigger word recorded for this character — it may still fire from the LoRA alone.')
+          : T('loras.no_trigger_word_recorded_for', 'No trigger word recorded for this character — it may still fire from the LoRA alone.'))
       : '';
   }
 }
@@ -450,7 +481,7 @@ try {
 } catch (e) {}
 async function checkLoraUpdates() {
   const btn = document.getElementById('loraUpdatesBtn');
-  if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
+  if (btn) { btn.disabled = true; btn.textContent = T('loras.checking', 'Checking…'); }
   try {
     const r = await (await fetch('/loras/updates')).json();
     Object.keys(LORA_UPDATES).forEach(k => delete LORA_UPDATES[k]);
@@ -458,16 +489,16 @@ async function checkLoraUpdates() {
     try { localStorage.setItem('phos_lora_updates', JSON.stringify({ at: Date.now(), items: r.items || [] })); } catch (e) {}
     const n = (r.items || []).length;
     if (typeof phosToast === 'function') {
-      phosToast(!r.checked ? 'No installed LoRA came from CivitAI, so there is nothing to check.'
-        : n ? `${n} LoRA${n > 1 ? 's have' : ' has'} a newer version on CivitAI — marked in the list.`
-        : `All ${r.checked} CivitAI LoRA${r.checked > 1 ? 's are' : ' is'} up to date.`
+      phosToast(!r.checked ? T('loras.no_installed_lora_came_from', 'No installed LoRA came from CivitAI, so there is nothing to check.')
+        : n ? `${TP('loras.n_loras_have_a_newer_version', n, {one: '{count} LoRA has a newer version on CivitAI — marked in the list.', other: '{count} LoRAs have a newer version on CivitAI — marked in the list.'})}`
+        : `All ${r.checked} CivitAI LoRA${r.checked > 1 ? T('loras.s_are', 's are') : ' is'} up to date.`
         + ((r.errors || []).length ? ` ${r.errors.length} could not be checked.` : ''), { duration: 6000 });
     }
     renderLorasList();
   } catch (e) {
-    if (typeof phosToast === 'function') phosToast('CivitAI could not be reached.', { kind: 'danger' });
+    if (typeof phosToast === 'function') phosToast(T('loras.civitai_could_not_be_reached', 'CivitAI could not be reached.'), { kind: 'danger' });
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = 'Check for updates'; }
+    if (btn) { btn.disabled = false; btn.textContent = T('loras.check_for_updates', 'Check for updates'); }
   }
 }
 async function updateLora(path) {
@@ -482,7 +513,7 @@ async function updateLora(path) {
     if (r.ok) {
       delete LORA_UPDATES[path];
       try { localStorage.setItem('phos_lora_updates', JSON.stringify({ at: Date.now(), items: Object.values(LORA_UPDATES) })); } catch (e) {}
-      if (typeof phosToast === 'function') phosToast(`${it.name} updated. The old file is still installed — delete it from the list when you are done comparing.`, { duration: 8000 });
+      if (typeof phosToast === 'function') phosToast(T('loras.updated_the_old_file_is', '{name} updated. The old file is still installed — delete it from the list when you are done comparing.', {name: it.name}), { duration: 8000 });
       await refreshLoras();
     } else if (typeof phosToast === 'function') phosToast(r.error || 'The download failed.', { kind: 'danger', duration: 7000 });
   } catch (e) {
@@ -496,7 +527,7 @@ async function updateLora(path) {
 async function writeLoraGuide(path, btn) {
   // Busy state on the button itself: the planner model loads for tens of
   // seconds the first time, and a second click would queue a second write.
-  if (btn) { btn.disabled = true; btn.dataset.label = btn.textContent; btn.textContent = 'Writing…'; }
+  if (btn) { btn.disabled = true; btn.dataset.label = btn.textContent; btn.textContent = T('loras.writing', 'Writing…'); }
   const fd = new URLSearchParams(); fd.set('path', path);
   try {
     const r = await (await fetch('/loras/guide', { method: 'POST', body: fd })).json();
@@ -555,7 +586,7 @@ async function refreshLoras() {
     if (dirEl) {
       dirEl.textContent = (tag === 'video:h3')
         ? (_lorasDirs.h3 || 'the Hailuo H3 pack’s loras/ folder')
-        : (_lorasDirs.ltx || 'mlx_models/loras/');
+        : ltxLorasDirText();
     }
   }
   // Backfill compatible_modes on any active LoRA whose entry we now
@@ -570,9 +601,19 @@ async function refreshLoras() {
   }
   // If a row was previously active but the file is gone (deleted on
   // disk), drop it from the active set so we don't submit a stale path.
+  // 4.19.17 (fleet 4.19.16): the old test kept every path containing '/' -
+  // meant to spare Hugging Face ids ("org/repo"), it spared every absolute
+  // path too, so a deleted LoRA restored from a draft or Load Params stayed
+  // picked forever and every Image render failed "LoRA file not found". A
+  // filesystem path (leading / or ~) must be in the library; an id is kept.
+  // Only on a real listing: an error body without `user` must not unpick all.
   const knownPaths = new Set(_knownUserLoras.map(l => l.path));
-  _activeLoras = _activeLoras.filter(l =>
-    knownPaths.has(l.path) || l.path.includes('/'));   // keep HF ids (no dir slash)
+  if (Array.isArray(data.user)) {
+    _activeLoras = _activeLoras.filter(l => {
+      const p = String((l && l.path) || '');
+      return knownPaths.has(p) || !(p.startsWith('/') || p.startsWith('~'));
+    });
+  }
   renderLorasList();
   _serializeLoras();
   // The picker's own visibility depends on the H3 gate we just refreshed.
@@ -586,7 +627,54 @@ async function refreshLoras() {
 }
 
 function _loraGenerationCompatible(row, modeTag) {
+  if (modeTag === 'image:flux3') return false;
   return !(modeTag === 'video' && row && row.ltx_compatible === false);
+}
+
+// Does a picker row belong to the active (mode + engine) lane? The ONE rule,
+// shared by the picker's filter (renderLorasList) and the Image Studio submit
+// (imageLorasForSubmit), so what the picker shows and what is posted agree.
+function _loraRowMatchesMode(r, modeTag) {
+  if (!modeTag) return true;
+  // Heuristic: trained character bundles (e.g. bizarrotrn_v2.safetensors,
+  // .audio.safetensors, .voice.wav) are video-only conditioning even
+  // when their sidecar tagged them ['unknown']. Without this rule, the
+  // 'unknown' branch below would surface them in image-mode pickers —
+  // exactly the LTX-LoRA-leakage Mr Bizarro complained about:
+  // "they show the LTX LoRA's. You need to separate both galleries."
+  const _looksVideoOnly = (r) => {
+    if (r.kind === 'trained') return true;
+    const path = (r.path || r.filename || r.name || '').toLowerCase();
+    if (/_v2\.safetensors$/.test(path)) return true;       // character convention
+    if (/\.audio\.safetensors$/.test(path)) return true;   // character audio companion
+    if (/\.voice\./.test(path)) return true;               // character voice clip
+    if (/\.style\.safetensors$/.test(path)) return true;   // style LoRA convention
+    return false;
+  };
+  const tags = r.compatible_modes || ['unknown'];
+  const isImageMode = (modeTag === 'image' || modeTag.startsWith('image:'));
+  if (isImageMode) {
+    // Image modes only accept LoRAs whose sidecar declared an
+    // image:* family. The 'unknown' branch is still permissive
+    // (sidecar-less drops should still surface) but EXCLUDES
+    // anything that looks like a character/style video bundle.
+    if (tags.some(t => typeof t === 'string' && t.startsWith('image:'))) return true;
+    if (tags.includes('unknown') && !_looksVideoOnly(r)) return true;
+    return false;
+  }
+  // ---- Video lanes: LTX and Hailuo H3, by DIRECTORY -----------------
+  // 2026-08-09: the video side stopped being one family the moment H3
+  // learned to take LoRAs, and the two are not interchangeable in
+  // either direction — an LTX adapter handed to H3's loader matches
+  // zero modules (silent no-op), an H3 one handed to LTX fails inside
+  // the fuser. The 'unknown' escape hatch above is what makes this a
+  // lane check rather than a tag check: a sidecar-less .safetensors
+  // dropped into mlx_models/loras/ classifies as 'unknown' and would
+  // otherwise surface in the H3 picker, which is the exact
+  // cross-gallery leakage the image split was built to stop.
+  if (modeTag === 'video:h3') return r.lane === 'h3';
+  if (r.lane === 'h3') return false;
+  return tags.includes(modeTag) || tags.includes('unknown');
 }
 
 function renderLorasList() {
@@ -687,47 +775,7 @@ function renderLorasList() {
   let hiddenCount = 0;
   const showOtherModes = !!window._loraShowOtherModes;
   if (modeTag) {
-    // Heuristic: trained character bundles (e.g. bizarrotrn_v2.safetensors,
-    // .audio.safetensors, .voice.wav) are video-only conditioning even
-    // when their sidecar tagged them ['unknown']. Without this rule, the
-    // 'unknown' branch below would surface them in image-mode pickers —
-    // exactly the LTX-LoRA-leakage Mr Bizarro complained about:
-    // "they show the LTX LoRA's. You need to separate both galleries."
-    const _looksVideoOnly = (r) => {
-      if (r.kind === 'trained') return true;
-      const path = (r.path || r.filename || r.name || '').toLowerCase();
-      if (/_v2\.safetensors$/.test(path)) return true;       // character convention
-      if (/\.audio\.safetensors$/.test(path)) return true;   // character audio companion
-      if (/\.voice\./.test(path)) return true;               // character voice clip
-      if (/\.style\.safetensors$/.test(path)) return true;   // style LoRA convention
-      return false;
-    };
-    const _matches = (r) => {
-      const tags = r.compatible_modes || ['unknown'];
-      const isImageMode = (modeTag === 'image' || modeTag.startsWith('image:'));
-      if (isImageMode) {
-        // Image modes only accept LoRAs whose sidecar declared an
-        // image:* family. The 'unknown' branch is still permissive
-        // (sidecar-less drops should still surface) but EXCLUDES
-        // anything that looks like a character/style video bundle.
-        if (tags.some(t => typeof t === 'string' && t.startsWith('image:'))) return true;
-        if (tags.includes('unknown') && !_looksVideoOnly(r)) return true;
-        return false;
-      }
-      // ---- Video lanes: LTX and Hailuo H3, by DIRECTORY -----------------
-      // 2026-08-09: the video side stopped being one family the moment H3
-      // learned to take LoRAs, and the two are not interchangeable in
-      // either direction — an LTX adapter handed to H3's loader matches
-      // zero modules (silent no-op), an H3 one handed to LTX fails inside
-      // the fuser. The 'unknown' escape hatch above is what makes this a
-      // lane check rather than a tag check: a sidecar-less .safetensors
-      // dropped into mlx_models/loras/ classifies as 'unknown' and would
-      // otherwise surface in the H3 picker, which is the exact
-      // cross-gallery leakage the image split was built to stop.
-      if (modeTag === 'video:h3') return r.lane === 'h3';
-      if (r.lane === 'h3') return false;
-      return tags.includes(modeTag) || tags.includes('unknown');
-    };
+    const _matches = (r) => _loraRowMatchesMode(r, modeTag);
     rows = allRows.filter(r => {
       // A model-family mismatch may be revealed with "Show other modes";
       // an adapter proven unable to attach to the active LTX generation may
@@ -783,7 +831,7 @@ function renderLorasList() {
   // exposes a "Show N from other modes" toggle so the user has an
   // escape hatch to manage them without switching engines first.
   if (banner) {
-    let bannerHtml = `Library filter: <strong>${escapeHtml(_loraFilterLabel(modeTag))}</strong>`;
+    let bannerHtml = `${T('loras.library_filter', 'Library filter:')} <strong>${escapeHtml(_loraFilterLabel(modeTag))}</strong>`;
     if (hiddenCount > 0) {
       // H3-09: on H3 specifically, name what's hidden and say WHY it won't
       // help — "other modes" reads as "somewhere in this app", not "16 LTX
@@ -793,7 +841,7 @@ function renderLorasList() {
         : `${hiddenCount} from other modes`;
       bannerHtml += ` · <a href="#" style="color:var(--muted)" onclick="event.preventDefault(); window._loraShowOtherModes = true; renderLorasList()">Show ${hiddenLabel}</a>`;
     } else if (showOtherModes) {
-      bannerHtml += ` · <a href="#" style="color:var(--muted)" onclick="event.preventDefault(); window._loraShowOtherModes = false; renderLorasList()">Hide other modes</a>`;
+      bannerHtml += ` · <a href="#" style="color:var(--muted)" onclick="event.preventDefault(); window._loraShowOtherModes = false; renderLorasList()">${T('loras.hide_other_modes', 'Hide other modes')}</a>`;
     }
     banner.innerHTML = bannerHtml;
   }
@@ -816,7 +864,7 @@ function renderLorasList() {
   if (rescanBtn) {
     const dir = (modeTag === 'video:h3')
       ? (_lorasDirs.h3 || "the Hailuo H3 pack's loras/ folder")
-      : (_lorasDirs.ltx || 'mlx_models/loras/');
+      : ltxLorasDirText();
     rescanBtn.title = `Rescan ${dir} for new files`;
   }
   // H3-08: no total-strength warning ever showed for stacked H3 LoRAs — the
@@ -833,12 +881,12 @@ function renderLorasList() {
       const color = level === 'high' ? 'var(--danger,#f85149)'
         : level === 'mid' ? 'var(--warn,#e8b341)' : 'var(--muted)';
       const stackNote = (modeTag === 'video:h3')
-        ? ' — H3 stacks every active LoRA into one render'
+        ? T('loras.h3_stacks_every_active_lora', ' — H3 stacks every active LoRA into one render')
         : '';
       totalEl.hidden = false;
       totalEl.style.color = color;
       totalEl.textContent = `Combined strength: ${total.toFixed(2)}${stackNote}`
-        + (level !== 'ok' ? ' — keep the total near 1.5 for a clean result.' : '.');
+        + (level !== 'ok' ? T('loras.keep_the_total_near_1', ' — keep the total near 1.5 for a clean result.') : '.');
     } else {
       totalEl.hidden = true;
     }
@@ -857,15 +905,15 @@ function renderLorasList() {
     } else if (typeof modeTag === 'string' && modeTag.startsWith('image')) {
       wrap.innerHTML = `
         <div class="hint" style="padding:14px 8px;text-align:center;line-height:1.6;">
-          <div style="margin-bottom:4px;color:var(--fg);"><strong>No image LoRAs in your library.</strong></div>
-          <div>The Library tab shows LoRAs scoped to the active engine — your installed LoRAs are LTX-Video LoRAs.</div>
-          <div style="margin-top:6px;">Install a Qwen-Image or Flux LoRA via the <strong>Browse CivitAI</strong> button above (filter base model to Qwen / Flux).</div>
+          <div style="margin-bottom:4px;color:var(--fg);"><strong>${T('loras.no_image_loras_in_your', 'No image LoRAs in your library.')}</strong></div>
+          <div>${T('loras.the_library_tab_shows_loras', 'The Library tab shows LoRAs scoped to the active engine — your installed LoRAs are LTX-Video LoRAs.')}</div>
+          <div style="margin-top:6px;">${T('loras.install_a_qwen_image_or', 'Install a Qwen-Image or Flux LoRA via the')} <strong>${T('loras.browse_civitai', 'Browse CivitAI')}</strong> ${T('loras.button_above_filter_base_model', 'button above (filter base model to Qwen / Flux).')}</div>
         </div>`;
     } else if (modeTag === 'video') {
       wrap.innerHTML = `
         <div class="hint" style="padding:14px 8px;text-align:center;line-height:1.6;">
-          <div style="margin-bottom:4px;color:var(--fg);"><strong>No video LoRAs in your library.</strong></div>
-          <div>Install an LTX-Video LoRA via the <strong>Browse CivitAI</strong> button above (filter base model to LTX 2.3), or train one in the <strong>Train Character</strong> tab.</div>
+          <div style="margin-bottom:4px;color:var(--fg);"><strong>${T('loras.no_video_loras_in_your', 'No video LoRAs in your library.')}</strong></div>
+          <div>${T('loras.install_an_ltx_video_lora', 'Install an LTX-Video LoRA via the')} <strong>${T('loras.browse_civitai', 'Browse CivitAI')}</strong> ${T('loras.button_above_filter_base_model_2', 'button above (filter base model to LTX 2.3), or train one in the')} <strong>${T('loras.train_character', 'Train Character')}</strong> tab.</div>
         </div>`;
     } else if (modeTag === 'video:h3') {
       // Its own empty state, not the LTX one: the two libraries are separate
@@ -876,14 +924,14 @@ function renderLorasList() {
       // bad adapter reach a long render.
       wrap.innerHTML = `
         <div class="hint" style="padding:14px 8px;text-align:center;line-height:1.6;">
-          <div style="margin-bottom:4px;color:var(--fg);"><strong>No Hailuo H3 LoRAs in your library.</strong></div>
-          <div>H3 has its own library — your LTX LoRAs can't load here, and H3's can't load on LTX.</div>
-          <div style="margin-top:6px;">Already have one? <strong>Import</strong> above takes a <code>.safetensors</code> file and checks it against your installed H3 transformer before it lands in the library.</div>
-          <div style="margin-top:6px;">Drop a converted H3 <code>.safetensors</code> with <code>lora_A</code> / <code>lora_B</code> tensors into <code>${escapeHtml(_lorasDirs.h3 || 'the H3 pack’s loras/ folder')}</code>, then press Rescan — same result, no size limit.</div>
-          <div style="margin-top:6px;">Or install one via <strong>Browse CivitAI</strong> above using the <strong>Hailuo H3</strong> CivitAI filter.</div>
+          <div style="margin-bottom:4px;color:var(--fg);"><strong>${T('loras.no_hailuo_h3_loras_in', 'No Hailuo H3 LoRAs in your library.')}</strong></div>
+          <div>${T('loras.h3_has_its_own_library', 'H3 has its own library — your LTX LoRAs can\'t load here, and H3\'s can\'t load on LTX.')}</div>
+          <div style="margin-top:6px;">${T('loras.already_have_one', 'Already have one?')} <strong>${T('loras.import', 'Import')}</strong> ${T('loras.above_takes_a', 'above takes a')} <code>.safetensors</code> ${T('loras.file_and_checks_it_against', 'file and checks it against your installed H3 transformer before it lands in the library.')}</div>
+          <div style="margin-top:6px;">${T('loras.drop_a_converted_h3', 'Drop a converted H3')} <code>.safetensors</code> with <code>lora_A</code> / <code>lora_B</code> ${T('loras.tensors_into', 'tensors into')} <code>${escapeHtml(_lorasDirs.h3 || 'the H3 pack’s loras/ folder')}</code>${T('loras.then_press_rescan_same_result', ', then press Rescan — same result, no size limit.')}</div>
+          <div style="margin-top:6px;">${T('loras.or_install_one_via', 'Or install one via')} <strong>${T('loras.browse_civitai', 'Browse CivitAI')}</strong> ${T('loras.above_using_the', 'above using the')} <strong>Hailuo H3</strong> ${T('loras.civitai_filter', 'CivitAI filter.')}</div>
         </div>`;
     } else {
-      wrap.innerHTML = `<div class="hint" style="padding:8px 0;">No LoRAs available.</div>`;
+      wrap.innerHTML = `<div class="hint" style="padding:8px 0;">${T('loras.no_loras_available', 'No LoRAs available.')}</div>`;
     }
     return;
   }
@@ -923,7 +971,7 @@ function loraRowHtml(r, modeTag) {
     && !tags.includes(modeTag) && !tags.includes('unknown'));
   const familyBadges = [];
   if (isUnknown) {
-    familyBadges.push(`<span class="badge" title="Unknown LoRA family — sidecar didn't list a base_model. May or may not fire on this engine.">?</span>`);
+    familyBadges.push(`<span class="badge" title="${TA('loras.unknown_lora_family_sidecar_didn', 'Unknown LoRA family — sidecar didn\'t list a base_model. May or may not fire on this engine.')}">?</span>`);
   }
   if (familyMismatch) {
     familyBadges.push(`<span class="badge" style="background:rgba(232,179,65,0.15);color:var(--warn,#e8b341)" title="This LoRA was trained for a different family (${tags.join(', ')}) — it will be passed to mflux but probably won't influence the output. Switch the Engine dropdown to a matching family, or remove this LoRA."><svg class="ph" aria-hidden="true"><use href="#ph-warning-fill"/></svg></span>`);
@@ -942,23 +990,20 @@ function loraRowHtml(r, modeTag) {
   // lane badge instead, only where the name could actually mislead —
   // an H3-lane row whose name mentions LTX.
   if (r.lane === 'h3' && /\bltx\b/i.test(r.name || '')) {
-    familyBadges.push(`<span class="badge" title="This is an H3 LoRA — its own display name mentions LTX, but it lives in the H3 library and only loads on H3.">H3</span>`);
+    familyBadges.push(`<span class="badge" title="${TA('loras.this_is_an_h3_lora', 'This is an H3 LoRA — its own display name mentions LTX, but it lives in the H3 library and only loads on H3.')}">H3</span>`);
   }
   // Trigger summary line under the name (when not expanded). Truncated.
   const trigs = r.trigger_words || [];
   const trigSummary = trigs.length
     ? trigs.slice(0, 4).join(' · ') + (trigs.length > 4 ? ` +${trigs.length - 4}` : '')
-    : 'no trigger word';
+    : T('loras.no_trigger_word', 'no trigger word');
   // Corner actions: rename → download → external link → delete.
   // Order is safe-first, destructive-last so users don't fat-finger the X.
   // Rename + download are local-only (need an on-disk file), so they're
   // gated to `user` / `trained` rows; remote (HF) rows skip them.
   const corner = [];
-  // Bilingual Info modal for LoRA (Draw Things + Local)
-  corner.push(`<button class="lora-icon-btn" type="button" title="Info & Bilingual Details / شرح وتفاصيل اللورا"
-                       onclick="event.stopPropagation(); if (typeof showLoraBilingualInfo === 'function') showLoraBilingualInfo(${pathAttr})">ℹ️</button>`);
   if (r.kind === 'user' || r.kind === 'trained') {
-    corner.push(`<button class="lora-icon-btn" type="button" title="Rename (display name only — filename stays the same)"
+    corner.push(`<button class="lora-icon-btn" type="button" title="${TA('loras.rename_display_name_only_filename', 'Rename (display name only — filename stays the same)')}"
                          onclick="event.stopPropagation(); renameLora(${pathAttr}, ${nameAttr})"><svg class="ph" aria-hidden="true"><use href="#ph-pencil-simple"/></svg></button>`);
     corner.push(`<button class="lora-icon-btn" type="button" title="Download the .safetensors file"
                          onclick="event.stopPropagation(); downloadLora(${pathAttr})"><svg class="ph" aria-hidden="true"><use href="#ph-download-simple"/></svg></button>`);
@@ -969,7 +1014,7 @@ function loraRowHtml(r, modeTag) {
                          onclick="event.stopPropagation(); updateLora(${pathAttr})"><svg class="ph" aria-hidden="true"><use href="#ph-download-simple"/></svg></button>`);
   }
   if (r.civitai_url) {
-    corner.push(`<a class="lora-icon-btn" href="${escapeHtml(r.civitai_url)}" target="_blank" rel="noopener" title="Open on CivitAI" onclick="event.stopPropagation()"><svg class="ph" aria-hidden="true"><use href="#ph-arrow-square-out"/></svg></a>`);
+    corner.push(`<a class="lora-icon-btn" href="${escapeHtml(r.civitai_url)}" target="_blank" rel="noopener" title="${TA('loras.open_on_civitai', 'Open on CivitAI')}" onclick="event.stopPropagation()"><svg class="ph" aria-hidden="true"><use href="#ph-arrow-square-out"/></svg></a>`);
   }
   if (r.kind === 'user' || r.kind === 'trained') {
     // VC-42: a bare danger X sat right next to Rename/Download in the same
@@ -981,7 +1026,7 @@ function loraRowHtml(r, modeTag) {
     // independently addressable.
     const kid = _loraRowKebabId(r.path);
     corner.push(`<div class="kebab-wrap" onclick="event.stopPropagation()">
-      <button class="lora-icon-btn" type="button" title="More" aria-haspopup="true"
+      <button class="lora-icon-btn" type="button" title="${TA('loras.more', 'More')}" aria-haspopup="true"
               onclick="kebabToggle('${kid}')">
         <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
           <circle cx="3" cy="8" r="1.4" fill="currentColor"/><circle cx="8" cy="8" r="1.4" fill="currentColor"/><circle cx="13" cy="8" r="1.4" fill="currentColor"/>
@@ -989,11 +1034,11 @@ function loraRowHtml(r, modeTag) {
       </button>
       <div class="kebab-pop" id="${kid}" role="menu">
         <button type="button" role="menuitem" class="danger"
-                onclick="kebabToggle('${kid}', false); deleteLora(${pathAttr}, ${nameAttr})">Delete from disk</button>
+                onclick="kebabToggle('${kid}', false); deleteLora(${pathAttr}, ${nameAttr})">${T('loras.delete_from_disk', 'Delete from disk')}</button>
       </div>
     </div>`);
   } else {
-    corner.push(`<button class="lora-icon-btn" type="button" title="Remove from active set"
+    corner.push(`<button class="lora-icon-btn" type="button" title="${TA('loras.remove_from_active_set', 'Remove from active set')}"
                          onclick="event.stopPropagation(); removeLoraFromActive(${pathAttr})"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>`);
   }
   // Trigger chips for the expanded section. Same click-to-append behavior
@@ -1001,10 +1046,10 @@ function loraRowHtml(r, modeTag) {
   const chipsHtml = trigs.length
     ? trigs.slice(0, 12).map(w => {
         const wAttr = escapeHtml(JSON.stringify(w));
-        return `<span class="trigger-chip" title="Click to add to prompt"
+        return `<span class="trigger-chip" title="${TA('loras.click_to_add_to_prompt', 'Click to add to prompt')}"
                        onclick="event.stopPropagation(); appendTriggerToPrompt(${wAttr})">${escapeHtml(w)}</span>`;
       }).join('')
-    : `<span class="trigger-chip empty">style-only LoRA — no trigger word needed</span>`;
+    : `<span class="trigger-chip empty">${T('loras.style_only_lora_no_trigger', 'style-only LoRA — no trigger word needed')}</span>`;
 
   return `
     <div class="lora-row ${r.active ? 'active' : ''}" data-path="${pathHtml}">
@@ -1013,7 +1058,7 @@ function loraRowHtml(r, modeTag) {
         <div class="lora-toggle-dot"></div>
         <div class="lora-text">
           <div class="lora-name" title="${pathHtml}">
-            ${nameHtml}${r.kind === 'remote' ? '<span class="badge">HF</span>' : ''}${r.kind === 'trained' ? '<span class="badge badge-trained" title="Trained in Phosphene’s Train Character workflow">Trained</span>' : ''}${familyBadges.join('')}${LORA_UPDATES[r.path] ? `<button type="button" class="badge badge-update lora-update-badge" title="A newer version is on CivitAI — click to download it" onclick="event.stopPropagation(); updateLora(${pathAttr})">Update</button>` : ''}
+            ${nameHtml}${r.kind === 'remote' ? '<span class="badge">HF</span>' : ''}${r.kind === 'trained' ? '<span class="badge badge-trained" title="Trained in Phosphene’s Train Character workflow">Trained</span>' : ''}${familyBadges.join('')}${LORA_UPDATES[r.path] ? `<button type="button" class="badge badge-update lora-update-badge" title="${TA('loras.a_newer_version_is_on', 'A newer version is on CivitAI — click to download it')}" onclick="event.stopPropagation(); updateLora(${pathAttr})">${T('loras.update', 'Update')}</button>` : ''}
           </div>
           <div class="lora-name-meta" title="${escapeHtml(trigs.join(', '))}">${escapeHtml(trigSummary)}</div>
         </div>
@@ -1032,11 +1077,11 @@ function loraRowHtml(r, modeTag) {
         <div class="trigger-chips">${chipsHtml}</div>
         ${(r.kind === 'user' || r.kind === 'trained') ? `
         <div class="lora-guide-actions">
-          ${r.guide ? '' : `<button type="button" class="ghost-btn small" ${_guideBusyAttrs()} onclick="event.stopPropagation(); writeLoraGuide(${pathAttr}, this)">Write a guide</button>
-          <span class="muted small">What it does, how to prompt it, a strength to start from — written by the planner model from the LoRA's own notes.</span>`}
+          ${r.guide ? '' : `<button type="button" class="ghost-btn small" ${_guideBusyAttrs()} onclick="event.stopPropagation(); writeLoraGuide(${pathAttr}, this)">${T('loras.write_a_guide', 'Write a guide')}</button>
+          <span class="muted small">${T('loras.what_it_does_how_to', 'What it does, how to prompt it, a strength to start from — written by the planner model from the LoRA\'s own notes.')}</span>`}
         </div>
         ${r.guide ? `<div class="lora-guide">${escapeHtml(r.guide)}
-          <div class="lora-guide-actions"><button type="button" class="ghost-btn small" ${_guideBusyAttrs()} onclick="event.stopPropagation(); writeLoraGuide(${pathAttr}, this)">Rewrite</button></div></div>` : ''}` : ''}
+          <div class="lora-guide-actions"><button type="button" class="ghost-btn small" ${_guideBusyAttrs()} onclick="event.stopPropagation(); writeLoraGuide(${pathAttr}, this)">${T('loras.rewrite', 'Rewrite')}</button></div></div>` : ''}` : ''}
       </div>
     </div>`;
 }
@@ -1142,13 +1187,13 @@ async function renameLora(path, currentName) {
       const data = await r.json();
       if (!r.ok || !data.ok) {
         nameEl.innerHTML = original;
-        alert('Rename failed: ' + (data.error || `HTTP ${r.status}`));
+        alert(T('loras.rename_failed', 'Rename failed: ') + (data.error || `HTTP ${r.status}`));
         return;
       }
       refreshLoras();
     } catch (e) {
       nameEl.innerHTML = original;
-      alert('Rename failed: ' + (e.message || e));
+      alert(T('loras.rename_failed', 'Rename failed: ') + (e.message || e));
     }
   };
 
@@ -1180,7 +1225,7 @@ function downloadLora(path) {
 }
 
 async function deleteLora(path, name) {
-  if (!confirm(`Delete the LoRA file for "${name}" from disk? This is permanent.`)) {
+  if (!confirm(T('loras.delete_the_lora_file_for', 'Delete the LoRA file for "{name}" from disk? This is permanent.', {name}))) {
     return;
   }
   const fd = new FormData();
@@ -1193,13 +1238,13 @@ async function deleteLora(path, name) {
     });
     const data = await r.json();
     if (!r.ok || !data.ok) {
-      alert('Delete failed: ' + (data.error || `HTTP ${r.status}`));
+      alert(T('loras.delete_failed', 'Delete failed: ') + (data.error || `HTTP ${r.status}`));
       return;
     }
     removeLoraFromActive(path);
     refreshLoras();
   } catch (e) {
-    alert('Delete failed: ' + (e.message || e));
+    alert(T('loras.delete_failed', 'Delete failed: ') + (e.message || e));
   }
 }
 
@@ -1284,7 +1329,7 @@ function _renderManualCharactersList() {
   if (!_manualCharacters.length) {
     wrap.innerHTML = '';
     if (empty) empty.hidden = false;
-    if (meta) meta.textContent = 'no bundles on disk';
+    if (meta) meta.textContent = T('loras.no_bundles_on_disk', 'no bundles on disk');
     _renderCharsAppliedNote();
     return;
   }
@@ -1313,10 +1358,10 @@ function _renderManualCharactersList() {
     // as 'silent' more cleanly than a gray badge fighting for
     // attention). Tooltip on the avatar already mentions silent state.
     const voiceBadge = hasVoice
-      ? `<span class="chars-avatar-voice" title="Has voice LoRA + reference clip"><svg class="ph"><use href="#ph-music-notes"/></svg></span>`
+      ? `<span class="chars-avatar-voice" title="${TA('loras.has_voice_lora_reference_clip', 'Has voice LoRA + reference clip')}"><svg class="ph"><use href="#ph-music-notes"/></svg></span>`
       : '';
     const idAttr = escapeHtml(JSON.stringify(c.id));
-    const tt = `${escapeHtml(name)} · ${escapeHtml(trigger)}${hasVoice ? ' · has voice' : ' · silent'}${active ? ' · click to deselect' : ''}`;
+    const tt = `${escapeHtml(name)} · ${escapeHtml(trigger)}${hasVoice ? T('loras.has_voice', ' · has voice') : T('loras.silent', ' · silent')}${active ? T('loras.click_to_deselect', ' · click to deselect') : ''}`;
     chips.push(`
       <button type="button" class="chars-avatar-chip ${active ? 'active' : ''}"
               onclick="selectManualCharacter(${idAttr})"
@@ -1331,7 +1376,7 @@ function _renderManualCharactersList() {
   if (meta) {
     if (_selectedCharacterId) {
       const cur = _manualCharacters.find(c => c.id === _selectedCharacterId);
-      meta.textContent = cur ? `selected: ${cur.name || cur.trigger}` : '1 selected';
+      meta.textContent = cur ? `selected: ${cur.name || cur.trigger}` : T('loras.1_selected', '1 selected');
     } else {
       meta.textContent = `${_manualCharacters.length} available`;
     }
@@ -1398,10 +1443,10 @@ function _renderCharsAppliedNote() {
   }
   const name = escapeHtml(c.name || c.trigger || c.id);
   const triggerCode = c.trigger
-    ? ` · trigger <code>${escapeHtml(c.trigger)}</code>`
+    ? ` ${T('loras.trigger', '· trigger')} <code>${escapeHtml(c.trigger)}</code>`
     : '';
   const silentBadge = (!c.audio_lora_path)
-    ? ` · <em title="No audio LoRA on disk — face only">silent</em>`
+    ? ` · <em title="${TA('loras.no_audio_lora_on_disk', 'No audio LoRA on disk — face only')}">silent</em>`
     : '';
   const cur = parseFloat(document.getElementById('characterStrength')?.value || '1.0');
   const voi = parseFloat(document.getElementById('characterVoiceStrength')?.value || '1.0');
@@ -1423,7 +1468,7 @@ function _renderCharsAppliedNote() {
       <output id="charFaceOut">${cur.toFixed(1)}</output>
       ${hasVoice ? `<button type="button" class="chars-split-toggle" id="charSplitBtn"
               aria-expanded="false" aria-controls="charSplitRow"
-              title="Set the face and the voice separately"
+              title="${TA('loras.set_the_face_and_the', 'Set the face and the voice separately')}"
               onclick="toggleCharSplit()">${escapeHtml(splitLabel)}</button>` : ''}
     </span>
     ${hasVoice ? `
@@ -1440,7 +1485,7 @@ function _renderCharsAppliedNote() {
                oninput="setCharStrength('voice', this.value)">
         <output id="charVoiceOut">${voi.toFixed(1)}</output>
         <button type="button" class="help-dot" id="charVoiceHelpBtn" aria-expanded="false"
-                aria-controls="charVoiceHelpNote" title="Why the voice has its own number"
+                aria-controls="charVoiceHelpNote" title="${TA('loras.why_the_voice_has_its', 'Why the voice has its own number')}"
                 onclick="toggleCharVoiceHelp()">?</button>
       </div>
       <div class="h3-winhelp" id="charVoiceHelpNote" hidden></div>
@@ -1494,9 +1539,10 @@ function renderCharacterStrip() {
 // Inline handlers in the markup and the other files resolve these through
 // the global scope; everything NOT listed here is private to this module.
 Object.assign(globalThis, {
+  ltxLorasDirText,
   checkLoraUpdates, updateLora, writeLoraGuide,
   _currentLoraModeFilter, _syncLoraPickerForEngine, importH3Lora, renderH3LoraSlot,
-  setH3LoraSlot, _serializeLoras, enhanceLoraPaths, addLoraToActive, populateIngredientCharLoras,
+  setH3LoraSlot, _serializeLoras, imageLorasForSubmit, enhanceLoraPaths, addLoraToActive, populateIngredientCharLoras,
   onIngredientCharChange, onIngredientCharStrength, refreshLoras, _loraGenerationCompatible,
   renderLorasList, appendTriggerToPrompt, _updateCharsPickerVisibility, refreshManualCharacters,
   _renderManualCharactersList, _renderCharsAppliedNote, renderCharacterStrip,

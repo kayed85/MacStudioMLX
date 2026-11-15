@@ -34,7 +34,7 @@ function engineById(id) {
 }
 function defaultEngine() {
   return engineById(ENGINE_DEFAULT) || ENGINES[0]
-      || { id: 'ltx', label: 'LTX', builtin: true, strip_label: 'Quality' };
+      || { id: 'ltx', label: 'LTX', builtin: true, strip_label: T('engines.quality', 'Quality') };
 }
 
 // An engine's live capability block. `probe` names the bootstrap key that
@@ -44,6 +44,7 @@ function defaultEngine() {
 function engineStatus(e) {
   if (!e) return { capable: false, available: false };
   if (e.state === 'announced') return { capable: false, available: false, announced: true };
+  if ((e.surfaces || []).indexOf('image') !== -1) return imageModelStatus(e);
   if (!e.probe) return { capable: true, available: true };
   return (window._ENGINE_PROBES && window._ENGINE_PROBES[e.probe]) || { capable: false, available: false };
 }
@@ -88,6 +89,9 @@ function engineOnSurface(e) {
 function engineRenderable(e) {
   if (!engineOnSurface(e)) return false;
   if (e.builtin || e.state === 'announced') return true;
+  // Image models stay listed when they cannot fit this Mac, dimmed with the
+  // Mac size that runs them (the Images tab's memory-fit rule, 2 Sep 2026).
+  if ((e.surfaces || []).indexOf('image') !== -1) return true;
   return !!engineStatus(e).capable;
 }
 
@@ -328,7 +332,7 @@ function setH3Steps(v) {
   const hint = document.querySelector('#h3StepsRow .cz-label-hint');
   if (hint) {
     hint.textContent = lit ? "Auto = this shape's tuned count"
-      : ('Pinned at ' + v + ' (from a saved render) · pick a pill to change');
+      : (T('engines.pinned_at', 'Pinned at ') + v + T('engines.from_a_saved_render_pick', ' (from a saved render) · pick a pill to change'));
   }
   // Mirror the resolved count into the shared hidden `steps` so the queue
   // card and the estimate line read the truth (make_job re-stamps anyway).
@@ -345,7 +349,13 @@ function setH3Steps(v) {
   if (typeof updateCustomizeSummary === 'function') { try { updateCustomizeSummary(); } catch (e) {} }
 }
 document.querySelectorAll('#h3StepsGroup [data-h3-steps]').forEach(b => {
-  b.onclick = () => setH3Steps(b.dataset.h3Steps);
+  b.onclick = () => {
+    if (b.classList.contains('flex-locked')) {
+      if (typeof phosToast === 'function') phosToast(H3_FLEX_SPEED_TIP, { kind: 'info' });
+      return;
+    }
+    setH3Steps(b.dataset.h3Steps);
+  };
 });
 
 // ---- Speed: ⚡ Fast | ✦ Best ------------------------------------------------
@@ -382,11 +392,181 @@ function _h3V13Mode() {
   const m = (document.getElementById('mode') || {}).value || 't2v';
   return m === 't2v' || m === 'i2v';
 }
+// Pika H3 Flex (Pika Labs' six-step H3 student, running natively on Apple
+// Silicon): the third Speed choice. Text and Image, every 5 s-window cell the
+// server prices (cell.flex_min); never a default — only when picked.
+function h3FlexState() {
+  return (H3 && H3.flex) || { available: false, supported: false, downloaded: false };
+}
+// H3 Flex Turbo (5.0, Pro, preview): the faster Flex draft. Same cells as
+// Flex (cell.flex_turbo_min).
+function h3FlexTurboState() {
+  return (H3 && H3.flex_turbo) || { available: false, supported: false, downloaded: false, pro: true, pro_active: false };
+}
+function h3FlexTurboOn(cell) {
+  cell = cell || h3CurrentCell();
+  return !!(cell && cell.flex_turbo_min != null && (typeof h3FlexServesMode !== 'function' || h3FlexServesMode(null, 'flex_turbo'))
+            && h3FlexTurboState().available && h3SpeedPref() === 'flex_turbo');
+}
+function h3FlexOn(cell) {
+  cell = cell || h3CurrentCell();
+  return !!(cell && cell.flex_min != null && (typeof h3FlexServesMode !== 'function' || h3FlexServesMode(null, 'flex'))
+            && h3FlexState().available && h3SpeedPref() === 'flex');
+}
+
+// ---- What H3 Flex can render, from the server (owner, 31 Oct 2026) ---------
+// Flex and Flex Turbo render Text and Image only, and only on 5 s-window cells
+// (not the dense single pass, not Fast HD). Anywhere else make_job quietly
+// renders H3's own sampler and only says so after submit, so while Flex is the
+// pick every control it cannot honour is greyed and refuses the click: the
+// mode chips, the Quality/Length cells, Fast/Best and the Steps pills.
+// Both facts are the server's: `modes` on the Flex status block (H3_FLEX_MODES)
+// and `takes_flex` on every cell (h3_cell_takes_flex). No copy lives here, so a
+// new Flex mode or cell lights up with no JS change. make_job keeps its own
+// fallback as the safety net.
+const H3_FLEX_LOCK_TIP = T('engines.h3_flex_makes_videos_from', 'H3 Flex makes videos from text or an image. Switch to H3 for this.');
+const H3_FLEX_CELL_TIP = T('engines.h3_flex_runs_on_5', 'H3 Flex runs on 5-second windows. Switch to H3 for this.');
+const H3_FLEX_SPEED_TIP = T('engines.h3_flex_runs_its_own', 'H3 Flex runs its own steps. Switch to H3 to pick Fast, Best or Steps.');
+// Flex or Flex Turbo is what this form will ask for.
+function h3FlexPickedAny() {
+  const pref = h3SpeedPref();
+  return currentEngine() === 'h3' && (pref === 'flex' || pref === 'flex_turbo');
+}
+// The modes the picked Flex renders (null = the server did not say: no lock,
+// make_job decides).
+function h3FlexModes(which) {
+  which = which || h3SpeedPref();
+  const st = which === 'flex_turbo' ? h3FlexTurboState() : h3FlexState();
+  return Array.isArray(st.modes) ? st.modes : null;
+}
+function h3FlexServesMode(mode, which) {
+  if (mode == null) mode = (document.getElementById('mode') || {}).value || 't2v';
+  if (mode === 'oneshot') mode = 't2v';
+  const modes = h3FlexModes(which);
+  return !modes || modes.indexOf(mode) !== -1;
+}
+// Would Flex render THIS cell? The server's own answer; an older server that
+// predates `takes_flex` still prices exactly the cells it takes.
+function h3CellTakesFlex(cell) {
+  if (!cell) return false;
+  if (typeof cell.takes_flex === 'boolean') return cell.takes_flex;
+  return cell.flex_min != null;
+}
+// The supported cell nearest to one Flex cannot render: same canvas at the
+// closest duration first (10 s single pass -> 10 s in two windows), else, at
+// this length, the biggest picture that is not bigger than what the cell
+// delivers (Fast HD's 1280x768 -> High, never the far slower Native), like
+// _h3FallbackCell never goes longer than asked; else any cell Flex takes.
+function _h3FlexNearestCell(cell) {
+  const tiers = (H3.tiers || []).filter(t => h3CellTakesFlex(t) && t.available !== false);
+  if (!tiers.length) return null;
+  const secs = c => Number((h3LengthByKey(c.length) || {}).seconds || c.seconds || 0);
+  const qIdx = k => (H3.qualities || []).findIndex(q => q.key === k);
+  const want = secs(cell);
+  const sameQ = tiers.filter(t => t.quality === cell.quality);
+  if (sameQ.length) {
+    return sameQ.sort((a, b) => Math.abs(secs(a) - want) - Math.abs(secs(b) - want)
+                                || secs(a) - secs(b))[0];
+  }
+  let pool = tiers.filter(t => t.length === cell.length);
+  if (!pool.length) {
+    const gap = Math.min(...tiers.map(t => Math.abs(secs(t) - want)));
+    pool = tiers.filter(t => Math.abs(secs(t) - want) === gap);
+  }
+  const px = c => (c.final_width || c.width || 0) * (c.final_height || c.height || 0);
+  const want_px = px(cell);
+  const fits = pool.filter(t => px(t) <= want_px);
+  if (fits.length) return fits.sort((a, b) => px(b) - px(a) || qIdx(a.quality) - qIdx(b.quality))[0];
+  return pool.sort((a, b) => px(a) - px(b) || qIdx(a.quality) - qIdx(b.quality))[0];
+}
+// The supported mode nearest to one Flex cannot render: a mode that starts
+// from a picture goes to Image, everything else to Text, whichever of the two
+// the server lists (else its first).
+function _h3FlexNearestMode(mode) {
+  const modes = h3FlexModes() || [];
+  // i2v_clean_audio is LTX's Image-with-your-audio, left in the Image select
+  // by an earlier LTX render: still a picture mode.
+  const fromPicture = mode === 'keyframe' || mode === 'a2v' || mode === 'i2v_clean_audio';
+  const order = fromPicture ? ['i2v', 't2v'] : ['t2v', 'i2v'];
+  return order.find(m => modes.indexOf(m) !== -1) || modes[0] || null;
+}
+// Picking Flex while the form points somewhere Flex cannot go moves the form to
+// the nearest place it can (and says so, once per move) rather than greying
+// Flex itself: the user asked for Flex, and the move is one visible step that
+// a click on H3 undoes. Runs after the click, and after any repaint that left a
+// picked Flex on an unsupported mode or cell (a restore, a status tick).
+// setMode('i2v') copies the Image select (#i2vMode) into #mode, and that select
+// may still hold LTX's 'i2v_clean_audio' from an earlier render: Image would
+// snap straight back. Pin it first, as Load Params does for an H3 i2v sidecar.
+function _h3FlexPinImageSelect(to) {
+  if (to !== 'i2v') return;
+  const sel = document.getElementById('i2vMode');
+  if (sel && sel.value !== 'i2v') sel.value = 'i2v';
+}
+let _h3FlexFitBusy = false;
+function h3FlexFit() {
+  if (_h3FlexFitBusy || !h3FlexPickedAny()) return;
+  _h3FlexFitBusy = true;
+  try {
+    const name = h3SpeedPref() === 'flex_turbo' ? T('engines.h3_flex_turbo', 'H3 Flex Turbo') : T('engines.h3_flex', 'H3 Flex');
+    let movedMode = '', movedCell = null;
+    const mode = (document.getElementById('mode') || {}).value || 't2v';
+    if (!h3FlexServesMode(mode)) {
+      const to = _h3FlexNearestMode(mode);
+      if (to && typeof setMode === 'function') {
+        _h3FlexPinImageSelect(to);
+        setMode(to);
+        // A plain Image click that only lost a leftover LTX audio variant is
+        // not a move worth announcing.
+        if (mode !== 'i2v_clean_audio') movedMode = to === 'i2v' ? T('engines.image', 'Image') : T('engines.text', 'Text');
+      }
+    }
+    const cell = h3CurrentCell();
+    if (cell && !h3CellTakesFlex(cell)) {
+      const to = _h3FlexNearestCell(cell);
+      if (to) { _h3ApplyShape(to.quality, to.length); movedCell = to; }
+    }
+    const msg = movedMode && movedCell
+      ? name + T('engines.makes_videos_from_text_or', ' makes videos from text or an image, on 5-second windows: you are on ')
+        + movedMode + ' at ' + movedCell.label + ' now.'
+      : movedMode ? name + T('engines.makes_videos_from_text_or_2', ' makes videos from text or an image: you are on ') + movedMode + ' now.'
+      : movedCell ? name + T('engines.runs_on_5_second_windows', ' runs on 5-second windows: the shape is ') + movedCell.label + ' now.'
+      : '';
+    if (msg && typeof phosToast === 'function') {
+      phosToast(msg + T('engines.pick_h3_to_go_back', ' Pick H3 to go back.'), { kind: 'info', duration: 4200 });
+    }
+  } finally {
+    _h3FlexFitBusy = false;
+  }
+}
+// Generate while H3 Flex is the pick but not ready yet (still downloading, or
+// never fetched) used to post h3_flex=0 and render plain H3, the same "thought
+// it was Flex" trap. Returns the plain reason to refuse with, or ''.
+function h3FlexSubmitBlock() {
+  if (!h3FlexPickedAny()) return '';
+  const turbo = h3SpeedPref() === 'flex_turbo';
+  const st = turbo ? h3FlexTurboState() : h3FlexState();
+  if (st.available) return '';
+  const name = turbo ? T('engines.h3_flex_turbo', 'H3 Flex Turbo') : T('engines.h3_flex', 'H3 Flex');
+  if (st.installing) {
+    return name + T('engines.is_still_downloading_it_can', ' is still downloading. It can render as soon as it is ready, or pick H3 to render now.');
+  }
+  return name + T('engines.is_not_on_this_mac', ' is not on this Mac yet. Pick it in the model menu to get it, or pick H3 to render now.');
+}
+let _h3FlexFitQueued = false;
+function _h3FlexFitSoon() {
+  if (_h3FlexFitQueued || _h3FlexFitBusy || !h3FlexPickedAny()) return;
+  const cell = h3CurrentCell();
+  if (h3FlexServesMode() && (!cell || h3CellTakesFlex(cell))) return;
+  _h3FlexFitQueued = true;
+  setTimeout(() => { _h3FlexFitQueued = false; h3FlexFit(); }, 0);
+}
 // Would THIS cell's Best render on v1.3, as things stand?
 function h3V13On(cell, opts) {
   cell = cell || h3CurrentCell();
   if (!cell || cell.v13_min == null) return false;
   opts = opts || {};
+  if (opts.flex == null && typeof h3FlexOn === 'function' && h3FlexOn(cell)) return false;
   const fast = (opts.fast != null) ? opts.fast : h3TriStepOn(cell);
   if (fast) return false;
   const ov = (opts.steps != null) ? String(opts.steps)
@@ -397,10 +577,12 @@ function h3V13On(cell, opts) {
 function h3SpeedPref() {
   let v = null;
   try { v = localStorage.getItem('phos_h3_speed'); } catch (e) {}
-  return v === 'best' ? 'best' : 'fast';
+  return (v === 'best' || v === 'flex' || v === 'flex_turbo') ? v : 'fast';
 }
 function _h3SetSpeedPref(v) {
-  try { localStorage.setItem('phos_h3_speed', v === 'best' ? 'best' : 'fast'); } catch (e) {}
+  try {
+    localStorage.setItem('phos_h3_speed', (v === 'best' || v === 'flex' || v === 'flex_turbo') ? v : 'fast');
+  } catch (e) {}
 }
 function _h3IsI2V() {
   return ((document.getElementById('mode') || {}).value || 't2v') === 'i2v';
@@ -412,6 +594,56 @@ function h3TriStepOn(cell) {
   if (cell && cell.fast_hd) return !!(cell.tristep_min != null && h3TriStepState().available);
   return !!(cell && cell.tristep_min != null
             && h3TriStepState().available && h3SpeedPref() === 'fast');
+}
+// Clean up sound (5.0): re-make a Fast render's sound with the adapter off.
+// Remembered per browser; the server's default when never touched.
+function h3RevoiceState() {
+  return (H3 && H3.revoice) || { supported: false, default: false };
+}
+function h3CleanSoundPref() {
+  let v = null;
+  try { v = localStorage.getItem('phos_h3_clean_sound'); } catch (e) {}
+  if (v === '1') return true;
+  if (v === '0') return false;
+  return !!h3RevoiceState().default;
+}
+// Would THIS cell's render clean up its sound, as things stand?
+function h3CleanSoundOn(cell) {
+  cell = cell || h3CurrentCell();
+  const mode = (document.getElementById('mode') || {}).value || 't2v';
+  // Never under H3 Flex: make_job turns clean sound off for a Flex render.
+  return !!(h3RevoiceState().supported && h3TriStepOn(cell) && cell
+            && cell.revoice_min != null && cell.revoice_fits !== false
+            && mode !== 'a2v' && mode !== 'v2a' && h3CleanSoundPref()
+            && !(typeof h3FlexPickedAny === 'function' && h3FlexPickedAny()));
+}
+function setH3CleanSound(on) {
+  try { localStorage.setItem('phos_h3_clean_sound', on ? '1' : '0'); } catch (e) {}
+  _h3SyncCleanSound();
+  // Every price on screen follows: the Speed pill, the chips, the footer.
+  _h3SpeedRepriced();
+}
+function _h3SyncCleanSound() {
+  const row = document.getElementById('h3CleanSoundRow');
+  const box = document.getElementById('h3CleanSound');
+  const hint = document.getElementById('h3CleanSoundHint');
+  const inp = document.getElementById('h3_clean_sound');
+  const cell = h3CurrentCell();
+  const mode = (document.getElementById('mode') || {}).value || 't2v';
+  const show = !!(h3RevoiceState().supported && h3TriStepOn(cell) && cell
+                  && cell.revoice_min != null && mode !== 'a2v' && mode !== 'v2a'
+                  && !(typeof h3FlexPickedAny === 'function' && h3FlexPickedAny()));
+  if (row) row.hidden = !show;
+  const fits = !!(cell && cell.revoice_fits !== false);
+  if (box) {
+    box.checked = show && fits && h3CleanSoundPref();
+    box.disabled = !fits;
+  }
+  if (hint) {
+    hint.textContent = !show ? '' : !fits ? (cell.revoice_note || 'needs more memory at this Quality')
+      : T('engines.clearer_voices_same_picture_adds', 'clearer voices, same picture · adds about ') + Math.max(1, Math.round(cell.revoice_min)) + ' min';
+  }
+  if (inp) inp.value = show ? (h3CleanSoundOn(cell) ? '1' : '0') : '';
 }
 function _h3TriStepMin(cell) {
   if (!cell || cell.tristep_min == null) return null;
@@ -434,15 +666,45 @@ function _h3EtaPlain(s) {
 // Minutes for a cell under the CURRENT speed (or the one opts names). The
 // server ships every number (Best eta, Fast eta per mode, per-forward and
 // fixed seconds for a pinned Steps count); nothing here models anything.
+// Face to keep (5.0): the reference block's own cost, on top of either speed.
+function _h3ReferenceExtra(cell, fast) {
+  const ref = (document.getElementById('h3_reference') || {}).value || '';
+  const mode = (document.getElementById('mode') || {}).value || 't2v';
+  if (!ref || !cell || (mode !== 't2v' && mode !== 'i2v')) return 0;
+  if (!(H3 && H3.reference && H3.reference.supported)) return 0;
+  return (fast ? cell.reference_min_fast : cell.reference_min) || 0;
+}
 function h3CellEtaMin(cell, opts) {
   if (!cell) return 0;
+  const _fastNow = (opts && opts.fast != null) ? opts.fast : h3TriStepOn(cell);
+  const _ref = (typeof _h3ReferenceExtra === 'function') ? _h3ReferenceExtra(cell, _fastNow) : 0;
+  return _ref + _h3CellEtaMinCore(cell, opts);
+}
+// The shape's own price at the current speed (Clean up sound
+// and a pinned Steps count folded in); h3CellEtaMin adds the reference.
+function _h3CellEtaMinCore(cell, opts) {
+  if (!cell) return 0;
   // Fast HD is priced whole: the Fast H3 pass plus its Upscale & Face Fix.
-  if (cell.fast_hd) return (_h3TriStepMin(cell) || cell.tristep_min || 0) + (cell.facefix_min || 0);
+  if (cell.fast_hd) {
+    // The Fast pass (plus Clean up sound when it rides) and the Face Fix.
+    const cleanHd = (opts && opts.clean != null) ? opts.clean
+      : (typeof h3CleanSoundOn === 'function' && h3CleanSoundOn(cell));
+    return (_h3TriStepMin(cell) || cell.tristep_min || 0) + (cell.facefix_min || 0)
+      + (cleanHd ? (cell.revoice_min || 0) : 0);
+  }
   opts = opts || {};
   const fast = (opts.fast != null) ? opts.fast : h3TriStepOn(cell);
-  if (fast && cell.tristep_min != null) return _h3TriStepMin(cell);
+  if (fast && cell.tristep_min != null) {
+    const clean = (opts.clean != null) ? opts.clean
+      : (typeof h3CleanSoundOn === 'function' && h3CleanSoundOn(cell));
+    return _h3TriStepMin(cell) + (clean ? (cell.revoice_min || 0) : 0);
+  }
   if (opts.turbo) return cell.turbo_min;
-  if (h3V13On(cell, { fast: false, steps: opts.steps })) return cell.v13_min;
+  const flexOn = (opts.flex != null) ? opts.flex
+    : (typeof h3FlexOn === 'function' && h3FlexOn(cell));
+  if (flexOn && cell.flex_min != null) return cell.flex_min;
+  if (opts.flex == null && typeof h3FlexTurboOn === 'function' && h3FlexTurboOn(cell) && cell.flex_turbo_min != null) return cell.flex_turbo_min;
+  if (h3V13On(cell, { fast: false, steps: opts.steps, flex: false })) return cell.v13_min;
   const ov = (opts.steps != null) ? String(opts.steps)
     : ((document.getElementById('h3_steps') || {}).value || 'auto');
   if (ov !== 'auto' && /^\d+$/.test(ov)) {
@@ -460,15 +722,15 @@ function h3CellEtaBasis(cell, opts) {
   const fast = (opts.fast != null) ? opts.fast : h3TriStepOn(cell);
   const fr = fast ? cell.fleet_range_fast
     : (h3V13On(cell, { fast: false }) ? cell.fleet_range_v13 : cell.fleet_range);
-  if (!fr && !fast && h3V13On(cell, { fast: false }) && cell.v13_measured) return 'measured on an M4 Max';
-  return fr ? fr.basis : 'estimated — few renders on this Mac class yet';
+  if (!fr && !fast && h3V13On(cell, { fast: false }) && cell.v13_measured) return T('engines.measured_on_an_m4_max', 'measured on an M4 Max');
+  return fr ? fr.basis : T('engines.estimated_few_renders_on_this', 'estimated — few renders on this Mac class yet');
 }
 function h3FmtEtaMin(m) {
   // H3-37: "· batch" on a 25+ min chip was unexplained, and reads as the
   // unrelated Batch feature (queueing several renders) rather than what it
   // meant here — this single render is long enough to start and walk away
   // from. Say that plainly instead of a one-word label with two meanings.
-  return '~' + Math.max(1, Math.round(m)) + ' min' + (m >= 25 ? ' · long, start and walk away' : '');
+  return '~' + Math.max(1, Math.round(m)) + ' min' + (m >= 25 ? T('engines.long_start_and_walk_away', ' · long, start and walk away') : '');
 }
 // The eta STRING for a cell under the current speed; the server's own string
 // wherever it priced that state (that is where a MEASURED wall clock lives).
@@ -477,17 +739,28 @@ function h3CellEta(cell, opts) {
   if (cell.fast_hd) return h3FmtEtaMin(h3CellEtaMin(cell));
   opts = opts || {};
   const fast = (opts.fast != null) ? opts.fast : h3TriStepOn(cell);
-  if (fast && cell.tristep_min != null) return _h3TriStepEta(cell);
+  const refExtra = (typeof _h3ReferenceExtra === 'function') ? _h3ReferenceExtra(cell, fast) : 0;
+  if (fast && cell.tristep_min != null) {
+    // Clean up sound adds its own pass: price the sum, not the bare Fast receipt.
+    const clean = (opts.clean != null) ? opts.clean
+      : (typeof h3CleanSoundOn === 'function' && h3CleanSoundOn(cell));
+    return (clean || refExtra) ? h3FmtEtaMin(h3CellEtaMin(cell, { fast: true, clean })) : _h3TriStepEta(cell);
+  }
+  if (refExtra && !opts.turbo) return h3FmtEtaMin(h3CellEtaMin(cell, { fast: false }));
   if (opts.turbo) return cell.turbo_eta;
+  const flexOn = (opts.flex != null) ? opts.flex
+    : (typeof h3FlexOn === 'function' && h3FlexOn(cell));
+  if (flexOn && cell.flex_eta) return cell.flex_eta;
+  if (opts.flex == null && typeof h3FlexTurboOn === 'function' && h3FlexTurboOn(cell) && cell.flex_turbo_eta) return cell.flex_turbo_eta;
   const ov = (document.getElementById('h3_steps') || {}).value || 'auto';
   if (ov === 'auto' || !/^\d+$/.test(ov)) {
-    if (h3V13On(cell, { fast: false })) {
+    if (h3V13On(cell, { fast: false, flex: false })) {
       return (!_h3IsI2V() && cell.fleet_range_v13) ? cell.fleet_range_v13.eta_range : cell.v13_eta;
     }
     // Owner ruling (2026-09-29): Best's own real fleet range, same idea as
     // Fast's above — never for i2v, which the server prices separately and
     // this fleet cell (mode "t2v") does not cover.
-    if (!_h3IsI2V() && cell.fleet_range) return cell.fleet_range.eta_range;
+    if (!_h3IsI2V() && cell.fleet_range) return cell.fleet_range.eta_range + proEstSuffix(cell.fleet_range);
     return cell.eta;
   }
   return h3FmtEtaMin(h3CellEtaMin(cell, { fast: false }));
@@ -496,19 +769,34 @@ function h3CellEta(cell, opts) {
 function h3SpeedSub(which) {
   const cell = h3CurrentCell();
   if (which === 'best') {
-    return _h3EtaPlain(h3CellEta(cell, { fast: false })) || 'full steps';
+    return _h3EtaPlain(h3CellEta(cell, { fast: false, flex: false })) || 'full steps';
+  }
+  if (which === 'flex') {
+    const fx = h3FlexState();
+    if (!fx.supported) return T('engines.update_h3_runner', 'update H3 runner');
+    if (!fx.downloaded) {
+      if (fx.installing) {
+        const d = fx.download || {};
+        return d.status === 'building' ? 'preparing…'
+          : 'installing ' + (d.mb || 0) + ' / ' + (d.total_mb || 2639) + ' MB';
+      }
+      return T('engines.install', 'Install (') + (fx.download_gb || 2.8) + ' GB)';
+    }
+    if (!cell || cell.flex_min == null || !_h3V13Mode()) return T('engines.not_at_this_shape', 'not at this shape');
+    return _h3EtaPlain(h3CellEta(cell, { fast: false, flex: true })) || '6 steps';
   }
   const tri = h3TriStepState();
-  if (!tri.supported) return 'update H3 runner';
+  if (!tri.supported) return T('engines.update_h3_runner', 'update H3 runner');
   if (!tri.downloaded) {
     if (tri.installing) {
       const d = tri.download || {};
       return 'installing ' + (d.mb || 0) + ' / ' + (d.total_mb || 173) + ' MB';
     }
-    return 'Install (180 MB)';
+    return T('engines.install_180_mb', 'Install (180 MB)');
   }
-  if (!cell || cell.tristep_min == null) return 'Best only here';
-  return _h3EtaPlain(_h3TriStepEta(cell)) || '3 steps';
+  if (!cell || cell.tristep_min == null) return T('engines.best_only_here', 'Best only here');
+  // h3CellEta adds Clean up sound / a reference when they ride on this render.
+  return _h3EtaPlain(h3CellEta(cell, { fast: true })) || '3 steps';
 }
 // Kept for callers of the pre-switch API.
 function h3TurboPillSub() { return h3SpeedSub('fast'); }
@@ -516,27 +804,30 @@ function h3TurboPillSub() { return h3SpeedSub('fast'); }
 // The sampler depth Best runs is per CELL (High 16 sigma points, Draft/
 // Standard/Native 9, dense 10 s 16), so the tooltips read it from the cell.
 function _h3SyncSamplerTitles() {
+  // Under H3 Flex the Best / Steps pills carry the Flex reason, not their own
+  // description (renderH3Turbo / _h3ApplySpeed set it; never overwrite it).
+  if (typeof h3FlexPickedAny === 'function' && h3FlexPickedAny()) return;
   const cell = h3CurrentCell();
   const pts = (cell && cell.steps) || 9;
   const fwd = Math.max(1, pts - 1);
   const best = document.querySelector('#h3SpeedGroup [data-h3-speed="best"]');
   if (best) best.title = h3V13On(cell, { fast: false })
-    ? 'Best on High: ' + (h3V13State().name || 'lightx2v v1.3') + ', ' + (h3V13State().forwards || 6)
-      + ' steps per window. Takes about half the time. Choose a Steps count to use the old Best sampler.'
-    : "Best: this shape's full sampler — " + fwd + ' steps per window. '
-      + 'The slower, most careful render.';
+    ? T('engines.best_on_high', 'Best on High: ') + (h3V13State().name || 'lightx2v v1.3') + ', ' + (h3V13State().forwards || 6)
+      + T('engines.steps_per_window_takes_about', ' steps per window. Takes about half the time. Choose a Steps count to use the old Best sampler.')
+    : "Best: this shape's full sampler — " + fwd + T('engines.steps_per_window', ' steps per window. ')
+      + T('engines.the_slower_most_careful_render', 'The slower, most careful render.');
   const auto = document.querySelector('#h3StepsGroup [data-h3-steps="auto"]');
-  if (auto) auto.title = "This shape's tuned count — " + pts + ' sigma points ('
-    + fwd + ' forwards per window) at this canvas.';
+  if (auto) auto.title = T('engines.this_shape_s_tuned_count', "This shape's tuned count — ") + pts + T('engines.sigma_points', ' sigma points (')
+    + fwd + T('engines.forwards_per_window_at_this', ' forwards per window) at this canvas.');
   if (!cell || !cell.eta_min) return;
   document.querySelectorAll('#h3StepsGroup [data-h3-steps]').forEach(b => {
     const n = b.dataset.h3Steps;
     if (!/^\d+$/.test(n)) return;
     const k = h3CellEtaMin(cell, { fast: false, steps: n }) / cell.eta_min;
-    const rel = Math.abs(k - 1) < 0.05 ? 'the same time as Auto at this shape'
-      : '~' + k.toFixed(1) + '× Auto\'s render time at this shape';
-    b.title = n + ' sigma points (' + (parseInt(n, 10) - 1) + ' forwards) — ' + rel
-      + (n === '20' ? '. The official reference recipe.' : '.');
+    const rel = Math.abs(k - 1) < 0.05 ? T('engines.the_same_time_as_auto', 'the same time as Auto at this shape')
+      : '~' + k.toFixed(1) + T('engines.auto_s_render_time_at', '× Auto\'s render time at this shape');
+    b.title = n + T('engines.sigma_points', ' sigma points (') + (parseInt(n, 10) - 1) + T('engines.forwards', ' forwards) — ') + rel
+      + (n === '20' ? T('engines.the_official_reference_recipe', '. The official reference recipe.') : '.');
   });
 }
 
@@ -564,19 +855,143 @@ function renderH3Turbo() {
     const cellOnlyBest = tri.available && cell && cell.tristep_min == null;
     fastBtn.classList.toggle('cell-only-best', cellOnlyBest);
     fastBtn.title = !tri.supported
-      ? distText('Fast needs a newer H3 runner — run "Update Hailuo H3 runner" in the Pinokio sidebar (weights stay).',
-                 'Fast needs a newer Hailuo H3 runner. Updating the runner isn\u2019t available in the Mac app yet.')
+      ? distText(T('engines.fast_needs_a_newer_h3', 'Fast needs a newer H3 runner — run "Update Hailuo H3 runner" in the Pinokio sidebar (weights stay).'),
+                 T('engines.fast_needs_a_newer_hailuo', 'Fast needs a newer Hailuo H3 runner. Phosphene brings the Hailuo H3 runner up to date by itself; quit and reopen Phosphene if this stays.'))
       : !tri.downloaded
-        ? '3 steps — about 4× faster, great for drafts and most shots. One click installs the '
-          + '180 MB adapter (' + (tri.license || 'MiniMax H3 Community License') + ').'
+        ? T('engines.3_steps_about_4_faster', '3 steps — about 4× faster, great for drafts and most shots. One click installs the ')
+          + T('engines.180_mb_adapter', '180 MB adapter (') + (tri.license || 'MiniMax H3 Community License') + ').'
         : cellOnlyBest
-          ? (cell.label || 'This shape') + ' has no Fast pass yet — it always renders on Best.'
-          : '3 steps — about 4× faster, great for drafts and most shots.';
+          ? (cell.label || 'This shape') + T('engines.has_no_fast_pass_yet', ' has no Fast pass yet — it always renders on Best.')
+          : T('engines.3_steps_about_4_faster_2', '3 steps — about 4× faster, great for drafts and most shots.');
   }
+  const flexBtn = document.querySelector('#h3SpeedGroup [data-h3-speed="flex"]');
+  const flexSub = document.getElementById('h3SpeedFlexSub');
+  const fx = h3FlexState();
+  if (flexSub) flexSub.textContent = h3SpeedSub('flex');
+  if (flexBtn) {
+    // Hidden where the runner cannot take it at all (an older pack); dashed
+    // until the adapter is in, like Fast.
+    // 4.19.15: H3 Flex is its own entry in the top engine picker (owner:
+    // "selected in the ticker, like we select H3"). One obvious way in, so the
+    // Speed pill stays hidden; the Speed row is H3's own Fast / Best again.
+    flexBtn.hidden = true;
+    flexBtn.classList.toggle('needs-download', !fx.available);
+    flexBtn.classList.toggle('cell-only-best',
+      fx.available && !!cell && (cell.flex_min == null || !_h3V13Mode()));
+  }
+  const group = document.getElementById('h3SpeedGroup');
+  if (group && flexBtn) {
+    group.classList.toggle('cols-3', !flexBtn.hidden);
+    group.classList.toggle('cols-2', flexBtn.hidden);
+  }
+  // While H3 Flex is the engine, Fast / Best do not apply. 4.19.15 hid them;
+  // owner, 31 Oct 2026: show what Flex cannot do, greyed, so nobody believes a
+  // Fast or Best choice still counts. The Flex note (credit, download,
+  // progress) sits under them. _h3ApplySpeed greys the Steps pills the same way.
+  const flexPicked = h3SpeedPref() === 'flex' || h3SpeedPref() === 'flex_turbo';
+  if (group) {
+    group.hidden = false;
+    group.classList.toggle('flex-locked', flexPicked);
+    group.querySelectorAll('[data-h3-speed="fast"], [data-h3-speed="best"]').forEach(b => {
+      if (flexPicked) {
+        if (b.dataset.flexTitle == null) b.dataset.flexTitle = b.getAttribute('title') || '';
+        b.setAttribute('title', H3_FLEX_SPEED_TIP);
+        b.setAttribute('aria-disabled', 'true');
+      } else if (b.dataset.flexTitle != null) {
+        b.setAttribute('title', b.dataset.flexTitle);
+        delete b.dataset.flexTitle;
+        b.removeAttribute('aria-disabled');
+      }
+      b.classList.toggle('flex-locked', flexPicked);
+    });
+  }
+  const speedMeta = document.querySelector('#h3SpeedRow .qs-meta');
+  if (speedMeta) speedMeta.hidden = flexPicked;
+  const speedName = document.querySelector('#h3SpeedRow .qs-name');
+  if (speedName) speedName.textContent = !flexPicked ? T('engines.speed', 'Speed')
+    : (h3SpeedPref() === 'flex_turbo' ? T('engines.h3_flex_turbo_faster_draft', 'H3 Flex Turbo (faster draft, Pro)') : T('engines.h3_flex_preview', 'H3 Flex (preview)'));
   _h3SyncSamplerTitles();
   _h3ApplySpeed();
+  _h3RenderFlexNote();
+  _h3FlexPickerSync();
   _h3RenderV13Note();
   _h3SyncFaceFixEta();
+  // The mode chips grey / un-grey with the Flex pick, whatever changed it
+  // (the picker, Load Params, a status tick).
+  if (typeof currentEngine === 'function' && currentEngine() === 'h3') { try { syncModeStripToEngine(); } catch (e) {} }
+  if (typeof _h3FlexFitSoon === 'function') _h3FlexFitSoon();
+}
+
+// The line under the switch for Pika H3 Flex: the credit (and "Powered by
+// MiniMax H3", which the H3 licence asks a product to show) while it is the
+// choice, the one click that gets it before then.
+function _h3RenderFlexNote() {
+  const box = document.getElementById('h3FlexNote');
+  if (!box) return;
+  const cell = h3CurrentCell();
+  const fx = h3FlexState();
+  const text = document.getElementById('h3FlexNoteText');
+  const btn = document.getElementById('h3FlexGet');
+  if (h3SpeedPref() === 'flex_turbo' && !h3TriStepOn(cell)) {
+    const message = _h3FlexTurboNote(cell);
+    box.hidden = !message;
+    if (text) text.textContent = message;
+    if (btn) btn.hidden = true;
+    return;
+  }
+  const show = h3SpeedPref() === 'flex' && !h3TriStepOn(cell);
+  box.hidden = !show;
+  if (!show || !text) return;
+  const name = fx.name || 'Pika H3 Flex';
+  let msg = '';
+  let canGet = false;
+  if (!fx.supported) {
+    msg = name + T('engines.needs_a_newer_h3_runner', ' needs a newer H3 runner. ') + distText(
+      T('engines.click_update_hailuo_h3_runner', 'Click "Update Hailuo H3 runner" in the Pinokio sidebar. Your weights stay.'),
+      T('engines.phosphene_brings_the_hailuo_h3', 'Phosphene brings the Hailuo H3 runner up to date by itself; quit and reopen Phosphene if this stays.'));
+  } else if (fx.installing) {
+    const d = fx.download || {};
+    msg = d.status === 'building' ? T('engines.preparing', 'Preparing ') + name + T('engines.on_your_mac', ' on your Mac…')
+      : T('engines.downloading', 'Downloading ') + name + ': ' + (d.mb || 0) + ' / ' + (d.total_mb || 2639) + ' MB';
+  } else if (!fx.downloaded) {
+    const e = (fx.download || {}).error;
+    msg = e ? T('engines.download_failed', 'Download failed: ') + e : name + T('engines.needs_a_download', ' needs a download.');
+    canGet = true;
+  } else if (h3FlexOn(cell)) {
+    box.hidden = true;
+    text.textContent = '';
+    if (btn) btn.hidden = true;
+    return;
+  } else {
+    msg = name + ' renders Text and Image on 5-second windows; this shape uses Best.';
+  }
+  text.textContent = msg;
+  if (btn) {
+    btn.hidden = !canGet;
+    btn.textContent = T('engines.get_it', 'Get it · ') + (fx.download_gb || 2.8) + ' GB';
+  }
+}
+async function h3FlexInstall() {
+  const toast = (m, kind) => { if (typeof phosToast === 'function') phosToast(m, { kind }); };
+  const btn = document.getElementById('h3FlexGet');
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch('/h3/flex/install', { method: 'POST' });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+    _h3SetSpeedPref('flex');
+    toast(j.already_installed ? T('engines.pika_h3_flex_is_already', 'Pika H3 Flex is already installed.')
+      : T('engines.downloading_pika_h3_flex_from', 'Downloading Pika H3 Flex from Pika Labs (2.8 GB), then preparing it on your Mac. ')
+        + T('engines.it_switches_on_by_itself', 'It switches on by itself when ready.'), 'ok');
+  } catch (e) {
+    toast(T('engines.pika_h3_flex', 'Pika H3 Flex: ') + (e.message || 'failed'), 'danger');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+{
+  const _flexBtn = document.getElementById('h3FlexGet');
+  if (_flexBtn) _flexBtn.onclick = (ev) => { ev.preventDefault(); h3FlexInstall(); };
 }
 
 // The line under the switch for lightx2v v1.3 on High: what it is and who
@@ -588,40 +1003,36 @@ function _h3RenderV13Note() {
   const v = h3V13State();
   const text = document.getElementById('h3V13NoteText');
   const btn = document.getElementById('h3V13Get');
-  const show = !!(cell && cell.v13_min != null && _h3V13Mode() && !h3TriStepOn(cell));
+  // Not while Pika H3 Flex is the choice: its own note says what renders.
+  const show = !!(cell && cell.v13_min != null && _h3V13Mode() && !h3TriStepOn(cell)
+                  && h3SpeedPref() === 'best');
   box.hidden = !show;
   if (!show || !text) return;
   const name = v.name || 'lightx2v v1.3';
-  const credit = 'By LightX2V (Apache-2.0 code; ' + (v.license || 'MiniMax H3 Community License') + ' weights).';
   let msg = '';
   let canGet = false;
   if (!v.supported) {
-    msg = 'Best on High takes about half the time with ' + name + '. ' + distText(
-      'Update H3: click "Update Hailuo H3 runner" in the Pinokio sidebar. Your weights stay.',
-      'It needs a newer H3 runner, but the Mac app can\u2019t update the runner yet.');
+    msg = name + T('engines.needs_an_update', ' needs an update. ') + distText(
+      T('engines.update_h3_click_update_hailuo', 'Update H3: click "Update Hailuo H3 runner" in the Pinokio sidebar. Your weights stay.'),
+      T('engines.it_needs_a_newer_h3', 'It needs a newer H3 runner, but the Mac app can\u2019t update the runner yet.'));
   } else if (v.installing) {
     const d = v.download || {};
-    msg = d.status === 'building' ? 'Preparing ' + name + ' on your Mac…'
-      : 'Downloading ' + name + ': ' + (d.mb || 0) + ' / ' + (d.total_mb || 1320) + ' MB';
+    msg = d.status === 'building' ? T('engines.preparing', 'Preparing ') + name + T('engines.on_your_mac', ' on your Mac…')
+      : T('engines.downloading', 'Downloading ') + name + ': ' + (d.mb || 0) + ' / ' + (d.total_mb || 1320) + ' MB';
   } else if (!v.downloaded) {
     const e = (v.download || {}).error;
-    // "about half the time", not "down from <Best>": the Best half of the
-    // switch may show a fleet range, and two different "before" numbers on
-    // one screen would contradict each other.
-    msg = 'New: ' + name + ' runs Best on High in about ' + _h3EtaPlain(cell.v13_eta)
-      + ', about half the time. Richer detail in our side-by-side tests. ' + credit
-      + (e ? ' Last try failed: ' + e : '');
+    msg = e ? T('engines.download_failed', 'Download failed: ') + e : name + T('engines.needs_a_download', ' needs a download.');
     canGet = true;
-  } else if (h3V13On(cell, { fast: false })) {
-    msg = 'Best on High uses ' + name + ' (' + (v.forwards || 6) + ' steps). ' + credit
-      + ' Choose a Steps count to use the old Best sampler.';
   } else {
-    msg = 'Steps set: Best uses the old sampler instead of ' + name + '.';
+    box.hidden = true;
+    text.textContent = '';
+    if (btn) btn.hidden = true;
+    return;
   }
   text.textContent = msg;
   if (btn) {
     btn.hidden = !canGet;
-    btn.textContent = 'Get it · ' + (v.download_gb || 1.4) + ' GB';
+    btn.textContent = T('engines.get_it', 'Get it · ') + (v.download_gb || 1.4) + ' GB';
   }
 }
 async function h3V13Install() {
@@ -632,11 +1043,11 @@ async function h3V13Install() {
     const r = await fetch('/h3/v13/install', { method: 'POST' });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
-    toast(j.already_installed ? 'lightx2v v1.3 is already installed.'
-      : "Downloading LightX2V's lightx2v v1.3 (1.4 GB), then preparing it on your Mac. "
-        + 'Best on High will use it automatically when ready.', 'ok');
+    toast(j.already_installed ? T('engines.lightx2v_v1_3_is_already', 'lightx2v v1.3 is already installed.')
+      : T('engines.downloading_lightx2v_s_lightx2v_v1', "Downloading LightX2V's lightx2v v1.3 (1.4 GB), then preparing it on your Mac. ")
+        + T('engines.best_on_high_will_use', 'Best on High will use it automatically when ready.'), 'ok');
   } catch (e) {
-    toast('lightx2v v1.3: ' + (e.message || 'failed'), 'danger');
+    toast(T('engines.lightx2v_v1_3', 'lightx2v v1.3: ') + (e.message || 'failed'), 'danger');
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -661,15 +1072,24 @@ function _h3ApplySpeed() {
     if (triIn) triIn.value = fastOn ? '1' : '0';
     const tbIn = document.getElementById('h3_turbo');
     if (tbIn) tbIn.value = '0';
+    const flexOn = !fastOn && typeof h3FlexOn === 'function' && h3FlexOn(cell);
+    const fxIn = document.getElementById('h3_flex');
+    if (fxIn) fxIn.value = flexOn ? '1' : '0';
+    const ftOn = !fastOn && !flexOn && typeof h3FlexTurboOn === 'function' && h3FlexTurboOn(cell);
+    const ftIn = document.getElementById('h3_flex_turbo');
+    if (ftIn) ftIn.value = ftOn ? '1' : '0';
     // H3-13: the lit half used to be the PREFERENCE alone (pref === 'fast' &&
     // tri.available), so Native and the single-pass 10s — cells with no Fast
     // path at all (cell.tristep_min == null) — kept the Fast pill pink while
     // the render that actually queued ran Best, 8-25x slower. fastOn already
     // folds in per-cell availability (h3TriStepOn), so light whichever half
     // is really about to render; the note below still explains why.
-    const lit = fastOn ? 'fast' : 'best';
+    const flexPicked = pref === 'flex' || pref === 'flex_turbo';
+    const lit = fastOn ? 'fast' : (flexOn ? 'flex' : (ftOn ? 'flex_turbo' : 'best'));
     document.querySelectorAll('#h3SpeedGroup [data-h3-speed]').forEach(b =>
       b.classList.toggle('active', b.dataset.h3Speed === lit));
+    const fxCredit = document.getElementById('h3FlexCredit');   // the credit lives in the credits line, not the picker
+    if (fxCredit) fxCredit.hidden = !(flexOn || ftOn);
     const note = document.getElementById('h3SpeedNote');
     if (note) {
       // Independent of `lit`: this is "you prefer Fast, but this shape can
@@ -677,7 +1097,7 @@ function _h3ApplySpeed() {
       // note used to disagree.
       const bestOnly = pref === 'fast' && cell && cell.tristep_min == null;
       note.textContent = bestOnly
-        ? cell.label + ' renders on Best — Fast is not validated at this shape yet.'
+        ? cell.label + T('engines.renders_on_best_fast_is', ' renders on Best — Fast is not validated at this shape yet.')
         : '';
       note.hidden = !bestOnly;
     }
@@ -699,14 +1119,47 @@ function _h3ApplySpeed() {
       // hasn't loaded yet.
       if (s) s.value = (cell && cell.tristep_forwards != null)
         ? cell.tristep_forwards : (tri.steps ? tri.steps - 1 : 3);
+    } else if (flexOn && s && cell) {
+      // Flex owns its six-step ladder: a pinned Steps pill does not apply.
+      if (stIn && stIn.value !== 'auto' && typeof setH3Steps === 'function') {
+        try { setH3Steps('auto'); } catch (e) {}
+      }
+      s.value = (cell.flex_forwards != null) ? cell.flex_forwards : (h3FlexState().forwards || 6);
     } else if (s && cell) {
       const ov = (stIn || {}).value || 'auto';
       s.value = (ov !== 'auto' && /^\d+$/.test(ov)) ? parseInt(ov, 10)
         : (h3V13On(cell, { fast: false }) ? cell.v13_steps : cell.steps);
     }
-    // Steps is a Best control: it only shows while Best is what renders.
+    // Steps is a Best control: hidden under Fast; under H3 Flex it shows
+    // greyed with the reason (Flex runs its own steps), like Fast / Best.
     const stepsRow = document.getElementById('h3StepsRow');
-    if (stepsRow) stepsRow.hidden = fastOn;
+    if (stepsRow) {
+      stepsRow.hidden = fastOn && !flexPicked;
+      stepsRow.classList.toggle('flex-locked', flexPicked);
+      const stHint = stepsRow.querySelector('.cz-label-hint');
+      if (stHint && flexPicked) {
+        if (stHint.dataset.flexText == null) stHint.dataset.flexText = stHint.textContent;
+        stHint.textContent = T('engines.h3_flex_runs_its_own_2', 'H3 Flex runs its own steps');
+      } else if (stHint && stHint.dataset.flexText != null) {
+        stHint.textContent = stHint.dataset.flexText;
+        delete stHint.dataset.flexText;
+      }
+      stepsRow.querySelectorAll('[data-h3-steps]').forEach(b => {
+        if (flexPicked) {
+          if (b.dataset.flexTitle == null) b.dataset.flexTitle = b.getAttribute('title') || '';
+          b.setAttribute('title', H3_FLEX_SPEED_TIP);
+          b.setAttribute('aria-disabled', 'true');
+          b.classList.remove('active');
+        } else if (b.dataset.flexTitle != null) {
+          b.setAttribute('title', b.dataset.flexTitle);
+          delete b.dataset.flexTitle;
+          b.removeAttribute('aria-disabled');
+          b.classList.toggle('active', b.dataset.h3Steps === ((stIn || {}).value || 'auto'));
+        }
+        b.classList.toggle('flex-locked', flexPicked);
+      });
+    }
+    _h3SyncCleanSound();
     if (typeof renderH3LoraSlot === 'function') { try { renderH3LoraSlot(); } catch (e) {} }
   } finally {
     _h3SpeedBusy = false;
@@ -721,7 +1174,7 @@ function _h3SpeedRepriced() {
 
 // Set the speed ('fast' | 'best'). Remembered per browser.
 function setH3Speed(v) {
-  _h3SetSpeedPref(v === 'best' ? 'best' : 'fast');
+  _h3SetSpeedPref((v === 'best' || v === 'flex' || v === 'flex_turbo') ? v : 'fast');
   _h3ApplySpeed();
   _h3SpeedRepriced();
 }
@@ -731,15 +1184,17 @@ function setH3TriStep(on) { setH3Speed(on ? 'fast' : 'best'); }
 // What a saved clip was made with, as this switch's value.
 function h3SpeedOfParams(p) {
   p = p || {};
-  return (p.h3_tristep || p.h3_turbo) ? 'fast' : 'best';
+  return (p.h3_tristep || p.h3_turbo) ? 'fast' : (p.h3_flex ? 'flex' : (p.h3_flex_turbo ? 'flex_turbo' : 'best'));
 }
 // H3-04: "Fast" / "Best", for any place that shows a submitted or running
 // H3 job's params — the Now card, a queue row, the info modal. One
 // function so all three read the same label from the same field.
 function h3JobSpeedLabel(p) {
   if (!p || p.engine !== 'h3') return '';
-  if (h3SpeedOfParams(p) === 'fast') return 'Fast';
-  return p.h3_v13 ? 'Best · lightx2v v1.3' : 'Best';
+  if (h3SpeedOfParams(p) === 'fast') return T('engines.fast', 'Fast');
+  if (h3SpeedOfParams(p) === 'flex') return 'Pika H3 Flex';
+  if (h3SpeedOfParams(p) === 'flex_turbo') return T('engines.h3_flex_turbo', 'H3 Flex Turbo');
+  return p.h3_v13 ? T('engines.best_lightx2v_v1_3', 'Best · lightx2v v1.3') : T('engines.best', 'Best');
 }
 // "Hailuo H3 · Standard 10s" — the shape a submitted H3 job asked for,
 // looked up from its own h3_tier (never re-derived from the CURRENT form
@@ -755,17 +1210,33 @@ function h3JobShapeLabel(p) {
 // The Fast half: select it when ready; otherwise the one click that makes it
 // ready (install the adapter, or say which update is needed).
 async function h3SpeedClick(which) {
+  if (which === 'flex') {
+    const fx = h3FlexState();
+    if (fx.available) { setH3Speed('flex'); return; }
+    const toastF = (m, kind) => { if (typeof phosToast === 'function') phosToast(m, { kind }); };
+    if (!fx.supported) {
+      toastF(distText(T('engines.pika_h3_flex_needs_a', 'Pika H3 Flex needs a newer Hailuo H3 runner. Run "Update Hailuo H3 runner" in the ')
+             + T('engines.pinokio_sidebar_your_weights_stay', 'Pinokio sidebar — your weights stay.'),
+             T('engines.pika_h3_flex_needs_a_2', 'Pika H3 Flex needs a newer Hailuo H3 runner. Phosphene brings the Hailuo H3 runner up to date by itself; quit and reopen Phosphene if this stays.')), 'danger');
+      return;
+    }
+    // Show the note (credit + the Get button) for the one explicit click.
+    _h3SetSpeedPref('flex');
+    _h3ApplySpeed();
+    _h3SpeedRepriced();
+    return;
+  }
   if (which !== 'fast') { setH3Speed('best'); return; }
   const tri = h3TriStepState();
   if (tri.available) { setH3Speed('fast'); return; }
   const toast = (m, kind) => { if (typeof phosToast === 'function') phosToast(m, { kind }); };
   if (!tri.supported) {
-    toast(distText('Fast needs a newer Hailuo H3 runner. Run "Update Hailuo H3 runner" in the Pinokio '
-          + 'sidebar — your weights stay.',
-          'Fast needs a newer Hailuo H3 runner. Updating the runner isn\u2019t available in the Mac app yet.'), 'danger');
+    toast(distText(T('engines.fast_needs_a_newer_hailuo_2', 'Fast needs a newer Hailuo H3 runner. Run "Update Hailuo H3 runner" in the Pinokio ')
+          + T('engines.sidebar_your_weights_stay', 'sidebar — your weights stay.'),
+          T('engines.fast_needs_a_newer_hailuo', 'Fast needs a newer Hailuo H3 runner. Phosphene brings the Hailuo H3 runner up to date by itself; quit and reopen Phosphene if this stays.')), 'danger');
     return;
   }
-  if (tri.installing) { toast('The Fast adapter is already installing — watch the log.', 'ok'); return; }
+  if (tri.installing) { toast(T('engines.the_fast_adapter_is_already', 'The Fast adapter is already installing — watch the log.'), 'ok'); return; }
   // H3-27: a native confirm() blocks the tab and reads as a browser dialog,
   // not the panel's own UI (the same rule Stop's confirmation follows).
   // Replace it with the panel's existing "toast + action link" confirm
@@ -776,18 +1247,18 @@ async function h3SpeedClick(which) {
   // option this click used to leave unmentioned entirely.
   const turbo = h3TurboState();
   const turboHint = (turbo && turbo.available)
-    ? ' Turbo (already installed) is a quicker option too — pick it from this same switch after Best.'
+    ? T('engines.turbo_already_installed_is_a', ' Turbo (already installed) is a quicker option too — pick it from this same switch after Best.')
     : '';
   const el = phosToast(
-    'Install Fast — 180 MB adapter from ' + (tri.repo || 'Kijai/MiniMax-H3_comfy')
-    + ' (a conversion of ' + (tri.source_repo || 'TaoLiveAIGC/TaoMate-H3') + '). License: '
-    + (tri.license || 'MiniMax H3 Community License') + ', same terms as H3 itself.' + turboHint,
+    T('engines.install_fast_180_mb_adapter', 'Install Fast — 180 MB adapter from ') + (tri.repo || 'Kijai/MiniMax-H3_comfy')
+    + T('engines.a_conversion_of', ' (a conversion of ') + (tri.source_repo || 'TaoLiveAIGC/TaoMate-H3') + T('engines.license', '). License: ')
+    + (tri.license || 'MiniMax H3 Community License') + T('engines.same_terms_as_h3_itself', ', same terms as H3 itself.') + turboHint,
     { icon: 'ph-download-simple', duration: 12000 });
   if (!el) return;
   const a = document.createElement('a');
   a.href = '#';
   a.className = 'phos-toast-action';
-  a.textContent = 'Install Fast';
+  a.textContent = T('engines.install_fast', 'Install Fast');
   a.onclick = async (ev) => {
     ev.preventDefault();
     el.remove();
@@ -796,16 +1267,22 @@ async function h3SpeedClick(which) {
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
       _h3SetSpeedPref('fast');
-      toast(j.already_installed ? 'Fast is already installed.'
-        : 'Installing Fast (180 MB) — watch the log. It switches on by itself when it lands.', 'ok');
+      toast(j.already_installed ? T('engines.fast_is_already_installed', 'Fast is already installed.')
+        : T('engines.installing_fast_180_mb_watch', 'Installing Fast (180 MB) — watch the log. It switches on by itself when it lands.'), 'ok');
     } catch (e) {
-      toast('Fast install: ' + (e.message || 'failed'), 'danger');
+      toast(T('engines.fast_install', 'Fast install: ') + (e.message || 'failed'), 'danger');
     }
   };
   el.appendChild(a);
 }
 document.querySelectorAll('#h3SpeedGroup [data-h3-speed]').forEach(b => {
-  b.onclick = () => h3SpeedClick(b.dataset.h3Speed);
+  b.onclick = () => {
+    if (b.classList.contains('flex-locked')) {
+      if (typeof phosToast === 'function') phosToast(H3_FLEX_SPEED_TIP, { kind: 'info' });
+      return;
+    }
+    h3SpeedClick(b.dataset.h3Speed);
+  };
 });
 
 // The Upscale & Face Fix pair, priced from the cell's own numbers: the
@@ -824,14 +1301,14 @@ function _h3SyncFaceFixEta() {
   const eta = document.getElementById('h3FaceFixFooterEta');
   if (eta) {
     eta.textContent = (cell && cell.facefix_min != null)
-      ? '+' + (Math.round(cell.facefix_min * 2) / 2) + ' min · 2× · face and sound kept'
-      : '2× · face and sound kept';
+      ? '+' + (Math.round(cell.facefix_min * 2) / 2) + T('engines.min_2_face_and_sound', ' min · 2× · face and sound kept')
+      : T('engines.2_face_and_sound_kept', '2× · face and sound kept');
   }
   const legacy = document.getElementById('h3FaceFixEta');
   if (legacy) {
-    legacy.textContent = 'optional · 2× · face and sound kept'
+    legacy.textContent = T('engines.optional_2_face_and_sound', 'optional · 2× · face and sound kept')
       + ((cell && cell.facefix_min != null)
-        ? ' · +' + (Math.round(cell.facefix_min * 2) / 2) + ' min' : " · about the render's time again");
+        ? ' · +' + (Math.round(cell.facefix_min * 2) / 2) + ' min' : T('engines.about_the_render_s_time', " · about the render's time again"));
   }
 }
 // The footer line: "Draft · Fast ≈ 3 min" / "High · Best + Face Fix ≈ 44 min".
@@ -848,24 +1325,25 @@ function h3EstimateLine() {
     if (_mode === 'extend') {
       const sec = Math.max(0.5, Math.min(15, parseFloat((document.getElementById('extend_seconds') || {}).value) || 5));
       const windows = 1 + Math.max(0, Math.ceil((sec * 24 + 1 - 124) / 123));
-      return 'Extend +' + sec.toFixed(1) + ' s · ' + win.quality_label + ' · ' + windows
+      return T('engines.extend', 'Extend +') + sec.toFixed(1) + ' s · ' + win.quality_label + ' · ' + windows
         + ' window' + (windows > 1 ? 's' : '') + ' ≈ ' + fmt(per * windows);
     }
     // Add sound never upscales (the picture is the user's), so a Fast HD pick
     // costs only its H3 pass here.
     const v2aPer = win.fast_hd ? (_h3TriStepMin(win) || win.tristep_min || per) : per;
-    return 'Add sound · picture kept · ≈ ' + fmt(v2aPer) + ' per 5 s of clip';
+    return T('engines.add_sound_picture_kept', 'Add sound · picture kept · ≈ ') + fmt(v2aPer) + T('engines.per_5_s_of_clip', ' per 5 s of clip');
   }
   const fast = h3TriStepOn(cell);
   let m = h3CellEtaMin(cell);
   if (cell.fast_hd) {
     // Already includes its Upscale & Face Fix (h3CellEtaMin prices it whole).
-    return 'Fast HD · ' + cell.width + '×' + cell.height + ' → ' + cell.final_width + '×'
+    return T('engines.fast_hd', 'Fast HD · ') + cell.width + '×' + cell.height + ' → ' + cell.final_width + '×'
       + cell.final_height + ' ≈ ' + h3FmtEtaMin(m).replace(/^~/, '').replace(/ · batch$/, '');
   }
-  let txt = cell.quality_label + ' · ' + (fast ? 'Fast' : 'Best');
+  const flexLine = !fast && typeof h3FlexOn === 'function' && h3FlexOn(cell);
+  let txt = cell.quality_label + ' · ' + (fast ? T('engines.fast', 'Fast') : (flexLine ? 'Pika H3 Flex' : T('engines.best', 'Best')));
   if (h3FaceFixOn()) {
-    txt += ' + Face Fix';
+    txt += T('engines.face_fix', ' + Face Fix');
     if (cell.facefix_min == null) return txt;
     m += cell.facefix_min;
   }
@@ -900,30 +1378,123 @@ function _engineRowVisible() {
 // ---- The header switcher ----------------------------------------------------
 // Rendered entirely from the registry. Every visual decision — label, mark,
 // accent, badge, tooltip, order — comes off the engine's own row, so this
-// Scope the mode strip to what the ACTIVE engine actually renders. Each
-// engine's form should be its own surface: a model that can't do Extend
-// shouldn't advertise Extend. Purely additive to setEngine — the authority
-// is still engineServesMode() (and make_job server-side); this only stops the
-// UI from offering a mode that would silently bounce the user to the other
-// engine. Registry-driven, so a third engine scopes itself for free.
+// THE MODE LIST IS DRAWN FROM THE REGISTRY, AND IT NEVER CHANGES SHAPE
+// (redesign v2.1, option A). Every model brings its own abilities and the next
+// one will bring different ones, so the list of things you can make is the
+// same on every engine: switching model never moves a chip or makes one vanish.
+// What the registry adds is WHO can make each thing:
+//
+//   * a chip the active engine cannot render stays in place, dimmed
+//     (.eng-foreign), and says which model does it ("uses H3"); clicking it
+//     switches to that model (modeChipEngineClick) instead of the old silent
+//     bounce, or opens its install card when it is not installed yet;
+//   * where the engines on this Mac DISAGREE about a chip, the chip carries
+//     the marks of the ones that can do it. A chip every engine can do carries
+//     none, so the marks only ever say something;
+//   * a chip NO engine on this Mac can ever render (Add sound on a Mac that
+//     cannot run H3) is the one thing that does fold: it is not a task here.
+//
+// The authority stays engineServesMode() and make_job server-side; this only
+// draws it. Registry-driven, so a third engine marks itself with no new code.
 // The Remix parent pill is a UI GROUP whose children are real modes, so it
-// hides only when the engine serves NONE of them.
+// counts as served when the engine serves ANY of them.
+function _modeChipMode(chip) {
+  if (chip.dataset.lipsync) return 'a2v';
+  return chip.dataset.mode || '';
+}
+function _engineServesChip(e, mode) {
+  if (mode === 'remix') {
+    const kids = (typeof REMIX_MODES !== 'undefined' && REMIX_MODES) ? REMIX_MODES : ['ingredients'];
+    return kids.some(m => engineServesMode(e, m));
+  }
+  return engineServesMode(e, mode);
+}
+function _engineShort(e) {
+  return e.short || String(e.label || e.id).split(' ').pop();
+}
+function _videoEngines() {
+  return ENGINES.filter(e => e.state !== 'announced' && (e.surfaces || ['video']).indexOf('video') !== -1
+    && (e.builtin || engineStatus(e).capable));
+}
 function syncModeStripToEngine() {
   const e = engineById(currentEngine());
   if (!e) return;
+  const pool = _videoEngines();
+  // H3 Flex picked: a mode H3 renders but Flex does not is greyed AND refuses
+  // the click (modeChipEngineClick), with the plain reason as its tooltip.
+  const flexPicked = e.id === 'h3' && typeof h3FlexPickedAny === 'function' && h3FlexPickedAny();
   document.querySelectorAll('#modeGroup .mode-chip').forEach(chip => {
-    const mode = chip.dataset.mode;
+    const mode = _modeChipMode(chip);
     if (!mode) return;
-    let ok;
-    if (mode === 'remix') {
-      const kids = (typeof REMIX_MODES !== 'undefined' && REMIX_MODES)
-        ? REMIX_MODES : ['ingredients'];
-      ok = kids.some(m => engineServesMode(e, m));
-    } else {
-      ok = engineServesMode(e, mode);
+    let ok = _engineServesChip(e, mode);
+    const flexLocked = ok && flexPicked && !(mode === 'remix'
+      ? ((typeof REMIX_MODES !== 'undefined' && REMIX_MODES) ? REMIX_MODES : []).some(m => h3FlexServesMode(m))
+      : h3FlexServesMode(mode));
+    if (flexLocked) ok = false;
+    chip.classList.toggle('flex-locked', flexLocked);
+    if (flexLocked) {
+      if (chip.dataset.flexTitle == null) chip.dataset.flexTitle = chip.getAttribute('title') || '';
+      chip.setAttribute('title', H3_FLEX_LOCK_TIP);
+      chip.setAttribute('aria-disabled', 'true');
+    } else if (chip.dataset.flexTitle != null) {
+      if (chip.dataset.flexTitle) chip.setAttribute('title', chip.dataset.flexTitle);
+      else chip.removeAttribute('title');
+      delete chip.dataset.flexTitle;
+      chip.removeAttribute('aria-disabled');
     }
+    const by = pool.filter(x => _engineServesChip(x, mode));
     chip.classList.toggle('eng-foreign', !ok);
+    chip.classList.toggle('mode-reachable', by.length > 0);
+    chip.classList.toggle('mode-unreachable', by.length === 0);
+    const sub = chip.querySelector('.mc-sub');
+    if (sub) {
+      // Flex-locked: plain H3 (the engine already picked) is the way to it.
+      if (flexLocked) sub.dataset.uses = _engineShort(e);
+      else if (!ok && by.length) sub.dataset.uses = _engineShort(by[0]);
+      else delete sub.dataset.uses;
+    }
+    let marks = chip.querySelector('.mc-eng');
+    const differs = pool.length > 1 && by.length > 0 && by.length < pool.length;
+    if (!differs) { if (marks) marks.remove(); return; }
+    if (!marks) {
+      marks = document.createElement('span');
+      marks.className = 'mc-eng';
+      marks.setAttribute('aria-hidden', 'true');
+      chip.appendChild(marks);
+    }
+    marks.innerHTML = by.map(x => `<svg class="ph" style="--eng-accent:${escapeHtml(x.accent || 'currentColor')}"><use href="#${escapeHtml(x.mark)}"/></svg>`).join('');
   });
+}
+
+// A dimmed chip is a door to the model that makes it, not a dead end. Runs in
+// the capture phase ahead of the chip's own handler (characters.js), so the
+// choice of engine is settled before setMode() asks _syncEngineForMode() which
+// engine the user wants: the preference is written, setMode then lands on it
+// through the normal gates. A model that is not installed yet answers with its
+// own install card and the mode is left alone.
+function modeChipEngineClick(ev) {
+  const chip = ev.target.closest('#modeGroup .mode-chip.eng-foreign');
+  if (!chip) return;
+  // Greyed because H3 Flex is the pick: nothing switches; the reason shows.
+  if (chip.classList.contains('flex-locked')) {
+    ev.stopImmediatePropagation(); ev.preventDefault();
+    if (typeof phosToast === 'function') phosToast(H3_FLEX_LOCK_TIP, { kind: 'info' });
+    return;
+  }
+  const mode = _modeChipMode(chip);
+  const target = _videoEngines().find(x => _engineServesChip(x, mode));
+  if (!target) return;
+  const st = engineStatus(target);
+  if (!target.builtin && !st.available) {
+    ev.stopImmediatePropagation(); ev.preventDefault();
+    engineSegClick(target.id);
+    return;
+  }
+  try { localStorage.setItem(H3_ENGINE_LS_KEY, target.id); } catch (e) {}
+  if (typeof phosToast === 'function') {
+    const name = (chip.firstChild && chip.firstChild.textContent || '').trim();
+    phosToast(`${name} is made with ${target.label}${target.generation ? ' ' + target.generation : ''} — switched model.`, { duration: 2600 });
+  }
 }
 
 // function has no idea which engines exist. Re-run on: boot, every setEngine,
@@ -978,10 +1549,15 @@ function toggleEngineMenu() {
   const trig = document.querySelector('#engineSwitch .eng-trigger');
   if (!trig) return;
   const r = trig.getBoundingClientRect();
-  m.style.top = (r.bottom + 6) + 'px';
-  m.style.left = r.left + 'px';
   m.style.minWidth = Math.max(r.width, 240) + 'px';
   m.hidden = false;
+  // The trigger sits beside Generate, at the foot of the column: the menu
+  // opens UPWARD when there is no room under it, and never runs off an edge.
+  const mh = m.offsetHeight, mw = m.offsetWidth;
+  const roomUp = r.top - 6 - mh >= 8, roomDown = r.bottom + 6 + mh <= window.innerHeight - 8;
+  const up = roomUp && (r.top > window.innerHeight / 2 || !roomDown);
+  m.style.top = (up ? r.top - 6 - mh : Math.min(r.bottom + 6, window.innerHeight - mh - 8)) + 'px';
+  m.style.left = Math.max(8, Math.min(r.left, window.innerWidth - mw - 8)) + 'px';
   window._engineMenuOpen = true;
   trig.setAttribute('aria-expanded', 'true');
   // Move focus INTO the menu (the active engine's row, or the first row) —
@@ -1020,6 +1596,318 @@ document.addEventListener('keydown', (ev) => {
 });
 window.addEventListener('resize', () => closeEngineMenu({ returnFocus: false }));
 
+// ---- H3 Flex: its own entry in the engine picker (4.19.15, preview) --------
+// Not a server engine: it renders on H3 (engine=h3, h3_flex=1, the Flex
+// adapter + its six-step sampler), so every H3 gate, price and queue path
+// stays the one H3 already has. The picker shows it as a sibling of H3 so it
+// can be found, downloaded and chosen the way an engine is.
+const H3FLEX_ID = 'h3flex';
+function h3FlexPicked() {
+  return currentEngine() === 'h3' && h3SpeedPref() === 'flex';
+}
+// The entry, built from H3's own row (accent, mark, surfaces), or null when
+// this Mac's H3 runner cannot take Flex at all (an older H3 pack).
+function h3FlexPickerEntry() {
+  const h3e = engineById('h3');
+  if (!h3e || !engineRenderable(h3e)) return null;
+  const fx = h3FlexState();
+  const h3st = engineStatus(h3e);
+  if (h3st.available && !fx.supported && !fx.downloaded) return null;
+  return Object.assign({}, h3e, {
+    id: H3FLEX_ID, label: T('engines.h3_flex', 'H3 Flex'), generation: '', preview: true, virtual: true,
+    sublabel: T('engines.h3_flex_preview_2', 'H3 Flex · preview'),
+    tagline: T('engines.six_steps_about_2_2', 'Six steps: about 2.2× faster than Best. Preview.'),
+  });
+}
+// Its state, in the same words the menu uses for every engine.
+function h3FlexPickerStatus() {
+  const h3st = engineStatus(engineById('h3'));
+  const fx = h3FlexState();
+  const d = fx.download || {};
+  return {
+    capable: !!h3st.capable,
+    h3_ready: !!h3st.available,
+    available: !!(h3st.available && fx.available),
+    installing: !!fx.installing,
+    progress: fx.installing
+      ? (d.status === 'building' ? 'preparing'
+        : Math.min(99, Math.round(100 * (d.mb || 0) / (d.total_mb || 2639))) + '%')
+      : '',
+    error: d.error || '',
+    download_gb: fx.download_gb || 2.8,
+  };
+}
+function _h3FlexBadge(st, h3e) {
+  if (!st.h3_ready) return (h3e.install_size || '').replace(/^~/, '');
+  if (st.installing) return st.progress;
+  if (!st.available) return st.download_gb + ' GB';
+  return '';
+}
+function _h3FlexTooltip(st, h3e) {
+  const credit = T('engines.running_on_your_mac_powered', ' Running on your Mac. Powered by MiniMax H3.');   // Pika Labs is credited in the credits line (#h3FlexCredit)
+  if (!st.h3_ready) return T('engines.h3_flex_preview_needs_hailuo', 'H3 Flex (preview) needs Hailuo H3 first (')
+    + (h3e.install_size || '') + T('engines.then_its_2_8_gb', '), then its 2.8 GB add-on. Click to get them.') + credit;
+  if (st.installing) return T('engines.h3_flex_preview_downloading_and', 'H3 Flex (preview): downloading and preparing (') + st.progress + ').' + credit;
+  if (!st.available) return T('engines.h3_flex_preview_click_to', 'H3 Flex (preview): click to download it (') + st.download_gb
+    + T('engines.gb_prepared_on_your_mac', ' GB, prepared on your Mac).') + credit;
+  return T('engines.h3_flex_preview_six_steps', 'H3 Flex (preview): six steps, about 2.2× faster than Best.') + credit;
+}
+// Flex picked from a mode H3 itself does not render (an LTX-only one): move
+// to the nearest mode Flex renders first, instead of a click that does nothing.
+// h3FlexFit says so once the engine has switched.
+function _h3FlexEnterMode(h3e) {
+  if (engineServesMode(h3e, currentMode)) return true;
+  const to = _h3FlexNearestMode(currentMode);
+  if (!to || !engineServesMode(h3e, to) || typeof setMode !== 'function') return false;
+  _h3FlexPinImageSelect(to);
+  setMode(to);
+  if (typeof phosToast === 'function') {
+    phosToast(T('engines.h3_flex_makes_videos_from_2', 'H3 Flex makes videos from text or an image, so the form is on ')
+              + (to === 'i2v' ? T('engines.image', 'Image') : T('engines.text', 'Text')) + ' now.', { kind: 'info', duration: 4200 });
+  }
+  return engineServesMode(h3e, currentMode);
+}
+// Picking it: H3 with the Flex sampler. Missing pieces download on the same
+// click: H3 itself through its own install card (Flex follows on the first
+// status tick that finds H3 ready), else the Flex adapter right here.
+function h3FlexPickerClick() {
+  const h3e = engineById('h3');
+  const st = h3FlexPickerStatus();
+  if (!h3e || !st.capable) return;
+  _h3SetSpeedPref('flex');
+  try { localStorage.setItem('phos_h3flex_wanted', '1'); } catch (e) {}
+  if (!st.h3_ready) { engineSegClick('h3'); return; }
+  if (typeof _h3FlexEnterMode === 'function' ? !_h3FlexEnterMode(h3e) : !engineServesMode(h3e, currentMode)) return;
+  setEngine('h3');
+  if (typeof setH3Speed === 'function') setH3Speed('flex');
+  if (typeof h3FlexFit === 'function') h3FlexFit();
+  if (!st.available && !st.installing) h3FlexInstall();
+  renderEngineSwitch();
+}
+
+// ---- H3 Flex Turbo: its own picker entry (5.0, Pro, preview) --------------
+// Not a server engine either: engine=h3, h3_flex_turbo=1. A Pro option.
+const H3FLEXTURBO_ID = 'h3flexturbo';
+function h3FlexTurboPicked() {
+  return currentEngine() === 'h3' && h3SpeedPref() === 'flex_turbo';
+}
+function h3FlexTurboPickerEntry() {
+  const h3e = engineById('h3');
+  if (!h3e || !engineRenderable(h3e)) return null;
+  const ft = h3FlexTurboState();
+  const h3st = engineStatus(h3e);
+  // A Pro member whose H3 runner cannot do it yet has nothing to pick; a Free user always sees
+  // it, marked Pro (owner, 6 Nov: the option was silently missing for Free, so nobody knew it
+  // existed). Clicking it as Free opens the Pro panel.
+  if (ft.pro_active && h3st.available && !ft.supported && !ft.downloaded) return null;
+  return Object.assign({}, h3e, {
+    id: H3FLEXTURBO_ID, label: T('engines.faster_flex_turbo', 'Faster Flex Turbo'), generation: '', preview: true, pro: true, virtual: true,
+    sublabel: T('engines.faster_flex_turbo_quick_drafts', 'Faster Flex Turbo · quick drafts · Pro'),
+    // In the Pro ledger's words, for who is looking (proSpotText, settings.js).
+    tagline: (typeof proSpotText === 'function' && proSpotText('h3-flex-turbo', !!ft.pro_active))
+      || 'Quick drafts: try ideas fast, then render the keeper. Part of Phosphene Pro.',
+  });
+}
+function h3FlexTurboPickerStatus() {
+  const h3st = engineStatus(engineById('h3') || {});
+  const ft = h3FlexTurboState();
+  const d = ft.download || {};
+  return {
+    capable: !!h3st.capable,
+    h3_ready: !!h3st.available,
+    pro_active: !!ft.pro_active,
+    available: !!(h3st.available && ft.available),
+    installing: !!ft.installing,
+    progress: ft.installing ? Math.min(99, Math.round(100 * (d.mb || 0) / (d.total_mb || 295))) + '%' : '',
+    error: d.error || '',
+    download_gb: ft.download_gb || 0.31,
+  };
+}
+function _h3FlexTurboTooltip(st) {
+  const credit = T('engines.by_akhaliq_pika_h3_flex', ' By akhaliq (Pika H3 Flex by Pika Labs + LightX2V Turbo), running on your Mac. Powered by MiniMax H3.');
+  if (!st.pro_active) return T('engines.faster_flex_turbo_pro_adds', 'Faster Flex Turbo. Pro adds: about 1.5× faster than Flex on Free. A little softer; for drafts. Click to see Pro.');
+  if (!st.h3_ready) return T('engines.h3_flex_turbo_needs_hailuo', 'H3 Flex Turbo needs Hailuo H3 first. Click to get it.') + credit;
+  if (st.installing) return T('engines.h3_flex_turbo_downloading', 'H3 Flex Turbo: downloading (') + st.progress + ').' + credit;
+  if (!st.available) return T('engines.h3_flex_turbo_click_to', 'H3 Flex Turbo: click to download it (') + st.download_gb + ' GB).' + credit;
+  return T('engines.faster_flex_turbo_on_with', 'Faster Flex Turbo. On with your Pro: about 1.5× faster than Flex on Free. A little softer; for drafts. Try ideas fast, then render the keeper on Flex or Best.') + credit;
+}
+function _h3FlexTurboNote(cell) {
+  const ft = h3FlexTurboState();
+  if (!ft.pro_active) return T('engines.h3_flex_turbo_is_part', 'H3 Flex Turbo is part of Phosphene Pro. This render uses H3 Flex.');
+  if (!ft.supported) return T('engines.h3_flex_turbo_needs_a', 'H3 Flex Turbo needs a newer H3 runner.');
+  if (ft.installing) { const d = ft.download || {}; return T('engines.downloading_h3_flex_turbo', 'Downloading H3 Flex Turbo: ') + (d.mb || 0) + ' / ' + (d.total_mb || 295) + ' MB.'; }
+  if (!ft.downloaded) return T('engines.h3_flex_turbo_pick_it', 'H3 Flex Turbo: pick it in the engine picker to download it (0.3 GB).');
+  if (h3FlexTurboOn(cell)) return '';
+  return 'H3 Flex Turbo renders Text and Image on 5-second windows; this shape uses Best.';
+}
+function _h3FlexTurboMenuRow(e, active, surfaceMode) {
+  const st = h3FlexTurboPickerStatus();
+  const badge = !st.pro_active ? '' : !st.h3_ready ? (engineById('h3').install_size || '').replace(/^~/, '')
+    : st.installing ? st.progress : !st.available ? st.download_gb + ' GB' : '';
+  const ok = engineServesMode(e, surfaceMode);
+  const cls = 'eng-opt eng-opt-flex eng-opt-pro' + (e.id === active ? ' active' : '')
+    + (!st.available ? ' needs-install' : '') + (st.available && !ok ? ' inert' : '');
+  return `<button type="button" class="${cls}" data-engine="${H3FLEXTURBO_ID}"
+      role="option" aria-selected="${e.id === active ? 'true' : 'false'}"
+      style="--eng-accent:${escapeHtml(e.accent)};--eng-dim:${escapeHtml(e.accent_dim)};--eng-soft:${escapeHtml(e.accent_soft)}"
+      title="${escapeHtml(_h3FlexTurboTooltip(st))}">
+    <span class="eng-mark"><svg class="ph" aria-hidden="true"><use href="#${escapeHtml(e.mark)}"/></svg></span>
+    <span class="eng-opt-body">
+      <span class="eng-opt-top">
+        <span class="eng-seg-name">${escapeHtml(e.label)}</span><span class="eng-badge eng-preview">preview</span><span class="pro-tag${st.pro_active ? ' pro-on' : ''}">${st.pro_active ? 'Pro ✓' : 'Pro'}</span>${
+        badge ? `<span class="eng-badge offer">${escapeHtml(badge)}</span>` : ''}
+      </span>
+      <span class="eng-opt-sub">${typeof proNoteHtml === 'function' ? proNoteHtml(e.tagline) : escapeHtml(e.tagline)}</span>
+    </span>${
+    e.id === active ? '<svg class="ph eng-tick" aria-hidden="true"><use href="#ph-check-bold"/></svg>' : ''}
+  </button>`;
+}
+async function h3FlexTurboInstall() {
+  const toast = (m, kind) => { if (typeof phosToast === 'function') phosToast(m, { kind }); };
+  try {
+    const r = await fetch('/h3/flex-turbo/install', { method: 'POST' });
+    const j = await r.json().catch(() => ({}));
+    if (r.status === 402) { if (typeof openProModal === 'function') openProModal(); return; }
+    if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+    toast(j.already_installed ? T('engines.h3_flex_turbo_is_already', 'H3 Flex Turbo is already installed.')
+      : T('engines.downloading_h3_flex_turbo_0', 'Downloading H3 Flex Turbo (0.3 GB). It switches on by itself when ready.'), 'ok');
+  } catch (e) {
+    toast(T('engines.h3_flex_turbo_2', 'H3 Flex Turbo: ') + (e.message || 'failed'), 'danger');
+  }
+}
+// Picking it: Pro opens the Pro panel when Pro is off; otherwise H3 with the
+// Turbo sampler, downloading the 0.3 GB LoRA on the same click.
+function h3FlexTurboPickerClick() {
+  const st = h3FlexTurboPickerStatus();
+  if (!st.capable) return;
+  if (!st.pro_active) {
+    if (typeof openProModal === 'function') openProModal();
+    else if (typeof phosToast === 'function') phosToast(T('engines.h3_flex_turbo_is_part_2', 'H3 Flex Turbo is part of Phosphene Pro.'), { kind: 'info' });
+    return;
+  }
+  _h3SetSpeedPref('flex_turbo');
+  if (!st.h3_ready) { engineSegClick('h3'); return; }
+  const h3e = engineById('h3');
+  if (typeof _h3FlexEnterMode === 'function' ? !_h3FlexEnterMode(h3e) : !engineServesMode(h3e, currentMode)) return;
+  setEngine('h3');
+  if (typeof setH3Speed === 'function') setH3Speed('flex_turbo');
+  if (typeof h3FlexFit === 'function') h3FlexFit();
+  if (!st.available && !st.installing) h3FlexTurboInstall();
+  renderEngineSwitch();
+}
+// Status ticks: redraw the picker when Flex's state moves, and finish what
+// a click on H3 Flex asked for once H3 itself has arrived.
+let _h3FlexPickerSig = '';
+function _h3FlexPickerSync() {
+  const st = h3FlexPickerStatus();
+  let wanted = false;
+  try { wanted = localStorage.getItem('phos_h3flex_wanted') === '1'; } catch (e) {}
+  if (wanted && st.available) { try { localStorage.removeItem('phos_h3flex_wanted'); } catch (e) {} }
+  if (wanted && st.h3_ready && !st.available && !st.installing && !st.error
+      && h3FlexState().supported && h3SpeedPref() === 'flex' && !window._h3FlexAutoAsked) {
+    window._h3FlexAutoAsked = true;
+    h3FlexInstall();
+  }
+  const ft = (typeof h3FlexTurboState === 'function') ? h3FlexTurboPickerStatus() : {};
+  const sig = [st.h3_ready, st.available, st.installing, st.progress, h3SpeedPref(),
+               ft.available, ft.installing, ft.progress, ft.pro_active].join('|');
+  if (sig !== _h3FlexPickerSig) {
+    _h3FlexPickerSig = sig;
+    if (typeof renderEngineSwitch === 'function') { try { renderEngineSwitch(); } catch (e) {} }
+  }
+}
+
+// ---- Image models: the same picker on the Images tab -------------------------
+// Owner, 5 Nov 2026: "for pictures, you select inside the picture thingy" — the
+// Images tab chose its model in a long select inside the form while Video and
+// Compose chose it at the top of the column. Now the image MODELS are registry
+// rows (surfaces=["image"]) drawn by this same picker, and the form's
+// #imgStudioEngine keeps only the picked model's versions (FLUX 3 Q8/Q6/Q4,
+// Reference Edit Fast/Standard/Quality, P-H3-Image Draft/Standard/High, MiniMax-H3-Image Draft/Standard/High). The
+// select stays the form value every Images function reads, so nothing that
+// renders, estimates or restores an image changed shape.
+const IMG_MODEL_LS_KEY = 'phos_img_model_versions';
+
+function imageModelRows() {
+  return ENGINES.filter(e => (e.surfaces || []).indexOf('image') !== -1);
+}
+
+// Which image model owns an #imgStudioEngine value ('auto' -> FLUX.2 klein).
+function imageModelForValue(v) {
+  return imageModelRows().find(e => (e.image_engines || []).indexOf(v) !== -1) || null;
+}
+
+function _imgVersionsMemory() {
+  try { return JSON.parse(localStorage.getItem(IMG_MODEL_LS_KEY) || '{}') || {}; } catch (e) { return {}; }
+}
+
+// The status of one image model, in the picker's vocabulary. Download state
+// is per version and lives on the form's chip; the one thing the picker must
+// say is that a model can never run on this Mac (every version needs more RAM).
+function imageModelStatus(e) {
+  const st = (typeof imgStudioEngineStatus === 'function') ? imgStudioEngineStatus() : {};
+  const infos = (e.image_engines || []).map(v => st[v]).filter(Boolean);
+  if (infos.length && infos.every(i => i.fits_mac === false)) {
+    const gb = Math.min.apply(null, infos.map(i => Number(i.mac_gb_needed) || 0));
+    return { capable: false, available: false, ram_floor_gb: gb };
+  }
+  return { capable: true, available: true };
+}
+
+// Show only the picked model's versions in the form; hide the select when the
+// model has one version (its chip and estimate stay). Keeps the user's version
+// per model, so FLUX 3 -> Ideogram -> FLUX 3 comes back on the same Q6.
+function syncImageVersions() {
+  const sel = document.getElementById('imgStudioEngine');
+  if (!sel) return null;
+  const model = imageModelForValue(sel.value);
+  if (!model) return null;
+  const own = model.image_engines || [];
+  let shown = 0;
+  Array.from(sel.options).forEach(o => {
+    if (o.dataset.alwaysHidden === undefined) o.dataset.alwaysHidden = o.hidden ? '1' : '';
+    const mine = own.indexOf(o.value) !== -1 && o.dataset.alwaysHidden !== '1';
+    o.hidden = !mine;
+    if (mine) shown++;
+  });
+  sel.hidden = shown <= 1;
+  const row = sel.closest('.studio-engine-row');
+  if (row) row.classList.toggle('single-version', shown <= 1);
+  const only = document.getElementById('imgStudioVersionOnly');
+  if (only) {
+    only.hidden = shown > 1;
+    const o = sel.options[sel.selectedIndex];
+    only.textContent = (shown <= 1 && o) ? o.textContent : '';
+  }
+  const mem = _imgVersionsMemory();
+  if (mem[model.id] !== sel.value) {
+    mem[model.id] = sel.value;
+    try { localStorage.setItem(IMG_MODEL_LS_KEY, JSON.stringify(mem)); } catch (e) {}
+  }
+  return model;
+}
+
+// Picking an image model: its last-used version (or its first), then the same
+// change chain the select itself runs, so every Images gate re-evaluates.
+function pickImageModel(id) {
+  const e = engineById(id);
+  const sel = document.getElementById('imgStudioEngine');
+  if (!e || !sel) return;
+  if (!imageModelStatus(e).capable) return;
+  const own = (e.image_engines || []).filter(v => {
+    const o = Array.from(sel.options).find(x => x.value === v);
+    return o && !o.disabled && o.dataset.alwaysHidden !== '1';
+  });
+  if (!own.length) return;
+  const remembered = _imgVersionsMemory()[id];
+  const want = own.indexOf(remembered) !== -1 ? remembered : own[0];
+  if (sel.value !== want) {
+    sel.value = want;
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  renderEngineSwitch();
+}
+
 function renderEngineSwitch() {
   renderLtxGenSwitch();   // the Remix-row switch; independent of the header row below
   const box = document.getElementById('engineSwitch');
@@ -1030,9 +1918,31 @@ function renderEngineSwitch() {
   if (div) div.hidden = !show;
   if (!show) { box.innerHTML = ''; closeEngineMenu(); return; }
 
-  const active = _currentSurface() === 'music' ? 'music' : currentEngine();
-  const surfaceMode = _currentSurface() === 'music' ? 'music' : currentMode;
+  const surfaceMode = _currentSurface() === 'music' ? 'music'
+    : _currentSurface() === 'oneshot' ? 'oneshot' : currentMode;
+  const osSurface = _currentSurface() === 'oneshot';
   const list = ENGINES.filter(engineRenderable);
+  // H3 Flex sits right after H3 (preview; see h3FlexPickerEntry).
+  // typeof: harnesses that lift renderEngineSwitch alone (test_music_engine) run without it.
+  // Flex rows are Video-form variants; One Shot renders plain LTX or H3 parts.
+  const videoSurface = _currentSurface() === 'video';
+  const flexEntry = (videoSurface && typeof h3FlexPickerEntry === 'function') ? h3FlexPickerEntry() : null;
+  if (flexEntry) {
+    const at = list.findIndex(e => e.id === 'h3');
+    list.splice(at + 1, 0, flexEntry);
+  }
+  const turboEntry = (videoSurface && typeof h3FlexTurboPickerEntry === 'function') ? h3FlexTurboPickerEntry() : null;
+  if (turboEntry) {
+    const at = list.findIndex(e => e.id === (flexEntry ? H3FLEX_ID : 'h3'));
+    list.splice(at + 1, 0, turboEntry);
+  }
+  const imgSurface = _currentSurface() === 'image';
+  const imgModel = imgSurface ? syncImageVersions() : null;
+  const active = _currentSurface() === 'music' ? 'music'
+    : imgSurface ? (imgModel ? imgModel.id : ((list[0] || {}).id))
+    : osSurface ? ((typeof osCurrentEngine === 'function' && osCurrentEngine()) || 'ltx')
+    : (turboEntry && h3FlexTurboPicked() ? H3FLEXTURBO_ID
+      : (flexEntry && h3FlexPicked() ? 'h3flex' : currentEngine()));
 
   // ---- The trigger: the active engine, and nothing else ----
   const act = list.find(e => e.id === active) || list[0];
@@ -1040,30 +1950,54 @@ function renderEngineSwitch() {
     box.innerHTML = `<button type="button" class="eng-trigger" aria-haspopup="listbox"
         aria-expanded="false"
         style="--eng-accent:${escapeHtml(act.accent)};--eng-dim:${escapeHtml(act.accent_dim)};--eng-soft:${escapeHtml(act.accent_soft)}"
-        title="${escapeHtml(_engineTooltip(act, engineStatus(act), engineServesMode(act, surfaceMode)))}">
+        title="${escapeHtml(act.virtual ? (act.id === H3FLEXTURBO_ID ? _h3FlexTurboTooltip(h3FlexTurboPickerStatus())
+          : _h3FlexTooltip(h3FlexPickerStatus(), engineById('h3')))
+          : _engineTooltip(act, engineStatus(act), imgSurface || engineServesMode(act, surfaceMode)))}">
       <span class="eng-mark"><svg class="ph" aria-hidden="true"><use href="#${escapeHtml(act.mark)}"/></svg></span>
       <span class="eng-seg-name">${escapeHtml(act.label)}</span>${
-      act.generation ? `<span class="eng-seg-gen">${escapeHtml(act.generation)}</span>` : ''}
+      act.generation ? `<span class="eng-seg-gen">${escapeHtml(act.generation)}</span>` : ''}${
+      act.preview ? '<span class="eng-badge eng-preview">preview</span>' : ''}${
+      act.pro ? (h3FlexTurboPickerStatus().pro_active ? '<span class="pro-tag pro-on">Pro ✓</span>' : '<span class="pro-tag">Pro</span>') : ''}
       <svg class="ph eng-caret" aria-hidden="true"><use href="#ph-caret-down-bold"/></svg>
-    </button>
-    <button type="button" class="ghost-btn" id="activeEngineInfoBtn"
-        title="Engine Details & Bilingual Info / شرح وتفاصيل المحرك"
-        style="margin-left:4px;padding:3px 6px;font-size:12px;border:none;background:transparent;cursor:pointer;opacity:0.8;">ℹ️</button>`;
+    </button>`;
     const t = box.querySelector('.eng-trigger');
     if (t) t.onclick = (ev) => { ev.stopPropagation(); toggleEngineMenu(); };
-    const inf = box.querySelector('#activeEngineInfoBtn');
-    if (inf) inf.onclick = (ev) => {
-      ev.stopPropagation();
-      if (typeof showEngineInfoModal === 'function') showEngineInfoModal(act.id);
-    };
   }
 
   // ---- The menu: every engine, each stating its own state ----
   const menu = _engineMenuEl();
   menu.innerHTML = list.map(e => {
+    if (e.virtual && e.id === H3FLEXTURBO_ID) return _h3FlexTurboMenuRow(e, active, surfaceMode);
+    if (e.virtual) {
+      const fst = h3FlexPickerStatus();
+      const fBadge = _h3FlexBadge(fst, engineById('h3'));
+      const fOffer = !fst.available;
+      const fOk = engineServesMode(e, surfaceMode);
+      const fCls = 'eng-opt eng-opt-flex' + (e.id === active ? ' active' : '')
+        + (fOffer ? ' needs-install' : '') + (fst.available && !fOk ? ' inert' : '');
+      return `<button type="button" class="${fCls}" data-engine="${H3FLEX_ID}"
+          role="option" aria-selected="${e.id === active ? 'true' : 'false'}"
+          style="--eng-accent:${escapeHtml(e.accent)};--eng-dim:${escapeHtml(e.accent_dim)};--eng-soft:${escapeHtml(e.accent_soft)}"
+          title="${escapeHtml(_h3FlexTooltip(fst, engineById('h3')))}">
+        <span class="eng-mark"><svg class="ph" aria-hidden="true"><use href="#${escapeHtml(e.mark)}"/></svg></span>
+        <span class="eng-opt-body">
+          <span class="eng-opt-top">
+            <span class="eng-seg-name">${escapeHtml(e.label)}</span><span class="eng-badge eng-preview">preview</span>${
+            fBadge ? `<span class="eng-badge offer">${escapeHtml(fBadge)}</span>` : ''}
+          </span>
+          <span class="eng-opt-sub">${escapeHtml(e.tagline)}</span>
+        </span>${
+        e.id === active ? '<svg class="ph eng-tick" aria-hidden="true"><use href="#ph-check-bold"/></svg>' : ''}
+      </button>`;
+    }
     const st = engineStatus(e);
-    const offer = !e.builtin && !st.announced && st.capable && !st.available;
-    const modeOk = engineServesMode(e, surfaceMode);
+    // Mac app, weights on this Mac, runtime being set up by the app itself: not an
+    // offer and not a repair, just a calm "getting ready".
+    const preparing = !e.builtin && !st.announced && st.capable && !st.available && !!st.preparing;
+    const offer = !e.builtin && !st.announced && st.capable && !st.available && !preparing;
+    // Every image model makes pictures; the form under the picker says what
+    // each needs (a reference for Reference Edit).
+    const modeOk = imgSurface || engineServesMode(e, surfaceMode);
     // Four badges, four different sentences. An OFFER (download / repair) is
     // worth the engine's own colour; a constraint is not.
     let badge = '', badgeClass = '';
@@ -1078,10 +2012,13 @@ function renderEngineSwitch() {
         : st.repairable ? 'repair'
         : (e.install_size || '').replace(/^~/, '');
       badgeClass = ' offer';
-    } else if (st.available && !modeOk) { badge = (e.serves_label || '').toLowerCase().replace(' and ', ' · '); }
+    } else if (preparing) { badge = T('engines.getting_ready', 'getting ready'); }
+    else if (st.available && !modeOk) { badge = (e.serves_label || '').toLowerCase().replace(' and ', ' · '); }
+    else if (imgSurface && !st.capable) { badge = 'needs ' + (st.ram_floor_gb || '?') + ' GB'; }
+    else if (e.preview) { badge = 'preview'; }
     // Inert = real but unreachable RIGHT NOW. Distinct from needs-install,
     // which IS reachable — that click is the install.
-    const inert = st.announced || (st.available && !modeOk);
+    const inert = st.announced || preparing || (st.available && !modeOk) || (imgSurface && !st.capable);
     const cls = 'eng-opt'
       + (e.id === active ? ' active' : '')
       + (offer ? ' needs-install' : '')
@@ -1109,7 +2046,26 @@ function renderEngineSwitch() {
   menu.querySelectorAll('.eng-opt').forEach(b => {
     b.onclick = () => {
       closeEngineMenu();
+      if (b.dataset.engine === 'h3flex') { h3FlexPickerClick(); return; }
+      if (b.dataset.engine === H3FLEXTURBO_ID) { h3FlexTurboPickerClick(); return; }
+      // Plain H3 from the picker means H3's own Speed, not Flex.
+      if (b.dataset.engine === 'h3' && (h3SpeedPref() === 'flex' || h3SpeedPref() === 'flex_turbo')
+          && typeof setH3Speed === 'function') {
+        try { localStorage.removeItem('phos_h3flex_wanted'); } catch (e) {}
+        setH3Speed('fast');
+      }
+      if (imgSurface) { pickImageModel(b.dataset.engine); return; }
+      if (osSurface) {
+        // One Shot keeps its own engine state (OS.engine); an engine that is
+        // not installed opens its install card exactly as on Video.
+        const oe = engineById(b.dataset.engine), ost = engineStatus(oe);
+        if (oe && !oe.builtin && ost.capable && !ost.available) { engineSegClick(oe.id); return; }
+        if (typeof osSetEngine === 'function') osSetEngine(b.dataset.engine);
+        renderEngineSwitch();
+        return;
+      }
       engineSegClick(b.dataset.engine);
+      renderEngineSwitch();
     };
   });
 
@@ -1132,12 +2088,12 @@ function renderEngineSwitch() {
 // The generation switch, as markup. Shared by the engine menu and the Remix row
 // so the two cannot drift: same buttons, same endpoint, same wording.
 function _ltxGenSwitchHtml(gens, withNote) {
-  return `<span class="eng-gen-label">LTX generation</span>
-      <span class="eng-gen-btns" role="group" aria-label="LTX generation">${
+  return `<span class="eng-gen-label">${T('engines.ltx_generation', 'LTX generation')}</span>
+      <span class="eng-gen-btns" role="group" aria-label="${TA('engines.ltx_generation', 'LTX generation')}">${
       gens.map(g => `<button type="button" class="eng-gen-btn${g.active ? ' active' : ''}"
           data-gen="${escapeHtml(g.id)}" aria-pressed="${g.active ? 'true' : 'false'}"
-          title="${g.active ? 'Rendering with LTX-' + escapeHtml(g.label)
-                           : 'Switch to LTX-' + escapeHtml(g.label) + ' (restarts the panel)'}">${escapeHtml(g.label)}</button>`).join('')
+          title="${g.active ? T('engines.rendering_with_ltx', 'Rendering with LTX-') + escapeHtml(g.label)
+                           : T('engines.switch_to_ltx', 'Switch to LTX-') + escapeHtml(g.label) + T('engines.restarts_the_panel', ' (restarts the panel)')}">${escapeHtml(g.label)}</button>`).join('')
       }</span>${withNote
         ? '<span class="eng-gen-note">Switching restarts the panel. Ingredients needs 2.3.</span>'
         : '<span class="eng-gen-note">Only one runs at a time - switching restarts the panel.</span>'}`;
@@ -1194,7 +2150,7 @@ async function switchLtxGeneration(id) {
     }
     if (d.unchanged) return true;
   }
-  say('Switching LTX generation - restarting the panel\u2026', 'success');
+  say(T('engines.switching_ltx_generation_restarting_the', 'Switching LTX generation - restarting the panel\u2026'), 'success');
   const deadline = Date.now() + 60000;
   while (Date.now() < deadline) {
     await new Promise(res => setTimeout(res, 700));
@@ -1203,8 +2159,8 @@ async function switchLtxGeneration(id) {
       if (v.ok) { location.reload(); return true; }
     } catch (e) { /* still down */ }
   }
-  say(distText('Panel did not come back within 60s - start it from Pinokio.',
-               'The studio did not come back within 60s - use Studio \u2192 Restart Engine.'), 'danger');
+  say(distText(T('engines.panel_did_not_come_back', 'Panel did not come back within 60s - start it from Pinokio.'),
+               T('engines.the_studio_did_not_come', 'The studio did not come back within 60s - use Studio \u2192 Restart Engine.')), 'danger');
   return false;
 }
 
@@ -1226,23 +2182,26 @@ function _engineTooltip(e, st, modeOk) {
     // this codebase has ever been either (H3-28). The real bar is
     // H3_MIN_RAM_GB_Q8 = 36 (mlx_ltx_panel.py); both server fields should
     // always be present, so this is a last-resort fallback only.
-    return name + ' — needs ' + (st.ram_floor_gb || st.min_ram_gb || 36)
-                + ' GB unified memory';
+    return name + T('engines.needs', ' — needs ') + (st.ram_floor_gb || st.min_ram_gb || 36)
+                + T('engines.gb_unified_memory', ' GB unified memory');
+  }
+  if (!e.builtin && !st.available && st.preparing) {
+    return name + T('engines.is_getting_ready_on_this', ' is getting ready on this Mac. It turns on by itself when it is ready.');
   }
   if (!e.builtin && !st.available) {
     // H3-05: "repairable" also covers missing_q8_dit (every weight present,
     // only the local compact build is missing) — a genuinely different fix
     // than "repair", with its own Pinokio menu entry (Build, not Repair).
     return (st.repairable && st.reason === 'missing_q8_dit')
-      ? name + ' — needs its compact engine built; your weights are already on disk. Click for the one-click fix.'
+      ? name + T('engines.needs_its_compact_engine_built', ' — needs its compact engine built; your weights are already on disk. Click for the one-click fix.')
       : st.repairable
-      ? name + ' — needs repair; your weights are still on disk. Click for the one-click fix.'
-      : name + ' — available to install (' + (e.install_size || '')
-        + '). Click to see what it does.';
+      ? name + T('engines.needs_repair_your_weights_are', ' — needs repair; your weights are still on disk. Click for the one-click fix.')
+      : name + T('engines.available_to_install', ' — available to install (') + (e.install_size || '')
+        + T('engines.click_to_see_what_it', '). Click to see what it does.');
   }
   if (!modeOk) {
-    return name + ' — renders ' + (e.serves_label || 'other modes')
-         + " only, and this mode isn't one of them.";
+    return name + T('engines.renders', ' — renders ') + (e.serves_label || 'other modes')
+         + T('engines.only_and_this_mode_isn', " only, and this mode isn't one of them.");
   }
   return name + ' — ' + (e.tagline || '');
 }
@@ -1256,6 +2215,8 @@ function engineSegClick(id) {
   if (!e) return;
   const st = engineStatus(e);
   if (st.announced) return;
+  // Mac app, runtime being set up by the app: nothing to open, nothing to click.
+  if (!e.builtin && st.capable && !st.available && st.preparing) return;
   if (!e.builtin && st.capable && !st.available) {
     const fn = e.install_card && window[e.install_card];
     // 'chip' tells the card this click came from the switcher, where a repeat
@@ -1355,7 +2316,11 @@ const TIER_ENGINES = {
 
 function _tierChipHtml(engine, kind, item, cell, active) {
   const E = TIER_ENGINES[engine] || TIER_ENGINES.h3;
-  const ok = !cell ? false : (cell.available !== false);
+  // While H3 Flex is the pick, a cell it cannot render is greyed like an
+  // unavailable one, with the plain reason (h3CellTakesFlex is the server's).
+  const flexLocked = engine === 'h3' && !!cell && cell.available !== false
+    && typeof h3FlexPickedAny === 'function' && h3FlexPickedAny() && !h3CellTakesFlex(cell);
+  const ok = !cell ? false : (cell.available !== false && !flexLocked);
   // NEEDS-INSTALL is a third state, distinct from unavailable: the cell is
   // renderable on this Mac, the weights just aren't here yet. It reads as a
   // CTA (dashed + download glyph via .needs-install) and its third slot names
@@ -1363,10 +2328,12 @@ function _tierChipHtml(engine, kind, item, cell, active) {
   const needsInstall = ok && E.needsInstall ? !!E.needsInstall(cell) : false;
   const cls = 'q-chip pill-btn pill-quality'
     + (active ? ' active' : '') + (ok ? '' : ' unavailable')
+    + (flexLocked ? ' flex-locked' : '')
     + (needsInstall ? ' needs-install' : '');
   const spec = (kind === 'quality') ? E.qualitySpec(item, cell)
                                     : E.lengthSpec(item, cell);
-  const foot = !ok ? 'unavailable'
+  const foot = flexLocked ? T('engines.h3_only', 'H3 only')
+             : !ok ? 'unavailable'
              : needsInstall ? E.installLabel(cell)
              : E.eta(cell);
   // Owner ruling (2026-09-29): the tooltip says WHERE the time on the chip
@@ -1376,8 +2343,9 @@ function _tierChipHtml(engine, kind, item, cell, active) {
   const basisFn = kind === 'quality' && !needsInstall
     ? (engine === 'h3' ? h3CellEtaBasis : ltxCellEtaBasis) : null;
   const basis = (ok && basisFn) ? basisFn(cell) : '';
-  const title = ok
-    ? ([(cell && cell.blurb) || item.blurb || '', basis].filter(Boolean).join(' — '))
+  const title = flexLocked ? H3_FLEX_CELL_TIP
+    : ok
+    ? basis
     : (cell && cell.unavailable_reason) || 'Not available on this install.';
   const attr = (kind === 'quality') ? (E.qAttr || `${engine}-quality`)
                                     : (E.lAttr || `${engine}-length`);
@@ -1547,6 +2515,14 @@ function ltxCurrentCell() {
 // and where it is NOT measured the string is still the server's model, so the
 // browser never carries a second cost model. The only case it recomputes is a
 // custom duration, which by definition has no cell.
+// Pro active (data-pro set by proStatusRefresh): add the honest estimate the server computed from the
+// fleet p75 x the worst measured Pro/Free ratio. Free: nothing.
+function proEstSuffix(fr) {
+  try {
+    if (!document.documentElement.dataset.pro || !fr || !fr.pro_est) return '';
+    return ' · Pro ' + fr.pro_est.label;
+  } catch (e) { return ''; }
+}
 function ltxCellEta(cell) {
   if (!cell) return '';
   if (cell.eta === 'custom') return 'custom';
@@ -1557,11 +2533,11 @@ function ltxCellEta(cell) {
   // range of its own yet, so this branch keeps the point estimate.
   if (cell.fast_eta && typeof schedPresetActive === 'function'
       && schedPresetActive()) {
-    return cell.fast_eta + ' · fast draft';
+    return cell.fast_eta + T('engines.fast_draft', ' · fast draft');
   }
   // VC-23: "Q8 HQ" names the internal quantization + pipeline, not
   // anything a user asked for — "High detail" says what it delivers.
-  const tail = (cell.pack === 'q8' && cell.pipeline === 'hq') ? ' · High detail' : '';
+  const tail = (cell.pack === 'q8' && cell.pipeline === 'hq') ? T('engines.high_detail', ' · High detail') : '';
   // Owner ruling (2026-09-29): show the fleet's own p25-p75 RANGE ("~12-18
   // min") wherever real fleet data exists, instead of a single point
   // number — cell.fleet_range is server-computed (fleet_calibrated_range,
@@ -1571,7 +2547,7 @@ function ltxCellEta(cell) {
   // +/-10% on a measured cell, skewed upward on a modelled one) still reads
   // more honestly than a single point; the bare point estimate is last.
   const fr = cell.fleet_range;
-  return (fr ? fr.eta_range : (cell.eta_range || cell.eta || '')) + tail;
+  return (fr ? fr.eta_range : (cell.eta_range || cell.eta || '')) + tail + proEstSuffix(fr);
 }
 // The provenance line for a cell's tooltip — "based on 523 renders on Macs
 // like yours" / "estimated -- few renders on this Mac class yet". Kept
@@ -1579,7 +2555,7 @@ function ltxCellEta(cell) {
 // Batch total, a queue-row label) doesn't have to strip a sentence back off.
 function ltxCellEtaBasis(cell) {
   if (!cell) return '';
-  return cell.fleet_range ? cell.fleet_range.basis : 'estimated — few renders on this Mac class yet';
+  return cell.fleet_range ? cell.fleet_range.basis : T('engines.estimated_few_renders_on_this', 'estimated — few renders on this Mac class yet');
 }
 // Are this cell's weights on disk? A RUNTIME question — the tier table is built
 // at import time and cannot know. `offered` answers "can this Mac's RAM serve
@@ -1617,7 +2593,7 @@ function ltxCellInstallLabel(cell) {
   // present, High's only remaining gap is the add-on.
   let want = P.q8;
   if (cell && cell.pipeline === 'hq' && packOk && addonMissing) want = P.hq_addon;
-  if (!want) return 'install needed';
+  if (!want) return T('engines.install_needed', 'install needed');
   const short = String(want.name || '').replace(/^LTX-2\.5\s*/, '');
   return `Install ${short} · ${want.size}`;
 }
@@ -1738,10 +2714,18 @@ function _h3ApplyShape(qualityKey, lengthKey, opts) {
     const fb = _h3FallbackCell(cell);
     if (!fb || fb.available === false) return;
     if (note) {
-      note.textContent = reason + ' Falling back to ' + fb.label + '.';
+      note.textContent = reason + T('engines.falling_back_to', ' Falling back to ') + fb.label + '.';
       note.hidden = false;
     }
     cell = fb;
+  }
+  // A cell H3 Flex cannot render, clicked while Flex is the pick: refused like
+  // an unavailable one (the chip is greyed with the reason). A restore lands
+  // and h3FlexFit (queued from renderH3Turbo) moves it to the nearest cell.
+  if (!opts.fallback && typeof h3FlexPickedAny === 'function' && h3FlexPickedAny() && !h3CellTakesFlex(cell)) {
+    if (typeof phosToast === 'function') phosToast(H3_FLEX_CELL_TIP, { kind: 'info' });
+    renderH3Axes();
+    return;
   }
   const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
   set('h3_quality', cell.quality);
@@ -1760,26 +2744,16 @@ function _h3ApplyShape(qualityKey, lengthKey, opts) {
     const ov = (document.getElementById('h3_steps') || {}).value || 'auto';
     s.value = (ov !== 'auto' && /^\d+$/.test(ov)) ? parseInt(ov, 10) : cell.steps;
   }
-  // Cells carry every honest note they owe, and the server owns the text. Two
-  // exist today and they now COMPOSE: a chained length warns that one prompt is
-  // asked of every window (so a scripted line lands once per window) at ANY
-  // quality, and the Draft canvas says out loud that its 0.25 MP pass resolves
-  // composition and timing but not faces. Surfaced where the user is choosing,
-  // not in a tooltip.
+  // Explanations belong in Docs; the controls keep only actionable status.
   const noteEl = document.getElementById('h3TierNote');
   if (noteEl) {
-    const n = cell.note || '';
-    noteEl.textContent = n;
-    noteEl.hidden = !n;
+    noteEl.textContent = '';
+    noteEl.hidden = true;
   }
-  // H3-14: the same blurb the chip's own title= tooltip carries, surfaced as
-  // a visible line so it isn't hover-only (unreachable on trackpad-averse
-  // and touch use, and easy for a stale sentence to hide in for months).
   const blurbEl = document.getElementById('h3TierBlurb');
   if (blurbEl) {
-    const b = cell.blurb || '';
-    blurbEl.textContent = b;
-    blurbEl.hidden = !b;
+    blurbEl.textContent = '';
+    blurbEl.hidden = true;
   }
   // The export line is per (canvas × target): switching quality changes whether
   // this canvas exports clean or padded, so it has to be re-read here too.
@@ -1882,7 +2856,7 @@ function renderH3WindowPrompts() {
   row.hidden = !show;
   if (!show) { _h3SerializeWindowPrompts(); return; }
   const hint = document.getElementById('h3WinPromptsHint');
-  if (hint) hint.textContent = windows + ' × 5s windows';
+  if (hint) hint.textContent = windows + T('engines.5s_windows', ' × 5s windows');
   const prev = _h3WinValues();
   const main = String((document.getElementById('prompt') || {}).value || '');
   const parts = [];
@@ -1992,15 +2966,15 @@ function h3InsertPromptStructure() {
   const cur = ta.value || '';
   if (cur.includes(H3_PROMPT_FIELD_MARKER)) {
     if (typeof phosToast === 'function') {
-      phosToast('Already structured — the three fields are there.', { kind: 'ok' });
+      phosToast(T('engines.already_structured_the_three_fields', 'Already structured — the three fields are there.'), { kind: 'ok' });
     }
     ta.focus();
     return;
   }
   const body = cur.trim()
     ? cur.trim()
-    : '[Shot 1] Who is on screen, two or three anchors (build, clothes), '
-      + 'where they are and the light. What happens, described plainly.';
+    : T('engines.shot_1_who_is_on', '[Shot 1] Who is on screen, two or three anchors (build, clothes), ')
+      + T('engines.where_they_are_and_the', 'where they are and the light. What happens, described plainly.');
   ta.value = `${H3_PROMPT_FIELD_MARKER} ${body}\n\n`
     + `overall_soundscape: ambience and sound effects in the scene.\n\n`
     + `non_diegetic_music: N/A`;
@@ -2021,16 +2995,17 @@ function h3InsertDialogueLine() {
   const before = ta.value.slice(0, start);
   const after = ta.value.slice(end);
   const needsLeadingSpace = before && !/[\s\n]$/.test(before);
-  const isArabic = (lang.toLowerCase() === 'arabic' || lang === 'العربية');
-  const ph = isArabic ? 'اكتب الحوار هنا' : 'line here';
-  const speaker = 'NAME (S1) says: ';
-  const line = `${needsLeadingSpace ? ' ' : ''}${speaker}<d>[${lang}] ${ph}</d> `
-    + `Exactly as the line ends, NAME's mouth settles closed.`;
+  const speaker = T('engines.name_s1_says', 'NAME (S1) says: ');
+  const placeholder = lang.includes('Arabic') ? 'اكتب جملة الحوار هنا' : T('engines.line_here', 'line here');
+  const line = `${needsLeadingSpace ? ' ' : ''}${speaker}<d>[${lang}] ${placeholder}</d> `
+    + T('engines.exactly_as_the_line_ends', 'Exactly as the line ends, NAME\'s mouth settles closed.');
   ta.value = before + line + after;
-  // Select placeholder so typing the actual words is one keystroke away.
+  // Select "line here" so typing the actual words is one keystroke away.
+  // Numeric, always: `before && …` is '' at position 0, and '' + 1 + … used to
+  // concatenate into a string offset that selected nothing (Codex H3-9).
   const selStart = before.length + (needsLeadingSpace ? 1 : 0) + speaker.length
     + `<d>[${lang}] `.length;
-  const selEnd = selStart + ph.length;
+  const selEnd = selStart + placeholder.length;
   ta.focus();
   try { ta.setSelectionRange(selStart, selEnd); } catch (e) {}
   ta.dispatchEvent(new Event('input', { bubbles: true }));
@@ -2095,7 +3070,7 @@ document.getElementById('prompt') && document.getElementById('prompt')
 // on the INSTALLED runner; the server (make_job + the worker) makes the same
 // decision from the same probes — this copy only lets the UI say so first.
 globalThis.H3_MODE_CAP = { keyframe: 'keyframes', extend: 'extend', a2v: 'audio_drive', v2a: 'video_to_audio' };
-globalThis.H3_MODE_LABEL = { keyframe: 'Keyframes', extend: 'Extend', a2v: 'Lip-sync', v2a: 'Add sound' };
+globalThis.H3_MODE_LABEL = { keyframe: T('engines.keyframes', 'Keyframes'), extend: T('engines.extend_2', 'Extend'), a2v: 'Lip-sync', v2a: T('engines.add_sound', 'Add sound') };
 
 function h3CanServe(mode) {
   const st = (window._ENGINE_PROBES && window._ENGINE_PROBES.h3) || {};
@@ -2131,12 +3106,15 @@ function syncH3MediaModeUi() {
 // Inline handlers in the markup and the other files resolve these through
 // the global scope; everything NOT listed here is private to this module.
 Object.assign(globalThis, {
+  imageModelRows, imageModelForValue, syncImageVersions, pickImageModel,
   engineById, defaultEngine, engineStatus, engineServesMode,
   h3ResolveTierKey, h3TierByKey, h3CellFor, h3CurrentCell,
   setH3Upscale, setH3FaceFixAfter, setH3Orientation, setH3Steps, h3TurboPillSub,
   h3V13State, h3V13On,
-  renderH3Turbo, setH3Turbo, syncModeStripToEngine, renderEngineSwitch,
-  setH3Speed, h3SpeedOfParams, h3EstimateLine, setH3TriStep, h3TriStepOn, h3TriStepState,
+  renderH3Turbo, setH3Turbo, syncModeStripToEngine, modeChipEngineClick, renderEngineSwitch, h3FlexSubmitBlock,
+  setH3Speed, h3SpeedOfParams, h3FlexOn, h3FlexState, h3FlexTurboOn, h3FlexTurboState,
+  h3FlexTurboPickerEntry, h3FlexTurboPickerStatus, h3FlexTurboPickerClick, h3EstimateLine, setH3TriStep, h3TriStepOn, h3TriStepState,
+  setH3CleanSound, h3CleanSoundOn, h3CleanSoundPref,
   h3JobSpeedLabel, h3JobShapeLabel, ltxCellEtaBasis, h3CellEtaBasis,
   // Published for the Shot setup summary (characters.js): a closed section has
   // to price the shape it is hiding, and it must do it with the SAME numbers
@@ -2158,4 +3136,6 @@ Object.assign(globalThis, {
   // and the chip fell through to the "needs LTX-2.3" toast while its own
   // tooltip said "click to switch".
   switchLtxGeneration,
+  // What the form has picked, for capabilities.js (the generic greying).
+  h3SpeedPref, h3CurrentQuality, h3CurrentLength, _modeChipMode,
 });

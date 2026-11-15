@@ -1,410 +1,196 @@
-// webapp/js/i18n.js — Bilingual English/Arabic localization engine for MacStudio MLX
-// Default language: English ('en'). Arabic ('ar') toggles full RTL layout and translation.
+// webapp/js/i18n.js — the Studio's string lookup (docs/TRANSLATING.md).
+//
+// English lives in the code: markup carries data-i18n="key" attributes on
+// the element whose text it is, JS calls T('key', 'English {name}', {name})
+// or TP('key', n, {one: '{count} clip', other: '{count} clips'}). Capital T
+// on purpose: `t` is a common local name in these modules and would shadow it. The
+// server picks the language (i18n.py: the Studio setting, else the Mac's
+// language list) and ships only that language's strings in BOOT.i18n, so a
+// lookup is synchronous and a missing key always falls back to the English
+// written next to it — the page can never show a raw key.
+//
+// This tag loads FIRST among the modules so every other module may call
+// T() at evaluation time. The markup pass (applyI18n(document)) is a
+// run-once startup call and lives in main.js like every other.
 
-(function (root, factory) {
-  if (typeof define === 'function' && define.amd) {
-    define([], factory);
-  } else if (typeof module === 'object' && module.exports) {
-    module.exports = factory();
-  } else {
-    root.I18N = factory();
-    root.t = root.I18N.t;
-    root.setLanguage = root.I18N.setLanguage;
-    root.getLanguage = root.I18N.getLanguage;
-    root.toggleLanguage = root.I18N.toggleLanguage;
+const _I18N = (typeof BOOT !== 'undefined' && BOOT && BOOT.i18n) || {};
+const _STR = _I18N.strings || {};
+const _LANG = _I18N.lang || 'en';
+let _plural = null;
+try { _plural = new Intl.PluralRules(_LANG); } catch (e) { _plural = new Intl.PluralRules('en'); }
+
+function _fill(s, vars) {
+  if (!vars) return s;
+  return s.replace(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (m, k) =>
+    Object.prototype.hasOwnProperty.call(vars, k) ? String(vars[k]) : m);
+}
+
+// T('key', 'English with {name}', {name: value}) -> the translation, or the
+// English, with {name} placeholders filled.
+function T(key, english, vars) {
+  const tr = _STR[key];
+  return _fill((typeof tr === 'string' && tr) ? tr : String(english == null ? '' : english), vars);
+}
+
+// TP('key', count, {one: '{count} clip', other: '{count} clips'}, vars) —
+// plural forms. A translation supplies its own language's CLDR categories
+// (Russian one/few/many/other, Japanese other only); a missing category
+// falls back to "other", then to the English.
+// TA() — the same lookup for text that lands inside an HTML attribute
+// value in a template (title="${TA(...)}"): a translation is escaped for the
+// attribute; the English is returned exactly as written in the code.
+function TA(key, english, vars) {
+  const tr = _STR[key];
+  if (typeof tr === 'string' && tr) {
+    return _fill(tr, vars).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
-}(typeof self !== 'undefined' ? self : this, function () {
+  return _fill(String(english == null ? '' : english), vars);
+}
 
-  const STORAGE_KEY = 'phos_ui_lang';
-  const DEFAULT_LANG = 'en';
+function TP(key, count, forms, vars) {
+  const n = Number(count);
+  const v = Object.assign({ count: count }, vars || {});
+  const tr = _STR[key];
+  if (tr && typeof tr === 'object') {
+    const cat = _plural.select(n);
+    const s = tr[cat] || tr.other;
+    if (s) return _fill(s, v);
+  }
+  const en = forms || {};
+  return _fill((n === 1 && en.one) ? en.one : (en.other || en.one || ''), v);
+}
 
-  const TRANSLATIONS = {
-    en: {
-      // Header & System
-      "app_title": "MacStudio MLX",
-      "switch_lang": "عربي",
-      "switch_lang_title": "Switch to Arabic / التبديل إلى العربية",
-      "docs": "Docs",
-      "docs_title": "Docs — how every tool works, and every shortcut",
-      "settings": "Settings",
-      "settings_title": "Settings — models, rendering, output, accounts",
-      "report_bug": "Report a bug",
-      "report_bug_title": "Report a bug — opens GitHub issue with environment pre-filled",
-      "stop_comfy": "Stop Comfy",
-      "update_now": "Update now",
-      "later": "Later",
-      "new_version_available": "A new version is available",
-      "tier": "Tier",
-      "memory": "Memory",
-      "engine": "Engine",
-      "models": "Models",
-      "queue": "Queue",
-      "render": "Render",
-      "system_health": "System health",
-      "sys_health_click": "System health — click for detail",
+function i18nLang() { return _LANG; }
 
-      // Navigation Tabs
-      "tab_video": "Video",
-      "tab_oneshot": "One Shot",
-      "tab_images": "Images",
-      "tab_storyboard": "Storyboard",
-      "tab_editor": "Editor",
-      "tab_audio": "Audio",
-      "tab_train": "Train Character",
+// i18nAgo(seconds) -> "hace 5 min", "vor 3 Std.", "3분 전"… in the page's
+// language (Intl, CLDR rules). English call sites keep their own wording, so
+// they only ask for this when i18nLang() !== 'en'.
+function i18nAgo(sec) {
+  const s = Math.max(0, Number(sec) || 0);
+  let rtf;
+  try { rtf = new Intl.RelativeTimeFormat(_LANG, { numeric: 'auto', style: 'short' }); } catch (e) { rtf = new Intl.RelativeTimeFormat('en', { style: 'short' }); }
+  if (s < 60) return rtf.format(-Math.round(s), 'second');
+  if (s < 3600) return rtf.format(-Math.round(s / 60), 'minute');
+  if (s < 86400) return rtf.format(-Math.round(s / 3600), 'hour');
+  if (s < 86400 * 30) return rtf.format(-Math.round(s / 86400), 'day');
+  return rtf.format(-Math.round(s / (86400 * 30)), 'month');
+}
+function i18nDir() { return _I18N.dir || 'ltr'; }
 
-      // Mode Bar
-      "mode_text": "Text",
-      "mode_text_sub": "prompt → video",
-      "mode_character": "Character",
-      "mode_character_sub": "trained face + voice",
-      "mode_image": "Image",
-      "mode_image_sub": "image + prompt",
-      "mode_keyframe": "Start & end frame",
-      "mode_keyframe_sub": "first + last",
-      "mode_keyframes": "Keyframes",
-      "mode_keyframes_sub": "3–8 frames",
-      "mode_extend": "Extend",
-      "mode_extend_sub": "continue a clip",
-      "mode_add_sound": "Add sound",
-      "mode_add_sound_sub": "your clip → its sound",
-      "mode_lipsync": "Lip-sync",
-      "mode_lipsync_sub": "picture + audio → it talks",
-      "mode_remix": "Remix",
-      "mode_remix_sub": "motion control · refs · color",
+// ---- markup ---------------------------------------------------------------
+// An element with data-i18n="key" is one message made of its direct
+// children: text runs, plus each child element as a numbered marker —
+// <0>text</0> for an inline child holding only text (its text is
+// translatable in place, e.g. <b>Pro</b>), <0/> for anything else (an icon,
+// an input, a child with its own data-i18n). The translation may move the
+// markers but must keep exactly the same set; the ORIGINAL child nodes are
+// reused, so ids, listeners and classes survive. Text is set as text nodes,
+// never parsed as HTML — a translation cannot inject markup.
+// Same set as scripts/i18n_tool.py PAIRED — keep the two in step. Code,
+// keyboard keys and file names (<code>, <kbd>) are opaque: never translated.
+const _PAIRED = new Set(['B', 'I', 'EM', 'STRONG', 'A', 'SPAN', 'SMALL',
+  'U', 'S', 'MARK', 'SUB', 'SUP', 'ABBR', 'Q', 'CITE', 'DFN', 'TIME']);
 
-      // Remix Tools
-      "remix_header": "Remix tool · bring your own media · IC-LoRA",
-      "remix_ingredients": "Ingredients",
-      "remix_ingredients_sub": "2–8 refs → one clip",
-      "remix_control": "Motion Control",
-      "remix_control_sub": "pose · depth · canny",
-      "remix_colorize": "Colorize & Restore",
-      "remix_colorize_sub": "vintage / b&w → vivid video",
+function _isPaired(el) {
+  if (!_PAIRED.has(el.tagName)) return false;
+  if (el.id || el.hasAttribute('data-i18n')) return false;
+  for (const c of el.childNodes) if (c.nodeType !== 3) return false;
+  return /[A-Za-z]/.test(el.textContent);
+}
 
-      // Form Controls & Labels
-      "prompt_label": "Prompt",
-      "prompt_placeholder": "Describe what you want to see…",
-      "negative_prompt_label": "Negative Prompt",
-      "negative_prompt_placeholder": "What to avoid: blurry, distorted, jitter, bad hands…",
-      "enhance": "Enhance",
-      "enhance_title": "Use AI to expand and refine your prompt",
-      "clear": "Clear",
-      "random": "Random",
-      "seed": "Seed",
-      "quality": "Quality",
-      "duration": "Duration",
-      "frames": "Frames",
-      "fps": "FPS",
-      "aspect_ratio": "Aspect Ratio",
-      "resolution": "Resolution",
-      "steps": "Steps",
-      "guidance": "Guidance (CFG)",
-      "loras": "LoRAs",
-      "camera": "Camera",
-      "camera_motion": "Camera Motion",
-      "generate": "Generate",
-      "render_video": "Render Video",
-      "stop": "Stop",
-      "stop_title": "Stop the current render",
-      "cancel": "Cancel",
-      "apply": "Apply",
-      "close": "Close",
-      "save": "Save",
-      "delete": "Delete",
-      "retry": "Retry",
-      "download": "Download",
-      "play": "Play",
-      "pause": "Pause",
+function _tokens(s) {
+  const out = [];
+  const re = /<(\/?)(\d+)(\/?)>/g;
+  let last = 0, m;
+  while ((m = re.exec(s))) {
+    if (m.index > last) out.push({ text: s.slice(last, m.index) });
+    out.push({ n: +m[2], close: !!m[1], self: !!m[3] });
+    last = re.lastIndex;
+  }
+  if (last < s.length) out.push({ text: s.slice(last) });
+  return out;
+}
 
-      // Bottom Pane
-      "now": "Now",
-      "recent": "Recent",
-      "logs": "Logs",
-      "idle": "Idle",
-      "running": "Running",
-      "completed": "Completed",
-      "failed": "Failed",
-
-      // Image Studio & Storyboard & Audio & Train
-      "studio_generate": "Generate Image",
-      "studio_style": "Style",
-      "os_title": "One Shot Film",
-      "os_generate": "Generate Full Film",
-      "sb_new": "New Storyboard",
-      "sb_render_board": "Render Storyboard",
-      "train_name": "Character Name",
-      "train_start": "Start Training",
-      "audio_compose": "Compose Music",
-      "audio_lyrics": "Lyrics",
-
-      // Settings Modal
-      "appearance": "Appearance",
-      "theme_dark": "Dark",
-      "theme_light": "Light",
-      "theme_system": "System",
-      "language": "Language",
-      "language_en": "English",
-      "language_ar": "العربية (Arabic)",
-      "codec_preset": "Output Codec Preset",
-      "save_settings": "Save Settings"
-    },
-    ar: {
-      // Header & System
-      "app_title": "ماك ستوديو MLX",
-      "switch_lang": "English",
-      "switch_lang_title": "Switch to English / التبديل إلى الإنجليزية",
-      "docs": "التوثيق",
-      "docs_title": "التوثيق — شرح كامل لجميع الأدوات والاختصارات",
-      "settings": "الإعدادات",
-      "settings_title": "الإعدادات — النماذج، خيارات التوليد، الإخراج والحسابات",
-      "report_bug": "إبلاغ عن خطأ",
-      "report_bug_title": "إبلاغ عن مشكلة — يفتح تذكرة على GitHub مع تضمين تفاصيل النظام",
-      "stop_comfy": "إيقاف Comfy",
-      "update_now": "تحديث الآن",
-      "later": "لاحقاً",
-      "new_version_available": "يتوفر إصدار جديد",
-      "tier": "فئة العتاد",
-      "memory": "الذاكرة",
-      "engine": "المحرك",
-      "models": "النماذج",
-      "queue": "الانتظار",
-      "render": "التوليد",
-      "system_health": "حالة النظام",
-      "sys_health_click": "حالة النظام — اضغط للتفاصيل",
-
-      // Navigation Tabs
-      "tab_video": "فيديو",
-      "tab_oneshot": "لقطة واحدة",
-      "tab_images": "صور",
-      "tab_storyboard": "لوحة القصة",
-      "tab_editor": "المحرر",
-      "tab_audio": "صوت",
-      "tab_train": "تدريب شخصية",
-
-      // Mode Bar
-      "mode_text": "نص",
-      "mode_text_sub": "نص ← فيديو",
-      "mode_character": "شخصية",
-      "mode_character_sub": "وجه وصوت مدرّب",
-      "mode_image": "صورة",
-      "mode_image_sub": "صورة + نص",
-      "mode_keyframe": "البداية والنهاية",
-      "mode_keyframe_sub": "الأول والأخير",
-      "mode_keyframes": "إطارات مفتاحية",
-      "mode_keyframes_sub": "3–8 إطارات",
-      "mode_extend": "تمديد",
-      "mode_extend_sub": "مواصلة المشهد",
-      "mode_add_sound": "إضافة صوت",
-      "mode_add_sound_sub": "المقطع ← صوته",
-      "mode_lipsync": "مزامنة الشفاه",
-      "mode_lipsync_sub": "صورة + صوت ← حديث",
-      "mode_remix": "ريمكس",
-      "mode_remix_sub": "تحكم بالحركة · مراجع · ألوان",
-
-      // Remix Tools
-      "remix_header": "أداة ريمكس · أضف وسائطك الخاصة · IC-LoRA",
-      "remix_ingredients": "المكونات",
-      "remix_ingredients_sub": "2–8 صور مرجعية ← مقطع واحد",
-      "remix_control": "التحكم بالحركة",
-      "remix_control_sub": "وضعيات الجسم · العمق · الحواف",
-      "remix_colorize": "تلوين واستعادة",
-      "remix_colorize_sub": "أبيض وأسود / قديم ← فيديو ملون حي",
-
-      // Form Controls & Labels
-      "prompt_label": "الوصف التوجيهي (Prompt)",
-      "prompt_placeholder": "صف المشهد الذي تريد توليده بدقة…",
-      "negative_prompt_label": "الوصف السلبي (تجنب)",
-      "negative_prompt_placeholder": "ما ترغب بتجنبه: تشويه، ضبابية، اهتزاز، أيدي مشوهة…",
-      "enhance": "تحسين الوصف",
-      "enhance_title": "استخدام الذكاء الاصطناعي لتحسين وتوسيع النص التوجيهي",
-      "clear": "مسح",
-      "random": "عشوائي",
-      "seed": "البذرة (Seed)",
-      "quality": "الجودة",
-      "duration": "المدة",
-      "frames": "الإطارات",
-      "fps": "معدل الإطارات",
-      "aspect_ratio": "نسبة الأبعاد",
-      "resolution": "الدقة",
-      "steps": "الخطوات",
-      "guidance": "قوة التوجيه (CFG)",
-      "loras": "نماذج LoRA",
-      "camera": "الكاميرا",
-      "camera_motion": "حركة الكاميرا",
-      "generate": "توليد",
-      "render_video": "توليد الفيديو",
-      "stop": "إيقاف",
-      "stop_title": "إيقاف التوليد الحالي",
-      "cancel": "إلغاء",
-      "apply": "تطبيق",
-      "close": "إغلاق",
-      "save": "حفظ",
-      "delete": "حذف",
-      "retry": "إعادة المحاولة",
-      "download": "تنزيل",
-      "play": "تشغيل",
-      "pause": "إيقاف مؤقت",
-
-      // Bottom Pane
-      "now": "الآن",
-      "recent": "السابق",
-      "logs": "السجلات",
-      "idle": "خامل",
-      "running": "قيد التشغيل",
-      "completed": "مكتمل",
-      "failed": "فشل",
-
-      // Image Studio & Storyboard & Audio & Train
-      "studio_generate": "توليد صورة",
-      "studio_style": "النمط",
-      "os_title": "فيلم بلقطة واحدة",
-      "os_generate": "توليد الفيلم كاملاً",
-      "sb_new": "لوحة قصة جديدة",
-      "sb_render_board": "توليد لوحة القصة",
-      "train_name": "اسم الشخصية",
-      "train_start": "بدء التدريب",
-      "audio_compose": "تلحين وتوليد",
-      "audio_lyrics": "كلمات الأغنية",
-
-      // Settings Modal
-      "appearance": "المظهر",
-      "theme_dark": "داكن",
-      "theme_light": "فاتح",
-      "theme_system": "حسب النظام",
-      "language": "اللغة",
-      "language_en": "English",
-      "language_ar": "العربية (Arabic)",
-      "codec_preset": "ترميز الفيديو المخرج",
-      "save_settings": "حفظ الإعدادات"
+function _applyMessage(el, tr) {
+  const kids = Array.from(el.childNodes).filter(c => c.nodeType === 1);
+  const want = new Set();
+  kids.forEach((c, i) => want.add(_isPaired(c) ? `p${i}` : `o${i}`));
+  const toks = _tokens(tr);
+  const got = new Set();
+  const nodes = [];
+  for (let i = 0; i < toks.length; i++) {
+    const tk = toks[i];
+    if (tk.text != null) { nodes.push(document.createTextNode(tk.text)); continue; }
+    const c = kids[tk.n];
+    if (!c || tk.close) return false;
+    if (tk.self) {
+      if (!want.has(`o${tk.n}`)) return false;
+      got.add(`o${tk.n}`); nodes.push(c); continue;
     }
-  };
-
-  function getLanguage() {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved === 'ar' || saved === 'en') return saved;
-    } catch (e) {}
-    return DEFAULT_LANG;
+    if (!want.has(`p${tk.n}`)) return false;
+    const hasText = toks[i + 1] && toks[i + 1].text != null;
+    const close = toks[i + (hasText ? 2 : 1)];
+    if (!close || close.n !== tk.n || !close.close) return false;
+    c.textContent = hasText ? toks[i + 1].text : '';
+    got.add(`p${tk.n}`); nodes.push(c);
+    i += hasText ? 2 : 1;
   }
+  if (got.size !== want.size) return false;
+  // Keep the outer whitespace the English had (inline layouts depend on it).
+  const first = el.firstChild, lastN = el.lastChild;
+  if (first && first.nodeType === 3 && /^\s/.test(first.data)) nodes.unshift(document.createTextNode(' '));
+  if (lastN && lastN.nodeType === 3 && /\s$/.test(lastN.data)) nodes.push(document.createTextNode(' '));
+  el.replaceChildren(...nodes);
+  return true;
+}
 
-  function t(key, fallback) {
-    const lang = getLanguage();
-    if (TRANSLATIONS[lang] && TRANSLATIONS[lang][key] !== undefined) {
-      return TRANSLATIONS[lang][key];
-    }
-    if (TRANSLATIONS[DEFAULT_LANG] && TRANSLATIONS[DEFAULT_LANG][key] !== undefined) {
-      return TRANSLATIONS[DEFAULT_LANG][key];
-    }
-    return fallback !== undefined ? fallback : key;
-  }
+const _ATTRS = ['title', 'placeholder', 'aria-label', 'alt'];
 
-  function updateToggleButtons(lang) {
-    const nextLang = lang === 'ar' ? 'en' : 'ar';
-    const label = lang === 'ar' ? 'English' : 'عربي';
-    const title = lang === 'ar' ? 'Switch to English / التبديل للإنجليزية' : 'Switch to Arabic / التبديل للعربية';
-
-    document.querySelectorAll('.lang-toggle-btn').forEach(btn => {
-      const word = btn.querySelector('.lang-word');
-      if (word) {
-        word.textContent = label;
-      } else {
-        btn.textContent = (btn.querySelector('.lang-globe') ? '' : '🌐 ') + label;
-      }
-      btn.title = title;
-      btn.setAttribute('aria-label', title);
+// Translate every data-i18n element under root. English needs no pass: the
+// markup already is the English.
+function applyI18n(root) {
+  root = root || document;
+  if (_LANG === 'en' || !Object.keys(_STR).length) return;
+  root.querySelectorAll('[data-i18n]').forEach(el => {
+    const tr = _STR[el.getAttribute('data-i18n')];
+    if (typeof tr === 'string' && tr) _applyMessage(el, tr);
+  });
+  for (const a of _ATTRS) {
+    root.querySelectorAll(`[data-i18n-${a}]`).forEach(el => {
+      const tr = _STR[el.getAttribute(`data-i18n-${a}`)];
+      if (typeof tr === 'string' && tr) el.setAttribute(a, tr);
     });
   }
+}
 
-  function applyTranslations(root) {
-    const doc = root || document;
-    const lang = getLanguage();
-    const isRtl = lang === 'ar';
+// The Settings > Language menu: saves `ui_language` server-side (the page
+// is rendered in the chosen language from the first byte) and reloads.
+function i18nFillLanguageMenu() {
+  const sel = document.getElementById('settingsLanguage');
+  if (!sel) return;
+  sel.replaceChildren();
+  const auto = document.createElement('option');
+  auto.value = 'auto';
+  auto.textContent = T('settings.language.auto', 'Same as this Mac');
+  sel.appendChild(auto);
+  (_I18N.available || [{ code: 'en', name: 'English' }]).forEach(l => {
+    const o = document.createElement('option');
+    o.value = l.code;
+    o.textContent = l.name;
+    o.lang = l.code;
+    sel.appendChild(o);
+  });
+  sel.value = _I18N.setting || 'auto';
+  if (!sel.value) sel.value = 'auto';
+}
 
-    // Update document language and direction
-    document.documentElement.lang = lang;
-    document.documentElement.setAttribute('dir', isRtl ? 'rtl' : 'ltr');
-    if (document.body) {
-      document.body.setAttribute('data-lang', lang);
-      if (isRtl) {
-        document.body.classList.add('rtl-layout');
-      } else {
-        document.body.classList.remove('rtl-layout');
-      }
-    }
+async function i18nSetLanguage(code) {
+  // url-encoded, like every /settings call (the route reads a form body).
+  const body = new URLSearchParams({ ui_language: code || 'auto' });
+  try {
+    const r = await fetch('/settings', { method: 'POST', body });
+    if (r.ok) location.reload();
+  } catch (e) { /* the menu keeps its old value; nothing changed */ }
+}
 
-    // Translate text nodes with data-i18n
-    doc.querySelectorAll('[data-i18n]').forEach(el => {
-      const key = el.getAttribute('data-i18n');
-      const val = t(key);
-      if (val) el.textContent = val;
-    });
-
-    // Translate HTML contents with data-i18n-html
-    doc.querySelectorAll('[data-i18n-html]').forEach(el => {
-      const key = el.getAttribute('data-i18n-html');
-      const val = t(key);
-      if (val) el.innerHTML = val;
-    });
-
-    // Translate placeholders
-    doc.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
-      const key = el.getAttribute('data-i18n-placeholder');
-      const val = t(key);
-      if (val) el.setAttribute('placeholder', val);
-    });
-
-    // Translate titles
-    doc.querySelectorAll('[data-i18n-title]').forEach(el => {
-      const key = el.getAttribute('data-i18n-title');
-      const val = t(key);
-      if (val) el.setAttribute('title', val);
-    });
-
-    // Translate aria-labels
-    doc.querySelectorAll('[data-i18n-aria]').forEach(el => {
-      const key = el.getAttribute('data-i18n-aria');
-      const val = t(key);
-      if (val) el.setAttribute('aria-label', val);
-    });
-
-    // Update switcher buttons
-    updateToggleButtons(lang);
-  }
-
-  function setLanguage(lang) {
-    const target = (lang === 'ar' || lang === 'en') ? lang : DEFAULT_LANG;
-    try {
-      localStorage.setItem(STORAGE_KEY, target);
-    } catch (e) {}
-
-    applyTranslations();
-
-    window.dispatchEvent(new CustomEvent('languagechange', {
-      detail: { language: target, isRtl: target === 'ar' }
-    }));
-  }
-
-  function toggleLanguage() {
-    const cur = getLanguage();
-    const next = cur === 'ar' ? 'en' : 'ar';
-    setLanguage(next);
-  }
-
-  // Initialize on load
-  if (typeof document !== 'undefined') {
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', () => applyTranslations());
-    } else {
-      applyTranslations();
-    }
-  }
-
-  return {
-    t,
-    getLanguage,
-    setLanguage,
-    toggleLanguage,
-    applyTranslations,
-    translations: TRANSLATIONS
-  };
-}));
+Object.assign(globalThis, { T, TA, TP, i18nLang, i18nAgo, i18nDir, applyI18n, i18nFillLanguageMenu, i18nSetLanguage });

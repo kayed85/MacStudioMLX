@@ -32,22 +32,6 @@ import time
 import traceback
 from contextlib import contextmanager
 from pathlib import Path
-_ROOT = Path(__file__).resolve().parent
-for _p in [
-    _ROOT / "ltx-2-mlx" / "env" / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages",
-    _ROOT / "ltx-2-mlx" / "packages" / "ltx-core-mlx" / "src",
-    _ROOT / "ltx-2-mlx" / "packages" / "ltx-pipelines-mlx" / "src",
-    _ROOT / "env" / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages",
-]:
-    if _p.exists() and str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
-
-try:
-    import mlx_lm.utils
-    for _gkey in ("gemma4_unified", "gemma4_unified_text", "gemma4_unified_audio", "gemma4", "Gemma4UnifiedForConditionalGeneration", "Gemma4UnifiedTextForConditionalGeneration"):
-        mlx_lm.utils.MODEL_REMAPPING[_gkey] = "gemma2"
-except Exception:
-    pass
 
 # ---- MLX lazy-eval defaults — MUST RUN BEFORE LTX IMPORTS ===================
 # Upstream ltx_core_mlx reads `LTX2_DIT_EVAL_EVERY` (default 8) and
@@ -97,32 +81,12 @@ if "LTX2_GEMMA_EVAL_EVERY" not in os.environ:
 # because prompt rewriting needs Gemma 3's generative language-model head while
 # LTX-2.5 conditions renders with a non-generative Gemma 4 tower.
 _ROOT = Path(__file__).resolve().parent
-MODELS_DIR = Path(os.environ.get("LTX_MODELS_DIR", str(_ROOT / "mlx_models")))
-_Q4_LOCAL_PATH = MODELS_DIR / "ltx-2.3-mlx-q4"
+_Q4_LOCAL_PATH = _ROOT / "mlx_models" / "ltx-2.3-mlx-q4"
 MODEL_ID = os.environ.get(
     "LTX_MODEL",
     str(_Q4_LOCAL_PATH) if _Q4_LOCAL_PATH.is_dir() else "dgrauet/ltx-2.3-mlx-q4",
 )
-def _is_valid_encoder_dir(dir_path: Path | str | None) -> bool:
-    if not dir_path:
-        return False
-    try:
-        dp = Path(dir_path)
-        return dp.is_dir() and (dp / "config.json").is_file() and any(dp.glob("*.safetensors"))
-    except Exception:
-        return False
-
 GEMMA_PATH = os.environ.get("LTX_GEMMA", "mlx-community/gemma-3-12b-it-4bit")
-if GEMMA_PATH.startswith("/") and not _is_valid_encoder_dir(GEMMA_PATH):
-    for cand in [
-        str(MODELS_DIR / "gemma-3-12b-it-4bit"),
-        str(MODELS_DIR.parent / "mlx_models" / "gemma-3-12b-it-4bit"),
-        os.environ.get("LTX_GEMMA_PATH", ""),
-    ]:
-        if cand and _is_valid_encoder_dir(cand):
-            GEMMA_PATH = cand
-            break
-
 ENHANCE_GEMMA_PATH = os.environ.get(
     "LTX_ENHANCE_GEMMA", "mlx-community/gemma-3-12b-it-4bit"
 )
@@ -132,33 +96,36 @@ LOW_MEMORY = os.environ.get("LTX_LOW_MEMORY", "true").lower() in ("true", "1", "
 # of holding the whole DiT resident. The panel sets this for small-memory Macs
 # (see HELPER_LOW_RAM_STREAM in mlx_ltx_panel.py). Slower per step, far
 # smaller peak — the difference between a 16 GB Mac finishing a clip and
-# being jetsam-killed. Renders that carry LoRAs keep the exact unfused
-# runtime branch and skip streaming (the streamer cannot carry per-block
-# adapters; the library refuses rather than silently fusing on a quantized
-# pack), so the flag is applied per pipeline, not blindly.
-def _detect_system_ram_gb() -> float:
-    try:
-        import os
-        return float(os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')) / (1024 ** 3)
-    except Exception:
-        return 16.0
-
-_env_stream = os.environ.get("LTX_LOW_RAM_STREAM")
-if _env_stream is not None and _env_stream.strip():
-    LOW_RAM_STREAM = _env_stream.strip().lower() in ("true", "1", "yes", "on")
-else:
-    # Auto-enable on Macs with <= 24 GB Unified Memory (e.g. 16 GB M1 Pro)
-    LOW_RAM_STREAM = _detect_system_ram_gb() <= 24.0
+# being jetsam-killed. Renders that carry LoRAs stream too since 5.0.20:
+# ltx_lowram.StreamedLoras binds each block's exact unfused adapters as the
+# block streams (the library alone could only fuse them, lossy on Q4, or
+# refuse). The flag is still applied per pipeline (_stream_for).
+LOW_RAM_STREAM = os.environ.get("LTX_LOW_RAM_STREAM", "0").lower() in ("true", "1", "yes")
 
 
 def _stream_for(loras) -> bool:
+    """Whether a pipeline built for this job streams its transformer blocks.
+
+    5.0.20: a job WITH LoRAs streams too. ``ltx_lowram.StreamedLoras``
+    carries the exact unfused adapters through the block streamer (bound per
+    block, the resident path's arithmetic), so a character or style LoRA on a
+    16-24 GB Mac no longer needs the whole 11 GB transformer resident.
+    ``LTX_STREAM_LORAS=0`` restores the old rule (LoRA jobs resident)."""
     if not LOW_RAM_STREAM:
         return False
-    # If LTX_STREAM_LORA is enabled, stream even with LoRAs using BlockLoraSource
-    # bind-time fusion so 16 GB Macs avoid Metal OutOfMemory crashes.
-    if loras and os.environ.get("LTX_STREAM_LORA", "").lower() in ("1", "true", "yes"):
+    if not loras:
         return True
-    return bool(LOW_RAM_STREAM) and not loras
+    return _streamed_loras_available()
+
+
+def _streamed_loras_available() -> bool:
+    if (os.environ.get("LTX_STREAM_LORAS") or "1").strip().lower() in ("0", "false", "no", "off"):
+        return False
+    try:
+        import importlib.util as _ilu
+        return _ilu.find_spec("ltx_lowram") is not None
+    except Exception:
+        return False
 MODEL_UPSCALE_ENABLED = os.environ.get("LTX_ENABLE_MODEL_UPSCALE", "").lower() in ("1", "true", "yes", "on")
 
 # Y1.037 — VAE temporal-streaming decision.
@@ -511,10 +478,6 @@ def _apply_vae_streaming_decision(num_frames: int) -> None:
     decoder's auto-mode cutoff in patch_ltx_codec.py)."""
     if _USER_VAE_STREAMING_OVERRIDE is not None:
         return  # respect explicit override
-    if LOW_RAM_STREAM:
-        # On <=24 GB Macs, always stream VAE decode to keep peak memory below 2 GB
-        os.environ.pop("LTX_VAE_STREAMING", None)
-        return
     threshold = int(os.environ.get("LTX_VAE_STREAMING_AUTO_MAX_FRAMES", "121"))
     if num_frames <= threshold:
         os.environ["LTX_VAE_STREAMING"] = "0"
@@ -989,6 +952,44 @@ def _lora_fingerprint(loras: list[dict] | None) -> tuple:
 
 
 
+def _hf_unreachable_message(repo: str, exc: BaseException) -> str | None:
+    """A plain sentence when a first-use Hugging Face download failed because
+    the network did, else None.
+
+    Fleet 11 Nov 2026 (fw-20261110-1411): one Mac's Control renders failed five
+    times as "Got: ConnectTimeout: [Errno 60] Operation timed out". Control
+    downloads its Union-Control IC-LoRA on first use when the installer's copy
+    is not on disk; huggingface_hub wraps the network failure in a
+    LocalEntryNotFoundError (an OSError) whose first line is its own "Got:
+    <class>: <text>", and that line reached the card as the whole reason. The
+    user is told what is being fetched, why it failed, and what to do."""
+    seen, chain = set(), []
+    e = exc
+    while e is not None and id(e) not in seen:
+        seen.add(id(e))
+        chain.append(e)
+        e = e.__cause__ or e.__context__
+    names = " ".join(type(x).__name__ for x in chain).lower()
+    text = " ".join(str(x) for x in chain).lower()
+    if "outgoing traffic has been disabled" in text or "offlinemodeisenabled" in names:
+        why = "downloads are switched off on this Mac (HF_HUB_OFFLINE is set)"
+    elif "timeout" in names or "timed out" in text or "errno 60" in text:
+        why = "the connection timed out"
+    elif any(k in text for k in ("nodename nor servname", "name or service not known",
+                                 "errno 8", "getaddrinfo", "network is unreachable",
+                                 "errno 51", "no route to host")):
+        why = "this Mac is offline or could not find huggingface.co"
+    elif ("connecterror" in names or "connectionerror" in names
+          or "connection refused" in text or "connection reset" in text
+          or text.lstrip().startswith("got: ")):
+        why = "the connection to huggingface.co failed"
+    else:
+        return None
+    return (f"Phosphene could not download {repo} from Hugging Face: {why}. "
+            "This render needs it once and keeps it afterwards. Check that this Mac "
+            "is online and can open huggingface.co, then make the clip again.")
+
+
 def _resolve_lora_path(path: str) -> str:
     """Resolve a LoRA path to a local .safetensors file.
 
@@ -1035,6 +1036,9 @@ def _resolve_lora_path(path: str) -> str:
             raise FileNotFoundError(
                 f"LoRA file not found: {p} — it is not on disk and it is not a Hugging Face "
                 f"repo id. It was probably moved or deleted after it was picked; pick it again.") from exc
+        unreachable = _hf_unreachable_message(p, exc)
+        if unreachable:
+            raise RuntimeError(unreachable) from exc
         raise
     except GatedRepoError as exc:
         # Most Lightricks LoRAs are gated — they require accepting a
@@ -1061,6 +1065,9 @@ def _resolve_lora_path(path: str) -> str:
         # repo" (GatedRepoError). The string-match keeps both paths
         # consistent for the user.
         msg = str(exc)
+        unreachable = _hf_unreachable_message(p, exc)
+        if unreachable:
+            raise RuntimeError(unreachable) from exc
         if "401" in msg or "gated" in msg.lower():
             raise RuntimeError(
                 f"Could not access HF LoRA {p} (401 Unauthorized). "
@@ -1311,6 +1318,86 @@ def _int32_safe_decode_tiling(orig, latent_shape, frame_rate=24.0, T=None):
         f"corrupted. Use a smaller size.")
 
 
+# 5.0.25 (lab L50, 14 Nov 2026): a LONG clip's decode is the render's memory
+# peak, and on Macs over 32 GB it ran in one piece (25 to 32 GB Macs get a
+# small budget from the Studio, so the tiler already cut theirs). Upstream's
+# tiler only cuts
+# the decode when ONE bf16 activation passes LTX2_VAE_DECODE_BUDGET_GB (8 GB
+# there), an estimate 10-17x below the real peak: 1.2 GB counted against a
+# measured 20.05 GB for 10 s at 1024x576, 1.8 GB against 30.2 GB at 1280x704.
+# A 36 or 48 GB Mac paid that at the very end of a ten-minute render. Measured on
+# this Mac (M4 Max, Q8 LTX-2.5 decoder, 241 frames): 128-frame chunks with a
+# 32-frame blend decode 1024x576 at 12.73 GB instead of 20.05 in the same time
+# (35.1 s vs 36.2) at 52.6 dB against the whole decode (bit-identical first 13
+# frames; the difference is fine noise, no seam), and 1280x704 at 19.0 GB
+# instead of 30.2 at 54.4 dB. So a whole-volume decode of 17+ latent frames
+# (129+ frames: every 10 s clip, never a 5 s one) becomes those chunks. The
+# LTX-2.5 decoder is non-causal, so a chunk's quality is set by its overlap:
+# 8 frames (the OpenVINO port's default) is 29 dB, visible; 32 is not.
+# Left alone: a decode upstream (or the int32 guard above) already tiles, and
+# the streamed path (24 GB and smaller), whose exact chunked decode
+# (ltx_lowram.install_chunked_decode) is bit-identical and halves the peak on
+# its own; 5.0.20 doubled those Macs' budget so a 10 s clip stays ONE exact
+# pass. LTX_LONG_DECODE_TILES=off keeps the whole decode; "T/O" sets the
+# chunk and blend (multiples of 8, chunk 16+, blend below the chunk).
+_LONG_DECODE_TILE_FRAMES = 128
+_LONG_DECODE_TILE_OVERLAP = 32
+_LONG_DECODE_MIN_LATENT_FRAMES = 17
+
+
+def _long_decode_tiles():
+    """(chunk frames, blend frames) for a long clip's decode, or None when the
+    user switched the chunks off. A value the tiler would refuse falls back to
+    the measured 128/32."""
+    raw = (os.environ.get("LTX_LONG_DECODE_TILES") or "").strip().lower()
+    if raw in ("0", "off", "no", "false", "whole"):
+        return None
+    tile, overlap = _LONG_DECODE_TILE_FRAMES, _LONG_DECODE_TILE_OVERLAP
+    if raw:
+        try:
+            tile, overlap = (int(x) for x in raw.split("/", 1))
+        except ValueError:
+            return (_LONG_DECODE_TILE_FRAMES, _LONG_DECODE_TILE_OVERLAP)
+    if tile < 16 or tile % 8 or overlap < 0 or overlap % 8 or overlap >= tile:
+        return (_LONG_DECODE_TILE_FRAMES, _LONG_DECODE_TILE_OVERLAP)
+    return (tile, overlap)
+
+
+def _exact_chunked_decode_on() -> bool:
+    """True on the streamed path once ltx_lowram's exact chunked decode is in."""
+    try:
+        import ltx_lowram as _lowram
+        return bool(_lowram._DECODE_PATCH.get("on"))
+    except Exception:                                      # noqa: BLE001
+        return False
+
+
+def _long_clip_decode_tiling(cfg, latent_shape, frame_rate: float = 24.0, T=None,
+                             exact_chunks=None):
+    """`cfg` (the tiler's answer after the int32 guard), or 128/32 temporal
+    chunks when it is a whole-volume decode of a long clip (see above).
+    Pure arithmetic; the returned config is checked against the int32 cap."""
+    if cfg is not None:
+        return cfg
+    f_lat = int(latent_shape[2])
+    if f_lat < _LONG_DECODE_MIN_LATENT_FRAMES:
+        return cfg
+    if exact_chunks is None:
+        exact_chunks = _exact_chunked_decode_on()
+    if exact_chunks:
+        return cfg
+    tiles = _long_decode_tiles()
+    if tiles is None or tiles[0] // 8 >= f_lat:
+        return cfg
+    if T is None:
+        from ltx_core_mlx.model.video_vae import tiling as T
+    chunked = T.TilingConfig(temporal_config=T.TemporalTilingConfig(
+        tile_size_in_frames=tiles[0], tile_overlap_in_frames=tiles[1]))
+    if _decode_tiling_peak_elements(chunked, latent_shape, T) > _DECODE_MAX_ELEMENTS:
+        return cfg
+    return chunked
+
+
 def _install_decode_int32_guard() -> None:
     """Route every conv-VAE decode through `_int32_safe_decode_tiling`.
 
@@ -1342,6 +1429,18 @@ def _install_decode_int32_guard() -> None:
                           + (f" × {sc.tile_size_in_pixels}px squares "
                              f"(overlap {sc.tile_overlap_in_pixels}px)"
                              if sc is not None else "")})
+        # 5.0.25: a long clip's whole-volume decode runs in 128-frame chunks.
+        chunked = _long_clip_decode_tiling(cfg, latent_shape, frame_rate=frame_rate)
+        if chunked is not cfg:
+            _, _, f_lat, h_lat, w_lat = (int(v) for v in latent_shape)
+            tc = chunked.temporal_config
+            emit({"event": "log",
+                  "line": f"vae-decode: {8 * f_lat - 7} frames at "
+                          f"{w_lat * 32}×{h_lat * 32} decode in chunks of "
+                          f"{tc.tile_size_in_frames} frames "
+                          f"(blend {tc.tile_overlap_in_frames}), a third less "
+                          f"memory at the end of the render"})
+            return chunked
         return cfg
 
     _guarded._phosphene_int32_guard = True
@@ -1399,6 +1498,45 @@ def _install_video_decoder_patch() -> None:
 _SPLIT_ENCODE_PATCH_INSTALLED = False
 
 
+_LOWRAM_TEXT_OFF: list = []
+
+
+def _install_lowram_decode() -> None:
+    """5.0.20 - the exact time-chunked VAE decode (ltx_lowram), on the
+    streamed path only. Rides the same choke point as the low-memory encode
+    (every lane installs that one). The decoded frames are bit-identical; the
+    decode peak halves (5 s: 7.2 -> 3.4 GB; 10 s: 13.4 -> 6.3 GB), which is
+    also why the panel doubles the decode budget for these Macs."""
+    if not split_prompt_encode_wanted():
+        return
+    try:
+        import ltx_lowram as _lowram
+        if _lowram.chunked_decode_wanted():
+            _lowram.install_chunked_decode()
+    except Exception:
+        pass          # the engine's own decode stays in place
+
+
+def _lowram_stream_text() -> bool:
+    """5.0.20: the layer-streamed prompt encode (ltx_lowram), on the streamed
+    path only and not after it failed once in this helper."""
+    if _LOWRAM_TEXT_OFF:
+        return False
+    try:
+        import ltx_lowram as _lowram
+        return _lowram.stream_text_encoder_wanted()
+    except Exception:
+        return False
+
+
+def _lowram_text_off(exc) -> None:
+    _LOWRAM_TEXT_OFF.append(repr(exc))
+    # Neutral words only: the panel reads every raw line for phases and
+    # crash causes, and this is neither (the render carries on).
+    print("[text-encoder] layer-by-layer encode not used for this helper; "
+          "the two-part encode runs instead", file=sys.stderr, flush=True)
+
+
 def split_prompt_encode_wanted() -> bool:
     """The low-memory prompt encode: on the streamed (low-RAM) path only.
     Read at call time, so a helper's lanes and the tests see one answer."""
@@ -1424,6 +1562,7 @@ def _install_split_prompt_encode_patch() -> None:
     sum. A second prompt (CFG lanes) loads the text model again - those lanes
     are refused below 48 GB anyway. Off the streamed path nothing changes."""
     global _SPLIT_ENCODE_PATCH_INSTALLED
+    _install_lowram_decode()
     if _SPLIT_ENCODE_PATCH_INSTALLED:
         return
     import ltx_pipelines_mlx.utils.blocks as _blocks
@@ -1436,19 +1575,120 @@ def _install_split_prompt_encode_patch() -> None:
             self._text_encoder.load(self.gemma_model_id)
             _blocks.aggressive_cleanup()
 
+    def _read_connector_now(fx):
+        """4.19.17 - read the connector's weights into memory BEFORE the GPU
+        needs them (the fleet's #1 failure, the GPU watchdog in prompt
+        encoding).
+
+        Symptom: SIGABRT, kIOGPUCommandBufferCallbackErrorTimeout /
+        ImpactingInteractivity, always in phase "encode" (196 of 203 known
+        phases in 30 days; 37 of 37 on 4.19.15/16), at any size down to
+        128x128 x41, already on one-op command buffers, and a 256-token
+        Gemma encode dies the same way (#44).
+
+        Cause: the engine loads the Gemma tower and the DiT eagerly, but the
+        connector (6.3 GB BF16 on LTX-2.5) only LAZILY - load_weights builds
+        Load nodes and nothing reads the file. MLX runs Load on the CPU
+        stream only, so the first GPU op of the feature extractor (the
+        video_aggregate_embed projection, ONE 1,541 MB tensor; then 771 MB
+        for audio) sits in a committed Metal command buffer waiting on an
+        event until the CPU has read that tensor from disk. A command buffer
+        that waits that long is what macOS's watchdog kills: a slow or busy
+        disk (external drive, cold cache, a 16 GB Mac re-reading the file
+        under memory pressure) turns a 0.5 s read into 6+ s. No other lazy
+        weight comes close (largest: VAE decoder 226 MB, upscaler 76 MB,
+        VAE encoder 57 MB), which is why only this phase dies.
+
+        Fix: evaluate the connector's parameters right after load_weights.
+        Those are Load nodes only, so the reads run on the CPU stream with
+        no GPU work queued behind them - there is nothing for the watchdog
+        to time. Same bytes, same values (bit-identical embeddings), same
+        peak (the encode needed them resident anyway); only the moment of
+        the read moves."""
+        if fx is None or getattr(fx, "_phos_weights_resident", False):
+            return
+        params = getattr(fx, "parameters", None)
+        if not callable(params):
+            return
+        import sys as _sys
+        import time as _time
+        import mlx.core as _mx
+        from mlx.utils import tree_flatten as _flatten
+        arrays = [v for _k, v in _flatten(params()) if isinstance(v, _mx.array)]
+        t0 = _time.monotonic()
+        getattr(_mx, "eval")(arrays)            # MLX graph evaluation, not Python eval
+        dt = _time.monotonic() - t0
+        fx._phos_weights_resident = True
+        mb = sum(int(a.nbytes) for a in arrays) / 1e6
+        # Never a phase or crash word here: the panel reads every raw line.
+        print(f"[text-connector] {mb:.0f} MB of connector weights read in "
+              f"{dt:.1f} s ({mb / max(dt, 1e-3):.0f} MB/s) before the prompt "
+              f"is encoded", file=_sys.stderr, flush=True)
+
     def load(self):
         if not split_prompt_encode_wanted():
-            return _orig_load(self)
+            _orig_load(self)
+            _read_connector_now(getattr(self, "_feature_extractor", None))
+            return None
         # Text model only: the connector loads after it is gone (encode).
         # Callers that read the tokenizer (Prompt Relay) still find it here.
+        # 5.0.20: on the layer-streamed encode that text model holds LAZY
+        # weights - the tokenizer is there, nothing is read from disk yet.
+        if _lowram_stream_text():
+            try:
+                import ltx_lowram as _lowram
+                if _lowram.lazy_text_encoder_for_load(self):
+                    return None
+            except Exception as exc:  # never a reason to fail a render
+                _lowram_text_off(exc)
         _load_text_model(self)
 
     def encode(self, prompt):
+        max_length = int(os.environ.get("LTX2_GEMMA_MAX_LENGTH", "1024"))
+        # 5.0.20: the prompt-embedding cache. Exact (a pure function of the
+        # prompt, the text-encoder files, the connector file and max length),
+        # and on a hit the riskiest phase of a 16 GB render never runs.
+        cache, key = None, None
+        try:
+            import ltx_lowram as _lowram
+            cache = _lowram.EMBEDDINGS
+            key = _lowram.embedding_key(prompt, self.gemma_model_id, self.model_dir, max_length)
+            hit = cache.get(key)
+            if hit is not None:
+                self._text_encoder = None        # a lazy tower from load(): unused
+                print("[text-encoder] same prompt as a recent render: embeddings "
+                      "reused, encode skipped", file=sys.stderr, flush=True)
+                return hit
+        except Exception:
+            cache = None
+        video, audio = _encode_uncached(self, prompt, max_length)
+        if cache is not None:
+            try:
+                cache.put(key, video, audio)
+            except Exception:
+                pass
+        return video, audio
+
+    def _encode_uncached(self, prompt, max_length):
         if not split_prompt_encode_wanted():
             return _orig_encode(self, prompt)
+        if _lowram_stream_text():
+            try:
+                import ltx_lowram as _lowram
+                out = _lowram.streamed_prompt_encode(
+                    self, prompt, max_length,
+                    log=lambda line: print(line, file=sys.stderr, flush=True))
+                if out is not None:
+                    return out
+            except Exception as exc:
+                # A failure inside the streamed walk falls back to the 4.19.10
+                # split encode once, then stays off for this helper.
+                _lowram_text_off(exc)
+                self._text_encoder = None
+                self._feature_extractor = None
+                _blocks.aggressive_cleanup()
         import mlx.core as _mx
         _materialize = getattr(_mx, "eval")      # MLX graph evaluation, not Python eval
-        max_length = int(os.environ.get("LTX2_GEMMA_MAX_LENGTH", "1024"))
         self._feature_extractor = None           # never both resident
         _load_text_model(self)
         hidden, mask = self._text_encoder.encode_all_layers(prompt, max_length=max_length)
@@ -1460,6 +1700,7 @@ def _install_split_prompt_encode_patch() -> None:
                                                  prefix="connector.")
         fx.connector.load_weights(list(weights.items()))
         del weights
+        _read_connector_now(fx)                  # read now, not inside fx()
         _blocks.aggressive_cleanup()
         self._feature_extractor = fx
         video, audio = fx(hidden, attention_mask=mask)
@@ -1556,6 +1797,41 @@ def _install_a2v_frame_rate_patch() -> None:
     _A2V_FRAME_RATE_PATCH_INSTALLED = True
 
 
+def _attach_streamed_loras(pipe, model, active) -> None:
+    """Attach ``active`` [(path, strength)] to a block-streamed DiT as exact
+    unfused adapters (ltx_lowram.StreamedLoras), with the same live check the
+    resident path runs: a LoRA whose modules did not attach refuses the render
+    rather than producing a LoRA-free clip."""
+    import mlx.core as mx
+    import ltx_lowram as _lowram
+    from lora_compat import LoraCompatibilityError, validate_runtime_application
+    from ltx_pipelines_mlx.utils._orchestration import resolve_lora_path
+
+    if not _lowram.is_streaming_model(model):
+        raise LoraCompatibilityError(
+            "a streamed render was asked to carry LoRAs but its transformer is not "
+            "streamed; rendering was refused before it could drop them.")
+    resolved = [(resolve_lora_path(path), float(strength)) for path, strength in active]
+    expected = list(getattr(pipe, "_phosphene_lora_preflight", []) or [])
+    if len(expected) != len(resolved):
+        names = ", ".join(Path(path).name for path, _ in resolved)
+        raise LoraCompatibilityError(
+            f"LoRA preflight state was lost before live attachment ({names}). "
+            "Rendering was refused before it could produce a LoRA-free result.")
+    streamed = _lowram.StreamedLoras(model, _lowram.load_lora_specs(resolved))
+    validate_runtime_application(
+        expected, list(streamed.applied),
+        reporter=lambda line: emit({"event": "log", "line": line}))
+    arrays = [a for pairs in streamed._per_block.values() for _n, a in pairs]
+    getattr(mx, "eval")(arrays)                 # MLX graph evaluation, not Python eval
+    # No reference on the pipeline: the adapters live exactly as long as the
+    # streamed model (the decode drops `dit`, and they go with it).
+    del arrays
+    emit({"event": "log",
+          "line": f"LoRA (exact, low-memory): {len(streamed.applied)} modules carried "
+                  f"through the streamed transformer ({streamed.wrapped_modules} per block)"})
+
+
 def _install_lora_fusion_patches() -> None:
     """Install fail-closed native LoRA guards, or repair an older engine.
 
@@ -1637,6 +1913,19 @@ def _install_lora_fusion_patches() -> None:
                     self._phosphene_lora_preflight = list(zip(
                         reports, (strength for _, strength in active)
                     ))
+                if active and getattr(self, "low_ram_streaming", False):
+                    # 5.0.20: the engine would FUSE these into the streamed
+                    # blocks (lossy on Q4) or refuse the unfused branch.
+                    # Build the plain streamed model, then carry the exact
+                    # unfused adapters through the streamer.
+                    saved = self._pending_loras
+                    self._pending_loras = None
+                    try:
+                        model = _native_load_transformer(self, transformer_path)
+                    finally:
+                        self._pending_loras = saved
+                    _attach_streamed_loras(self, model, active)
+                    return model
                 return _native_load_transformer(self, transformer_path)
 
             def _guarded_native_attach(self, dit, lora_paths):
@@ -1771,8 +2060,6 @@ def _install_lora_fusion_patches() -> None:
 
     def _make_wrapper(orig_load):
         def patched_load(self):
-            if getattr(self, "low_ram_streaming", False):
-                return orig_load(self)
             pending = getattr(self, "_pending_loras", None)
             if pending and self.dit is None and not getattr(self, "_loaded", False):
                 tx_path = _resolve_tx_path(self)
@@ -1803,8 +2090,6 @@ def _install_lora_fusion_patches() -> None:
     # self.dit, so the inner call short-circuits in `if self.dit is None`.
     def _make_dev_loader_wrapper(orig):
         def patched_load_dev(self):
-            if getattr(self, "low_ram_streaming", False):
-                return orig(self)
             pending = getattr(self, "_pending_loras", None)
             # FIX 2026-05-14: removed the `_phosphene_dit_fused` flag guard.
             # That flag latched True after the first job in a batch and
@@ -1973,45 +2258,6 @@ _t2v_model_dir: str | None = None
 _i2v_model_dir: str | None = None
 
 
-def _install_gemma_model_not_loaded_patch() -> None:
-    """Ensure PromptEncoder.load() reloads GemmaLanguageModel if _model is None,
-    preventing 'Model not loaded. Call load() first.' runtime crashes.
-    """
-    try:
-        import ltx_pipelines_mlx.utils.blocks as _blocks
-        import ltx_core_mlx.text_encoders.gemma.encoders.base_encoder as _base_enc
-
-        _orig_load = _blocks.PromptEncoder.load
-
-        def _guarded_load(self):
-            if self._text_encoder is None or getattr(self._text_encoder, "_model", None) is None:
-                self._text_encoder = _base_enc.GemmaLanguageModel()
-                self._text_encoder.load(self.gemma_model_id)
-            return _orig_load(self)
-
-        _blocks.PromptEncoder.load = _guarded_load
-
-        _orig_tokenize = _base_enc.GemmaLanguageModel.tokenize
-
-        def _guarded_tokenize(self, text, max_length=1024):
-            if self._tokenizer is None and getattr(self, "_model_path", None):
-                self.load(self._model_path)
-            return _orig_tokenize(self, text, max_length)
-
-        _base_enc.GemmaLanguageModel.tokenize = _guarded_tokenize
-
-        _orig_get_all = _base_enc.GemmaLanguageModel.get_all_hidden_states
-
-        def _guarded_get_all(self, token_ids, attention_mask=None):
-            if self._model is None and getattr(self, "_model_path", None):
-                self.load(self._model_path)
-            return _orig_get_all(self, token_ids, attention_mask=attention_mask)
-
-        _base_enc.GemmaLanguageModel.get_all_hidden_states = _guarded_get_all
-    except Exception:
-        pass
-
-
 def get_pipe(kind: str, loras: list[dict] | None = None,
              model_dir: str | None = None,
              dev_transformer: str | None = None):
@@ -2083,7 +2329,6 @@ def get_pipe(kind: str, loras: list[dict] | None = None,
     _install_video_decoder_patch()  # fps/frame_rate kwarg shim
     _install_split_prompt_encode_patch()  # 4.19.10 low-RAM encode
     _install_a2v_frame_rate_patch()  # A2V missing frame_rate= on combined_image_conditionings
-    _install_gemma_model_not_loaded_patch()
 
     fp = _lora_fingerprint(loras)
 
@@ -2400,10 +2645,8 @@ def get_hq_pipe(model_dir: str, loras: list[dict] | None = None,
                 hq_kwargs["dev_transformer"] = dev_transformer
             if distilled_lora:
                 hq_kwargs["distilled_lora"] = distilled_lora
-            _hq_pipe = _construct_pipeline(
-                TwoStageHQPipeline,
+            _hq_pipe = TwoStageHQPipeline(
                 model_dir=model_dir, gemma_model_id=GEMMA_PATH, low_memory=LOW_MEMORY,
-                low_ram_streaming=_stream_for(loras),
                 **hq_kwargs,
             )
             _attach_loras(_hq_pipe, loras)
@@ -2471,12 +2714,10 @@ def get_kf_pipe(model_dir: str, dev_transformer: str | None = None,
                 except Exception:        # noqa: BLE001
                     pass
             emit({"event": "log", "line": f"Loading Keyframe pipeline (Q8 dev model — {model_dir})..."})
-            _kf_pipe = _construct_pipeline(
-                KeyframeInterpolationPipeline,
+            _kf_pipe = KeyframeInterpolationPipeline(
                 model_dir=model_dir,
                 gemma_model_id=GEMMA_PATH,
                 low_memory=LOW_MEMORY,
-                low_ram_streaming=_stream_for(None),
                 dev_transformer=dev_name,
                 distilled_lora=lora_name,
                 distilled_lora_strength=1.0,
@@ -2545,12 +2786,10 @@ def get_a2v_pipe(model_dir: str, loras: list[dict] | None = None,
                 _ac()
             emit({"event": "log",
                   "line": f"Loading A2V pipeline (Q8 dev + distilled LoRA — {model_dir})..."})
-            _a2v_pipe = _construct_pipeline(
-                A2VidPipelineTwoStage,
+            _a2v_pipe = A2VidPipelineTwoStage(
                 model_dir=model_dir,
                 gemma_model_id=GEMMA_PATH,
                 low_memory=LOW_MEMORY,
-                low_ram_streaming=_stream_for(loras),
                 dev_transformer=dev_name,
                 distilled_lora=lora_name,
                 distilled_lora_strength=1.0,
@@ -2629,38 +2868,23 @@ _gemma_lm = None
 def get_gemma_lm():
     global _gemma_lm
     if _gemma_lm is None:
-        try:
-            from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
-        except ImportError as err:
-            raise RuntimeError(
-                "ltx_core_mlx package is missing in the Python environment. "
-                "Please click 'Install' or 'Resume Install' in Pinokio to complete model setup."
-            ) from err
+        from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
         emit({"event": "log", "line": "Loading Gemma language model for prompt enhancement (~10-15s)…"})
-        target_path = ENHANCE_GEMMA_PATH
-        if target_path.startswith("/") and not _is_valid_encoder_dir(target_path):
-            candidates = [
-                os.environ.get("LTX_GEMMA"),
-                str(MODELS_DIR / "gemma-3-12b-it-4bit"),
-                str(MODELS_DIR.parent / "mlx_models" / "gemma-3-12b-it-4bit"),
-                str(MODELS_DIR / "gemma4-12b-ltx25-q4"),
-                str(MODELS_DIR.parent / "mlx_models" / "gemma4-12b-ltx25-q4"),
-            ]
-            found = False
-            for cand in candidates:
-                if cand and _is_valid_encoder_dir(cand):
-                    target_path = cand
-                    found = True
-                    break
-            if not found:
-                target_path = "mrbizarro/gemma4-12b-ltx25-q4"
         with _pipe_lock:
             # Free any active pipeline first — Gemma is ~6 GB, the dev
             # transformer is ~12-19 GB, having both resident risks pushing
             # us past 64 GB on standard tier.
             release_pipelines(keep_kind=None)
+            # LOAD, THEN PUBLISH. Assigning the instance before load()
+            # succeeded poisoned the singleton: the FIRST failure reported
+            # its real cause (missing dir, OOM), and every later call in the
+            # warm process hit the retained half-built instance and reported
+            # the useless "Model not loaded. Call load() first." — which is
+            # what the fleet counts (14 events / 6 installs on 4.8.0). A
+            # failed load now leaves the slot None, so the next attempt
+            # re-tries the load and reports the real error again.
             _candidate = GemmaLanguageModel()
-            _candidate.load(target_path)
+            _candidate.load(ENHANCE_GEMMA_PATH)
             _gemma_lm = _candidate
         emit({"event": "log", "line": "Gemma loaded — subsequent enhances will be fast."})
     return _gemma_lm
@@ -2675,31 +2899,6 @@ def free_gemma_lm():
             aggressive_cleanup()
         except Exception:
             pass
-
-
-def _fallback_enhance_prompt(prompt: str, mode: str = "t2v", preserve_tokens: list = None) -> str:
-    """Built-in cinematic prompt enhancer fallback when Gemma model/packages are missing."""
-    clean = prompt.strip()
-    if not clean:
-        return clean
-
-    camera_styles = [
-        "cinematic 35mm film shot, slow panning camera, soft natural lighting, 8k detail",
-        "handheld camera movement, shallow depth of field, natural illumination, 8k resolution",
-        "wide-angle cinematic frame, gentle camera push-in, rich color grading, 8k detail",
-        "dramatic lighting, crisp focus, photorealistic 8k detail, smooth camera motion"
-    ]
-    has_camera = any(t in clean.lower() for t in ["camera", "shot", "lens", "mm", "pan", "zoom", "angle", "lighting"])
-    if not has_camera:
-        style = camera_styles[abs(hash(clean)) % len(camera_styles)]
-        enhanced = f"{clean}. {style}."
-    else:
-        enhanced = clean
-
-    for tok in (preserve_tokens or []):
-        if tok and tok.lower() not in enhanced.lower():
-            enhanced = f"{enhanced} ({tok})"
-    return enhanced
 
 
 # ---- image preprocessing -----------------------------------------------------
@@ -3660,7 +3859,17 @@ emit({
     # on reporting live preview as ON. Zero frames, zero errors, zero
     # explanation. The panel can only tell the user the truth if the helper
     # tells the panel.
-    "live_preview_supported": _live_preview_supported(),
+    "live_preview_supported": (
+        importlib.util.find_spec("ltx_pipelines_mlx.live_preview") is not None),
+    # CAN THIS ENGINE ENCODE FOR LTX-2.5 AT ALL? Same capability-probe shape as
+    # live_preview_supported, for the same reason: an install whose vendored
+    # engine predates the Gemma 4 tower (site-packages older than
+    # v0.14.19+ltx25.3 — the 3.8→4.0 stale-updater path) routes 2.5 text
+    # encoding into mlx_lm, which has no gemma4 module and dies with mlx_lm's
+    # own words: "Model type gemma4_unified not supported." (19 fleet events /
+    # 6 installs, all legacy). The fault self-heals on a SECOND Update click,
+    # but nothing ever told the user that — the panel can only say it if the
+    # helper reports the capability.
     "gemma4_tower_supported": (
         importlib.util.find_spec("ltx_core_mlx.text_encoders.gemma.gemma4")
         is not None),
@@ -5120,6 +5329,126 @@ for line in sys.__stdin__:
             _is_busy = False
         continue
 
+    if action == "generate_outpaint":
+        # "Make it vertical", Pro layer: the bands above and below a landscape
+        # clip are painted by the In/Outpainting IC-LoRA instead of a blur.
+        # Lightricks' LTX-2.5 outpaint workflow, step for step (the geometry,
+        # the green reference and the blends are vertical_outpaint.py):
+        #   reference: source centred on the canvas, bands flat #66FF00
+        #   stage 1:   half res, 8 distilled steps, IC-LoRA 1.0 (unfused: Q4
+        #              cannot hold a fused adapter, see generate_restore)
+        #   blend:     stage-1 frames pyramid-blended with the real source
+        #   stage 2:   the blend upsampled x2 and refined 2 steps from sigma
+        #              0.725 with the reference re-applied (source_video mode
+        #              of ICLoraPipeline; its 2-step tail IS 0.725/0.4219/0)
+        #   final:     scaled to the output canvas, blended with the source
+        #              again, the middle pasted back untouched, source audio.
+        # Windows (long takes) are rendered one after another in this one
+        # job and joined; the pipeline is built once and reused.
+        job_id = msg.get("id", "?")
+        p = msg.get("params", {}) or {}
+        model_dir = p.get("model_dir") or MODEL_ID
+        seed = _coerce_seed(p.get("seed", -1))
+        if seed < 0:
+            seed = random.randint(0, 2**31 - 1)
+        _is_busy = True
+        try:
+            t0 = time.time()
+            _mlx_mem_reset_run()
+            configure_acceleration("off")
+            import shutil
+            import subprocess
+            import tempfile
+            import vertical_outpaint as vo
+            from ltx_pipelines_mlx.ic_lora import ICLoraPipeline
+            from ltx_pipelines_mlx.iclora_utils import read_lora_reference_downscale_factor
+            ffmpeg = os.environ.get("FFMPEG_BIN") or shutil.which("ffmpeg") or "ffmpeg"
+            src = str(p["source_path"])
+            out_path = str(p["output_path"])
+            work = Path(p.get("work_dir") or tempfile.mkdtemp(prefix="phosphene_outpaint_"))
+            work.mkdir(parents=True, exist_ok=True)
+            src_w, src_h = int(p["src_width"]), int(p["src_height"])
+            out_w, out_h = int(p["out_width"]), int(p["out_height"])
+            cw, ch = vo.canvas_size(out_w, out_h)
+            fps = float(p.get("frame_rate") or 24.0)
+            total = int(p["frames"])
+            lora = _resolve_lora_path(str(p["lora_path"]))
+            strength = float(p.get("lora_strength") or vo.OUTPAINT_LORA_STRENGTH)
+            _preflight_distilled_loras([(lora, strength)], model_dir)
+            release_pipelines("outpaint render incoming")
+            try:
+                _install_lora_fusion_patches()
+            except Exception:                                      # noqa: BLE001
+                pass
+            pipe = ICLoraPipeline(model_dir=Path(model_dir), lora_paths=[],
+                                  gemma_model_id=GEMMA_PATH, low_memory=LOW_MEMORY)
+            pipe._pending_loras = [(lora, strength)]
+            _scale = read_lora_reference_downscale_factor(lora)
+            if _scale != 1:
+                pipe.reference_downscale_factor = _scale
+            prompt = str(p.get("prompt") or "")
+            wins = vo.windows(total, int(p.get("max_window_frames") or vo.MAX_WINDOW_FRAMES))
+            emit({"event": "log", "line":
+                  f"step:generate_outpaint {src_w}x{src_h} -> canvas {cw}x{ch} -> "
+                  f"{out_w}x{out_h} {total}f in {len(wins)} window(s), "
+                  f"stage1={vo.STAGE1_STEPS} refine={vo.REFINE_STEPS} lora x{strength}"})
+            parts = []
+            for wi, (start, count) in enumerate(wins):
+                n = vo.render_frames(count)
+                _apply_vae_streaming_decision(n)
+                ref = str(work / f"w{wi}_ref.mp4")
+                r = subprocess.run(vo.reference_args(src, ref, src_w, src_h, cw, ch, n,
+                                                     start_frame=start, fps=fps, ffmpeg=ffmpeg),
+                                   capture_output=True, text=True, errors="replace")
+                if r.returncode != 0:
+                    raise RuntimeError(f"outpaint reference failed: {r.stderr[-300:]}")
+                emit({"event": "log", "line": f"outpaint window {wi + 1}/{len(wins)}: "
+                      f"frames {start}..{start + count - 1} ({n} rendered) stage 1"})
+                s1 = str(work / f"w{wi}_s1.mp4")
+                pipe.generate_and_save(
+                    prompt=prompt, output_path=s1, video_conditioning=[(ref, 1.0)],
+                    height=ch, width=cw, num_frames=n, frame_rate=fps, seed=seed + wi,
+                    stage1_steps=_thin_cap(model_dir, "stage1_steps", vo.STAGE1_STEPS),
+                    skip_stage_2=True)
+                _mlx_phase_mem(f"outpaint w{wi} stage 1")
+                s1b = str(work / f"w{wi}_s1_blend.mp4")
+                vo.composite_video(s1, ref, s1b, cw // 2, ch // 2, src_w, src_h, n,
+                                   fps=fps, lossless=True, seam_inset=3, keep_inset=20,
+                                   ffmpeg=ffmpeg, source_is_canvas=True)
+                emit({"event": "log", "line": f"outpaint window {wi + 1}/{len(wins)}: stage 2"})
+                s2 = str(work / f"w{wi}_s2.mp4")
+                pipe.generate_and_save(
+                    prompt=prompt, output_path=s2, video_conditioning=[(ref, 1.0)],
+                    height=ch, width=cw, num_frames=n, frame_rate=fps, seed=seed + wi,
+                    source_video=s1b, refine_steps=vo.REFINE_STEPS)
+                _mlx_phase_mem(f"outpaint w{wi} stage 2")
+                part = str(work / f"w{wi}_final.mp4")
+                vo.composite_video(s2, src, part, out_w, out_h, src_w, src_h, count,
+                                   start_frame=start, fps=fps, lossless=True, ffmpeg=ffmpeg)
+                parts.append(part)
+            vo.join_parts(parts, src, out_path, fps=fps, crf=p.get("crf", 18),
+                          audio=bool(p.get("keep_audio", True)), ffmpeg=ffmpeg,
+                          steady=(out_w, out_h, src_w, src_h))
+            try:
+                pipe = None
+                from ltx_core_mlx.utils.memory import aggressive_cleanup as _ac
+                _ac()
+            except Exception:                                      # noqa: BLE001
+                pass
+            _mlx_mem_summary()
+            if not p.get("keep_work"):
+                shutil.rmtree(work, ignore_errors=True)
+            elapsed = round(time.time() - t0, 2)
+            _last_activity = time.time()
+            emit({"event": "done", "id": job_id, "output": out_path,
+                  "elapsed_sec": elapsed, "seed_used": seed, "windows": len(wins)})
+        except Exception as exc:
+            _last_activity = time.time()
+            emit({"event": "error", "id": job_id, "error": str(exc), "trace": traceback.format_exc()})
+        finally:
+            _is_busy = False
+        continue
+
     if action == "write_lyrics":
         # MUSIC STUDIO: Gemma writes lyrics from a concept. The same resident
         # Gemma 3 the enhancer uses, the same `_enhance` chat call underneath —
@@ -5361,9 +5690,6 @@ for line in sys.__stdin__:
         seed = _coerce_seed(p.get("seed", 10))
         if seed < 0:
             seed = 10
-        aspect = str(p.get("aspect") or p.get("orientation") or "").strip()
-        width = str(p.get("width") or "").strip()
-        height = str(p.get("height") or "").strip()
         preserve_tokens = p.get("preserve_tokens") or []
         if not isinstance(preserve_tokens, list):
             preserve_tokens = []
@@ -5381,76 +5707,56 @@ for line in sys.__stdin__:
         try:
             t0 = time.time()
             _mlx_mem_reset_run()
-            lm = None
-            try:
-                lm = get_gemma_lm()
-            except Exception as lm_err:
-                emit({"event": "log", "line": f"  [enhance] Gemma model not loaded ({lm_err}) — using built-in prompt enhancer."})
-
-            if lm is not None:
-                # Build augmented system prompt: official + Phosphene addendum.
-                base_sys = (lm.default_gemma_t2v_system_prompt if mode == "t2v"
-                            else lm.default_gemma_i2v_system_prompt)
-                addendum_lines = [
+            lm = get_gemma_lm()
+            # Build augmented system prompt: official + Phosphene addendum.
+            base_sys = (lm.default_gemma_t2v_system_prompt if mode == "t2v"
+                        else lm.default_gemma_i2v_system_prompt)
+            addendum_lines = [
+                "",
+                "#### Phosphene addendum (overrides any conflict above):",
+                "- Preserve every camera-move and shot description the user",
+                "  wrote verbatim. Do not add invented camera motion.",
+                "- If the user said 'cool bike' / 'a guy' / vague nouns,",
+                "  keep them generic. DO NOT invent specific brands, model",
+                "  numbers, or location styles (no 'futuristic', 'neon-lit',",
+                "  'polished chrome' unless the user said so).",
+                "- Color and lighting: prefer one or two concrete words",
+                "  ('warm afternoon sun', 'overcast sky') over flowery",
+                "  cascades ('shimmering golden hour bathed in...').",
+                "- Audio sentence stays as one trailing line that begins",
+                "  with 'Audio:'.",
+            ]
+            if not translate:
+                addendum_lines += [
                     "",
-                    "#### Phosphene addendum (overrides any conflict above):",
-                    "- Preserve every camera-move and shot description the user",
-                    "  wrote verbatim. Do not add invented camera motion.",
-                    "- If the user said 'cool bike' / 'a guy' / vague nouns,",
-                    "  keep them generic. DO NOT invent specific brands, model",
-                    "  numbers, or location styles (no 'futuristic', 'neon-lit',",
-                    "  'polished chrome' unless the user said so).",
-                    "- Color and lighting: prefer one or two concrete words",
-                    "  ('warm afternoon sun', 'overcast sky') over flowery",
-                    "  cascades ('shimmering golden hour bathed in...').",
-                    "- Audio sentence stays as one trailing line that begins",
-                    "  with 'Audio:'.",
+                    "#### Language (overrides the base instruction above):",
+                    "- Write the enhanced prompt in the SAME language the",
+                    "  user's original prompt is written in. Do NOT",
+                    "  translate it to English.",
                 ]
-                if not translate:
-                    addendum_lines += [
-                        "",
-                        "#### Language (overrides the base instruction above):",
-                        "- Write the enhanced prompt in the SAME language the",
-                        "  user's original prompt is written in. Do NOT",
-                        "  translate it to English.",
-                    ]
-                asp_lower = aspect.lower()
-                is_vert = asp_lower in ("portrait", "vertical", "9:16") or (width.isdigit() and height.isdigit() and int(height) > int(width))
-                is_horiz = asp_lower in ("landscape", "widescreen", "16:9", "4:3") or (width.isdigit() and height.isdigit() and int(width) > int(height))
-                if is_vert or is_horiz or aspect:
-                    target_orient = "portrait / vertical (9:16)" if is_vert else ("landscape / widescreen (16:9)" if is_horiz else aspect)
-                    addendum_lines += [
-                        "",
-                        f"#### Target Aspect Ratio & Composition Directive ({target_orient}):",
-                        f"- The target rendering aspect ratio is {target_orient}.",
-                        "- Describe framing, subject scale, and composition naturally suited for this exact aspect ratio.",
-                        "- DO NOT introduce descriptions that distort, stretch, reshape, or alter proportions (e.g. no letterboxing, forced widescreen distortion on vertical frames, or stretched subjects). Preserve native proportions.",
-                    ]
-                if preserve_tokens:
-                    addendum_lines += [
-                        "",
-                        "#### LoRA trigger tokens — PRESERVE CASE-EXACT:",
-                        ("The user's prompt contains LoRA trigger tokens that "
-                         "MUST appear in the output exactly as written, "
-                         "lowercase, no spelling changes, no capitalization "
-                         "changes, no substitutions:"),
-                        "  " + ", ".join(preserve_tokens),
-                        ("These tokens identify trained character / style LoRAs. "
-                         "Re-casing or rewording them breaks tokenization and "
-                         "the LoRA will not fire. If you would normally rephrase "
-                         "(e.g. 'Bizarrotrn the man' → 'a man named Bizarro'), "
-                         "DO NOT — emit the token verbatim, in lowercase."),
-                    ]
-                addendum_lines += _enhance_lora_notes_lines(p.get("lora_notes"))
-                augmented_sys = base_sys + "\n" + "\n".join(addendum_lines)
-                if mode == "t2v":
-                    enhanced = lm.enhance_t2v(user_prompt, seed=seed,
-                                               system_prompt=augmented_sys)
-                else:
-                    enhanced = lm.enhance_i2v(user_prompt, seed=seed,
-                                               system_prompt=augmented_sys)
+            if preserve_tokens:
+                addendum_lines += [
+                    "",
+                    "#### LoRA trigger tokens — PRESERVE CASE-EXACT:",
+                    ("The user's prompt contains LoRA trigger tokens that "
+                     "MUST appear in the output exactly as written, "
+                     "lowercase, no spelling changes, no capitalization "
+                     "changes, no substitutions:"),
+                    "  " + ", ".join(preserve_tokens),
+                    ("These tokens identify trained character / style LoRAs. "
+                     "Re-casing or rewording them breaks tokenization and "
+                     "the LoRA will not fire. If you would normally rephrase "
+                     "(e.g. 'Bizarrotrn the man' → 'a man named Bizarro'), "
+                     "DO NOT — emit the token verbatim, in lowercase."),
+                ]
+            addendum_lines += _enhance_lora_notes_lines(p.get("lora_notes"))
+            augmented_sys = base_sys + "\n" + "\n".join(addendum_lines)
+            if mode == "t2v":
+                enhanced = lm.enhance_t2v(user_prompt, seed=seed,
+                                           system_prompt=augmented_sys)
             else:
-                enhanced = _fallback_enhance_prompt(user_prompt, mode=mode, preserve_tokens=preserve_tokens)
+                enhanced = lm.enhance_i2v(user_prompt, seed=seed,
+                                           system_prompt=augmented_sys)
             # Post-hoc safety: case-exact restore for any preserve token
             # that Gemma still managed to mutate. Catches "Bizarrotrn" →
             # restore "bizarrotrn".
