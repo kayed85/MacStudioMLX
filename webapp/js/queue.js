@@ -2358,6 +2358,12 @@ function _pickerCropTargetCanvas(key) {
   } else {
     w = parseInt((document.getElementById('width') || {}).value || '0', 10);
     h = parseInt((document.getElementById('height') || {}).value || '0', 10);
+    const eng = (document.getElementById('engine') || {}).value || document.body.dataset.engine;
+    if (eng === 'h3') {
+      const o = (document.getElementById('h3_orientation') || {}).value;
+      if (o === 'portrait' && w > h) { const tmp = w; w = h; h = tmp; }
+      else if (o === 'landscape' && h > w) { const tmp = w; w = h; h = tmp; }
+    }
   }
   if (!(w > 0) || !(h > 0)) return null;
   return { w, h };

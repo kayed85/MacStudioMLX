@@ -279,6 +279,15 @@ function setH3Orientation(v) {
   document.querySelectorAll('#h3OrientationGroup [data-h3-orientation]').forEach(b =>
     b.classList.toggle('active', b.dataset.h3Orientation === val));
   try { localStorage.setItem('phos_h3_orientation', val); } catch (e) {}
+  const cell = (typeof h3CurrentCell === 'function') ? h3CurrentCell() : null;
+  if (cell) {
+    const wEl = document.getElementById('width');
+    const hEl = document.getElementById('height');
+    if (wEl && hEl) {
+      wEl.value = String((val === 'portrait') ? Math.min(cell.width, cell.height) : Math.max(cell.width, cell.height));
+      hEl.value = String((val === 'portrait') ? Math.max(cell.width, cell.height) : Math.min(cell.width, cell.height));
+    }
+  }
   _h3SyncOrientationSubs();
   if (typeof updateDerived === 'function') { try { updateDerived(); } catch (e) {} }
   // Orientation is part of the shape the closed Shot setup summary prints.
@@ -2734,8 +2743,10 @@ function _h3ApplyShape(qualityKey, lengthKey, opts) {
   // Mirror the cell geometry into the shared hidden fields so the queue card,
   // the "Generate" estimate and Load Params all read the truth. make_job
   // re-stamps these server-side too — a stale tab must never win.
-  set('width', cell.width);
-  set('height', cell.height);
+  const orient = (document.getElementById('h3_orientation') || {}).value || 'landscape';
+  const isPort = (orient === 'portrait');
+  set('width', isPort ? Math.min(cell.width, cell.height) : Math.max(cell.width, cell.height));
+  set('height', isPort ? Math.max(cell.width, cell.height) : Math.min(cell.width, cell.height));
   set('frames', cell.frames);
   const s = document.getElementById('steps');
   if (s) {
