@@ -2421,6 +2421,11 @@ function renderTierAxes(engine) {
         if (typeof openModelsModal === 'function') openModelsModal();
         return;
       }
+      if (b.classList.contains('is-unavailable') || b.getAttribute('aria-disabled') === 'true') {
+        const tip = b.getAttribute('title') || 'Not available on this hardware tier.';
+        if (typeof phosToast === 'function') phosToast(tip, { kind: 'warning' });
+        return;
+      }
       E.setQuality(b.getAttribute(`data-${qAttr}`));
     };
   });
