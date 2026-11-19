@@ -366,6 +366,24 @@ def patch_flux3_engine(version_dir: Path):
     print(f"[+] Patched flux3_engine.py for 16GB Macs")
     return True
 
+def install_arabic_catalog(version_dir: Path):
+    import shutil
+    src = Path("/Users/mk/MacStudioMLX/i18n/studio/ar.json")
+    if not src.is_file():
+        # Check cache in case repo hasn't synced yet
+        cache_src = Path("/Users/mk/MacStudioMLX/.ar_translation_cache.json")
+        if cache_src.is_file():
+            src = cache_src
+        else:
+            print("[-] Arabic catalog source not found yet")
+            return False
+    dst_dir = version_dir / "i18n" / "studio"
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    dst = dst_dir / "ar.json"
+    shutil.copyfile(src, dst)
+    print(f"[+] Installed Arabic catalog to {dst}")
+    return True
+
 def main():
     target = sys.argv[1] if len(sys.argv) > 1 else "/Users/mk/Library/Application Support/Phosphene/app/current"
     target_path = Path(target).resolve()
@@ -379,6 +397,7 @@ def main():
     patch_engines_js(target_path)
     patch_flux3_engine(target_path)
     patch_flux3_worker(target_path)
+    install_arabic_catalog(target_path)
 
     print(f"[✔] All patches applied to {target_path.name}")
 
