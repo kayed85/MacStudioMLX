@@ -1,8 +1,39 @@
-# Phosphene: free local AI video generator for Mac
+# Phosphene (MacStudioMLX Edition): Local AI Video & Image Studio for Apple Silicon
 
-**Phosphene is a free, open-source Mac app that makes AI video with sound, pictures, songs and speech on your own Apple Silicon Mac.** It runs LTX-2.5, MiniMax H3 (Hailuo H3) and MiniMax-H3-Image locally with MLX: offline, no cloud, no API key, no account, no NVIDIA GPU.
+> **MacStudioMLX Custom Edition (v5.0.73)**: Enhanced with full Arabic UI support (RTL), FLUX 3 Turbo 4-Step for 16GB Macs, Pro feature unlocks, and high-stability memory management.
 
-**Current release: v5.0.73.** Mac app or Pinokio · M1 to M5 · from 16 GB of memory · MIT licence · made by Mr Bizarro
+**Phosphene is a free, open-source Mac app that makes AI video with sound, pictures, songs and speech on your own Apple Silicon Mac.** It runs LTX-2.5, MiniMax H3 (Hailuo H3), MiniMax-H3-Image, and FLUX 3 locally with Apple MLX: offline, no cloud, no API key, no account, no NVIDIA GPU.
+
+**Current release: v5.0.73 (MacStudioMLX Optimized)** · Apple Silicon M1 to M5 · 16 GB unified memory optimized
+
+---
+
+## 🌟 MacStudioMLX Key Features & Enhancements
+
+### 1. 🌍 Full Arabic Language & RTL Support (دعم كامل للغة العربية)
+- Complete UI translation catalog containing **4,978 strings** (`i18n/studio/ar.json`).
+- Native Right-to-Left (`dir="rtl"`) layout across all panels (Storyboard, Video, Image Canvas, Audio/Music, Settings).
+- Toggle between **العربية** and **English** seamlessly in `Settings → Language`.
+
+### 2. ⚡ FLUX 3 Klein Turbo 4-Step (16GB Macs)
+- Unlocked **FLUX 3 Klein Distilled Q4** on 16GB Apple Silicon Macs (previously locked to 24GB+).
+- Integrated **Turbo 4-Step** inference mode (`--steps 4`) replacing 16 steps, speeding up image generation by ~75% while maintaining exceptional fidelity.
+
+### 3. 🔓 Permanent Pro Status
+- Native Pro activation enabled in `pro_token.py` and `mlx_ltx_panel.py` without external tokens or license keys.
+- Full access to Remote Control, Advanced H3 canvas options, and Pro quality presets.
+
+### 4. 🛡️ 16GB Memory Swap Guard
+- Raised swap memory thresholds to 12 GB in `yue2_run.py` and `mlx_ltx_panel.py` with system-available checks, preventing premature aborts during complex renders.
+- Intelligent canvas snapping and aspect ratio quantization.
+
+### 5. 🔄 Automated Patcher (`apply_patches.py`)
+Run after any upstream Phosphene update to re-apply all optimizations instantly:
+```bash
+python3 apply_patches.py
+```
+
+---
 
 <p align="center">
   <a href="https://phosphene.video/?utm_source=github&amp;utm_medium=readme&amp;utm_campaign=home&amp;utm_content=hero"><img src="assets/readme/app_video.webp" alt="The Phosphene Mac app: the Video tab with LTX-2.5 selected, a prompt box, the player and a gallery of AI video clips made locally on a Mac" width="100%"></a>
