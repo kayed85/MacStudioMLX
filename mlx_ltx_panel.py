@@ -20547,6 +20547,9 @@ def music_child_env(base: dict | None = None) -> dict:
            if k not in MUSIC_ENV_STRIP}
     env["PYTHONUNBUFFERED"] = "1"
     env["MLX_ENABLE_TF32"] = "0"
+    env["YUE2_MAX_SWAP_OUT_MIB"] = "12288"
+    env["YUE2_MAX_SWAP_GROWTH_MIB"] = "12288"
+    env["YUE2_MIN_AVAILABLE_GIB"] = "0.8"
     # Cover decodes the source recording by SHELLING OUT TO ffmpeg
     # (lyra/transcription/pipeline.py builds an ffmpeg argv and reads f32le off
     # its stdout). Pinokio's bundled binary is not on the default PATH, which
