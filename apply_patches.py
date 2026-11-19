@@ -338,6 +338,20 @@ def patch_engines_js(version_dir: Path):
         print(f"[+] Added snapCanvasForEngine to engines.js")
     return True
 
+def patch_flux3_engine(version_dir: Path):
+    path = version_dir / "flux3_engine.py"
+    if not path.is_file():
+        print(f"[-] {path} not found")
+        return False
+    content = path.read_text(encoding="utf-8")
+    content = content.replace('floor = 24 if config.mflux_quantize == 4 else 32', 'floor = 16 if config.mflux_quantize == 4 else 32')
+    content = content.replace('floor = 24 if recipe["quantize"] == 4 else 32', 'floor = 16 if recipe["quantize"] == 4 else 32')
+    content = content.replace('if total_gb < 32 and (width * height > 768**2 or len(refs) > 1):', 'if total_gb < 16 and (width * height > 1024**2 or len(refs) > 1):')
+    content = content.replace('"Q4 is available on 24 GB Macs; 32 GB or more is recommended.")', '"Q4 is available on 16 GB Macs; 32 GB or more is recommended.")')
+    path.write_text(content, encoding="utf-8")
+    print(f"[+] Patched flux3_engine.py for 16GB Macs")
+    return True
+
 def main():
     target = sys.argv[1] if len(sys.argv) > 1 else "/Users/mk/Library/Application Support/Phosphene/app/current"
     target_path = Path(target).resolve()
@@ -349,6 +363,7 @@ def main():
     patch_characters_js(target_path)
     patch_index_html(target_path)
     patch_engines_js(target_path)
+    patch_flux3_engine(target_path)
 
     print(f"[✔] All patches applied to {target_path.name}")
 

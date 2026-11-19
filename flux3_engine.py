@@ -157,15 +157,15 @@ def validate(config, width, height, refs, total_gb=None):
         if platform.system() != "Darwin" or platform.machine() != "arm64":
             raise RuntimeError("FLUX 3 requires an Apple Silicon Mac.")
         total_gb = int(subprocess.check_output(["/usr/sbin/sysctl", "-n", "hw.memsize"])) / 1024**3
-    floor = 24 if config.mflux_quantize == 4 else 32
+    floor = 16 if config.mflux_quantize == 4 else 32
     if total_gb < floor:
         raise ValueError(f"FLUX 3 Q{config.mflux_quantize} needs a {floor} GB Mac. "
-                         "Q4 is available on 24 GB Macs; 32 GB or more is recommended.")
+                         "Q4 is available on 16 GB Macs; 32 GB or more is recommended.")
     if width % 16 or height % 16 or width * height > 1024**2:
         raise ValueError("FLUX 3 supports up to 1024 x 1024 pixels, in multiples of 16.")
     if len(refs) > 10:
         raise ValueError("FLUX 3 supports up to ten reference images.")
-    if total_gb < 32 and (width * height > 768**2 or len(refs) > 1):
+    if total_gb < 16 and (width * height > 1024**2 or len(refs) > 1):
         raise ValueError("On a 24 GB Mac, use Q4, a small image size and at most one reference.")
 
 
@@ -174,7 +174,7 @@ def status(engine, total_gb):
     pack = PACKS[f"{recipe['variant']}-q{recipe['quantize']}"]
     complete = cached_bytes(pack)
     done = downloaded_bytes(pack)
-    floor = 24 if recipe["quantize"] == 4 else 32
+    floor = 16 if recipe["quantize"] == 4 else 32
     return dict(engine=engine, repo_id=pack["repo"], cached=complete == pack["bytes"],
                 partial=done > 0 and complete < pack["bytes"], partial_gb=done / 1e9,
                 family_installed=True, worker_installed=worker_ready(),
