@@ -356,7 +356,7 @@ async function musicCoverInstall() {
 async function musicGenerate() {
   if (musicBusy) return;
   // Pressing Compose before the engine exists IS the request to install it.
-  if (!window._ENGINE_PROBES.music.available) { openMusicInstallCard(); return; }
+  if (!window._ENGINE_PROBES.music.available || (typeof musicInstall === 'object' && musicInstall && musicInstall.active)) { openMusicInstallCard(); return; }
   // Simple mode does not render: it asks Gemma for the style and the words
   // and shows them in the Custom fields, because a song is minutes of this
   // Mac's GPU and nobody should spend that on a brief they have not read.
@@ -1110,7 +1110,7 @@ function audioStudioDurationChanged(val) {
       + 'whatever length was asked for. It is the <b>canvas</b>, not the length: '
       + T('characters.832_480_has_been_reported', '832\u00d7480 has been reported clean at 721 frames, while 1024\u00d7576 ')
       + T('characters.died_around_frame_454_on', 'died around frame 454 on the same machine ')
-      + '(<a href="https://github.com/mrbizarro/Phosphene/issues/46" target="_blank" rel="noopener">#46</a> '
+      + '(#46 '
       + T('characters.field_reports_not_a_limit', '\u2014 field reports, not a limit measured here). ')
       + T('characters.drop_to_about_832_480', 'Drop to about 832\u00d7480 or smaller and the length comes back. Longer still renders.');
   } else {

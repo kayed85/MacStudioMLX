@@ -169,6 +169,10 @@ function h3FinishFieldsFromSidecar(p, tierKey) {
     h3_clean_sound: (p.h3_clean_sound === true || p.h3_clean_sound === false) ? p.h3_clean_sound : null,
     // Face to keep carries over (same person in the finish).
     h3_reference: (typeof p.h3_reference === 'string') ? p.h3_reference : '',
+    // References (Pro) carry over too: the same pictures on the same model.
+    h3_refs: p.h3_refs === true,
+    h3_reference2: (typeof p.h3_reference2 === 'string') ? p.h3_reference2 : '',
+    h3_reference3: (typeof p.h3_reference3 === 'string') ? p.h3_reference3 : '',
     // The shot list carries over, and it is safe to: Finish means SAME LENGTH,
     // higher quality, so the window count is identical by construction and
     // entry i still means window i. Dropping it would silently finish a
@@ -349,6 +353,7 @@ async function h3FinishActive() {
   if (typeof pickerSetImage === 'function' && document.getElementById('h3_reference')) {
     try { pickerSetImage('h3_reference', fields.h3_reference || '', { snapAspect: false }); } catch (e) {}
   }
+  if (typeof _h3RefsRestore === "function") _h3RefsRestore(fields.h3_refs, fields.h3_reference2, fields.h3_reference3);
   // Shape LAST of the H3 controls: setH3Tier stamps width/height/frames/steps
   // from the cell table, so anything geometry-related set after it would be
   // fighting the source of truth. The LENGTH inside `fields.h3_tier` is the
@@ -725,7 +730,7 @@ function setEngine(engine, opts) {
       // A third case joined them: the Mac whose only gap is the local Q8
       // engine build. The server writes that sentence; do not paraphrase it.
       reason = st.needs_q8_dit
-        ? (st.ram_note || (e.label + T('queue.needs_its_low_ram_engine', ' needs its low-RAM engine built.')))
+        ? (st.ram_note || (e.label + T('queue.needs_a_one_time_setup', ' needs a one-time setup step to fit this Mac\u2019s memory.')))
         : st.repairable
         ? e.label + T('queue.needs_repair_your_weights_are', ' needs repair — your weights are still on disk. Click the chip.')
         : e.label + T('queue.isn_t_installed_yet', " isn't installed yet.");
@@ -735,14 +740,13 @@ function setEngine(engine, opts) {
              + T('queue.only_back_on', ' only — back on ') + fallback.label + T('queue.for_this_mode', ' for this mode.');
     } else if (currentMode === 'i2v' && st.first_frame === false) {
       target = fallback.id;
-      reason = T('queue.this', 'This ') + e.label + T('queue.build_has_no_first_frame', ' build has no first-frame support — ')
-             + T('queue.update_the_pack_to_use', 'update the pack to use Image mode.');
+      reason = e.label + T('queue.cannot_start_from_your_picture', ' cannot start from your picture in this version. Update Phosphene to use Image mode.');
     } else if (H3_MODE_CAP[currentMode] && st[H3_MODE_CAP[currentMode]] === false) {
       // 4.19 modes ride on runner flags an older H3 pack does not have.
       target = fallback.id;
-      reason = T('queue.this', 'This ') + e.label + T('queue.runner_predates', ' runner predates ') + (H3_MODE_LABEL[currentMode] || currentMode)
-             + distText(T('queue.press_update_in_pinokio_your', ' — press Update in Pinokio (your weights stay). Back on '),
-                        T('queue.phosphene_brings_it_up_to', '. Phosphene brings it up to date by itself (quit and reopen Phosphene if this stays). Back on '))
+      reason = (H3_MODE_LABEL[currentMode] || currentMode) + T('queue.needs_a_hailuo_h3_update', ' needs a Hailuo H3 update. ')
+             + distText(T('queue.press_update_in_pinokio_using', 'Press Update in Pinokio (your downloads stay). Using '),
+                        T('queue.phosphene_installs_it_using', 'Phosphene installs it by itself; if this stays, quit and reopen Phosphene. Using '))
              + fallback.label + T('queue.for_now', ' for now.');
     }
   }
@@ -989,6 +993,8 @@ function updateH3Availability(s) {
                     || (next.flex_turbo || {}).installing || (H3.flex_turbo || {}).installing);
   H3 = next;
   window._ENGINE_PROBES.h3 = next;
+  // References follows every tick: the download's progress, its end, a Pro licence turning on.
+  if (typeof _h3RefsUpdate === 'function') { try { _h3RefsUpdate(); } catch (e) {} }
   // The download card follows every status tick while it is open (5.0.9).
   if (document.getElementById('h3AppInstallBox')) {
     if (_h3AppInstallLocal && !(_h3AppInstallLocal.until > Date.now())) _h3AppInstallLocal = null;
@@ -1062,18 +1068,11 @@ function openH3InstallCard(source) {
     // server's sentence names the build and the sidebar entry that runs it.
     const diagnosis = (H3.reason === 'missing_q8_dit' && H3.ram_note)
         ? escapeHtml(H3.ram_note)
-        : H3.venv_broken
-        ? T('queue.what_broke_h3_s_python', 'What broke: H3’s Python environment points at a moved or deleted ')
-          + T('queue.interpreter_rebuilding_the_environment_t', 'interpreter. Rebuilding the environment takes about two minutes.')
-        : _missVenv
-        ? T('queue.what_broke_h3_s_python_2', 'What broke: H3’s Python environment was never built (or was ')
-          + T('queue.removed_building_it_takes_about', 'removed). Building it takes about two minutes and re-downloads ')
-          + 'nothing.'
+        : (H3.venv_broken || _missVenv)
+        ? T('queue.h3_quick_repair_two_minutes', 'Hailuo H3 needs a quick repair: about 2 minutes, nothing to download.')
         : _missRunner
-        ? T('queue.what_broke_the_engine_s', 'What broke: the engine’s code checkout is missing or incomplete. ')
-          + T('queue.re_cloning_it_takes_about', 'Re-cloning it takes about a minute.')
-        : T('queue.what_broke', 'What broke: ') + (_missing[0] || 'a component the probe lists below')
-          + '.';
+        ? T('queue.h3_quick_repair_one_minute', 'Hailuo H3 needs a quick repair: about a minute, nothing to download.')
+        : T('queue.h3_quick_repair', 'Hailuo H3 needs a quick repair. Nothing is downloaded again.');
     // H3-05: "repairable" covers two different real situations and they
     // need two different CTAs. missing_q8_dit means every weight is present
     // and only the local compact build is missing — pinokio.js shows ONLY a
@@ -1086,9 +1085,8 @@ function openH3InstallCard(source) {
       ? T('queue.build_hailuo_h3_compact_engine', 'Build Hailuo H3 compact engine (weights kept — no re-download)')
       : T('queue.repair_hailuo_h3_weights_kept', 'Repair Hailuo H3 (weights kept — no re-download)');
     const fixBlurb = needsBuildOnly
-      ? `<b>${T('queue.hailuo_h3_is_installed_it', 'Hailuo H3 is installed — it just needs its compact engine built.')}</b>
-         Your weights (~75 GB) are already on disk; the build downloads
-         nothing.`
+      ? `<b>${T('queue.hailuo_h3_needs_one_last', 'Hailuo H3 needs one last setup step: about 5 minutes, nothing to download.')}</b>
+         ${T('queue.everything_it_needs_is_already', 'Everything it needs (about 75 GB) is already on this Mac.')}`
       : `<b>${T('queue.hailuo_h3_is_installed_it_2', 'Hailuo H3 is installed — it just needs repairing.')}</b> ${T('queue.your_weights_75_gb_are', 'Your weights\n         (~75 GB) are still on disk and are')} <em>not</em> re-downloaded.`;
     const intro = (isMacApp() && (H3.repairable || H3.preparing)) ? `
       <p style="margin:0 0 10px">
@@ -1099,9 +1097,6 @@ function openH3InstallCard(source) {
       </p>
       <p style="margin:0 0 10px;color:var(--muted)">
         ${diagnosis}
-      </p>
-      <p style="margin:0 0 10px;color:var(--muted);font-size:12px">
-        ${_missing.length ? T('queue.missing', 'Missing: ') + _missing.map(escapeHtml).join(' · ') : ''}
       </p>
       <p style="margin:0 0 10px">
         ${distText(`${T('queue.fix_it_from_pinokio_open', 'Fix it from Pinokio: open the')} <b>Phosphene</b> ${T('queue.entry_in_the_pinokio_sidebar', 'entry in the Pinokio\n        sidebar and click')} <b>“${escapeHtml(fixMenuText)}”</b> ${T('queue.it_appears_in_place_of', '(it appears in\n        place of the install entry). The step is idempotent — it skips every\n        weight already on disk. The panel picks the engine back up within a\n        couple of seconds, no restart.')}`,
@@ -1145,7 +1140,7 @@ function openH3InstallCard(source) {
     const title = document.getElementById('h3InstallTitle');
     if (title) {
       title.textContent = (isMacApp() && (H3.repairable || H3.preparing)) ? 'Hailuo H3'
-        : needsBuildOnly ? T('queue.build_the_compact_engine_5', 'Build the compact engine · ~5 min, no download')
+        : needsBuildOnly ? T('queue.finish_setting_up_hailuo_h3_title', 'Finish setting up Hailuo H3 · about 5 min, no download')
         : H3.repairable ? T('queue.repair_hailuo_h3_no_download', 'Repair Hailuo H3 · no download')
         : T('queue.hailuo_h3_75_gb', 'Hailuo H3 · 75 GB');
     }
@@ -1932,6 +1927,7 @@ function updateDerived() {
     _h3Ref.classList.toggle('show', document.body.dataset.engine === 'h3' && !!_ref.supported
       && (currentMode === 't2v' || currentMode === 'i2v'));
   }
+  if (typeof _h3RefsUpdate === 'function') _h3RefsUpdate();
   const _restoreSection = document.getElementById('restoreSection');
   if (_restoreSection) _restoreSection.classList.toggle('show', currentMode === 'restore');
   // Upscale ×2 — its own source picker + "keep the shot" slider. The source
@@ -2157,6 +2153,212 @@ function snapA2VSizeToImage(path) {
 // `a2v_image` was added 2026-05-20 to replace the old bespoke
 // studio-ref-slot in the Audio-to-Video tab with the same drop +
 // preview + clear + recent-uploads-strip surface every other mode uses.
+// ---- References (Pro ledger row h3-references): MiniMax H3's reference model, three pictures ----
+// /status h3.references says, for this Mac: `locked` (Free: the same switch greyed, one line, the Pro
+// door only when clicked), `offered` (Pro with the recipe: the switch is live), `available` (files
+// built), `installing` with step/mb/total_mb, `error`, and `plan` (download, what stays, the free disk
+// the build needs, memory floor). Shown only on H3 Text. On, the Face to keep photo is Picture 1 and
+// two more slots open; before the first use the Get panel explains the download. The server
+// re-checks everything (make_job keeps the fields only for H3 Text; the worker re-checks Pro, memory
+// and files). Called from updateDerived() and on every /status tick.
+function _h3RefsInfo() { return (globalThis.H3 && globalThis.H3.references) || {}; }
+let _h3RefsRate = null;   // {t, mb, mbps}: the download speed, measured from the status ticks
+function _h3RefsGb(x) { return (Math.round(Number(x || 0) * 10) / 10).toLocaleString(); }
+function _h3RefsPlanText(pl) {
+  return T('queue.h3_refs_plan', 'Before the first clip, References gets its own model: a one-time download of MiniMax’s reference model (about {dl} GB), then a build on this Mac that keeps about {keep} GB. While it builds it needs about {need} GB free. About 1 hour on a 100 Mbit connection (less on a faster one), plus about 10 minutes to build. You can keep working meanwhile, and a stopped download carries on where it stopped.',
+    { dl: Math.round(pl.download_gb || 42.8), keep: _h3RefsGb(pl.keep_gb || 22.5), need: Math.round(pl.disk_need_gb || 66) });
+}
+function _h3RefsStepText(info) {
+  const step = info.step || '';
+  if (step === 'wait_render') return T('queue.h3_refs_step_wait_render', 'Downloaded. It builds when your Hailuo H3 clip has finished');
+  if (step === 'wait_build') return T('queue.h3_refs_step_wait_build', 'Waiting for an earlier setup on this Mac to finish');
+  if (step === 'build') return T('queue.h3_refs_step_build', 'Building it on this Mac (about 10 minutes)');
+  if (step === 'check') return T('queue.h3_refs_step_check', 'Checking the download');
+  if (step === 'adapter') return T('queue.h3_refs_step_adapter', 'Getting the last small file');
+  if (step === 'download') return T('queue.h3_refs_step_download', 'Downloading');
+  return T('queue.h3_refs_step_start', 'Starting');
+}
+function _h3RefsUpdate() {
+  const block = document.getElementById('h3RefsBlock');
+  if (!block) return;
+  const info = _h3RefsInfo();
+  const locked = !!info.locked;
+  const show = document.body.dataset.engine === 'h3' && currentMode === 't2v' && (!!info.offered || locked);
+  block.style.display = show ? '' : 'none';
+  block.classList.toggle('is-locked', locked);
+  const sw = document.getElementById('h3_refs');
+  if (sw && (!show || locked)) sw.checked = false;
+  const on = show && !locked && !!(sw && sw.checked);
+  const free = document.getElementById('h3RefsFreeLine');
+  if (free) {
+    free.hidden = !(show && locked);
+    if (show && locked && typeof proSpotText === 'function') {
+      const txt = proSpotText('h3-references', false);
+      if (free.dataset.txt !== txt) { free.dataset.txt = txt; free.innerHTML = proNoteHtml(txt); }
+    }
+  }
+  const hint = document.getElementById('h3RefsHint');
+  if (hint) hint.style.display = (on && info.available) ? '' : 'none';
+  const p1 = document.getElementById('h3RefsP1');
+  if (p1) p1.hidden = !(on && info.available);
+  // While References renders, the Speed row does not apply (its own sampler), and Picture 1 is any
+  // picture, not only a face: panel.css reads these two classes.
+  document.body.classList.toggle('h3-refs-on', !!(on && info.available));
+  const sec = document.getElementById('h3RefSection');
+  if (sec) sec.classList.toggle('refs-on', !!(on && info.available));
+  const more = document.getElementById('h3RefsMore');
+  if (more) more.style.display = (on && info.available) ? '' : 'none';
+  const get = document.getElementById('h3RefsGet');
+  if (get) get.style.display = (on && !info.available) ? '' : 'none';
+  if (on && !info.available) _h3RefsGetRender(info);
+  if (!on) {
+    for (const k of ['h3_reference2', 'h3_reference3']) {
+      const el = document.getElementById(k);
+      if (el && el.value && typeof pickerSetImage === 'function') { try { pickerSetImage(k, '', { snapAspect: false }); } catch (e) {} }
+    }
+  }
+}
+// The Get panel: what the download takes (always visible before it starts), whether this Mac has the
+// memory and the disk for it (said BEFORE anything is fetched), then live progress, then a plain
+// reason and "Resume" when it stopped.
+function _h3RefsGetRender(info) {
+  const pl = info.plan || {};
+  const plan = document.getElementById('h3RefsPlan');
+  if (plan) plan.textContent = _h3RefsPlanText(pl);
+  const check = document.getElementById('h3RefsCheck');
+  const btn = document.getElementById('h3RefsGetBtn');
+  const note = document.getElementById('h3RefsGetNote');
+  const prog = document.getElementById('h3RefsProgress');
+  let blocker = '';
+  // The installed Hailuo H3 is too old for References (its runner has no reference pass): the
+  // download would not help, so the one line says to update Hailuo H3 instead of the Get panel.
+  const oldRunner = info.reason === 'runner';
+  if (oldRunner) {
+    blocker = T('queue.h3_refs_update_h3', 'References needs a newer Hailuo H3. ')
+      + distText(T('queue.h3_refs_update_h3_pinokio', 'Press Update in Pinokio (your downloads stay), then come back.'),
+                 T('queue.h3_refs_update_h3_mac', 'Phosphene updates it by itself; if this stays, quit and reopen Phosphene.'));
+  } else if (pl.ram_ok === false) {
+    blocker = T('queue.h3_refs_too_small', 'References needs a Mac with {min} GB of memory or more; this Mac has {ram} GB. Face to keep above works on this Mac.', { min: pl.min_ram_gb, ram: pl.ram_gb });
+  } else if (pl.disk_ok === false && !info.installing) {
+    blocker = T('queue.h3_refs_no_space', 'The models disk has {free} GB free; References needs about {need} GB free while it builds. Free some space on it, then come back.', { free: pl.free_gb, need: Math.round(pl.disk_need_gb || 66) });
+  }
+  if (check) {
+    check.hidden = !blocker;
+    check.textContent = blocker;
+  }
+  // A Mac below the memory floor gets the one line only: no download to explain, no button to press.
+  const tooSmall = pl.ram_ok === false || oldRunner;
+  if (plan) plan.hidden = tooSmall;
+  const row = document.querySelector('#h3RefsGet .h3-refs-get-row');
+  if (row) row.hidden = tooSmall;
+  if (btn) {
+    btn.disabled = !!info.installing || !!blocker;
+    const resume = !!info.error || Number(pl.have_gb || 0) > 0.5;
+    btn.textContent = info.installing ? T('queue.h3_refs_getting', 'Getting References')
+      : resume ? T('queue.h3_refs_resume', 'Resume') : T('queue.h3_refs_get', 'Get References');
+  }
+  if (prog) prog.hidden = !info.installing;
+  if (info.installing) {
+    const fill = document.getElementById('h3RefsBarFill');
+    const text = document.getElementById('h3RefsProgressText');
+    const mb = Number(info.mb || 0), total = Number(info.total_mb || 0);
+    const pct = (info.step === 'download' && total) ? Math.min(100, Math.round(100 * mb / total)) : null;
+    if (fill) { fill.style.width = (pct == null ? 100 : pct) + '%'; fill.classList.toggle('is-busy', pct == null); }
+    // Speed from the last ticks, for a rough time left (only while bytes are arriving).
+    const now = Date.now();
+    if (info.step === 'download' && total) {
+      if (_h3RefsRate && mb > _h3RefsRate.mb && now > _h3RefsRate.t) {
+        const inst = (mb - _h3RefsRate.mb) / ((now - _h3RefsRate.t) / 1000);
+        _h3RefsRate = { t: now, mb, mbps: _h3RefsRate.mbps ? 0.8 * _h3RefsRate.mbps + 0.2 * inst : inst };
+      } else if (!_h3RefsRate || mb < _h3RefsRate.mb) {
+        _h3RefsRate = { t: now, mb, mbps: 0 };
+      }
+    } else { _h3RefsRate = null; }
+    let line = _h3RefsStepText(info);
+    if (pct != null) {
+      line += ' · ' + T('queue.h3_refs_of_gb', '{have} of {total} GB', { have: _h3RefsGb(mb * 1048576 / 1e9), total: _h3RefsGb(total * 1048576 / 1e9) });   // MB from the server are MiB; GB as the plan says them (1e9)
+      const mbps = _h3RefsRate && _h3RefsRate.mbps;
+      if (mbps > 0.5) {
+        const min = Math.max(1, Math.round((total - mb) / mbps / 60));
+        line += ' · ' + T('queue.h3_refs_minutes_left', 'about {n} min left', { n: min });
+      }
+    }
+    if (text) text.textContent = line;
+  }
+  if (note) {
+    note.textContent = info.installing ? T('queue.h3_refs_keep_working', 'You can keep working; this panel shows when it is ready.')
+      : info.error ? T('queue.h3_refs_stopped', 'Stopped: {why}', { why: info.error })
+      : (!blocker && Number(pl.have_gb || 0) > 0.5)
+        ? T('queue.h3_refs_have_part', '{have} GB already downloaded; Resume carries on from there.', { have: _h3RefsGb(pl.have_gb) })
+      : '';
+  }
+}
+// Minutes for one References clip on this shape, or 0 when References is not what renders. The
+// reference model takes `forwards` passes (4) plus the shape's fixed cost, and each picture adds a
+// little to every pass; the constants are the 17 Nov fit (343 / 361 / 384-396 s on Standard 5 s).
+function _h3RefsOn() {
+  const info = _h3RefsInfo();
+  const sw = document.getElementById('h3_refs');
+  return !!(sw && sw.checked && info.offered && !info.locked && info.available
+    && document.body.dataset.engine === 'h3' && currentMode === 't2v');
+}
+function _h3RefsEtaMin(cell) {
+  if (!cell || !_h3RefsOn() || !cell.per_forward_sec) return 0;
+  const n = ['h3_reference', 'h3_reference2', 'h3_reference3']
+    .filter(k => ((document.getElementById(k) || {}).value || '').trim()).length || 1;
+  const fwd = Number(_h3RefsInfo().forwards || 4);
+  return (Number(cell.fixed_sec || 0) + fwd * Number(cell.per_forward_sec) + 25 + 15 * n) / 60;
+}
+function h3RefsChanged() {
+  const sw = document.getElementById('h3_refs');
+  if (!sw) return;
+  if (_h3RefsInfo().locked) {        // Free: the switch is the door to what Pro adds, nothing else
+    sw.checked = false;
+    if (typeof openProModal === 'function') openProModal(document.getElementById('h3RefsSwitch'));
+    return;
+  }
+  // updateDerived redraws the form (it calls _h3RefsUpdate) and the time estimate with it.
+  if (typeof updateDerived === 'function') updateDerived(); else _h3RefsUpdate();
+}
+function _h3RefsRestore(on, ref2, ref3) {
+  const sw = document.getElementById('h3_refs');
+  if (!sw) return;
+  const info = _h3RefsInfo();
+  sw.checked = !!on && !!info.offered && !info.locked;
+  if (typeof pickerSetImage === 'function') {
+    try { pickerSetImage('h3_reference2', sw.checked ? (ref2 || '') : '', { snapAspect: false }); } catch (e) {}
+    try { pickerSetImage('h3_reference3', sw.checked ? (ref3 || '') : '', { snapAspect: false }); } catch (e) {}
+  }
+  _h3RefsUpdate();
+}
+async function h3RefsGet() {
+  const toast = (m, kind) => { if (typeof phosToast === 'function') phosToast(m, { kind }); };
+  const btn = document.getElementById('h3RefsGetBtn');
+  if (btn) btn.disabled = true;
+  try {
+    // A 451 (the H3 licence not accepted yet) is answered by the licence gate around fetch.
+    const r = await fetch('/h3/references/install', { method: 'POST' });
+    const j = await r.json().catch(() => ({}));
+    if (r.status === 402) { if (typeof openProModal === 'function') openProModal(document.getElementById('h3RefsSwitch')); return; }
+    if (r.status === 451) return;
+    if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+    toast(j.already_installed ? T('queue.h3_refs_ready', 'References is ready.')
+      : T('queue.h3_refs_downloading', 'Getting References: a one-time download, then a short build on this Mac. You can keep working.'), 'ok');
+    if (globalThis.H3 && globalThis.H3.references && !j.already_installed) {
+      globalThis.H3.references.installing = true;
+      globalThis.H3.references.error = null;
+      globalThis.H3.references.step = 'starting';
+    }
+  } catch (e) {
+    const msg = e.message || '';
+    toast(T('queue.h3_refs_failed', 'References: {why}', { why: msg }), 'danger');
+    if (globalThis.H3 && globalThis.H3.references) globalThis.H3.references.error = msg;
+  } finally {
+    if (btn) btn.disabled = false;
+    _h3RefsUpdate();
+  }
+}
+
 globalThis.PICKERS = [
   'image',
   'start_image',
@@ -2167,6 +2369,8 @@ globalThis.PICKERS = [
   'end_image',
   'a2v_image',
   'h3_reference',
+  'h3_reference2',
+  'h3_reference3',
 ];
 
 function pickerEls(key) {
@@ -3005,7 +3209,7 @@ function renderIntegrityBanner(integ) {
     '<span style="font-weight:700">'
     + (corrupt.length ? T('queue.model_files_look_incomplete_corrupt', 'Model files look incomplete / corrupt')
        : misplaced.length ? T('queue.model_files_are_in_the', 'Model files are in the wrong place')
-       : T('queue.renders_are_not_being_encoded', 'Renders are not being encoded as requested')) + '</span>'
+       : T('queue.clips_are_saving_at_lower', 'Clips are saving at lower quality than they should')) + '</span>'
     + (corrupt.length
         ? '<span style="opacity:.92">' + escapeHtml(corrupt.map(b => b.file).join(', '))
           + T('queue.this_produces_garbled_mosaic_output', ' — this produces garbled / "mosaic" output (usually an interrupted ')
@@ -3018,13 +3222,10 @@ function renderIntegrityBanner(integ) {
         : '')
     + (codecBad.length
         ? '<span style="opacity:.92;flex-basis:100%">'
-          + codecBad.map(b => escapeHtml(b.file + ' — ' + b.reason)).join('<br>')
-          + distText(T('queue.the_codec_patch_may_not', '. The codec patch may not be applied — click Update in Pinokio ')
-          + T('queue.if_it_persists_reinstall_clips', '(if it persists, reinstall). Clips rendered like this carry ')
-          + T('queue.avoidable_compression_on_faces', 'avoidable compression on faces.'),
-          T('queue.the_codec_patch_may_not_2', '. The codec patch may not be applied — use Phosphene \u2192 Check for Updates\u2026 ')
-          + T('queue.if_it_persists_help_report', '(if it persists, Help \u2192 Report a Bug\u2026). Clips rendered like this carry ')
-          + T('queue.avoidable_compression_on_faces', 'avoidable compression on faces.')) + '</span>'
+          + distText(T('queue.faces_look_over_compressed_pinokio', 'Faces look over-compressed. Press Update in Pinokio; if it stays, reinstall Phosphene.'),
+          T('queue.faces_look_over_compressed_app', 'Faces look over-compressed. Use Phosphene \u2192 Check for Updates\u2026; if it stays, use Help \u2192 Report a Bug\u2026')) + '</span>'
+          + '<details class="h3-diag" style="flex-basis:100%"><summary>' + T('queue.details_for_troubleshooting', 'Details for troubleshooting')
+          + '</summary><p>' + codecBad.map(b => escapeHtml(b.file + ': ' + b.reason)).join('<br>') + '</p></details>'
         : '')
     + '<span style="margin-left:auto;display:flex;gap:8px">'
     + repos.map(k => '<button class="btn btn-primary" onclick="repairModel(\'' + escapeHtml(k)
@@ -3060,83 +3261,94 @@ async function repairModel(key) {
 // Pinokio's own Install is still writing the venv it says "installing" and
 // offers nothing: a second installer into the same venv would race it.
 let _engineEnvWasBroken = false;
-function engineEnvBannerHtml(st) {
+let _engineDoneTimer = 0;
+// The visible words never name Python, packages or environments: the owner
+// asked (16 Nov) for a calm "finish setting up" card. The raw error stays
+// behind a Details disclosure and is never inline.
+function engineEnvBannerModel(st) {
   // /status.engine_env.cause (4.17.5) in the user's words. Server vocabulary:
   // ENGINE_ENV_CAUSES in mlx_ltx_panel.py; "unknown" and "installing" say nothing.
-  const ENGINE_ENV_CAUSE_TEXT = {
-    network: T('queue.the_last_install_could_not', 'The last install could not reach the package server - check the connection.'),
-    timeout: T('queue.the_last_install_timed_out', 'The last install timed out downloading packages - check the connection.'),
-    disk: T('queue.the_last_install_ran_out', 'The last install ran out of disk space - free some space first.'),
-    uv_error: T('queue.the_last_install_could_not_2', 'The last install could not resolve or build a package.'),
-    python_missing: distText(T('queue.the_engine_python_stopped_working', 'The engine Python stopped working - run Install from Pinokio to rebuild it (models kept).'),
-                             T('queue.the_engine_python_stopped_working_2', 'The engine Python stopped working - quit Phosphene and open it again so setup can rebuild it (models kept).')),
+  const CAUSE_TEXT = {
+    network: T('queue.setup_cause_network', 'Check your internet connection, then try again.'),
+    timeout: T('queue.setup_cause_timeout', 'The connection was too slow. Check it, then try again.'),
+    disk: T('queue.setup_cause_disk', 'There was not enough free disk space. Free some up, then try again.'),
+    python_missing: distText(T('queue.setup_cause_rebuild_pinokio', 'Run Install from Pinokio to rebuild it. Your models stay.'),
+                             T('queue.setup_cause_rebuild_app', 'Quit Phosphene and open it again so setup can finish. Your models stay.')),
   };
-  if (!st || st.ok) return '';
+  if (!st || st.ok) return null;
   const rep = st.repair || {};
-  const last = (rep.log || []).slice(-1)[0] || '';
   if (st.installing || rep.active) {
-    return '<span style="font-weight:700">Installing the render engine\u2026</span>'
-      + '<span style="opacity:.92">' + escapeHtml(_redactLocalPaths(last) || 'Installing its Python packages')
-      + ' \u2014 renders can start when it finishes. Models are not touched.</span>';
+    return { state: 'busy', title: T('queue.setup_running', 'Finishing setup… (about 3 min)'),
+             sub: T('queue.setup_running_sub', 'You can keep this window open. Your models stay.') };
   }
-  // The Mac app has no sidebar: the in-studio Repair button is the only one.
-  const pinokio = isMacApp() ? '' : '<span style="opacity:.85;flex-basis:100%">Or from Pinokio: Stop Phosphene, then '
-    + 'click \u201cRepair Phosphene engine (models kept)\u201d.</span>';
+  // The Mac app has no sidebar: the in-studio button is the only one.
+  const pinokio = isMacApp() ? '' : T('queue.setup_pinokio_fallback', 'Or from Pinokio: Stop Phosphene, then click “Repair Phosphene engine (models kept)”.');
   if (rep.state === 'failed') {
-    return '<span style="font-weight:700">The engine repair did not finish:</span>'
-      + '<span style="opacity:.92">' + escapeHtml(rep.error || 'unknown error') + '</span>'
-      + '<span style="margin-left:auto;display:flex;gap:8px">'
-      + '<button class="btn btn-primary" data-action="repair-engine">Try again</button></span>'
-      + pinokio;
+    return { state: 'failed', title: T('queue.setup_failed', 'Setup didn’t finish.'),
+             sub: CAUSE_TEXT[st.cause] || '', button: T('queue.setup_try_again', 'Try again'),
+             details: _redactLocalPaths(rep.error || '') || T('queue.setup_unknown_error', 'unknown error'), pinokio };
   }
-  // 4.17.5: why the last install stopped, when its installer recorded it.
-  const why = ENGINE_ENV_CAUSE_TEXT[st.cause] || '';
-  return '<span style="font-weight:700">The render engine did not finish installing</span>'
-    + '<span style="opacity:.92">Its Python packages are missing from its environment, so '
-    + T('queue.renders_cannot_start', 'renders cannot start. ') + (why ? escapeHtml(why) + ' ' : '')
-    + 'Repair re-installs only those packages (a few minutes); '
-    + 'every model is kept.</span>'
-    + '<span style="margin-left:auto;display:flex;gap:8px">'
-    + '<button class="btn btn-primary" data-action="repair-engine">Repair engine</button></span>'
-    + pinokio;
+  return { state: 'needed', title: T('queue.setup_needed', 'Phosphene needs to finish setting up before it can make videos.'),
+           sub: (CAUSE_TEXT[st.cause] ? CAUSE_TEXT[st.cause] + ' ' : '') + T('queue.setup_needed_sub', 'A few minutes. Your models stay.'),
+           button: T('queue.setup_finish', 'Finish setup'), pinokio };
+}
+function engineEnvBannerHtml(m) {
+  const glyph = m.state === 'done' ? 'ph-check-bold' : 'ph-gear-six';
+  return '<svg class="ph setup-card-icon" aria-hidden="true"><use href="#' + glyph + '"/></svg>'
+    + '<div class="setup-card-text"><div class="setup-card-title">' + escapeHtml(m.title) + '</div>'
+    + (m.sub ? '<div class="setup-card-sub">' + escapeHtml(m.sub) + '</div>' : '')
+    + (m.pinokio ? '<div class="setup-card-sub">' + escapeHtml(m.pinokio) + '</div>' : '')
+    + (m.details ? '<details class="setup-card-details"><summary>' + escapeHtml(T('queue.setup_details', 'Details'))
+        + '</summary><pre>' + escapeHtml(m.details) + '</pre></details>' : '')
+    + '</div>'
+    + (m.button ? '<button class="btn btn-primary setup-card-btn" data-action="repair-engine">' + escapeHtml(m.button) + '</button>' : '');
 }
 function renderEngineEnvBanner(st) {
-  const html = engineEnvBannerHtml(st);
+  const m = engineEnvBannerModel(st);
   let el = document.getElementById('engineEnvBanner');
-  if (!html) {
-    if (el) el.remove();
-    if (_engineEnvWasBroken && st && st.ok && typeof phosToast === 'function') {
-      phosToast(T('queue.the_render_engine_is_repaired', 'The render engine is repaired \u2014 renders can run. Press Retry on a failed render.'),
-                { kind: 'success', duration: 8000 });
+  if (!m) {
+    if (_engineEnvWasBroken && st && st.ok) {
+      // "All set." for a few seconds, then the card goes away.
+      _engineEnvWasBroken = false;
+      const done = { state: 'done', title: T('queue.setup_done', 'All set.'),
+                     sub: T('queue.setup_done_sub', 'Press Retry on a failed video to make it again.') };
+      if (el) {
+        el.className = 'setup-card is-done';
+        el.innerHTML = engineEnvBannerHtml(done);
+        el.dataset.html = '';
+        clearTimeout(_engineDoneTimer);
+        _engineDoneTimer = setTimeout(() => { const e = document.getElementById('engineEnvBanner'); if (e) e.remove(); }, 5000);
+      }
+      return;
     }
-    _engineEnvWasBroken = false;
+    if (el && !(el.classList.contains('is-done'))) el.remove();
     return;
   }
   _engineEnvWasBroken = true;
+  clearTimeout(_engineDoneTimer);
   if (!el) {
     el = document.createElement('div');
     el.id = 'engineEnvBanner';
-    document.body.appendChild(el);
+    // Below the header, never over it: the header and its update button stay visible.
+    const main = document.querySelector('main.layout');
+    if (main) main.before(el); else document.body.appendChild(el);
   }
-  const busy = !!(st.installing || (st.repair || {}).active);
-  const above = document.getElementById('integrityBanner');
-  el.style.cssText = 'position:fixed;left:0;right:0;z-index:9998;'
-    + 'top:' + (above ? above.offsetHeight : 0) + 'px;'
-    + 'background:' + (busy ? '#6b4a00' : '#7a1f1f') + ';color:#fff;padding:10px 16px;'
-    + 'font-size:13px;line-height:1.4;display:flex;align-items:center;gap:12px;'
-    + 'flex-wrap:wrap;box-shadow:0 2px 10px rgba(0,0,0,.45)';
+  el.className = ['setup-card', 'is-' + m.state].join(' ');
+  el.setAttribute('role', 'status');
+  const html = engineEnvBannerHtml(m);
   if (el.dataset.html !== html) { el.innerHTML = html; el.dataset.html = html; }
 }
+
 async function engineRepairStart() {
   try {
     const r = await fetch('/engine/repair', { method: 'POST', body: new URLSearchParams({}) });
     const res = await r.json().catch(() => ({}));
     if (!r.ok && typeof phosToast === 'function') {
-      phosToast(res.error || (T('queue.repair_could_not_start_http', 'Repair could not start: HTTP ') + r.status),
+      phosToast(res.error || (T('queue.setup_could_not_start_http', 'Setup could not start: HTTP ') + r.status),
                 { kind: res.installing ? 'info' : 'danger', duration: 8000 });
     }
   } catch (e) {
-    if (typeof phosToast === 'function') phosToast(T('queue.repair_could_not_start', 'Repair could not start: ') + (e.message || e), { kind: 'danger' });
+    if (typeof phosToast === 'function') phosToast(T('queue.setup_could_not_start', 'Setup could not start: ') + (e.message || e), { kind: 'danger' });
   }
   if (typeof poll === 'function') poll();
 }
@@ -3149,12 +3361,12 @@ async function h3RepairStart() {
     const r = await fetch('/h3/repair', { method: 'POST', body: new URLSearchParams({}) });
     const res = await r.json().catch(() => ({}));
     if (typeof phosToast === 'function') {
-      phosToast(r.ok ? T('queue.repairing_hailuo_h3_s_packages', 'Repairing Hailuo H3\u2019s packages\u2026 (about a minute, weights kept)')
-                     : (res.error || (T('queue.repair_could_not_start_http', 'Repair could not start: HTTP ') + r.status)),
+      phosToast(r.ok ? T('queue.setup_h3_running', 'Finishing Hailuo H3 setup\u2026 (about a minute)')
+                     : (res.error || (T('queue.setup_could_not_start_http', 'Setup could not start: HTTP ') + r.status)),
                 { kind: r.ok ? 'info' : 'danger', duration: 8000 });
     }
   } catch (e) {
-    if (typeof phosToast === 'function') phosToast(T('queue.repair_could_not_start', 'Repair could not start: ') + (e.message || e), { kind: 'danger' });
+    if (typeof phosToast === 'function') phosToast(T('queue.setup_could_not_start', 'Setup could not start: ') + (e.message || e), { kind: 'danger' });
   }
   if (typeof poll === 'function') poll();
 }
@@ -3166,8 +3378,8 @@ function noteH3EnvRepair(st) {
   const now = rep.state || '';
   if (_h3RepairWas === 'running' && (now === 'done' || now === 'failed') && typeof phosToast === 'function') {
     phosToast(now === 'done'
-      ? T('queue.hailuo_h3_is_repaired_h3', 'Hailuo H3 is repaired \u2014 H3 renders can run. Press Retry on the failed render.')
-      : T('queue.the_hailuo_h3_repair_did', 'The Hailuo H3 repair did not finish: ') + _redactLocalPaths(rep.error || 'unknown error'),
+      ? T('queue.setup_h3_done', 'All set. Hailuo H3 can make videos again. Press Retry on the failed one.')
+      : T('queue.setup_h3_failed', 'Hailuo H3 setup didn\u2019t finish. Try again.'),
       { kind: now === 'done' ? 'success' : 'danger', duration: 10000 });
   }
   _h3RepairWas = now;
@@ -3233,8 +3445,8 @@ function nowWaitNote(s) {
              text: hold.text + (mins >= 1 ? ` ${mins} min so far.` : '') };
   }
   if (restart.restarting) {
-    return { kind: 'engine_restart', title: T('queue.engine_restarting', 'Engine restarting'),
-             text: restart.text || 'Engine restarting. The next clip takes about a minute longer to start.' };
+    return { kind: 'engine_restart', title: T('queue.restarting', 'Restarting'),
+             text: restart.text || T('queue.restarting_next_clip_minute', 'Phosphene is restarting. The next clip takes about a minute longer to start.') };
   }
   if (queued && !running) {
     return { kind: 'next', title: T('queue.starting_the_next_clip', 'Starting the next clip'),
@@ -3274,17 +3486,17 @@ function nowCardFailureActions(last, info) {
     && !((_h3EnvLast.repair || {}).active);
   if (action === 'repair_h3' && !h3Fixed) {
     return `<button type="button" class="now-card-retry" data-action="repair-h3" ` +
-      `title="Re-install only Hailuo H3's Python packages, at the set this release was tested with (about a minute, weights kept)">` +
+      `title="${escapeHtml(T('queue.setup_h3_title', 'Finish setting up Hailuo H3 (about a minute, your models stay)'))}">` +
       `<svg class="ph" aria-hidden="true"><use href="#ph-arrow-clockwise"/></svg>` +
-      `<span>${T('queue.repair_hailuo_h3', 'Repair Hailuo H3')}</span></button>` + dismiss;
+      `<span>${T('queue.setup_finish', 'Finish setup')}</span></button>` + dismiss;
   }
   // 4.17.4: the engine's packages are not installed - every render fails the
   // same way until they are, so the card offers the repair, never a Retry.
   if (action === 'repair_engine') {
     return `<button type="button" class="now-card-retry" data-action="repair-engine" ` +
-      `title="Re-install only the render engine's Python packages (a few minutes, models kept)">` +
+      `title="${escapeHtml(T('queue.setup_finish_title', 'Finish setting up (a few minutes, your models stay)'))}">` +
       `<svg class="ph" aria-hidden="true"><use href="#ph-arrow-clockwise"/></svg>` +
-      `<span>${T('queue.repair_engine', 'Repair engine')}</span></button>` + dismiss;
+      `<span>${T('queue.setup_finish', 'Finish setup')}</span></button>` + dismiss;
   }
   // 4.17.5: a size refused because macOS's GPU watchdog stopped it (even in
   // short GPU steps) has one way forward - smaller. Retry as is would only be
@@ -3316,6 +3528,9 @@ function nowCardFailureActions(last, info) {
 }
 function friendlyJobError(raw, engine) {
   raw = raw || 'unknown error';
+  if (/Picture stalled;|mflux.*stalled: no output for/i.test(raw)) {
+    return { friendly: T('queue.picture_stall_help', 'The picture engine stopped responding for 30 minutes, so Phosphene stopped it. Press Generate again; if a download was running it continues where the finished files left off. If it happens again, restart Phosphene.'), hint: '', smaller: false, details: raw };
+  }
   // 4.17.5: a size macOS's GPU watchdog stopped twice on this Mac (once in
   // short GPU steps) is refused up front instead of failing again - smaller
   // is the way forward, and the card offers exactly that.
@@ -3334,10 +3549,8 @@ function friendlyJobError(raw, engine) {
   // One gave up after three. Point at the one-click repair instead.
   if (/engine venv is not usable|venv has a Python but no packages|never finished installing into it/i.test(raw)) {
     return {
-      friendly: T('queue.the_render_engine_did_not', 'The render engine did not finish installing.'),
-      hint: T('queue.its_python_packages_are_missing', 'Its Python packages are missing, so no render can start. Press Repair engine: ')
-          + T('queue.it_re_installs_only_those', 'it re-installs only those packages (a few minutes) and keeps every model. ')
-          + T('queue.retrying_as_is_fails_the', 'Retrying as is fails the same way.'),
+      friendly: T('queue.setup_needed', 'Phosphene needs to finish setting up before it can make videos.'),
+      hint: T('queue.setup_card_hint', 'Press Finish setup. It takes a few minutes and your models stay.'),
       details: _redactLocalPaths(raw) || raw,
       action: 'repair_engine',
     };
@@ -3347,10 +3560,8 @@ function friendlyJobError(raw, engine) {
   // fails the same way; the repair re-installs only H3's packages.
   if (/Hailuo H3 venv/i.test(raw)) {
     return {
-      friendly: T('queue.hailuo_h3_s_python_packages', 'Hailuo H3\u2019s Python packages need a repair.'),
-      hint: T('queue.they_are_not_the_versions', 'They are not the versions this release was tested with, so H3 stopped before using ')
-          + T('queue.the_gpu_press_repair_hailuo', 'the GPU. Press Repair Hailuo H3: it re-installs only those packages (about a minute) ')
-          + T('queue.and_keeps_every_weight_ltx', 'and keeps every weight. LTX renders are not affected.'),
+      friendly: T('queue.setup_h3_needed', 'Hailuo H3 needs to finish setting up before it can make videos.'),
+      hint: T('queue.setup_h3_hint', 'Press Finish setup. It takes about a minute and your models stay. Other video types are not affected.'),
       details: _redactLocalPaths(raw) || raw,
       action: 'repair_h3',
     };
@@ -3359,6 +3570,18 @@ function friendlyJobError(raw, engine) {
     return { friendly: T('queue.stopped_before_generating_the_music', 'Stopped before generating — the music engine is not ready.'),
       hint: distText(T('queue.install_or_repair_it_from', 'Install or repair it from the Phosphene sidebar in Pinokio. Everything else in the panel is unaffected.'),
                      T('queue.use_install_music_engine_or', 'Use Install music engine or Repair music engine in Audio \u2192 Compose. Everything else in the studio is unaffected.')) };
+  }
+  // Fleet 18 Nov 2026: Metal ran out of memory during a Hailuo H3 render
+  // (16 GB Macs on 10-15 s clips). The server says it in English
+  // (h3_metal_oom_message); older Studios sent the raw Metal line.
+  if (/Hailuo H3 ran out of memory/i.test(raw)
+      || (engine === 'h3' && /insufficient memory|commandbuffercallbackerroroutofmemory/i.test(raw))) {
+    return {
+      friendly: T('queue.your_mac_ran_out_of', 'Your Mac ran out of memory.'),
+      hint: T('queue.h3_oom_hint', 'Make a shorter clip (5 s) or pick a lower setting such as Draft, and quit other apps before you retry.'),
+      details: _redactLocalPaths(raw) || raw,
+      docsAnchor: 'memory',
+    };
   }
   const rawLower = String(raw).toLowerCase();
   // SYS-07: these two are the #1 and #3 fleet failures (54 + 23 installs in
@@ -3392,14 +3615,14 @@ function friendlyJobError(raw, engine) {
     };
   }
   if (rawLower.includes('sigsegv') || rawLower.includes('sigbus')) {
-    return { friendly: T('queue.helper_crashed_at_the_native', 'Helper crashed at the native level (MLX/Metal fault).'),
-             hint: T('queue.share_the_crashlog_at_library', 'Share the crashlog at ~/Library/Logs/DiagnosticReports/python3.11_*.crash ') +
-                   T('queue.on_github_com_mrbizarro_phosphene', 'on github.com/mrbizarro/phosphene/issues so we can fix it.') };
+    return { friendly: T('queue.the_render_crashed', 'The render crashed.'),
+             hint: T('queue.press_retry_if_it_keeps_crashing', 'Press Retry. If it keeps crashing, press Report a bug at the top of the window: it sends us what we need.'),
+             details: _redactLocalPaths(raw) || raw };
   }
   if (rawLower.includes('sigabrt')) {
     // The watchdog signature (kIOGPUCommandBufferCallbackErrorTimeout) is
     // the specific, common case on M1/M2-class GPUs; anything else that
-    // aborts at the C level still gets the crashlog ask, just demoted.
+    // aborts at the C level gets the plain driver advice (H20).
     const isWatchdog = rawLower.includes('gpu watchdog') || rawLower.includes('gpu timeout')
       || rawLower.includes('commandbuffercallbackerrortimeout')
       || rawLower.includes('impacting interactivity')
@@ -3414,22 +3637,21 @@ function friendlyJobError(raw, engine) {
         ...(onH3 ? {} : { smaller: true }),
         details: T('queue.the_macos_gpu_watchdog_killed', 'The macOS GPU watchdog killed a Metal command buffer that ran ')
                 + 'too long (kIOGPUCommandBufferCallbackErrorTimeout), seen on '
-                + T('queue.m1_m2_class_gpus_if', 'M1/M2-class GPUs. If it keeps happening on Quick at 3 s, please ')
-                + 'open an issue with your chip + macOS version and the crashlog at '
-                + T('queue.library_logs_diagnosticreports_python3_1', '~/Library/Logs/DiagnosticReports/python3.11_*.ips to ')
-                + 'github.com/mrbizarro/phosphene/issues/44.',
+                + T('queue.m1_m2_class_gpus_retried', 'M1/M2-class GPUs. Phosphene already retried it; if it keeps happening, ')
+                + T('queue.update_macos_period', 'update macOS.'),
         docsAnchor: 'gpu-watchdog',
       };
     }
-    return { friendly: T('queue.helper_hit_a_c_level', 'Helper hit a C-level assertion and aborted.'),
-             hint: T('queue.share_the_crashlog_at_library', 'Share the crashlog at ~/Library/Logs/DiagnosticReports/python3.11_*.crash ') +
-                   T('queue.on_github_com_mrbizarro_phosphene_2', 'on github.com/mrbizarro/phosphene/issues.') };
+    // H20: no issue-tracker ask (a driver abort is not fixed by a report).
+    return { friendly: T('queue.graphics_driver_stopped_render', 'The Mac\'s graphics driver stopped the render. Phosphene already retried it.'),
+             hint: T('queue.try_shorter_quit_graphics_apps', 'Try a shorter clip or a smaller size · quit other apps that use graphics ')
+                 + T('queue.graphics_apps_update_macos', '(browser video, games, other AI apps) · update macOS.') };
   }
   if (rawLower.includes('helper exited from') || rawLower.includes('helper pipe closed') ||
       rawLower.includes('helper died') || rawLower.includes('helper exited')) {
-    return { friendly: T('queue.helper_exited_unexpectedly', 'Helper exited unexpectedly.'),
-             hint: T('queue.check_the_log_for_the', 'Check the log for the last "step:*" breadcrumb (tells us which ') +
-                   T('queue.phase_died_if_memory_pressured', 'phase died). If memory-pressured, close other apps and retry.') };
+    return { friendly: T('queue.the_render_stopped_unexpectedly', 'The render stopped unexpectedly.'),
+             hint: T('queue.close_other_apps_to_free', 'Close other apps to free memory, then press Retry.'),
+             details: _redactLocalPaths(raw) || raw };
   }
   // SYS-31: the generic "training exited with code N" case (no known
   // signature to name a more specific cause for — the watchdog/OOM/canvas
@@ -3462,6 +3684,20 @@ function friendlyJobError(raw, engine) {
       friendly: T('queue.a_model_file_on_this', 'A model file on this Mac is damaged.'),
       hint: T('queue.usually_an_interrupted_download_press', 'Usually an interrupted download. Press Repair in the red bar at the ')
           + T('queue.top_of_the_panel_it', 'top of the panel: it re-downloads only the broken files. Retrying as ')
+          + T('queue.is_fails_the_same_way', 'is fails the same way.'),
+      details: _redactLocalPaths(raw) || raw,
+      action: 'models',
+    };
+  }
+  // H12 (fleet, 11 renders on 7 Macs, 4.19.5-5.0.28): the engine could not
+  // open a model weight file ("[load_safetensors] Failed to open file
+  // <path>") - it was removed, or its folder (often an external drive) was
+  // gone. It fell to the bare "Job failed." whose Retry fails the same way.
+  if (/failed to open file/i.test(raw) && /load_safetensors|\.safetensors/i.test(raw)) {
+    return {
+      friendly: T('queue.a_model_file_could_not', 'A model file could not be opened.'),
+      hint: T('queue.if_your_models_are_on', 'If your models are on an external drive, reconnect it. Otherwise press ')
+          + T('queue.repair_in_models_it_re', 'Repair in Models: it re-downloads only the missing files. Retrying as ')
           + T('queue.is_fails_the_same_way', 'is fails the same way.'),
       details: _redactLocalPaths(raw) || raw,
       action: 'models',
@@ -3532,15 +3768,35 @@ function friendlyJobError(raw, engine) {
   // exit-code one WITH its raw metrics_path (an absolute local path, often
   // containing the user's real name on macOS) shown verbatim on screen.
   if (/h3 render (timed out|exited with code)/i.test(raw)) {
+    const timedOut = rawLower.includes('timed out');
     return {
-      friendly: rawLower.includes('timed out')
-        ? T('queue.h3_stopped_no_progress_for', 'H3 stopped — no progress for 20 minutes.')
-        : T('queue.h3_render_failed', 'H3 render failed.'),
-      hint: _redactLocalPaths(raw) ||
-        'Try Fast, a shorter length, or Draft; quit Chrome/Slack if memory is tight.',
+      // The card shows two short lines of headline: keep it short, the rest goes in the hint.
+      friendly: timedOut
+        ? T('queue.hailuo_h3_stalled', 'Hailuo H3 stalled.')
+        : T('queue.hailuo_h3_stopped', 'Hailuo H3 stopped.'),
+      hint: timedOut
+        ? T('queue.no_progress_for_20_minutes', 'No progress for 20 minutes, most likely because the Mac ran out of memory. Try a shorter length or a smaller size, and close other apps.')
+        : T('queue.press_retry_if_it_stops_h3', 'Press Retry. If it stops again, try Fast or a shorter length, or press Report a bug at the top of the window.'),
+      details: _redactLocalPaths(raw) || raw,
     };
   }
-  return { friendly: T('queue.job_failed', 'Job failed.'), hint: _redactLocalPaths(raw) || raw };
+  // Plain words (17 Nov 2026): the catch-all. A server message that is already
+  // a plain sentence (a refusal written for people) stays the main line; raw
+  // engine text (exit codes, exceptions, paths, code words) goes under Details.
+  const shown = _redactLocalPaths(raw) || raw;
+  // A message is plain when a creator could read it: a short sentence with no
+  // code words, file paths, exit codes or exception names.
+  const looksPlain = (t) => {
+    const x = String(t || '').trim();
+    if (!x || x.length > 280 || !/[.!?]$/.test(x) || !/\s/.test(x)) return false;
+    return !/[_{}<>\[\]\\|`]|\/\w|\w\.(py|js|json|sh|so|dylib|safetensors)\b|traceback|exception|error:|errno|exit(ed)?( with)? code|returncode|status \d|0x[0-9a-f]|\bhelper\b|\bvenv\b|\bpython\b|\bmlx\b|\bmetal\b|\bcuda\b|\bpid\b|\bsig[a-z]+\b/i.test(x);
+  };
+  if (looksPlain(shown)) {
+    return { friendly: T('queue.the_render_stopped', 'The render stopped.'), hint: shown };
+  }
+  return { friendly: T('queue.the_render_stopped', 'The render stopped.'),
+           hint: T('queue.press_retry_if_it_stops', 'Press Retry. If it stops again, press Report a bug at the top of the window so we can see why.'),
+           details: shown };
 }
 
 // ---- Completion alerts ------------------------------------------------------
@@ -3616,6 +3872,28 @@ function playDoneChime(failed) {
 
 let _pollRequestSerial = 0;
 let _pollAppliedSerial = 0;
+// L144: /status?delta=1 leaves out every key whose tag we already hold. The
+// tags and the answer they describe are kept together (_STATUS_BASE /
+// _STATUS_TAGS) and a poll merges against the pair it was ASKED with, so two
+// polls in flight at once cannot mix up which copy an omitted key refers to.
+let _STATUS_BASE = null;
+let _STATUS_TAGS = null;
+function statusHaveParam(tags) {
+  return Object.keys(tags).map(k => k + ':' + tags[k]).join(',');
+}
+// An ordinary full answer (older server, or no `_delta`) comes back as is.
+// Returns null when a key was left out that we do not hold: ask again in full.
+function mergeStatusDelta(base, resp) {
+  const d = resp && resp._delta;
+  if (!d || !d.h) return resp;
+  const out = {};
+  for (const k of Object.keys(d.h)) {
+    if (k in resp) out[k] = resp[k];
+    else if (base && k in base) out[k] = base[k];
+    else return null;
+  }
+  return out;
+}
 async function poll() {
   const requestSerial = ++_pollRequestSerial;
   // Reflect HDR-vs-character mutual exclusion every poll cycle. character_id
@@ -3627,11 +3905,18 @@ async function poll() {
     try { _applyHdrPillAvailability(); } catch (_) {}
   }
   let s;
-  const url = '/status' + (filterMode === 'hidden' ? '?include_hidden=1' : '');
+  const reqBase = _STATUS_BASE, reqTags = _STATUS_TAGS;
+  const url = '/status?delta=1' + (filterMode === 'hidden' ? '&include_hidden=1' : '')
+    + (reqBase && reqTags ? '&have=' + statusHaveParam(reqTags) : '');
   try {
     s = await (await fetch(url)).json();
     // A slow older poll must not restore a completed job or its old preview.
     if (requestSerial < _pollAppliedSerial) return;
+    const tags = s && s._delta && s._delta.h;
+    s = mergeStatusDelta(reqBase, s);
+    if (s === null) { _STATUS_BASE = null; _STATUS_TAGS = null; return; }
+    _STATUS_BASE = tags ? s : null;
+    _STATUS_TAGS = tags || null;
     _pollAppliedSerial = requestSerial;
     notifyJobsDone(s);
     if (typeof starCardPoll === 'function') { try { starCardPoll(s); } catch (_) {} }
@@ -3650,6 +3935,8 @@ async function poll() {
     return;
   }
   LAST_STATUS = s;
+  // Install source resolved after first paint: Get Pro links pick it up (boot.js siteLink).
+  if (s && s.install && typeof BOOT !== 'undefined') BOOT.install = s.install;
   // PUBLISHED HERE, AT THE TOP, and that position is the fix for R2-B1.
   // It used to be assigned ~230 lines further down — AFTER the block that
   // repaints the tier strips. So the one repaint that fires (the first poll,
@@ -3724,16 +4011,16 @@ async function poll() {
   // after-timeout state.
   const hp = document.getElementById('helperPill');
   if (s.helper && s.helper.alive) {
-    hp.innerHTML = `<span class="dot"></span>${T('queue.engine_ready', 'engine ready')}`;
+    hp.innerHTML = `<span class="dot"></span>${T('queue.ready_pill', 'ready')}`;
     hp.className = 'pill pill-good';
-    hp.title = T('queue.the_render_engine_is_loaded', 'The render engine is loaded and ready.');
+    hp.title = T('queue.ready_to_render', 'Ready to render.');
   } else {
     // Helper auto-respawns on the next job (see WarmHelper._ensure). "Cold"
     // is normal after the idle timeout, not an error — first job after a
     // cold start eats a ~30s pipeline-load cost.
-    hp.innerHTML = `<span class="dot"></span>${T('queue.engine_resting', 'engine resting')}`;
+    hp.innerHTML = `<span class="dot"></span>${T('queue.resting_pill', 'resting')}`;
     hp.className = 'pill';
-    hp.title = T('queue.the_render_engine_unloaded_after', 'The render engine unloaded after being idle — normal, not a problem. The next render reloads it, a one-time ~30s delay.');
+    hp.title = T('queue.phosphene_freed_up_memory_idle', 'Phosphene freed up memory while it sat idle. Your next render takes about 30 seconds longer to start.');
   }
 
   // Tier pill — what this Mac's RAM tier allows. Click to open the
@@ -3905,6 +4192,20 @@ async function poll() {
     } else {
       breakerNotice.hidden = true;
     }
+  }
+
+  // Saved files folder: its drive unplugged. Renders carry on and stay on
+  // this Mac; say so once as a toast and keep a quiet line above Generate.
+  const ofNotice = document.getElementById('outputsFolderNotice');
+  const of = s.outputs_folder;
+  if (ofNotice && of !== undefined) {
+    const offline = !!(of && of.path && of.reachable === false);
+    if (offline) {
+      const line = T('queue.outputs_folder_offline', 'Your saved files folder ({folder}) is not connected. New videos and pictures stay on this Mac and are copied there when it is back.', {folder: of.label || of.path});
+      document.getElementById('outputsFolderNoticeText').textContent = line;
+      if (ofNotice.hidden) phosToast(line, {kind: 'warning', duration: 8000});
+    }
+    ofNotice.hidden = !offline;
   }
 
   // Q8 / High enable.
@@ -4148,7 +4449,7 @@ async function poll() {
         `<br><span style="color: var(--text)">${escapeHtml(hint)}</span>` +
         // SYS-33: errors rarely linked to Docs even where a section already
         // existed. docsAnchor names one of troubleshooting.md's own anchors.
-        (details ? `<details class="h3-diag"><summary>${T('queue.details_for_troubleshooting', 'Details for troubleshooting')}</summary><p>${details}` +
+        (details ? `<details class="h3-diag"><summary>${T('queue.details_for_troubleshooting', 'Details for troubleshooting')}</summary><p>${escapeHtml(details)}` +
           (docsAnchor ? ` <a href="#" onclick="openDocs('troubleshooting','${docsAnchor}');return false;">${T('queue.learn_more', 'Learn more →')}</a>` : '') +
           `</p></details>` : '');
       // Action row: Retry (re-submit same params via /queue/retry), plus
@@ -4201,7 +4502,9 @@ async function poll() {
       nowCard.classList.toggle('waiting', !!waitNote && waitNote.kind !== 'paused');
       nowCard.querySelector('.ttl').textContent = waitNote ? waitNote.title : T('queue.idle', 'Idle');
       nowCard.querySelector('.meta').textContent = waitNote
-        ? waitNote.text : T('queue.no_jobs_queued_generate_something', 'No jobs queued. Generate something on the left.');
+        ? waitNote.text : (last && last.image_partial
+          ? T('queue.pictures_partial_help', 'Some pictures finished. They are saved in the gallery. Try again with one picture at a time.')
+          : T('queue.no_jobs_queued_generate_something', 'No jobs queued. Generate something on the left.'));
       // #80: a paused worker used to say "waits for resume" and offer no way
       // to resume from where the user was looking; the only control was the
       // Pause/Resume chip above the queue list, and a restart persisted the
@@ -4450,7 +4753,7 @@ async function poll() {
       ${hsbBadge}
       <span class="params">${fmtMin(j.elapsed_sec)} · ${j.finished_at ? j.finished_at.slice(11) : ''}</span>
       <span>${actionHtml}</span>
-    </li>${proHintRow(j, !!s.current)}`;
+    </li>${proHintRow(j)}`;
   }).join('');
   }
 
@@ -6791,7 +7094,7 @@ function useAsAddSoundSource(path) {
   if (!path) { phosToast(T('queue.pick_a_clip_first', 'Pick a clip first.'), { kind: 'warn' }); return; }
   if (typeof h3CanServe !== 'function' || !h3CanServe('v2a')) {
     phosToast(distText(T('queue.add_sound_needs_hailuo_h3', 'Add sound needs Hailuo H3 with an up-to-date runner — press Update in Pinokio.'),
-                       T('queue.add_sound_needs_an_up', 'Add sound needs an up-to-date Hailuo H3 runner. Phosphene brings the Hailuo H3 runner up to date by itself; quit and reopen Phosphene if this stays.')), { kind: 'warn', duration: 6000 });
+                       T('queue.add_sound_needs_a_hailuo', 'Add sound needs a Hailuo H3 update. Phosphene installs it by itself. If this message stays, quit and reopen Phosphene.')), { kind: 'warn', duration: 6000 });
     return;
   }
   if (typeof workflowSwitch === 'function') { try { workflowSwitch('manual'); } catch (e) {} }
@@ -7187,7 +7490,7 @@ async function speedupQuietRetry() {
   const box = document.getElementById('speedupQuiet');
   const id = box && box.dataset.jobId;
   if (!id) return;
-  await retryJob(id, { overrides: { pro_speedup_choice: 'off' } });
+  await retryJob(id, { overrides: { pro_speedup_choice: 'off', pro_fast_draft: 'off' } });
   phosToast(T('queue.queued_again_without_the_speed', 'Queued again without the speed-up: same prompt, seed and settings.'), { kind: 'success', duration: 5000 });
 }
 function verticalHintDismiss() {
@@ -8182,14 +8485,17 @@ async function loadParams(recipe) {
                        { snapAspect: false });
       } catch (e) {}
     }
+    if (typeof _h3RefsRestore === "function") _h3RefsRestore(p.h3_refs === true, p.h3_reference2, p.h3_reference3);
     if (typeof setH3Steps === 'function') {
       // A Best clip made on the full sampler, where Best would now run
       // lightx2v v1.3 (High, Text/Image): pin the count it ran, so Load
       // Params reproduces the same sampler instead of quietly switching it.
-      const _fullBestOnV13Cell = !p.h3_v13 && h3SpeedOfParams(p) === 'best'
+      // A References clip ran its own short sampler: never pin that count onto Best.
+      const _refsClip = p.h3_refs === true;
+      const _fullBestOnV13Cell = !_refsClip && !p.h3_v13 && h3SpeedOfParams(p) === 'best'
         && p.h3_quality === 'high' && (p.mode === 't2v' || p.mode === 'i2v')
         && Number(p.steps || 0) > 0 && typeof h3V13State === 'function' && h3V13State().available;
-      const _pin = Number(p.h3_steps || 0) > 0 ? String(p.h3_steps)
+      const _pin = _refsClip ? 'auto' : Number(p.h3_steps || 0) > 0 ? String(p.h3_steps)
         : (_fullBestOnV13Cell ? String(p.steps) : 'auto');
       try { setH3Steps(_pin); } catch (e) {}
     }
@@ -9788,17 +10094,18 @@ function studioMotionInit() {
 Object.assign(globalThis, {studioMotionInit, studioProgress, viewerVideo, viewerBarMute});
 
 
-// Pro at the right moment (5.0.7): the server puts `pro_hint` on a finished FREE render only
-// when Pro has a measured speed-up for this Mac and these settings (at most once a day).
-// One quiet line under the finished row. Never a pop-up, never while a render runs.
+// Pro at the right moment (5.0.7, rebuilt around Fast draft in 5.0.20): the server puts `pro_hint`
+// on a finished FREE clip only when Pro's Fast draft would have served it and a measured ratio exists
+// for this Mac's class (a few times a week at most, never twice in one run). One quiet line under the
+// finished row, never a pop-up; it stays while the next render runs.
 const _proHintShown = new Set();
-function proHintRow(j, rendering) {
+function proHintRow(j) {
   const h = j && j.status === 'done' && j.pro_hint;
-  if (!h || !h.text || rendering) return '';   // nothing while a render is running
+  if (!h || !h.text) return '';
   if (!_proHintShown.has(j.id)) { _proHintShown.add(j.id); proHintPost(j.id, 'shown'); }
   const id = escapeHtml(JSON.stringify(j.id));
-  return `<li class="pro-hint-row" data-pro-hint="${escapeHtml(j.id)}"><span class="pro-hint-text">${escapeHtml(h.text)}</span>`
-    + `<a class="pro-hint-see" href="https://phosphene.video/pricing/" data-utm-campaign="get-pro" data-utm-content="speedup-line" target="_blank" rel="noopener" onclick='proHintSee(${id})'>${T('queue.see_pro', 'See Pro')}</a>`
+  return `<li class="pro-hint-row" data-pro-hint="${escapeHtml(j.id)}"><span class="pro-tag is-lead">Pro</span><span class="pro-hint-text">${escapeHtml(h.text)}</span>`
+    + `<a class="pro-hint-see" href="https://phosphene.video/pricing/" data-utm-campaign="get-pro" data-utm-content="fast-draft-line" target="_blank" rel="noopener" onclick='proHintSee(${id})'>${T('queue.see_pro', 'See Pro')}</a>`
     + `<button type="button" class="pro-hint-x" aria-label="${TA('queue.hide_this', 'Hide this')}" title="${TA('queue.hide_this', 'Hide this')}" onclick='proHintDismiss(${id})'>×</button></li>`;
 }
 function proHintPost(job, action) {
@@ -9814,3 +10121,4 @@ function proHintDismiss(job) {
 
 Object.assign(globalThis, {proHintSee, proHintDismiss});
 Object.assign(globalThis, {h3AppInstallStart, h3AppInstallStop, h3AppInstallRender});
+Object.assign(globalThis, {_h3RefsUpdate, _h3RefsRestore, h3RefsGet, h3RefsChanged, _h3RefsEtaMin});

@@ -285,7 +285,7 @@ function setH3Orientation(v) {
   try { localStorage.setItem('phos_h3_orientation', val); } catch (e) {}
   const cell = (typeof h3CurrentCell === 'function') ? h3CurrentCell() : null;
   if (typeof applyAspect === 'function') {
-    try { applyAspect(targetAspect); } catch (_) {}
+    try { applyAspect((val === 'portrait') ? 'vertical' : 'landscape'); } catch (_) {}
   } else {
     const wEl = document.getElementById('width');
     const hEl = document.getElementById('height');
@@ -695,6 +695,13 @@ function _h3ReferenceExtra(cell, fast) {
 }
 function h3CellEtaMin(cell, opts) {
   if (!cell) return 0;
+  // References (Pro) runs on its own sampler, so the speed switches do not apply: priced from the
+  // shape's own per-forward time (queue.js, measured 17 Nov 2026 on Standard 5 s: 343 s with one
+  // picture, 361 s with two, 384-396 s with three).
+  if (typeof _h3RefsEtaMin === 'function') {
+    const _refs = _h3RefsEtaMin(cell);
+    if (_refs) return _refs;
+  }
   const _fastNow = (opts && opts.fast != null) ? opts.fast : h3TriStepOn(cell);
   const _ref = (typeof _h3ReferenceExtra === 'function') ? _h3ReferenceExtra(cell, _fastNow) : 0;
   return _ref + _h3CellEtaMinCore(cell, opts);
@@ -875,7 +882,7 @@ function renderH3Turbo() {
     fastBtn.classList.toggle('cell-only-best', cellOnlyBest);
     fastBtn.title = !tri.supported
       ? distText(T('engines.fast_needs_a_newer_h3', 'Fast needs a newer H3 runner — run "Update Hailuo H3 runner" in the Pinokio sidebar (weights stay).'),
-                 T('engines.fast_needs_a_newer_hailuo', 'Fast needs a newer Hailuo H3 runner. Phosphene brings the Hailuo H3 runner up to date by itself; quit and reopen Phosphene if this stays.'))
+                 T('engines.fast_needs_a_hailuo_h3', 'Fast needs a Hailuo H3 update. Phosphene installs it by itself. If this message stays, quit and reopen Phosphene.'))
       : !tri.downloaded
         ? T('engines.3_steps_about_4_faster', '3 steps — about 4× faster, great for drafts and most shots. One click installs the ')
           + T('engines.180_mb_adapter', '180 MB adapter (') + (tri.license || 'MiniMax H3 Community License') + ').'
@@ -965,9 +972,9 @@ function _h3RenderFlexNote() {
   let msg = '';
   let canGet = false;
   if (!fx.supported) {
-    msg = name + T('engines.needs_a_newer_h3_runner', ' needs a newer H3 runner. ') + distText(
+    msg = name + T('engines.needs_a_hailuo_h3_update', ' needs a Hailuo H3 update. ') + distText(
       T('engines.click_update_hailuo_h3_runner', 'Click "Update Hailuo H3 runner" in the Pinokio sidebar. Your weights stay.'),
-      T('engines.phosphene_brings_the_hailuo_h3', 'Phosphene brings the Hailuo H3 runner up to date by itself; quit and reopen Phosphene if this stays.'));
+      T('engines.phosphene_installs_the_hailuo_h3', 'Phosphene installs it by itself. If this message stays, quit and reopen Phosphene.'));
   } else if (fx.installing) {
     const d = fx.download || {};
     msg = d.status === 'building' ? T('engines.preparing', 'Preparing ') + name + T('engines.on_your_mac', ' on your Mac…')
@@ -1033,7 +1040,7 @@ function _h3RenderV13Note() {
   if (!v.supported) {
     msg = name + T('engines.needs_an_update', ' needs an update. ') + distText(
       T('engines.update_h3_click_update_hailuo', 'Update H3: click "Update Hailuo H3 runner" in the Pinokio sidebar. Your weights stay.'),
-      T('engines.it_needs_a_newer_h3', 'It needs a newer H3 runner, but the Mac app can\u2019t update the runner yet.'));
+      T('engines.update_phosphene_to_use_it', 'Update Phosphene to use it: Phosphene \u2192 Check for Updates\u2026'));
   } else if (v.installing) {
     const d = v.download || {};
     msg = d.status === 'building' ? T('engines.preparing', 'Preparing ') + name + T('engines.on_your_mac', ' on your Mac…')
@@ -1210,6 +1217,7 @@ function h3SpeedOfParams(p) {
 // function so all three read the same label from the same field.
 function h3JobSpeedLabel(p) {
   if (!p || p.engine !== 'h3') return '';
+  if (p.h3_refs === true) return T('engines.references', 'References');
   if (h3SpeedOfParams(p) === 'fast') return T('engines.fast', 'Fast');
   if (h3SpeedOfParams(p) === 'flex') return 'Pika H3 Flex';
   if (h3SpeedOfParams(p) === 'flex_turbo') return T('engines.h3_flex_turbo', 'H3 Flex Turbo');
@@ -1236,7 +1244,7 @@ async function h3SpeedClick(which) {
     if (!fx.supported) {
       toastF(distText(T('engines.pika_h3_flex_needs_a', 'Pika H3 Flex needs a newer Hailuo H3 runner. Run "Update Hailuo H3 runner" in the ')
              + T('engines.pinokio_sidebar_your_weights_stay', 'Pinokio sidebar — your weights stay.'),
-             T('engines.pika_h3_flex_needs_a_2', 'Pika H3 Flex needs a newer Hailuo H3 runner. Phosphene brings the Hailuo H3 runner up to date by itself; quit and reopen Phosphene if this stays.')), 'danger');
+             T('engines.pika_h3_flex_needs_a_hailuo', 'Pika H3 Flex needs a Hailuo H3 update. Phosphene installs it by itself. If this message stays, quit and reopen Phosphene.')), 'danger');
       return;
     }
     // Show the note (credit + the Get button) for the one explicit click.
@@ -1252,7 +1260,7 @@ async function h3SpeedClick(which) {
   if (!tri.supported) {
     toast(distText(T('engines.fast_needs_a_newer_hailuo_2', 'Fast needs a newer Hailuo H3 runner. Run "Update Hailuo H3 runner" in the Pinokio ')
           + T('engines.sidebar_your_weights_stay', 'sidebar — your weights stay.'),
-          T('engines.fast_needs_a_newer_hailuo', 'Fast needs a newer Hailuo H3 runner. Phosphene brings the Hailuo H3 runner up to date by itself; quit and reopen Phosphene if this stays.')), 'danger');
+          T('engines.fast_needs_a_hailuo_h3', 'Fast needs a Hailuo H3 update. Phosphene installs it by itself. If this message stays, quit and reopen Phosphene.')), 'danger');
     return;
   }
   if (tri.installing) { toast(T('engines.the_fast_adapter_is_already', 'The Fast adapter is already installing — watch the log.'), 'ok'); return; }
@@ -1360,7 +1368,10 @@ function h3EstimateLine() {
       + cell.final_height + ' ≈ ' + h3FmtEtaMin(m).replace(/^~/, '').replace(/ · batch$/, '');
   }
   const flexLine = !fast && typeof h3FlexOn === 'function' && h3FlexOn(cell);
-  let txt = cell.quality_label + ' · ' + (fast ? T('engines.fast', 'Fast') : (flexLine ? 'Pika H3 Flex' : T('engines.best', 'Best')));
+  // References renders on its own sampler: the summary names it instead of a speed.
+  const refsLine = typeof _h3RefsEtaMin === 'function' && _h3RefsEtaMin(cell) > 0;
+  let txt = cell.quality_label + ' · ' + (refsLine ? T('engines.references', 'References')
+    : fast ? T('engines.fast', 'Fast') : (flexLine ? 'Pika H3 Flex' : T('engines.best', 'Best')));
   if (h3FaceFixOn()) {
     txt += T('engines.face_fix', ' + Face Fix');
     if (cell.facefix_min == null) return txt;
@@ -1740,10 +1751,13 @@ function h3FlexTurboPickerStatus() {
     progress: ft.installing ? Math.min(99, Math.round(100 * (d.mb || 0) / (d.total_mb || 295))) + '%' : '',
     error: d.error || '',
     download_gb: ft.download_gb || 0.31,
+    credit_by: ft.credit_by || '',
   };
 }
 function _h3FlexTurboTooltip(st) {
-  const credit = T('engines.by_akhaliq_pika_h3_flex', ' By akhaliq (Pika H3 Flex by Pika Labs + LightX2V Turbo), running on your Mac. Powered by MiniMax H3.');
+  // The adapter's author line comes from the Pro add-on with the option (credit_by), never from this file.
+  const credit = T('engines.flex_turbo_credit', ' Pika H3 Flex by Pika Labs + LightX2V Turbo, running on your Mac. Powered by MiniMax H3.')
+    + (st.credit_by ? ' ' + st.credit_by : '');
   if (!st.pro_active) return T('engines.faster_flex_turbo_pro_adds', 'Faster Flex Turbo. Pro adds: about 1.5× faster than Flex on Free. A little softer; for drafts. Click to see Pro.');
   if (!st.h3_ready) return T('engines.h3_flex_turbo_needs_hailuo', 'H3 Flex Turbo needs Hailuo H3 first. Click to get it.') + credit;
   if (st.installing) return T('engines.h3_flex_turbo_downloading', 'H3 Flex Turbo: downloading (') + st.progress + ').' + credit;
@@ -1753,7 +1767,8 @@ function _h3FlexTurboTooltip(st) {
 function _h3FlexTurboNote(cell) {
   const ft = h3FlexTurboState();
   if (!ft.pro_active) return T('engines.h3_flex_turbo_is_part', 'H3 Flex Turbo is part of Phosphene Pro. This render uses H3 Flex.');
-  if (!ft.supported) return T('engines.h3_flex_turbo_needs_a', 'H3 Flex Turbo needs a newer H3 runner.');
+  if (!ft.supported) return distText(T('engines.flex_turbo_needs_update_pinokio', 'Flex Turbo needs a Hailuo H3 update. Click "Update Hailuo H3 runner" in the Pinokio sidebar.'),
+                                     T('engines.flex_turbo_needs_update_app', 'Flex Turbo needs a Hailuo H3 update. Phosphene installs it by itself; if this stays, quit and reopen Phosphene.'));
   if (ft.installing) { const d = ft.download || {}; return T('engines.downloading_h3_flex_turbo', 'Downloading H3 Flex Turbo: ') + (d.mb || 0) + ' / ' + (d.total_mb || 295) + ' MB.'; }
   if (!ft.downloaded) return T('engines.h3_flex_turbo_pick_it', 'H3 Flex Turbo: pick it in the engine picker to download it (0.3 GB).');
   if (h3FlexTurboOn(cell)) return '';
@@ -2212,7 +2227,7 @@ function _engineTooltip(e, st, modeOk) {
     // only the local compact build is missing) — a genuinely different fix
     // than "repair", with its own Pinokio menu entry (Build, not Repair).
     return (st.repairable && st.reason === 'missing_q8_dit')
-      ? name + T('engines.needs_its_compact_engine_built', ' — needs its compact engine built; your weights are already on disk. Click for the one-click fix.')
+      ? name + T('engines.needs_one_last_setup_step', ' needs one last setup step: about 5 minutes, nothing to download. Click to finish it.')
       : st.repairable
       ? name + T('engines.needs_repair_your_weights_are', ' — needs repair; your weights are still on disk. Click for the one-click fix.')
       : name + T('engines.available_to_install', ' — available to install (') + (e.install_size || '')
@@ -2365,7 +2380,7 @@ function _tierChipHtml(engine, kind, item, cell, active) {
   const title = flexLocked ? H3_FLEX_CELL_TIP
     : ok
     ? basis
-    : (cell && cell.unavailable_reason) || 'Not available on this install.';
+    : cellUnavailableReason(cell) || 'Not available on this install.';
   const attr = (kind === 'quality') ? (E.qAttr || `${engine}-quality`)
                                     : (E.lAttr || `${engine}-length`);
   return `
@@ -2557,6 +2572,10 @@ function ltxCellEta(cell) {
   // range of its own yet, so this branch keeps the point estimate.
   if (cell.fast_eta && typeof schedPresetActive === 'function'
       && schedPresetActive()) {
+    // Pro Fast draft (settings.js proDraftRender): the server's own estimate for it on this Mac.
+    if (cell.pro_draft_eta && document.documentElement.dataset.pro && (globalThis.proSpeedStatus || {}).offered) {
+      return cell.pro_draft_eta + T('engines.pro_fast_draft', ' · Pro fast draft');
+    }
     return cell.fast_eta + T('engines.fast_draft', ' · fast draft');
   }
   // VC-23: "Q8 HQ" names the internal quantization + pipeline, not
@@ -2722,6 +2741,28 @@ function _h3FallbackCell(cell) {
 //     so it degrades along the same path make_job would take and says so.
 // Either way make_job re-runs the gate server-side, because a stale tab must
 // never win.
+// Fleet 18 Nov 2026: a 16 GB Mac is offered Hailuo H3 up to 5 s (longer clips
+// ran out of memory on every one). The server's reason is English; this one
+// reason has a code so it shows in the user's language. With an H3 engine that
+// has the low-memory chain switches the same Mac is offered 10 s, and 15 s
+// greys with its own coded reason (ram_15s).
+function cellUnavailableReason(cell) {
+  if (!cell) return '';
+  if (cell.unavailable_code === 'ram_long') {
+    const gb = Math.round(Number(cell.unavailable_gb) || 0) || 16;
+    return T('engines.h3_long_needs_more_memory',
+      'On this {gb} GB Mac, Hailuo H3 makes clips up to 5 s. Longer clips run out of memory here, so make a 5 s clip.',
+      {gb});
+  }
+  if (cell.unavailable_code === 'ram_15s') {
+    const gb = Math.round(Number(cell.unavailable_gb) || 0) || 16;
+    return T('engines.h3_15s_needs_more_memory',
+      'On this {gb} GB Mac, Hailuo H3 makes clips up to 10 s. Longer clips run out of memory here, so make a 10 s clip.',
+      {gb});
+  }
+  return cell.unavailable_reason || '';
+}
+
 function _h3ApplyShape(qualityKey, lengthKey, opts) {
   opts = opts || {};
   let cell = h3CellFor(qualityKey, lengthKey);
@@ -2730,7 +2771,7 @@ function _h3ApplyShape(qualityKey, lengthKey, opts) {
   if (!cell) return;
   if (cell.available === false) {
     const note = document.getElementById('engineRowNote');
-    const reason = cell.unavailable_reason || '';
+    const reason = cellUnavailableReason(cell);
     if (!opts.fallback) {
       if (note) { note.textContent = reason; note.hidden = !reason; }
       // Re-render so the click leaves the strips exactly as they were.
@@ -3025,8 +3066,7 @@ function h3InsertDialogueLine() {
   const after = ta.value.slice(end);
   const needsLeadingSpace = before && !/[\s\n]$/.test(before);
   const speaker = T('engines.name_s1_says', 'NAME (S1) says: ');
-  const placeholder = lang.includes('Arabic') ? 'اكتب جملة الحوار هنا' : T('engines.line_here', 'line here');
-  const line = `${needsLeadingSpace ? ' ' : ''}${speaker}<d>[${lang}] ${placeholder}</d> `
+  const line = `${needsLeadingSpace ? ' ' : ''}${speaker}<d>[${lang}] line here</d> `
     + T('engines.exactly_as_the_line_ends', 'Exactly as the line ends, NAME\'s mouth settles closed.');
   ta.value = before + line + after;
   // Select "line here" so typing the actual words is one keystroke away.
@@ -3034,7 +3074,7 @@ function h3InsertDialogueLine() {
   // concatenate into a string offset that selected nothing (Codex H3-9).
   const selStart = before.length + (needsLeadingSpace ? 1 : 0) + speaker.length
     + `<d>[${lang}] `.length;
-  const selEnd = selStart + placeholder.length;
+  const selEnd = selStart + T('engines.line_here', 'line here').length;
   ta.focus();
   try { ta.setSelectionRange(selStart, selEnd); } catch (e) {}
   ta.dispatchEvent(new Event('input', { bubbles: true }));
