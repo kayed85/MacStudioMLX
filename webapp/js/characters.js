@@ -96,7 +96,14 @@ function musicPick(id, button) {
   musicFormChanged();
 }
 function musicFormChanged() {
-  const instrumental = document.getElementById('musicInstrumental').checked;
+  let instrumental = Boolean((document.getElementById('musicInstrumental') || {}).checked);
+  const lyricsVal = ((document.getElementById('musicLyrics') || {}).value || '').trim();
+  if (lyricsVal && instrumental) {
+    instrumental = false;
+    const instEl = document.getElementById('musicInstrumental');
+    if (instEl) instEl.checked = false;
+    if (typeof musicFormChanged === 'function') musicFormChanged();
+  }
   document.getElementById('musicLyrics').disabled = instrumental;
   // The lyrics editor (music.js) reads that same flag and goes quiet — the
   // words stay in the boxes, they are just not used while this is on.
@@ -146,7 +153,7 @@ function musicFormParams() {
     // path left empty was indistinguishable from Write and composed a new
     // song instead of refusing.
     music_task: (document.getElementById('musicTask') || {}).value || 'write',
-    music_lyrics: instrumental ? '' : ((document.getElementById('musicLyrics') || {}).value || ''),
+    music_lyrics: instrumental ? '' : document.getElementById('musicLyrics').value,
     music_style: document.getElementById('musicStyle').value,
     music_mode: document.getElementById('musicMode').value,
     music_instrumental: instrumental ? 'on' : 'off',
@@ -4173,9 +4180,7 @@ function setQuality(q) {
   // Set canonical dimensions for the preset, respecting the current
   // aspect choice. Quick is 4:3 only — landscape orientation only.
   const preset = QUALITY_PRESETS[q];
-  let aspect = (document.getElementById('aspect') || {}).value || 'landscape';
-  const h3o = (document.getElementById('h3_orientation') || {}).value;
-  if (h3o === 'portrait' && aspect === 'landscape') aspect = 'vertical';
+  const aspect = document.getElementById('aspect').value || 'landscape';
   if (q === 'quick') {
     document.getElementById('width').value  = preset.w;
     document.getElementById('height').value = preset.h;
@@ -4801,7 +4806,6 @@ document.querySelectorAll('#temporalGroup .pill-btn').forEach(b => b.onclick = (
 document.querySelectorAll('#upscaleGroup .pill-btn').forEach(b => b.onclick = () => { if (!b.classList.contains('disabled')) setUpscale(b.dataset.upscale); });
 document.querySelectorAll('#upscaleMethodGroup .pill-btn').forEach(b => b.onclick = () => { if (!b.classList.contains('disabled')) setUpscaleMethod(b.dataset.method); });
 document.querySelectorAll('#aspectGroup .pill-btn').forEach(b => b.onclick = () => setAspect(b.dataset.aspect));
-// Auto-snap custom dimensions to the nearest multiple of 64 on edit
 ['width', 'height'].forEach(id => {
   const el = document.getElementById(id);
   if (el) {

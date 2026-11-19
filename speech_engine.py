@@ -75,7 +75,7 @@ STYLES: tuple[dict, ...] = (
 STYLE_BY_ID = {s["id"]: s for s in STYLES}
 
 LANGUAGES = ("auto", "english", "chinese", "japanese", "korean", "german",
-             "french", "russian", "portuguese", "spanish", "italian", "arabic")
+             "french", "russian", "portuguese", "spanish", "italian")
 
 
 class SpeechRequestError(ValueError):

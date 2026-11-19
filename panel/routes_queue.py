@@ -7,6 +7,9 @@ panel/__init__.py for why P is assigned rather than imported.
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 import threading
 from urllib.parse import parse_qs
 
@@ -14,8 +17,56 @@ from panel.routes import get, post
 
 P = None  # the running mlx_ltx_panel module; assigned at wiring time
 
+
+def _output_roots() -> list:
+    """OUTPUT plus every saved files folder (P.output_roots); a stub panel
+    without it (unit tests) gets OUTPUT alone, the behaviour before 5.0.60."""
+    f = getattr(P, "output_roots", None)
+    return list(f()) if callable(f) else [P.OUTPUT.resolve()]
+
 # SAFETY-7: one recovery join at a time owns STATE["take_join_pgid"].
 _TAKE_JOIN_LOCK = threading.Lock()
+
+
+# ---- /status: send only what changed (L144) --------------------------------
+# The Studio page asks for /status every 1.5 s and the answer carries the whole
+# job history, log, gallery and model lists (~350 KB on a busy Mac). A page that
+# asks `?delta=1` gets a short tag per top-level key with its answer, and on the
+# next ask sends the tags back (`have=key:tag,key:tag`); keys whose tag still
+# matches are left out. A caller that sends nothing (the shipped Mac app, old
+# pages, scripts) gets exactly the answer it always got: no new field, no
+# missing key.
+_HAVE_PAIR = re.compile(r"^[A-Za-z0-9_]{1,64}:[0-9a-f]{10}$")
+
+
+def status_key_tags(payload: dict) -> dict:
+    """One short content tag per top-level key of the /status payload."""
+    tags = {}
+    for key, value in payload.items():
+        blob = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+        tags[key] = hashlib.blake2b(blob.encode(), digest_size=5).hexdigest()
+    return tags
+
+
+def parse_status_have(raw: str) -> dict:
+    """`have=key:tag,key:tag` -> {key: tag}. Anything malformed is ignored (the
+    caller then simply gets that key again)."""
+    have = {}
+    for pair in (raw or "").split(","):
+        if _HAVE_PAIR.match(pair):
+            key, tag = pair.split(":")
+            have[key] = tag
+    return have
+
+
+def status_delta_reply(payload: dict, have: dict) -> dict:
+    """The payload with every key the caller already holds left out, plus
+    `_delta: {"h": {key: tag}}` listing every key now present (so a key that
+    disappeared is dropped by the caller too)."""
+    tags = status_key_tags(payload)
+    out = {k: v for k, v in payload.items() if have.get(k) != tags[k]}
+    out["_delta"] = {"h": tags}
+    return out
 
 
 @get("/status")
@@ -56,6 +107,8 @@ def get_status(h, parsed) -> None:
     payload["outputs"] = _outs
     payload["outputs_total"] = _outs_total
     payload["hidden_count"] = hidden_count
+    # Install source ({is, iv} or {}): Get Pro / pricing links carry it once resolved.
+    payload["install"] = P.install_source_tags()
     # The one-time "star us on GitHub" card (owner, 2 Nov 2026): true only
     # between the third finished render and the page putting the card up.
     payload["star_prompt_due"] = P.star_prompt_due()
@@ -77,6 +130,9 @@ def get_status(h, parsed) -> None:
     # = only Hailuo H3 clips wait; every other clip keeps going.
     payload["hold"] = P.queue_hold_status(payload.get("queue"), payload["server_now"])
     payload["avg_elapsed_sec"] = avg
+    # Saved files folder: where finished files go, and whether its drive is
+    # connected (the page says so in plain words when it is not).
+    payload["outputs_folder"] = P.output_folder_status()
     # v3.0.7 (P2): surface the installed ltx-2-mlx version (from the
     # helper's ready event) so every bug report — not just a mismatch
     # log — carries what's actually running. Empty until the helper
@@ -360,6 +416,8 @@ def get_status(h, parsed) -> None:
     # `settings.models_card_dismissed` on each /status tick to know
     # whether to keep the inline models card hidden.
     payload["settings"] = P.get_settings_public()
+    if qs.get("delta", ["0"])[0] == "1":
+        payload = status_delta_reply(payload, parse_status_have(qs.get("have", [""])[0]))
     h._json(payload)
 
 
@@ -437,7 +495,7 @@ def post_queue_retry(h, path, qs, ctype) -> None:
             h._json({"error": "overrides must be JSON"}, 400); return
         if not isinstance(overrides, dict):
             h._json({"error": "overrides must be a JSON object"}, 400); return
-        allowed = {"quality", "frames", "pro_speedup_choice"}
+        allowed = {"quality", "frames", "pro_speedup_choice", "pro_fast_draft"}
         unknown = set(overrides) - allowed
         if unknown:
             h._json({"error": f"overrides may only set {sorted(allowed)}, "
@@ -447,6 +505,8 @@ def post_queue_retry(h, path, qs, ctype) -> None:
             h._json({"error": f"unknown quality {overrides['quality']!r}"}, 400); return
         if "pro_speedup_choice" in overrides and overrides["pro_speedup_choice"] not in ("on", "off"):
             h._json({"error": "pro_speedup_choice must be on or off"}, 400); return
+        if "pro_fast_draft" in overrides and overrides["pro_fast_draft"] not in ("on", "off"):
+            h._json({"error": "pro_fast_draft must be on or off"}, 400); return
         if "frames" in overrides:
             try:
                 overrides["frames"] = int(overrides["frames"])
@@ -1103,7 +1163,7 @@ def _lipsync_media_path(raw: str):
     Returns the resolved path, or None when it is outside the roots."""
     try:
         media = P.Path(raw).resolve()
-        roots = [P.OUTPUT.resolve(), P.UPLOADS.resolve(), P.STATE_DIR.resolve()]
+        roots = [*_output_roots(), P.UPLOADS.resolve(), P.STATE_DIR.resolve()]
     except Exception:                                            # noqa: BLE001
         return None
     if not any(media.is_relative_to(r) for r in roots):
@@ -1132,7 +1192,10 @@ def post_a2v_mouth_check(h, path, qs, ctype) -> None:
     img = str(media)
     ratio = P.mouth_open_ratio(img)
     if ratio is None:
-        # No face found, or cv2 unavailable — not a verdict either way.
+        # No face found, or cv2 unavailable — not a verdict either way. A
+        # missing OpenCV (every Mac app engine before the 19 Nov 2026 fix) is
+        # added in the background so the next check can measure.
+        P.face_tools_kick()
         h._json({"ok": True, "measured": False}); return
     h._json({"ok": True, "measured": True, "ratio": round(ratio, 4),
              "open": ratio > P.MOUTH_OPEN_WARN,
@@ -1165,6 +1228,21 @@ def post_a2v_continue_song(h, path, qs, ctype) -> None:
     src = str(media)
     hit = P.find_closed_mouth_frame(src)
     if hit is None:
+        if not P.face_tools_ready():
+            # Not "no face": this engine cannot look for one yet (no OpenCV;
+            # see FACE_TOOLS in mlx_ltx_panel.py). Add it in the background
+            # and say what is happening instead of blaming the clip.
+            failed = (P.FACE_TOOLS_AUTO.get("error")
+                      if P.FACE_TOOLS_AUTO.get("attempts", 0) >= P.FACE_TOOLS_AUTO_MAX else None)
+            if failed:
+                h._json({"error": "Continue the song needs a small face-finding tool "
+                                   f"that could not be added ({failed}). Pick a start "
+                                   "frame by hand for now, or try again after "
+                                   "restarting Phosphene."}, 503); return
+            P.face_tools_kick()
+            h._json({"error": "Phosphene is adding the small face-finding tool "
+                               "this needs (once, about a minute). Try Continue "
+                               "the song again in a minute."}, 503); return
         h._json({"error": "could not find a face in the last half-second of "
                            "this clip — pick a start frame by hand instead."},
                  422); return
@@ -1327,7 +1405,7 @@ def post_queue_newtake(h, path, qs, ctype) -> None:
     except Exception:
         h._json({"error": "bad path"}, 400); return
     try:
-        roots = [P.OUTPUT.resolve(), P.UPLOADS.resolve()]
+        roots = [*_output_roots(), P.UPLOADS.resolve()]
     except Exception:
         roots = []
     if not any(media.is_relative_to(r) for r in roots):
@@ -1476,7 +1554,7 @@ def _load_take_manifest(h, form_or_qs) -> dict | None:
     except Exception:
         h._json({"error": "bad path"}, 400); return None
     try:
-        roots = [P.OUTPUT.resolve(), P.UPLOADS.resolve()]
+        roots = [*_output_roots(), P.UPLOADS.resolve()]
     except Exception:
         roots = []
     if not any(media.is_relative_to(r) for r in roots):

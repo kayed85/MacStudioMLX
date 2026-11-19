@@ -397,6 +397,7 @@ def get_image_engine_status(h, parsed) -> None:
                    for key in flux3_engine.PRESETS)
         out.extend(P.ph3image_engine_rows())
         out.extend(P.h3image_engine_rows())
+        out.extend(P.h3restyle_engine_rows())
         h._json({"engines": out,
                  "host_ram_gb": int(round(float(P.SYSTEM_RAM_GB or 0)))})
     except Exception as exc:                                # noqa: BLE001
@@ -502,9 +503,26 @@ def post_h3_flex_turbo_install(h, path, qs, ctype) -> None:
     result = P._h3_install_flex_turbo(P.push)
     if not result.get("ok"):
         h._json(result, 402 if result.get("pro_required") else
+                503 if result.get("pro_setup") else
                 409 if "active" in result.get("error", "") else 400)
         return
     h._json(result, 202)
+
+# ====== Hailuo H3 · References (Pro) - fetch MiniMax H3's reference model and its speed adapter
+# at the pinned revisions the Pro add-on names (never re-hosted), build the 8-bit pack locally.
+@post("/h3/references/install")
+def post_h3_references_install(h, path, qs, ctype) -> None:
+    P.h3_status_invalidate()
+    # The H3 weights themselves: the same licence screen as H3.
+    _lic = P.licence_refusal_for("h3")
+    if _lic:
+        h._json(_lic, 451); return
+    result = P.h3_refs_install(P.push)
+    if not result.get("ok"):
+        h._json(result, 402 if result.get("pro_required") else
+                409 if result.get("already_running") else 400)
+        return
+    h._json(result, 202 if result.get("started") else 200)
 
 # ====== Images lane · P-H3-Image (Pruna, on MiniMax H3) - fetch Pruna's adapter, text encoder and
 # image decoder at pinned revisions (never re-hosted) and build the decoder layout locally.
@@ -532,6 +550,22 @@ def post_image_h3image_install(h, path, qs, ctype) -> None:
     if _lic:
         h._json(_lic, 451); return
     result = P._h3image_install(P.push)
+    if not result.get("ok"):
+        h._json(result, 409 if "active" in result.get("error", "") else 400)
+        return
+    h._json(result, 202)
+
+
+# ====== Images lane · Restyle a picture on Hailuo H3 (R&D L55) - fetch the author's 298 MB adapter at
+# a pinned revision and digest (never re-hosted). The adapter is Apache-2.0; it runs on MiniMax H3, so
+# the H3 licence screen applies (451 until accepted on this Mac), like P-H3-Image.
+@post("/image/h3restyle/install")
+def post_image_h3restyle_install(h, path, qs, ctype) -> None:
+    P.h3_status_invalidate()
+    _lic = P.licence_refusal_for("h3")
+    if _lic:
+        h._json(_lic, 451); return
+    result = P._h3restyle_install(P.push)
     if not result.get("ok"):
         h._json(result, 409 if "active" in result.get("error", "") else 400)
         return
@@ -850,20 +884,19 @@ def post_image_generate(h, path, qs, ctype) -> None:
             rp = (P.UPLOADS / r).resolve()
         else:
             rp = rp.resolve()
-        # Security: refs must live under UPLOADS or the public
-        # outputs dir. Prevents the JSON body from naming /etc/...
-        # Use Path.is_relative_to (3.9+) — string startswith() lets
-        # `panel_uploads_evil/` slip through because it shares the
-        # `panel_uploads` prefix without being under it. Both ends
-        # are already .resolved() so symlink/.. tricks are
-        # neutralized. Mirrors the agent-side _ensure_under
-        # convention in agent/tools.py.
-        allowed_roots = [P.UPLOADS.resolve(), P.OUTPUT.resolve()]
-        if not any(rp.is_relative_to(root) for root in allowed_roots):
-            h._json({"error": f"ref path not under uploads/outputs: {r}"}, 403); return
+        # A picture outside uploads/outputs (Desktop, Downloads, an old
+        # library) used to be refused here with "ref path not under
+        # uploads/outputs" (H15: 6 failed renders on 4 Macs). Like every
+        # other render since 5.0.30, it is copied into UPLOADS below;
+        # copy_attached_reference resolves symlinks and refuses anything
+        # that is not an image, audio or video file, so the JSON body still
+        # cannot read /etc/... through this route.
         if not rp.is_file():
             h._json({"error": f"ref image not found: {r}"}, 404); return
-        refs_resolved.append(str(rp))
+        try:
+            refs_resolved.append(P.copy_attached_reference(str(rp)))
+        except ValueError as exc:
+            h._json({"error": str(exc)}, 400); return
 
     # Engine override: "auto" (use saved Settings config), or
     # one of the inline shorthands the modal exposes. Catalogue
@@ -919,7 +952,7 @@ def post_image_generate(h, path, qs, ctype) -> None:
             # Stream mflux stdout into the panel log card so users
             # see step-by-step progress while the gen runs.
             # tqdm progress bars come through line-buffered.
-            if cfg.kind in ("flux3", "h3image") or (cfg.kind == "ph3image" and cfg.ph3image_warm_service):
+            if cfg.kind in ("flux3", "h3image", "h3restyle") or (cfg.kind == "ph3image" and cfg.ph3image_warm_service):
                 P._preflight_image_job(cfg, engine_override=engine_override)
             candidates = P.agent_image_engine.generate(
                 prompt=prompt, n=n, aspect=aspect,
@@ -986,6 +1019,7 @@ def post_image_generate(h, path, qs, ctype) -> None:
         "engine": cfg.kind + (f"/{cfg.mflux_family}" if cfg.kind == "mflux" else ""),
         "model": (f"{P.PH3IMAGE_REPO}@{P.PH3IMAGE_REVISION[:7]}" if cfg.kind == "ph3image"
                   else f"{P.H3IMAGE_REPO}@{P.H3IMAGE_REVISION[:7]}" if cfg.kind == "h3image"
+                  else f"{P.H3RESTYLE_REPO}@{P.H3RESTYLE_REVISION[:7]}" if cfg.kind == "h3restyle"
                   else getattr(cfg, "mflux_model", None) or cfg.kind),
         "output_dir": str(out_dir),
     })

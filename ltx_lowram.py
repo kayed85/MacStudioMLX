@@ -3,7 +3,7 @@
 Three exact techniques the warm helper uses on the block-streamed path
 (``LTX_LOW_RAM_STREAM``, every Mac with 24 GB or less). "Exact" is measured,
 not argued: each one leaves the final video and audio latents bit-identical
-to the path it replaces (proof numbers in docs/LOWRAM_BUILD_2026-11.md).
+to the path it replaces (proven by the low-memory build's own renders).
 
 1. **Layer-streamed prompt encode** (:func:`streamed_prompt_encode`).
    4.19.10 already split the encode in two halves (the text model, freed,
@@ -249,7 +249,8 @@ class _OneSideAtATime:
             linear = p[name]
             _materialize(linear.parameters())
             scale = math.sqrt(linear.weight.shape[0] / p.embedding_dim)
-            y = linear(hidden_states * scale)
+            from ltx_watchdog import project
+            y = project(linear, hidden_states * scale)
             _materialize(y)
             outs.append(y)
             p.pop(name, None)

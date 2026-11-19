@@ -1,11 +1,30 @@
 // webapp/js/whats_new.js - the once-per-version "What's new" window and the feature "How it works" viewer.
 //
+// NOW IN PRO (5.0.23). The owner, 14 Nov: "The Now in Pro section should be on the upper side of the report of the new
+// things in the app and should link to the Pro page. We want to make conversions from the app." When a release names
+// Pro perks (whats_new.json "pro_perks", their words and measured gains from pro_perks.json), they come high up, before
+// the hero and How it works: one plain line each with its measured gain, one Get Pro button for Free users (utm:
+// get-pro / whats-new), "Included in your Pro" and no button for a member. The old New in Pro box below is then not
+// drawn (no line twice).
+//
+// PRO BLOCK FIRST (owner, 19 Nov 2026, on the 5.0.62 window: "why is there not a call to action to the landing page in
+// the Pro part, and why is the Pro part below? It should be above. We talk about these things many times. Why does
+// stuff keep coming back?"). The Pro block is drawn FIRST, right under the title, for everyone; the free changes come
+// straight after it. A Free user's Pro block ends with one Get Pro button to the Pro page (utm_medium whats-new,
+// utm_content the version); a member reads "Included in your Pro", no buy button, and one small "What's in Pro" link.
+// It came back once already: a 14 Nov change put the free list first (so it would not fall below the fold) and
+// rewrote the test that pinned the order in the same commit. scripts/check_whats_new.py now renders this window as a
+// Free and a Pro user and fails the release if the Pro block is not first. The tease under real items stays one line,
+// so the Pro block stays short and the free changes still show on the first screen. Do not reorder; ask the owner.
+//
 // ONE FIXED FORMAT (5.0.20). The owner, 12 Nov, on the 5.0.19 window: empty boxes, small off-centre clips, no
 // structure, it read as a debug page. Every release now reads the same, top to bottom, from whats_new.json:
 //   1. header: the version, the date, the release's one-line "headline"
-//   2. the hero, when the release has one
-//   3. New for everyone   (only when the release has something for everyone)
-//   4. New in Pro         (only when the release adds something to Pro: the owner, 12 Nov, "if there is nothing
+//   2. Now in Pro         (when the release adds to Pro or teases what is next; FIRST, see above)
+//   2b. New for everyone  (only when the release has something for everyone; right under the Pro block)
+//   3. the hero, when the release has one
+//   4. New in Pro         (only without the Now in Pro block, and only when the release adds something to Pro: the
+//                          owner, 12 Nov, "if there is nothing
 //                          new in Pro, then we shouldn't have this written in there". A member reads a thank-you
 //                          and what their licence added; a Free user reads the same lines, the measured "What Pro
 //                          adds" item and one quiet support link)
@@ -13,6 +32,10 @@
 // Footer: "Earlier releases" on the left, Close on the right. Earlier releases page back in the same window and
 // draw each release with the same pieces, so an old release reads like a new one. The server sends every clip's
 // real width and height (read from its poster), so frames are the clip's own shape before a byte of video loads.
+//
+// PLAIN WORDS, IN THEIR LANGUAGE (owner, 17 Nov 2026, on a Spanish window with English lines about "the Pro pack"):
+// every word here is the user's language. The lines come from the server already translated (?lang= the page's own
+// language, whats_new.json "i18n"); every heading and button below goes through T(); the date uses the same language.
 //
 // Shown once per version (POST /whats-new/seen when it closes); the version pill reopens it (openWhatsNew(true)).
 // Escape, the X, Close or a click outside closes it. Clips play only while on screen; reduced motion: none plays.
@@ -31,8 +54,13 @@ function wnReduced() {
 function wnDate(d) {
   if (!d) return '';
   try {
-    return new Date(d + 'T00:00:00Z').toLocaleDateString('en-US', {month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC'});
+    return new Date(d + 'T00:00:00Z').toLocaleDateString(wnLang(), {month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC'});
   } catch (e) { return d; }
+}
+
+// The page's language (BOOT.i18n.lang, i18n.js), for the server's lines and the date.
+function wnLang() {
+  try { return (typeof BOOT !== 'undefined' && BOOT && BOOT.i18n && BOOT.i18n.lang) || 'en'; } catch (e) { return 'en'; }
 }
 
 const wnIsVideo = src => /\.(mp4|webm|mov)$/i.test(src || '');
@@ -80,12 +108,12 @@ function wnHero(h) {
   const head = (h.title ? `<h3 class="wn-hero-t">${wnEsc(h.title)}</h3>` : '')
     + (h.caption ? `<p class="wn-hero-p">${wnEsc(h.caption)}</p>` : '');
   if (h.kind === 'vertical') {
-    return `<section class="wn-hero" aria-label="${wnEsc(h.title || 'Highlight')}">${head}`
+    return `<section class="wn-hero" aria-label="${wnEsc(h.title || T('whatsnew.highlight', 'Highlight'))}">${head}`
       + `<div class="wn-hero-vert" data-wn-sync>${wnHeroFig(h.original)}`
       + '<span class="wn-hero-arrow" aria-hidden="true">→</span>'
       + wnHeroFig(h.free) + wnHeroFig(h.pro, true) + '</div></section>';
   }
-  return `<section class="wn-hero" aria-label="${wnEsc(h.title || 'Highlight')}">${head}`
+  return `<section class="wn-hero" aria-label="${wnEsc(h.title || T('whatsnew.highlight', 'Highlight'))}">${head}`
     + `<figure class="wn-hfig wn-hfig-one">${wnMedia(h, h.title)}</figure></section>`;
 }
 
@@ -114,9 +142,10 @@ function wnShowcase(items) {
 }
 
 // A section that has nothing in it is not drawn: no "New in Pro" heading over an empty box.
-function wnFreeSec(r) {
+// first: the current window draws it right under the header, tighter, so it shares the first screen with the Pro block.
+function wnFreeSec(r, first) {
   if (!(r.free && r.free.length)) return '';
-  return `<section class="wn-sec wn-sec-free">${wnSecHead(r.free_title || 'New for everyone', 'is-free', (r.free || []).length)}`
+  return `<section class="wn-sec wn-sec-free${first ? ' is-first' : ''}">${wnSecHead(T('whatsnew.new_for_everyone', 'New for everyone'), 'is-free', (r.free || []).length)}`
     + wnLines(r.free) + '</section>';
 }
 
@@ -125,14 +154,81 @@ function wnProSec(r, proUser, opts) {
   if (!(r.pro && r.pro.length)) return '';
   const full = opts && opts.full;
   let body = '';
-  if (full && proUser && r.thanks) body += `<p class="wn-pro-thanks">${wnEsc(r.thanks)}</p>`;
+  if (full && proUser && r.thanks) body += `<p class="wn-pro-thanks">${wnEsc(T('whatsnew.thanks', 'Thank you for supporting Phosphene. This is what your Pro licence added.'))}</p>`;
   body += wnLines(r.pro);
   if (full && !proUser) {
     body += wnShowcase(r.showcase)
       + `<div class="wn-ask"><p>${wnEsc(WN_ASK)}</p>`
       + `<a class="wn-ask-link" href="${wnEsc(r.pricing_url || 'https://phosphene.video/pricing/')}" data-utm-campaign="support" data-utm-content="whats-new" target="_blank" rel="noopener">${T('whatsnew.support_phosphene', 'Support Phosphene')} <span aria-hidden="true">↗</span></a></div>`;
   }
-  return `<section class="wn-sec wn-sec-pro">${wnSecHead(r.pro_title || 'New in Pro', 'is-pro', (r.pro || []).length)}${body}</section>`;
+  return `<section class="wn-sec wn-sec-pro">${wnSecHead(T('whatsnew.new_in_pro', 'New in Pro'), 'is-pro', (r.pro || []).length)}${body}</section>`;
+}
+
+// ---- 0. Now in Pro, at the top ------------------------------------------------------------------------------------
+// THE OFFER (owner, 18 Nov 2026, on the 5.0.54 window: "add in there a visible link to go and check up on the offers
+// ... Let's give them a chance to get into the lander"). Free users only, at the foot of the Now in Pro block: the
+// support line, the Get Pro button now carrying the monthly price, and one small Founding line under it, both to the
+// Pro page in the user's language (the site has every Studio language; the Chinese page carries the yuan Founding
+// price, so its line says yuan). Founding always reads "first 100 buyers", never a count, and no other price is
+// shown. Both keep the 5.0.65 tags (utm_medium=whats-new, utm_campaign=get-pro, utm_content=<version>, the closed
+// where word whats_new) and say their plan, which boot.js adds to the anonymous Get Pro count.
+const WN_SITE_LANG = {de: 'de', es: 'es', fr: 'fr', it: 'it', ja: 'ja', ko: 'ko', pt: 'pt', ru: 'ru', zh: 'zh'};
+
+function wnPricingUrl(url) {
+  const seg = WN_SITE_LANG[String(wnLang()).toLowerCase().split('-')[0]];
+  try {
+    const u = new URL(url || 'https://phosphene.video/pricing/');
+    if (seg && u.hostname === 'phosphene.video' && u.pathname.startsWith('/pricing')) u.pathname = '/' + seg + u.pathname;
+    return u.href;
+  } catch (e) { return url; }
+}
+
+function wnOffer(url, tag) {
+  const href = wnPricingUrl(url) || '';
+  const link = (cls, h, plan, text) => `<a class="${cls}" href="${wnEsc(h)}" data-plan="${plan}" data-utm-campaign="get-pro"${tag}>`
+    + `${wnEsc(text)} <span aria-hidden="true">↗</span></a>`;
+  return `<div class="wn-np-foot wn-np-offer"><p>${wnEsc(WN_ASK)}</p><div class="wn-np-offer-act">`
+    + link('wn-np-cta', href, 'monthly', T('whatsnew.offer_pro_from_15', 'Pro from $15/month'))
+    + link('wn-np-founding', href.replace(/#.*$/, '') + '#plans', 'founding',
+      T('whatsnew.offer_founding_199', 'Founding: $199 once for 3 years, first 100 buyers'))
+    + '</div></div>';
+}
+
+function wnNowPro(d) {
+  const n = d.now_in_pro;
+  const items = (n && n.items) || [], coming = (n && n.coming) || [];
+  if (!n || (!items.length && !coming.length)) return '';
+  const proUser = !!d.pro_active;
+  const teasing = !items.length;   // nothing new for Pro this release: the tease carries the block (owner, 14 Nov 2026)
+  const comingTitle = proUser ? T('whatsnew.coming_next_in_your_pro', 'Coming next in your Pro') : T('whatsnew.coming_next_in_pro', 'Coming next in Pro');
+  const title = teasing ? comingTitle
+    : (proUser ? T('whatsnew.included_in_your_pro', 'Included in your Pro') : T('whatsnew.now_in_pro', 'Now in Pro'));
+  const soon = `<span class="wn-np-soon">${T('whatsnew.soon', 'Soon')}</span>`;
+  const lines = items.map(it => `<li><span class="wn-np-t">${wnEsc(it.text)}</span>`
+    + (it.gain ? `<span class="wn-np-gain">${wnEsc(it.gain)}</span>` : '') + '</li>').join('');
+  const comingLines = coming.map(it => `<li class="is-coming"><span class="wn-np-t">${wnEsc(it.text)}</span>`
+    + `<span class="wn-np-tags">${soon}${it.gain ? `<span class="wn-np-gain">${wnEsc(it.gain)}</span>` : ''}</span></li>`).join('');
+  // Under real items the tease is ONE brief line (name and gain per perk), so the block stays short and the free
+  // changes above and the Get Pro button below share the first screen. With no items the tease is the block: full lines.
+  const comingBrief = coming.map(it => `<span class="wn-np-coming-it">${wnEsc(it.name || it.text)}`
+    + (it.gain ? ` <span class="wn-np-gain">${wnEsc(it.gain)}</span>` : '') + '</span>').join('<span class="wn-np-dot" aria-hidden="true"> · </span>');
+  const comingBlock = !coming.length ? ''
+    : teasing ? `<div class="wn-np-coming is-lead"><ul class="wn-np-lines">${comingLines}</ul></div>`
+    : `<p class="wn-np-coming is-brief"><span class="wn-np-coming-k">${wnEsc(comingTitle)}</span>${soon}${comingBrief}</p>`;
+  const also = !proUser && n.also && n.also.length
+    ? `<p class="wn-np-also"><span class="wn-np-also-k">${T('whatsnew.also_in_pro', 'Also in Pro')}</span> ${n.also.map(wnEsc).join(' · ')}</p>` : '';
+  // The Pro page, tagged utm_medium=whats-new&utm_campaign=get-pro&utm_content=<version> (siteLinkApply adds them from
+  // these data- attributes; data-pro-where keeps the anonymous Get Pro count on its closed word, whats_new).
+  const proUrl = (n.cta && n.cta.url) || n.pro_url || d.pricing_url;
+  const proPage = wnEsc(proUrl);
+  const tag = ` data-utm-medium="whats-new" data-utm-content="${wnEsc(d.version || '')}" data-pro-where="whats_new" target="_blank" rel="noopener"`;
+  const cta = !proUser && n.cta ? wnOffer(proUrl, tag) : '';
+  const memberLink = proUser
+    ? `<p class="wn-np-member"><a class="dlg-link wn-np-what" href="${proPage}" data-utm-campaign="pricing"${tag}>`
+      + `${T('whatsnew.what_s_in_pro', "What's in Pro")} <span aria-hidden="true">↗</span></a></p>` : '';
+  return `<section class="wn-np${proUser ? ' is-member' : ''}${teasing ? ' is-teasing' : ''}" aria-label="${wnEsc(title)}">`
+    + `<div class="wn-np-h"><span class="pro-tag is-lead${proUser ? ' pro-on' : ''}">${proUser ? 'Pro ✓' : 'Pro'}</span><h3>${wnEsc(title)}</h3></div>`
+    + (lines ? `<ul class="wn-np-lines">${lines}</ul>` : '') + `${comingBlock}${also}${cta}${memberLink}</section>`;
 }
 
 // ---- 5. how it works --------------------------------------------------------------------------------------------
@@ -169,14 +265,18 @@ function wnPairs(hows) {
 
 function wnHowSec(hows, proUser) {
   if (!hows || !hows.length) return '';
-  return `<section class="wn-sec wn-sec-how">${wnSecHead('How it works', 'is-how')}`
+  return `<section class="wn-sec wn-sec-how">${wnSecHead(T('whatsnew.how_it_works', 'How it works'), 'is-how')}`
     + `<div class="wn-feats${wnPairs(hows) ? ' is-pairs' : ''}">${hows.map(h => wnFeature(h, proUser)).join('')}</div></section>`;
 }
 
 // ---- the views ----------------------------------------------------------------------------------------------------
 function wnNow(d) {
   const proUser = !!d.pro_active;
-  return wnHero(d.hero) + wnFreeSec(d) + wnProSec(d, proUser, {full: true}) + wnHowSec(d.how, proUser);
+  const top = wnNowPro(d);
+  // THE PRO BLOCK FIRST, right under the title (owner, 19 Nov 2026), the free changes straight after, then the hero and
+  // the rest. scripts/check_whats_new.py renders this and refuses a release where anything comes before the Pro block.
+  const pro = top || wnProSec(d, proUser, {full: true});
+  return pro + wnFreeSec(d, true) + wnHero(d.hero) + wnHowSec(d.how, proUser);
 }
 
 function wnEarlier(d) {
@@ -188,10 +288,10 @@ function wnEarlier(d) {
       + (e.date ? `<time datetime="${wnEsc(e.date)}">${wnEsc(wnDate(e.date))}</time>` : '')
       + (e.headline ? `<p>${wnEsc(e.headline)}</p>` : '') + '</div>'
       + still
-      + `<div class="wn-rel-cols">${wnFreeSec(r)}${wnProSec(r, proUser)}</div>`
+      + `<div class="wn-rel-cols">${wnProSec(r, proUser)}${wnFreeSec(r)}</div>`
       + wnHowSec(e.how, proUser) + '</article>';
   }).join('');
-  return (rows || `<p class="wn-empty">No earlier releases to show.</p>`)
+  return (rows || `<p class="wn-empty">${T('whatsnew.no_earlier_releases', 'No earlier releases to show.')}</p>`)
     + `<p class="wn-more"><a class="dlg-link" href="${wnEsc(d.changelog_url)}" data-utm-campaign="changelog" data-utm-content="whats-new" target="_blank" rel="noopener">${T('whatsnew.every_release_since_the_first', 'Every release since the first, on phosphene.video')} <span aria-hidden="true">↗</span></a></p>`;
 }
 
@@ -203,16 +303,17 @@ function wnShell(o) {
     + `<div class="wn-meta"><span class="dlg-kicker">${wnEsc(o.kicker)}</span>${meta}</div>`
     + `<h2 class="dlg-title wn-title" id="wnTitle">${o.title}</h2>`
     + (o.headline ? `<p class="wn-headline">${wnEsc(o.headline)}</p>` : '') + '</div>'
-    + '<button type="button" class="dlg-x" aria-label="Close" title="Close" data-wn-close><svg class="ph" aria-hidden="true"><use href="#ph-x"/></svg></button></header>'
+    + `<button type="button" class="dlg-x" aria-label="${TA('whatsnew.close', 'Close')}" title="${TA('whatsnew.close', 'Close')}" data-wn-close>`
+    + '<svg class="ph" aria-hidden="true"><use href="#ph-x"/></svg></button></header>'
     + `<div class="dlg-body wn-body">${o.body}</div>`
     + `<footer class="dlg-foot wn-foot">${o.footLeft || ''}<div class="dlg-foot-r">`
-    + '<button type="button" class="ghost-btn" data-wn-close>Close</button></div></footer>';
+    + `<button type="button" class="ghost-btn" data-wn-close>${T('whatsnew.close', 'Close')}</button></div></footer>`;
 }
 
 function wnRender(d) {
   const now = WN.view === 'now';
   const earlierBtn = (d.earlier || []).length || d.changelog_url
-    ? `<button type="button" class="ghost-btn" data-wn-view>${now ? T('whatsnew.earlier_releases', 'Earlier releases') : '<span aria-hidden="true">←</span> Back to ' + wnEsc(d.version)}</button>`
+    ? `<button type="button" class="ghost-btn" data-wn-view>${now ? T('whatsnew.earlier_releases', 'Earlier releases') : '<span aria-hidden="true">←</span> ' + wnEsc(T('whatsnew.back_to', 'Back to {version}', {version: d.version}))}</button>`
     : '';
   return wnShell({
     kicker: now ? T('whatsnew.what_s_new', "What's new") : T('whatsnew.earlier_releases', 'Earlier releases'),
@@ -313,7 +414,7 @@ async function openWhatsNew(force) {
   if (WN.el) return;
   let d;
   try {
-    const r = await fetch('/whats-new' + (force ? '?force=1' : ''), {cache: 'no-store'});
+    const r = await fetch('/whats-new?lang=' + encodeURIComponent(wnLang()) + (force ? '&force=1' : ''), {cache: 'no-store'});
     d = await r.json();
   } catch (e) { return; }
   if (!d || !d.show) {
@@ -344,7 +445,7 @@ async function openHowClip(id) {
   if (!h) { if (typeof phosToast === 'function') phosToast(T('whatsnew.no_how_to_clip_for', 'No how-to clip for this yet.'), 'info'); return; }
   const proUser = !!document.documentElement.dataset.pro;
   WN.data = null;
-  const el = wnMount(wnShell({kicker: 'How it works', title: wnEsc(wnFeatureName(h.title)), proUser: false,
+  const el = wnMount(wnShell({kicker: T('whatsnew.how_it_works', 'How it works'), title: wnEsc(wnFeatureName(h.title)), proUser: false,
     body: wnFeature(h, proUser, true)}));
   el.querySelector('.dlg').classList.add('wn-dlg-how');
   wnWire(el);

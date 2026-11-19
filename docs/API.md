@@ -85,7 +85,7 @@ Add a job to the panel's queue. Returns immediately; the helper renders it async
 
 | Field | Type | Note |
 |---|---|---|
-| `h3_quality`, `h3_length` | string | The cell. `h3_quality=fast_hd` = the 640×384 Fast pass + Upscale & Face Fix to 1280×768, queued together; Fast and the fix are forced. |
+| `h3_quality`, `h3_length` | string | The cell. **Send both:** an `engine=h3` job without them renders the Draft 3 s cell (640×384), the smallest. `h3_quality=fast_hd` = the 640×384 Fast pass + Upscale & Face Fix to 1280×768, queued together; Fast and the fix are forced. |
 | `h3_continuity` | `on` \| `off` | Default `on`: a chained window carries the last 17 frames of the previous one and their sound (`--chain-context-frames 17`). `off` = the one-still hand-over. |
 | `start_image`, `end_image`, `keyframes_json` | path / JSON | `mode=keyframe`. On H3 the start frame is optional (an end frame alone is MiniMax's last-frame task); `keyframes_json` beats land at their `frame_index` on the 24 fps timeline. |
 | `video_path`, `h3_extend_seconds` | path / float | `mode=extend`: any clip, continued from its last 17 frames and their sound; 0.5–15 s added after it. |
@@ -719,7 +719,7 @@ Generates still images via the bundled image engine (mflux, BFL, mock backend). 
 {
   "prompt": "...",
   "n": 4,
-  "engine_override": "mflux",
+  "engine_override": "auto",
   "aspect": "1:1",
   "refs": ["/path/to/ref.png"],
   "loras": [{"path": "...", "strength": 1.0}]
@@ -1068,9 +1068,21 @@ lists the runs already sent.
 Every licence the panel asks about, with this Mac's acceptance state:
 `{"licences": [{"key": "h3", "model": ..., "licence": ..., "licensor": ..., "version": ..., "url": ...,
 "non_commercial": false, "title": ..., "summary": ..., "terms": [...], "badge": ..., "accept_label": ...,
-"accepted": false, "accepted_at": null, ...}, ...], "ui": {...}}`. Keys: `h3`, `ideogram4`, `yue2`,
-`flux1_dev`, `fibo`. H3's entry also carries `territory_notice`, `excluded_territories`, `report_line`,
-`report_url` and `credit_line`.
+"accepted": false, "accepted_at": null, ...}, ...], "ui": {...}}`. Keys: `ltx`, `flux3`, `h3`,
+`minimax-h3-image`, `ideogram4`, `yue2`, `flux1_dev`, `fibo`. H3's entry also carries `territory_notice`,
+`excluded_territories`, `report_line`, `report_url` and `credit_line`; `ltx` carries `aup_url` (Lightricks'
+Acceptable Use Policy).
+
+**LTX (5.0.40).** Until the LTX-2.x Community License is accepted on this Mac, every route that STARTS an
+LTX render (`/queue/add`, `/queue/retry`, `/queue/batch`, One Shot, a character render, a storyboard
+`render` / `restill` / `edit/generate` on a non-H3 board) and every LTX pack download the user starts
+(`/models/download`, `/models/repair`, `/models/video`) answers HTTP 451 `code=licence_required`,
+`licence=ltx`. The queue worker does not re-check it: a job already queued or running is never stopped.
+An agent that gets this answer should ask the person to open Phosphene once and accept the licence.
+
+**Report links.** The misuse-report link (`report_url`) and the Report a bug flow (`/panel/bug-report`,
+which answers `issueUrl` plus `target`) follow one switch, `report_links.TARGET`: `github`, `gitlab` or
+`mail` (support@phosphene.video, the shipped value while GitHub is unreachable).
 
 ### `POST /licences/accept`
 

@@ -137,7 +137,7 @@ Powered by MiniMax H3. Pika H3 Flex by Pika Labs (Mellis, Inc.): the weights are
 - **Times on an M4 Max, 64 GB, per 5 s:** Draft about 3.5 minutes, High about 10 to 12 minutes (H3 Flex: about 16 minutes on the same shots).
 - **Good to know:** pictures come out a little softer than H3 Flex, and very fast motion can wobble a little more. Faces and speech held in our tests.
 
-Powered by MiniMax H3. H3 Flex Turbo runs the Pika H3 Flex Turbo LoRA by akhaliq, which fuses Pika H3 Flex (Pika Labs) with LightX2V's MiniMax-H3 Turbo; the weights are a MiniMax H3 Model Derivative under the MiniMax H3 Community License. Phosphene downloads the published file unchanged.
+Powered by MiniMax H3. H3 Flex Turbo runs a published Turbo LoRA for Pika H3 Flex (Pika Labs) with LightX2V's MiniMax-H3 Turbo; its author is credited in the engine picker when the option is on. The weights are a MiniMax H3 Model Derivative under the MiniMax H3 Community License. Phosphene downloads the published file unchanged.
 
 ## Faster Hailuo H3 (Pro) {#faster-h3}
 
@@ -146,6 +146,16 @@ Powered by MiniMax H3. H3 Flex Turbo runs the Pika H3 Flex Turbo LoRA by akhaliq
 - **What you do:** nothing. Turn Pro on in Settings and render picture-to-video as usual.
 - **Not sped up:** text-to-video renders exactly as on Free, so Pro is never worse than Free.
 - **Measured on an M4 Max with 64 GB.** Other chips get a smaller gain, and Macs under 36 GB, and Intel Macs, use the Free path.
+
+## References (Pro) {#references}
+
+**References** builds a new Hailuo H3 shot around up to 3 of your pictures: characters, things or places. They keep their look in the scene your prompt describes, and the prompt can name them ("the woman from Picture 2"). It is part of **Phosphene Pro** and needs an Apple Silicon Mac with 32 GB of memory or more.
+
+- **Where:** on **Text**, switch on **References** under the first picture slot. That picture is Picture 1, and two more slots open.
+- **First use:** a one-time download of MiniMax's reference model (about 43 GB), built on your Mac to about 23 GB. It needs about 66 GB free while it builds. A stopped download carries on where it stopped.
+- **Good to know:** clips are 5 seconds. A 5-second Standard clip takes about 6 to 7 minutes on an M4 Max with 64 GB. The speed choice and add-ons do not apply to References clips.
+
+Powered by MiniMax H3, under the MiniMax H3 Community License. Phosphene downloads the published files at a fixed version.
 
 ## How long it takes {#times}
 

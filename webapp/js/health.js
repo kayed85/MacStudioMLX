@@ -131,8 +131,8 @@ function renderVersionPill() {
     // (panelRestart(), same as the stale-process case below) instead of
     // asking for a manual Stop -> Start.
     pill.title = s.pull_requires_full_update
-      ? T('health.pulled_this_update_touched_dependencies', 'Pulled {v}. This update touched dependencies — use Pinokio\'s Update button (not just Stop+Start).', {v})
-      : T('health.pulled_click_to_restart_and', 'Pulled {v}. Click to restart and apply it.', {v});
+      ? T('health.v_is_downloaded_finish_in_pinokio', '{v} is downloaded. To finish, stop Phosphene in Pinokio and press Update there (Stop and Start is not enough this time).', {v})
+      : T('health.v_is_downloaded_click_to', '{v} is downloaded. Click to restart and use it.', {v});
     return;
   }
   // Same restart affordance for a checkout that advanced UNDER this
@@ -187,7 +187,7 @@ function renderVersionPill() {
   if (!s.error && s.checked_ts && (s.behind_by | 0) > 0) {
     pill.classList.add('pill-update');
     pill.innerHTML = `<svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-arrow-up"/></svg>Update to ${remote}`;
-    pill.title = T('health.you_re_on_latest_is', 'You\'re on {local}; latest is {remote}. Click to pull the update.', {local, remote});
+    pill.title = T('health.you_have_local_remote_is', 'You have {local}; {remote} is out. Click to update.', {local, remote});
     return;
   }
   // Last check errored (offline).
@@ -215,12 +215,9 @@ function renderVersionPill() {
 
 // ---- The pop-up: updates announce themselves, broadcasts reach everyone ----
 //
-// Owner ruling 2026-09-01: a new version must be a POP-UP on app open, not a
-// banner someone has to notice — and re-shown every page load until they
-// update ("people who don't update will be annoyed by it every time they open
-// the app" is the intended behaviour, verbatim). The broadcast is the
-// maintainer's channel: BROADCAST.json on public main, fetched by the same
-// 30-minute server poll, shown ONCE per message id, dismissed forever.
+// Announce a new release at startup, and remember Later for that release.
+// The header remains available for a manual update. Developer notices use a
+// separate once-per-id dismissal and the same 30-minute server poll.
 // The one Phosphene loading mark, small: the header's own markup (footer mark), cloned.
 // CSS .ph-mark-mini sets the size; Reduce Motion stops it like every other mark.
 window.phosMiniMark = function phosMiniMark() {
@@ -311,14 +308,17 @@ function _maybeShowUpdateModal(st) {
   if ((st.behind_by | 0) <= 0 || _versionRestartPending) return;
   const remote = st.remote_version || st.remote_short || 'a new version';
   const local = st.local_version || st.local_short || 'your build';
+  // Wait for saved preferences, then respect Later for this release across reloads.
+  if (!window._ubStarSettings) return;
+  if (String(window._ubStarSettings.update_banner_dismissed || '') === String(remote)) return;
   window._updModalShownThisLoad = true;
   _uiEvent('update_prompt', {action: 'shown'});
   _phModalShow({
     kicker: T('health.update_available', 'Update available'),
-    title: `Phosphene ${remote} is out — you're on ${local}`,
-    body: T('health.updates_are_mostly_bug_fixes', 'Updates are mostly bug fixes: renders that fail less and explain ')
-        + T('health.themselves_better_updating_takes_about', 'themselves better. Updating takes about a minute and keeps your ')
-        + T('health.queue_settings_and_models', 'queue, settings and models.'),
+    title: T('health.release_available', 'Phosphene {remote} is available. You are on {local}.', {remote, local}),
+    // Owner, 16 Nov 2026: this pop-up only says a new version is out and
+    // how to update. No invitation to move to the Mac app here.
+    body: T('health.update_how', 'To update, press Update now, then Restart now when it is ready (about a minute). Your queue, settings and models stay. You can also use Update in Pinokio, then Start.'),
     primaryLabel: T('health.update_now', 'Update now'),
     secondaryLabel: T('health.later', 'Later'),
     onPrimary: () => {
@@ -327,14 +327,17 @@ function _maybeShowUpdateModal(st) {
       if (go) { go.disabled = true; go.textContent = T('health.updating', 'Updating…'); }
       versionDoPull({skipConfirm: true});
     },
-    // Later = this page load only. The banner (per-version dismissal)
-    // remains as the quieter in-session reminder.
-    onSecondary: () => { _uiEvent('update_prompt', {action: 'later'}); },
+    onSecondary: () => {
+      _uiEvent('update_prompt', {action: 'later'});
+      window._ubStarSettings.update_banner_dismissed = String(remote);
+      _ubSaveSetting({update_banner_dismissed: String(remote)});
+      _ubRender(st);
+    },
   });
 }
 
 function _maybeShowBroadcastModal(st) {
-  if (window._phModalOpen) return;
+  if (window._phModalOpen || !window._ubStarSettings) return;
   const b = st && st.broadcast;
   if (!b || !b.id || window._bcHandled[b.id]) return;
   const seen = ((window._ubStarSettings || {}).broadcast_seen_ids) || [];
@@ -433,10 +436,18 @@ function _ubRestartState(newVersion, requiresFullUpdate) {
     if (title) title.textContent = pu.state === 'failed'
       ? T('health.the_update_did_not_finish', 'The update did not finish')
       : `Preparing version ${newVersion}...`;
-    if (sub) sub.textContent = pu.state === 'failed'
-      ? (pu.error || 'post_update.sh failed') + T('health.use_pinokio_s_update_stop', ' \u2014 use Pinokio\u2019s Update (Stop, then Update), or try again.')
-      : T('health.installing_what_the_new_version', 'Installing what the new version needs (the same step Pinokio\u2019s Update runs). ')
-        + T('health.restart_becomes_available_when_it', 'Restart becomes available when it finishes. ') + ((pu.log || []).slice(-1)[0] || '');
+    if (sub) {
+      // Plain words (17 Nov 2026): the raw reason stays one click away under
+      // Details, never the main line.
+      const esc = (t) => String(t).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+      if (pu.state === 'failed') {
+        sub.innerHTML = esc(T('health.press_try_again_if_it', 'Press Try again. If it fails again, stop Phosphene in Pinokio and press Update there.'))
+          + (pu.error ? '<details class="h3-diag"><summary>' + esc(T('health.details_for_troubleshooting', 'Details for troubleshooting'))
+            + '</summary><p>' + esc(pu.error) + '</p></details>' : '');
+      } else {
+        sub.textContent = T('health.finishing_the_update_restart_now', 'Finishing the update. Restart now appears when it is done, in about a minute.');
+      }
+    }
     if (go) {
       go.hidden = pu.state !== 'failed';
       go.disabled = false;
@@ -449,7 +460,7 @@ function _ubRestartState(newVersion, requiresFullUpdate) {
     }
     if (pu.state !== 'failed') _ubFollowPostUpdate(newVersion);
   } else if (requiresFullUpdate && !pu.state) {
-    if (sub) sub.textContent = T('health.this_update_touched_python_dependencies', 'This update touched Python dependencies, so use Pinokio\u2019s Update button (not just Stop and Start) so they reinstall.');
+    if (sub) sub.textContent = T('health.to_finish_this_update_stop', 'To finish this update, stop Phosphene in Pinokio and press Update there. Stop and Start is not enough this time.');
     if (go) go.hidden = true;
   } else {
     if (sub) sub.textContent = T('health.your_queue_and_settings_are', 'Your queue and settings are preserved across the restart.');
@@ -522,6 +533,7 @@ function _ubWire() {
   if (later) later.onclick = () => {
     _uiEvent('update_prompt', {action: 'banner_later'});
     const s = _versionState || {};
+    if (window._ubStarSettings) window._ubStarSettings.update_banner_dismissed = String(s.remote_version || s.remote_short || '');
     _ubSaveSetting({update_banner_dismissed: String(s.remote_version || s.remote_short || '')});
     const el = document.getElementById('updateBanner');
     if (el) el.hidden = true;
@@ -576,7 +588,9 @@ document.addEventListener('DOMContentLoaded', () => {
       };
       // Until they have starred, the header star twinkles now and then (CSS, reduced-motion aware).
       if (!st.star_prompt_done) document.getElementById('starLink')?.classList.add('is-calling');
-      if (_versionState) { try { _ubRender(_versionState); } catch (e) {} }
+      if (_versionState) {
+        try { _ubRender(_versionState); _maybeShowUpdateModal(_versionState); _maybeShowBroadcastModal(_versionState); } catch (e) {}
+      }
     })
     .catch(() => {});
 });
@@ -805,6 +819,7 @@ function appUpdateView(a) {
     v.label = T('health.update', 'Update ') + name;
     v.title = T('health.a_newer_version_is_out', 'A newer version is out. Click to install it.');
     v.action = 'updateAll';
+    v.toast = { kind: 'info', text: T('health.update_ready_when_you_are', 'An update is available. Use the Update button when you are ready.') };
   } else if (state === 'downloading') {
     const pct = Number.isFinite(a.progress) ? ` ${Math.round(Math.max(0, Math.min(1, a.progress)) * 100)}%` : '';
     v.label = `Downloading ${thing}${pct}`;
@@ -959,14 +974,14 @@ async function versionPillClick() {
     const _pu = s.post_update || {};
     if (_pu.pending || _pu.active || _pu.state === 'failed') {
       phosToast(_pu.state === 'failed'
-        ? T('health.the_update_did_not_finish_2', 'The update did not finish: ') + (_pu.error || '') + T('health.use_pinokio_s_update', ' Use Pinokio\u2019s Update.')
+        ? T('health.the_update_did_not_finish_press', 'The update did not finish. Press Try again on the update bar. If it fails again, stop Phosphene in Pinokio and press Update there.')
         : T('health.finishing_the_update_first_restart', 'Finishing the update first \u2014 restart becomes available when it is done.'), 'warn');
       return;
     }
     if (s.pull_requires_full_update && !_pu.state) {
       // Genuinely can't self-restart into this one -- dependencies /
       // patches changed, and only Pinokio's own Update reinstalls those.
-      alert(T('health.pulled_because_this_update_touched', "Pulled. Because this update touched Python deps / patches, use Pinokio's Update button (it reinstalls + reapplies patches). After that click Start."));
+      alert(T('health.the_update_is_downloaded_to', 'The update is downloaded. To finish it, stop Phosphene in Pinokio, press Update there (Stop and Start is not enough this time), then press Start.'));
       return;
     }
     // SYS-29: same fix as the update banner's button -- finish the update
@@ -1063,9 +1078,8 @@ async function versionDoPull(opts) {
   // that also does four other things depending on state.
   if (!opts.skipConfirm) {
     const ok = confirm(
-      T('health.pull_update_from', 'Pull update from {local} → {target}?\n\n', {local, target}) +
-      T('health.this_runs_git_pull_on', 'This runs git pull on your phosphene install. After it succeeds, ') +
-      T('health.you_ll_need_to_click', 'you\'ll need to click Stop, then Start in Pinokio to load the new code. ') +
+      T('health.update_from_local_to', 'Update from {local} to {target}?\n\n', {local, target}) +
+      T('health.this_downloads_the_new_version', 'This downloads the new version. When it is done, click Restart Phosphene to use it. ') +
       T('health.your_queue_and_settings_are_2', 'Your queue and settings are preserved across restarts.')
     );
     if (!ok) return;

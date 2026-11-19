@@ -63,6 +63,12 @@ def clean_env(base=None):
            and not k.startswith(("Malloc", "MFLUX_"))}
     env.update(PYTHONUNBUFFERED="1", HF_HUB_DISABLE_TELEMETRY="1",
                HF_HUB_DISABLE_PROGRESS_BARS="0", MLX_ENABLE_TF32="0")
+    # H38 (fleet, 18 Nov): the macOS Metal watchdog stopped FLUX 3 ("Command
+    # buffer execution failed: Impacting Interactivity", M1 Max). Smaller
+    # command buffers keep each one under it, same kernels, same picture;
+    # the size Qwen-Edit (image_engine.py) and the LTX helper use on M1/M2.
+    env.setdefault("MLX_MAX_OPS_PER_BUFFER", "10")
+    env.setdefault("MLX_MAX_MB_PER_BUFFER", "10")
     return env
 
 
@@ -183,6 +189,37 @@ def _redact(line):
     return re.sub(r"hf_[A-Za-z0-9]+", "[redacted]", line)
 
 
+_PROGRESS = re.compile(r"^(\[download\]|FLUX 3 download:|FLUX 3: (verifying|rendering seed|checking)\b)|%\||[0-9.]+s/it|it/s\]")
+
+
+def _failure_reason(tail, rc):
+    """The worker's own reason, not its last progress line (hotfix H7).
+
+    The message used to join the last 15 log lines oldest first, so users and
+    the fleet saw "model weights: 9.92 GB of 9.92 GB" or "verifying vae/..."
+    and the worker's real error was cut off at the bottom."""
+    lines = [l.strip() for l in tail if l.strip()]
+    for line in reversed(lines):
+        if not _PROGRESS.search(line):
+            return line[len("FLUX 3: "):] if line.startswith("FLUX 3: ") else line
+    return (f"the image worker stopped (exit code {rc}) without saying why. "
+            "Retry; if it stops again, restart Phosphene and free some memory.")
+
+
+def _failure_message(tail, context):
+    """Keep the last diagnostic in the fleet's first 80 characters."""
+    lines = [_redact(str(line)).strip() for line in tail if str(line).strip()]
+    # Some CLIs print memory statistics in finally after swallowing an error.
+    # Keep that error ahead of trailing statistics/progress, if it is present.
+    diagnostics = [line for line in lines if re.search(
+        r"error|failed|out of memory|stopping image|battery below|no space|cannot|unable",
+        line, re.IGNORECASE)]
+    reason = (diagnostics or lines or ["The renderer stopped without finishing an image."])[-1]
+    reason = reason.removeprefix("FLUX 3: ")
+    return "FLUX 3: " + reason + " " + context + (
+        " Last lines:\n" + "\n".join(lines[-6:]) if lines else "")
+
+
 def _run(cmd, env, on_log, request=None, timeout=7200, guard=(), tail_out=None):
     """Stream progress and share the studio's cancellation registry, including install."""
     import image_engine
@@ -240,10 +277,12 @@ def _run(cmd, env, on_log, request=None, timeout=7200, guard=(), tail_out=None):
         rc = proc.wait(timeout=10)
         if tail_out is not None:
             tail_out[:] = tail
-        if rc < 0:
+        if rc in (-15, -9):
             raise image_engine.ImageJobCancelled("FLUX 3 stopped.")
-        if rc:
-            raise RuntimeError("FLUX 3 did not finish: " + "\n".join(tail))
+        # A failed batch can still have verified images: recover its receipts
+        # below and publish those instead of losing the entire batch.
+        if rc and request is None:
+            raise RuntimeError("FLUX 3 did not finish: " + _failure_reason(tail, rc))
         return receipts
     finally:
         if proc.poll() is None:
@@ -312,8 +351,10 @@ def _complete_receipts(result, request, output_dir, tail=()):
     if seeds and all(s in got for s in seeds):
         return [got[s] for s in seeds]
     done = sum(1 for s in seeds if s in got)
-    last = "\n".join(str(x) for x in list(tail)[-6:])
-    raise RuntimeError(
-        f"FLUX 3 returned no complete image ({done} of {len(seeds)} finished; "
-        f"the worker exited without an error). Check the log and retry."
-        + (f" Last lines:\n{last}" if last else ""))
+    if done:
+        import image_diagnostics
+        diagnostic = image_diagnostics.safe_last_line(tail)
+        return [dict(got[s], partial=True, requested=len(seeds),
+                     finished=done, last_line=diagnostic) for s in seeds if s in got]
+    raise RuntimeError(_failure_message(
+        tail, f"{done} of {len(seeds)} finished. Please retry the missing images."))

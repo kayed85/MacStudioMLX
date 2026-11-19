@@ -253,6 +253,30 @@ def _download_stopped_note(repo_id, env, cause: str = "") -> "str | None":
             f"continue it; if it stops again, check the network and free disk space.")
 
 
+def _hub_unreachable_note(repo_id, cause: str = "") -> "str | None":
+    """The first line of an engine failure whose model could not be fetched
+    from Hugging Face because the network failed, or None.
+
+    Fleet, hotfix H10 (16 Nov 2026): Macs in mainland China failed every image
+    as "mflux-generate-flux2 failed (exit 1) on batch of 1 seeds; last line:
+    huggingface_hub...LocalEntryNotFoundError" - nothing on disk yet, so the
+    unfinished-download note never fired, and the user was told nothing."""
+    c = str(cause or "")
+    low = c.lower()
+    if "huggingface" not in low and "hf_hub" not in low:
+        return None
+    if not ("localentrynotfound" in low or "connect" in low or "timed out" in low
+            or "timeout" in low or "nodename nor servname" in low
+            or "network is unreachable" in low or "internet connection" in low):
+        return None
+    model = f" {repo_id}" if _is_hf_repo_id(repo_id) else " this model"
+    return (f"Phosphene could not download{model} from Hugging Face: this Mac could "
+            f"not reach huggingface.co. The model is needed once and kept afterwards. "
+            f"Check that this Mac is online and can open huggingface.co (in some "
+            f"countries it is blocked and needs a VPN), then Generate again. "
+            f"The engine's last line: {c[:220]}.")
+
+
 _REPAIR_MEMO: dict = {}   # repo_id -> on_disk_gb at the last repair attempt
 
 
@@ -532,6 +556,29 @@ class ImageEngineConfig:
     h3image_text_dir: str = ""       # the H3 video lane's text-encoder folder (ddalcu-q8)
     h3image_text_config: str = ""    # upstream-meta/FL2VA/text_encoder/config.json
     h3image_mp: float = 8.0
+    # Low-memory mode (engine runner with --memory/--budget-gb; empty = the runner's default, the
+    # resident path). The panel sets "auto" and the memory this picture may use right now; the
+    # runner then picks the fastest setting that fits (streamed text encoder / DiT on small Macs).
+    h3image_memory: str = ""
+    h3image_budget_gb: float = 0.0
+    # What the runner chose, from its "memory setting: <name>" line (analytics mem_mode).
+    h3image_memory_setting: str = ""
+
+    # Restyle a picture on Hailuo H3 (R&D L55): the Studio's own scripts/h3_restyle.py in the H3 pack's
+    # interpreter against the installed engine checkout. One content picture in, the same scene back in
+    # the style the prompt names. The panel fills the paths; the recipe values are the measured ones.
+    h3restyle_python_path: str = ""
+    h3restyle_script_path: str = ""   # <studio>/scripts/h3_restyle.py
+    h3restyle_engine_root: str = ""   # the installed H3 engine checkout (H3_ROOT)
+    h3restyle_dit: str = ""           # the H3 FL2VA Q8 DiT folder
+    h3restyle_text_dir: str = ""      # the H3 Q8 components folder (text encoder + video VAE)
+    h3restyle_text_config: str = ""   # upstream-meta/FL2VA/text_encoder/config.json
+    h3restyle_decoder: str = ""       # the P-H3-Image vae folder (single-frame decoder)
+    h3restyle_lora: str = ""          # the restyle adapter file
+    h3restyle_lora_bytes: int = 0     # its exact size when known (a partial file is "not downloaded")
+    h3restyle_scale: float = 1.3      # adapter strength, measured 1.0-1.3
+    h3restyle_steps: int = 16         # sigma points (15 forwards)
+    h3restyle_mp: float = 1.0         # output megapixels at the content's shape
 
     def to_public_dict(self) -> dict:
         d = asdict(self)
@@ -615,7 +662,8 @@ def generate(*, prompt: str, n: int, output_dir: Path,
     # Validate ref paths up-front so we fail fast — Qwen-Edit-2509 supports
     # 1-3 input images; more than 3 is unsupported by the model.
     if refs:
-        if len(refs) > (10 if config.kind == "flux3" else H3IMAGE_MAX_REFERENCES if config.kind == "h3image" else 3):
+        if len(refs) > (10 if config.kind == "flux3" else H3IMAGE_MAX_REFERENCES if config.kind == "h3image"
+                        else 1 if config.kind == "h3restyle" else 3):
             raise ValueError(
                 f"refs: Qwen-Image-Edit-2509 supports 1-3 input images, got {len(refs)}"
             )
@@ -652,6 +700,8 @@ def generate(*, prompt: str, n: int, output_dir: Path,
         return _generate_ph3image(prompt, n, aspect, output_dir, base_seed, config, refs=refs, on_log=on_log)
     if config.kind == "h3image":
         return _generate_h3image(prompt, n, aspect, output_dir, base_seed, config, refs=refs, on_log=on_log)
+    if config.kind == "h3restyle":
+        return _generate_h3restyle(prompt, n, output_dir, base_seed, config, refs=refs, on_log=on_log)
     raise ValueError(f"unknown image engine kind: {config.kind!r}")
 
 
@@ -692,12 +742,19 @@ def health_check(config: ImageEngineConfig) -> tuple[bool, str]:
         missing = ph3image_missing(config)
         if missing:
             return False, "P-H3-Image is not installed: " + "; ".join(missing)
-        return True, f"P-H3-Image ready ({config.ph3image_mp:g} MP, {5 if config.ph3image_pro_profile else 8} steps)"
+        if config.ph3image_pro_profile:
+            return True, f"P-H3-Image ready ({config.ph3image_mp:g} MP, Pro)"
+        return True, f"P-H3-Image ready ({config.ph3image_mp:g} MP, 8 steps)"
     if config.kind == "h3image":
         missing = h3image_missing(config)
         if missing:
             return False, "MiniMax-H3-Image is not installed: " + "; ".join(missing)
         return True, f"MiniMax-H3-Image ready ({config.h3image_mp:g} MP, 6 steps)"
+    if config.kind == "h3restyle":
+        missing = h3restyle_missing(config)
+        if missing:
+            return False, "Restyle on Hailuo H3 is not installed: " + "; ".join(missing)
+        return True, f"Restyle on Hailuo H3 ready ({config.h3restyle_mp:g} MP, {max(1, config.h3restyle_steps - 1)} steps)"
     return False, f"unknown engine kind: {config.kind!r}"
 
 
@@ -853,9 +910,11 @@ def mflux_missing_message(bin_name: str, fam: str, install_problem: str | None =
         way = _dist.say(
             "In Pinokio, click \"Install/repair image engines (Ideogram 4 + "
             "Qwen-Edit)\" in Phosphene's menu; it keeps every model. ",
-            "Check that this Mac is online and has a few GB free, then make the "
-            "image again; if it keeps happening, report it with "
-            f"{_dist.MAC_REPORT_MENU} ")
+            ("Free a few GB of disk space. " if "disk is full" in install_problem else
+             "Check that this Mac is online. If a VPN or firewall blocks downloads, "
+             "allow Phosphene to connect. ")
+            + "Wait 10 minutes, then press Retry on the image. "
+            + "If it still fails, report it with " + _dist.MAC_REPORT_MENU + " ")
     else:
         head = "The image engine is not installed, so images cannot start. "
         way = _dist.say(
@@ -1135,6 +1194,25 @@ def lora_input_width(path) -> int | None:
     return width if hits * 5 >= sum(counts.values()) * 2 else None   # >= 40 %
 
 
+def lora_is_flux1_shaped(path, width: int) -> bool:
+    """True when a LoRA as wide as the FLUX.2 model was made for FLUX.1.
+
+    FLUX.1 is 3072 wide, the same as FLUX.2 [klein] 4B, so the width check
+    passes it; its feed-forward writes 4 x width (12288; the BFL single-block
+    linear1 7 x width), while FLUX.2 writes 6 x width (18432) and never 4 or
+    7 x. mflux attaches it by key name and the first denoise step dies with
+    "[broadcast_shapes] Shapes (1,1024,18432)" - hotfix H19 (5.0.19-5.0.28,
+    7 renders on 2 Macs, "The render stopped on a layer-size mismatch")."""
+    import lora_compat
+    for key, meta in lora_compat.read_tensor_header(path).items():
+        if not key.endswith((".lora_B.weight", ".lora_up.weight")):
+            continue
+        shape = meta.get("shape") if isinstance(meta, dict) else None
+        if isinstance(shape, list) and len(shape) == 2 and shape[0] in (4 * width, 7 * width):
+            return True
+    return False
+
+
 _SHAPE_ERROR_MARKS = ("[broadcast_shapes]", "[matmul]", "[addmm]", "Shapes (")
 
 
@@ -1206,6 +1284,12 @@ def mflux_lora_problem(config: ImageEngineConfig) -> tuple[str, str] | None:
             if type(exc).__name__ == "LoraCompatibilityError":
                 return ("damaged", str(exc))
             continue
+        if want and have == want and lora_is_flux1_shaped(p, want):
+            runs = FLUX2_WIDTH_NAMES[want]
+            return ("mismatch",
+                    f"The LoRA {name} was made for FLUX.1 and cannot load on "
+                    f"{runs}, the model this image engine runs. Un-pick it in "
+                    f"the LoRA list, or pick a LoRA made for {runs}.")
         if want and have and have != want:
             made_for = FLUX2_WIDTH_NAMES.get(have)
             runs = FLUX2_WIDTH_NAMES[want]
@@ -1662,6 +1746,15 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
     if fam == "ideogram":
         env.setdefault("MLX_DISABLE_COMPILE", "1")
         env.setdefault("MLX_METAL_FAST_SYNCH", "1")
+    # H17 (fleet, 11-17 Nov): Qwen-Edit was stopped by the macOS Metal
+    # watchdog (SIGABRT, error_class metal_watchdog) on M1 Max, M2 Max and
+    # M4 Max 36 GB - 9 failures, 3 Macs, most within 2 minutes. The watchdog
+    # times ONE command buffer; smaller buffers keep each one under it and
+    # change no kernel, so the picture is bit-identical. Same buffer size
+    # the LTX helper uses on M1/M2 (GPU_STEPS_M1M2 in mlx_ltx_panel.py).
+    if fam == "qwen_edit":
+        env.setdefault("MLX_MAX_OPS_PER_BUFFER", "10")
+        env.setdefault("MLX_MAX_MB_PER_BUFFER", "10")
     # FBCache toggle for the Qwen-Edit transformer (skips middle blocks
     # when the layer-0 residual is stable step-to-step). The patch is
     # injected by patch_mflux_fbcache.py at install/update time and is
@@ -1904,9 +1997,9 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
                 except subprocess.TimeoutExpired:
                     pass
             raise RuntimeError(
-                f"{bin_name} stalled: no output for {int(stall_budget)}s "
-                f"(a hung download or a Metal deadlock). First-run weight pulls "
-                f"stream progress and keep this alive — a genuine stall tripped it."
+                f"Picture stalled; last line: {image_diagnostics.safe_last_line(last_lines)}. "
+                f"{bin_name} stalled: no output for {int(stall_budget)}s."
+
             )
         rc = proc.wait(timeout=30)
     except subprocess.TimeoutExpired as e:
@@ -2013,6 +2106,10 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
         if _dl_note:
             raise RuntimeError(
                 f"{_dl_note}\n\nTail of stdout/stderr:\n{stderr_tail[-1200:]}")
+        _hub_note = _hub_unreachable_note(getattr(config, "mflux_model", None), cause)
+        if _hub_note:
+            raise RuntimeError(
+                f"{_hub_note}\n\nTail of stdout/stderr:\n{stderr_tail[-1200:]}")
         _shape_note = _lora_shape_note(config, _lora_paths_in, cause)
         if _shape_note:
             raise RuntimeError(
@@ -2563,8 +2660,8 @@ def ph3image_resident_headroom_gb(config):
     return max(6.0, min(12.0, float(config.ph3image_mp) * 2.0))
 
 
-# What a private profile must not leave beside a picture: the schedule that makes it faster.
-# The profile name stays (it is how a render proves which path ran); the method does not.
+# A private profile's metrics file keeps only what the Studio shows; the profile name stays
+# (it is how a render proves which path ran).
 _PH3IMAGE_PRIVATE_METRIC_KEYS = ("sigmas", "forwards", "steps", "schedule", "timesteps")
 
 
@@ -2648,7 +2745,8 @@ def _generate_ph3image(prompt: str, n: int, aspect: str, output_dir: Path, base_
                 _ph3image_scrub_private_metrics(request["metrics"])
             results.append({"png_path": request["output"], "seed": request["seed"], "engine": "p-h3-image",
                             "width": int(info.get("width") or 0), "height": int(info.get("height") or 0),
-                            "seconds": float(info.get("request_seconds") or 0.0)})
+                            "seconds": float(info.get("request_seconds") or 0.0),
+                            "refs_ignored": bool(refs)})
         else:
             return results
     # A staged request must evict a worker left by an earlier warm request,
@@ -2733,7 +2831,8 @@ def _generate_ph3image(prompt: str, n: int, aspect: str, output_dir: Path, base_
                 _ph3image_scrub_private_metrics(metrics)
             results.append({"png_path": str(png), "seed": request["seed"], "engine": "p-h3-image",
                             "width": int(info.get("width") or 0), "height": int(info.get("height") or 0),
-                            "seconds": float(info.get("total_seconds") or 0.0)})
+                            "seconds": float(info.get("total_seconds") or 0.0),
+                            "refs_ignored": bool(refs)})
     return results
 
 
@@ -2815,6 +2914,10 @@ def _generate_h3image(prompt: str, n: int, aspect: str, output_dir: Path, base_s
             cmd += ["--reference", str(ref)]
         if match:
             cmd.append("--match-reference")
+        if config.h3image_memory:
+            cmd += ["--memory", config.h3image_memory]
+            if config.h3image_budget_gb > 0:
+                cmd += ["--budget-gb", f"{config.h3image_budget_gb:.1f}"]
         if on_log:
             on_log(f"[h3-image] image {i + 1}/{n}: {'Picture 1 shape' if match else ratio} at {mp:g} MP, seed {seed}")
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -2838,6 +2941,8 @@ def _generate_h3image(prompt: str, n: int, aspect: str, output_dir: Path, base_s
             if proc.stdout is not None:
                 for line in proc.stdout:
                     line = line.rstrip()
+                    if line.startswith("memory setting: "):
+                        config.h3image_memory_setting = line[len("memory setting: "):].strip()[:40]
                     if line and on_log:
                         on_log(f"[h3-image] {line}")
             rc = proc.wait()
@@ -2865,6 +2970,134 @@ def _generate_h3image(prompt: str, n: int, aspect: str, output_dir: Path, base_s
             pass
         results.append({"png_path": str(png), "seed": seed, "engine": "h3-image",
                         "references": len(refs), "refs_ignored": False,
+                        "width": int(info.get("width") or 0), "height": int(info.get("height") or 0),
+                        "seconds": float(info.get("request_seconds") or info.get("total_seconds") or 0.0)})
+    return results
+
+
+# ---- Restyle a picture on Hailuo H3 (R&D L55) ------------------------------------------------------
+H3RESTYLE_MAX_REFERENCES = 1      # the content picture; a second anchor makes the model copy one of them
+
+
+def h3restyle_missing(config: ImageEngineConfig) -> list[str]:
+    """What is not on disk yet, in plain words ([] = ready)."""
+    out: list[str] = []
+    py = config.h3restyle_python_path
+    if not py or not Path(py).exists():
+        out.append("the H3 engine is not installed")
+    if not config.h3restyle_script_path or not Path(config.h3restyle_script_path).is_file():
+        out.append("this Studio has no restyle runner")
+    root = Path(config.h3restyle_engine_root) if config.h3restyle_engine_root else None
+    # Every module the runner stages (the same five h3restyle_supported() probes), not just the decoder:
+    # an old or half-updated engine would otherwise fail at import after the expensive part began.
+    if root is None or not all((root / "minimax_h3_mlx" / f).is_file()
+                               for f in ("ph3_image_vae.py", "pipeline.py", "lora.py", "adaln.py", "packing.py")):
+        out.append("this H3 engine build has no single-frame image decoder (update the Hailuo H3 runner)")
+    if not config.h3restyle_dit or not Path(config.h3restyle_dit).is_dir():
+        out.append("the H3 video model is missing")
+    if not config.h3restyle_text_dir or not (Path(config.h3restyle_text_dir) / "video_vae.safetensors").is_file():
+        out.append("the H3 text encoder is missing")
+    if not config.h3restyle_text_config or not Path(config.h3restyle_text_config).is_file():
+        out.append("the H3 text encoder config is missing")
+    dec = Path(config.h3restyle_decoder) if config.h3restyle_decoder else None
+    # Both decoder files: the runner reads config.json after denoising, so a lost config would cost the whole run.
+    if dec is None or not (dec / "decoder.safetensors").is_file() or not (dec / "config.json").is_file():
+        out.append("the P-H3-Image picture decoder is not downloaded")
+    lora = Path(config.h3restyle_lora) if config.h3restyle_lora else None
+    try:
+        lora_ok = bool(lora and lora.is_file() and lora.stat().st_size > 0
+                       and (not config.h3restyle_lora_bytes or lora.stat().st_size == int(config.h3restyle_lora_bytes)))
+    except OSError:
+        lora_ok = False
+    if not lora_ok:
+        out.append("the restyle adapter is not downloaded")
+    return out
+
+
+def _generate_h3restyle(prompt: str, n: int, output_dir: Path, base_seed: int | None,
+                        config: ImageEngineConfig, refs: list[str] | None = None,
+                        on_log: "callable | None" = None) -> list[dict]:
+    """One picture per subprocess (the runner stages text encoder, DiT and decoder itself). The
+    output takes the content picture's shape; the Studio's aspect choice does not apply."""
+    import json as _json
+    import os
+    import random
+    import subprocess
+
+    missing = h3restyle_missing(config)
+    if missing:
+        raise FileNotFoundError("Restyle on Hailuo H3 is not ready: " + "; ".join(missing))
+    refs = list(refs or [])
+    if len(refs) != 1:
+        raise ValueError("Restyle takes exactly one picture: the one to restyle (Picture 1).")
+    content = refs[0]
+    forwards = max(1, int(config.h3restyle_steps) - 1)
+    if on_log:
+        on_log(f"[restyle] {Path(content).name} -> the style in the prompt, {forwards} steps, strength {config.h3restyle_scale:g}")
+    results: list[dict] = []
+    ts = int(time.time() * 1000)
+    for i in range(n):
+        seed = (base_seed + i) if base_seed is not None else random.randint(0, 2**31 - 1)
+        png = output_dir / f"cand_{i:02d}_h3restyle_{ts}.png"
+        metrics = output_dir / f"cand_{i:02d}_h3restyle_{ts}.json"
+        # Options first, then "--" and the prompt as data: a prompt that starts with "-" ("--watercolour")
+        # must reach the runner as the prompt, not as an option (5.0.27 review).
+        cmd = [config.h3restyle_python_path, config.h3restyle_script_path, "-o", str(png),
+               "--content", str(content), "--engine-root", config.h3restyle_engine_root,
+               "--dit", config.h3restyle_dit, "--text-dir", config.h3restyle_text_dir,
+               "--text-config", config.h3restyle_text_config, "--decoder", config.h3restyle_decoder,
+               "--lora", config.h3restyle_lora, "--lora-scale", f"{float(config.h3restyle_scale):g}",
+               "--steps", str(int(config.h3restyle_steps)), "--mp", f"{float(config.h3restyle_mp):g}",
+               "--seed", str(seed), "--metrics", str(metrics), "--", prompt]
+        if on_log:
+            on_log(f"[restyle] image {i + 1}/{n}: {config.h3restyle_mp:g} MP at the picture's shape, seed {seed}")
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                errors="replace", env=_clean_subprocess_env(), start_new_session=True)
+        _register_active_proc(proc)
+        deadline = float(os.environ.get("PHOSPHENE_H3RESTYLE_TIMEOUT_S", "3600"))
+        timed_out = {"v": False}
+
+        def _kill():
+            timed_out["v"] = True
+            try:
+                proc.kill()          # the runner creates no children
+            except ProcessLookupError:
+                pass
+
+        wd = threading.Timer(deadline, _kill)
+        wd.daemon = True
+        wd.start()
+        try:
+            if proc.stdout is not None:
+                for line in proc.stdout:
+                    line = line.rstrip()
+                    if line and on_log:
+                        on_log(f"[restyle] {line}")
+            rc = proc.wait()
+        except BaseException:
+            proc.kill()
+            proc.wait()
+            raise
+        finally:
+            wd.cancel()
+            _unregister_active_proc(proc)
+            if proc.stdout is not None:
+                proc.stdout.close()
+        if timed_out["v"]:
+            raise RuntimeError(f"Restyle exceeded its {deadline:.0f}s deadline and was stopped")
+        if rc in (-15, 143, -9, 137):
+            raise ImageJobCancelled(f"Restyle cancelled by /stop (rc={rc})")
+        if rc != 0:
+            raise RuntimeError(f"Restyle failed with rc={rc}")
+        if not png.exists():
+            raise RuntimeError(f"Restyle finished but no PNG at {png}")
+        info: dict = {}
+        try:
+            info = _json.loads(metrics.read_text())
+        except Exception:
+            pass
+        results.append({"png_path": str(png), "seed": seed, "engine": "h3-restyle",
+                        "references": 1, "refs_ignored": False,
                         "width": int(info.get("width") or 0), "height": int(info.get("height") or 0),
                         "seconds": float(info.get("request_seconds") or info.get("total_seconds") or 0.0)})
     return results

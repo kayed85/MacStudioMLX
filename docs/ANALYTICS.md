@@ -161,6 +161,7 @@ event below also carries these, unless the event already names the field itself:
 | `app_version`, `app_build` | e.g. `1.0.3`, `27`; Mac app only | The app and the Studio update separately |
 | `studio_version` | e.g. `5.0.3` | The Studio build that sent it (same as `version`) |
 | `os_version`, `chip_family`, `ram_gb` | `26.4`, `M4 Max`, `64` | The coarse machine class, so any event can be split by hardware |
+| `install_source`, `install_via` | e.g. `chatgpt.com` + `site-match`, `pinokio` + `pinokio-list`, `unknown` + `no-match`, `before-tracking` + `before-tracking`; only once resolved (5.0.30) | Where this install first came from, fixed once per install. See [Install source](#install-source-5030) below |
 
 All are closed words, version numbers or whole numbers. No path, no name, no
 prompt. The Mac app also sends its own few events (`mac_*`, below) with the same
@@ -168,6 +169,38 @@ rules and the same off switch. The Settings toggle and
 `PHOSPHENE_ANALYTICS_DISABLED=1` switch both off. When the Mac app minted this
 Mac's random id before the Studio first ran, the Studio keeps that same id
 (`PHOSPHENE_ANALYTICS_INSTALL_ID`), so one install is one id.
+
+### Install source (5.0.30)
+
+Two words that say where an install first came from, resolved **once** per install,
+saved in `state/panel_settings.json` and never changed afterwards:
+
+- `install_source`: a short lower-case slug (`^[a-z0-9_.~-]{1,40}$`; anything else is
+  dropped, never sent). The website's first touch when the licence server matched this
+  install to a download from the site (`chatgpt.com`, `google.com`, `reddit.com`,
+  `direct`...: the site's own `utm_source`, else the referring site, else `direct`);
+  `pinokio` for a Studio install in Pinokio with no site download to match; `unknown`
+  for a Mac app install with no single matching download; `before-tracking` for an
+  install that existed before this version.
+- `install_via`: `site-match`, `pinokio-list`, `no-match` or `before-tracking`.
+
+How it is found, in order: the saved pair; the Mac app's hand-over
+(`PHOSPHENE_INSTALL_SOURCE`, `PHOSPHENE_INSTALL_VIA`, adopted only when nothing is saved
+yet; the app found it itself); an install that had already reported `app_installed` is
+`before-tracking`; otherwise a **new Pinokio install** makes one request to
+`https://phosphene.video/api/v1/install/match` whose body is only
+`{"kind": "pinokio", "app_version": "<version>"}`. The server compares the address the
+request came from (salted and hashed, rotated daily, kept 7 days) with the downloads from
+the website in the last 6 hours and answers with one match or none. Two or more
+candidates are no match. A real answer is final; when there was no answer at all
+(offline), the request is tried once more on the next launch. The Studio under the Mac
+app never makes this request.
+
+Besides riding on every event, the two words go on the Get Pro and pricing links the
+Studio opens (`is=<install_source>&iv=<install_via>`, next to the `utm_*` tags), and on a
+licence activation (`install_source`, `install_via` form fields), so a sale can be traced
+to the channel that brought the install, never to a person. With analytics off, none of
+this happens: no request, nothing resolved, nothing on links or activation.
 
 ### The Mac app's own events (`mac_*`)
 
@@ -205,6 +238,9 @@ reports, immediately before its first `app_boot`.
 | `version` | string | `"3.7.0"` | Which release a new install actually landed on |
 | `chip_family` | string | `"M4 Max"` | Same hardware *class* as on `app_boot` |
 | `ram_gb` | int | `64` | Unified memory, rounded to whole GB |
+
+Plus the super properties, `install_source` / `install_via` included: the first boot
+resolves them before sending this event (waiting at most about 6 seconds for the match).
 
 **Why it exists:** it is the denominator. Without it, "new installs over time"
 has to be reverse-engineered from first-sightings of unique install ids, which
@@ -264,7 +300,12 @@ including image and training jobs.
 | `lora_kinds` | string | `"style"` | Closed vocabulary: `none` / `style` / `character` / `mixed` |
 | `character_used` | bool | `true` | A cast character drove this render |
 | `audio_mode` | string | `"joint"` | `joint` / `none` (external audio replaces the generated track) / `a2v_dub` / `h3_native` |
-| `h3_sampler` | string | `"v13"` | 4.19.11 — H3 renders only: which sampler ran. **Closed vocabulary**: `best` (the full sampler), `fast`, `turbo`, `v13` (lightx2v v1.3 on Best at High), `flex` (Pika H3 Flex, its six-step re-noise sampler), `flex_turbo` (5.0: H3 Flex Turbo, Pro, four euler steps). Keeps the timing lanes apart, which `steps` alone cannot |
+| `h3_sampler` | string | `"v13"` | 4.19.11 — H3 renders only: which sampler ran. **Closed vocabulary**: `best` (the full sampler), `fast`, `turbo`, `v13` (lightx2v v1.3 on Best at High), `flex` (Pika H3 Flex, its six-step re-noise sampler), `flex_turbo` (5.0: H3 Flex Turbo, Pro). Keeps the timing lanes apart, which `steps` alone cannot |
+| `mem_mode` | string | `"lowmem"` | 5.0.56 — Hailuo H3 clips and MiniMax-H3-Image pictures: which memory path ran. **Closed vocabulary**: `resident` (the whole model in memory), `lowmem` (the streamed low-memory path), `lowmem_min` / `lowmem_lightref` (the picture runner's lighter settings; `lightref` copies edit references smaller), `unknown` (a low-memory plan was asked for and the runner left no record). Absent for other engines |
+| `clean_sound` | string | `"dropped_ram"` | 5.0.56 — H3 renders only: Clean up sound `on`, `off`, or `dropped_ram` (asked for, but this Mac's memory could not hold it, so the clip kept its own sound) |
+| `length_capped_from` | string | `"15s"` | 5.0.56 — H3 renders only, present only when the Studio shortened the clip because of this Mac's memory: the length that was asked for (`10s` or `15s`); `tier` is what rendered |
+| `image_tier` | string | `"draft"` | 5.0.56 — MiniMax-H3-Image only: `draft` (4 MP), `standard` (8 MP), `high` (16 MP), or `unknown` |
+| `ref_count` | int | `2` | 5.0.56 — MiniMax-H3-Image only: how many reference pictures the edit had (0-16, the count only) |
 | `first_render` | bool | `true` | Present once per install, on its first successful render ever — the activation funnel without a join |
 | `gpu_steps` | string | `"short"` | 4.17.5 — present only when the render ran in **short GPU steps** (one Metal op per command buffer), the path a macOS GPU-watchdog kill switches a setting to. Closed vocabulary: `short`. Absent = default steps. Answers "does the short path stop the watchdog loop" |
 | `watchdog_retry` | bool | `true` | 4.17.5 — present only when a GPU-watchdog kill was re-run inside the same job (once, on short steps). On `render_completed` it means the retry saved the render |
@@ -571,6 +612,25 @@ previous boot. At most four per boot; usually zero.
 A `true → false` transition means a pack that *was* installed is no longer
 detectable — a broken install, not a user choice. This is the whole reason
 this event exists: nothing else in the panel notices that today.
+
+### `model_download` (5.0.42)
+
+Fired once when a model pack download started from the Studio finishes or gives up. It says
+which kind of place served the files, so a fall-back to our own server (which costs us
+bandwidth) is visible. GitHub is asked first; Hugging Face and our server are backups.
+
+| Field | Type | Example |
+|---|---|---|
+| `pack` | string | `"q8_25"`: a key from required_files.json, `"code"`, `"engine"`, `"h3"` or `"uv"` (the Mac app's setup downloads), else `"other"` |
+| `outcome` | string | `"ok"` or `"failed"` |
+| `source` | string | `"github"`, `"hf"`, `"own"`, `"mixed"` or `"none"` |
+| `from_github` / `from_hf` / `from_own` | int | files served by each kind of place |
+
+The Mac app's first setup downloads before the Studio runs: its setup notes the same counts
+in a local file (`state/download_sources.jsonl`) and the Studio sends them once when it
+starts, then deletes the file. With analytics off nothing is sent.
+
+No address, no file name, no path, nothing about you.
 
 ### `star_prompt`
 
@@ -918,7 +978,7 @@ inside the Pro window. Closed fields only:
 |---|---|---|---|
 | `where` | string | `topbar`, `remote_hint`, `remote_panel`, `pro_modal`, `star_card`, `speedup_line`, `feature_gate`, `settings`, `whats_new`, `whats_new_speed`, `your_pro` | The surface. On `action: open` it is the door the window was opened from: `topbar` (the header Pro button), `remote_hint` (Remote Control's "Open Pro settings"), `your_pro` (Your Pro's "Your licence" button), `feature_gate` (a locked Pro feature, e.g. AI fill or a Pro engine answering 402). Inside the window it is `pro_modal`. `whats_new_speed` (What's new's "How it was measured" link) and `your_pro` were added in 5.0.24; before that the page sent `whats_new_speed` and the server dropped it |
 | `action` | string | `open`, `get`, `restore`, `key`, `close` | `open`: the Pro window opened (once per opening). `get`: a Get Pro / See Pro / plan link was pressed. 5.0.24, Pro window only: `restore` (the Restore Pro link), `key` (a licence key was submitted; the key itself never leaves the Mac, and nothing says whether it worked), `close` (the window closed by its X, Close, Escape or a click outside) |
-| `plan` | string | `monthly`, `yearly`, `founding` | 5.0.24. Only on `where: pro_modal`, `action: get`, and only from the window's plan buttons; the footer Get Pro link carries none |
+| `plan` | string | `monthly`, `yearly`, `founding` | 5.0.24. Only on `action: get`: on `where: pro_modal` from the window's plan buttons (the footer Get Pro link carries none), and (18 Nov 2026) on `where: whats_new` from What's new's two offer links (`monthly`, `founding`) |
 
 Nothing else; the usual super properties (edition, chip family, RAM) ride along. Same opt-out
 as every event. Every plan button opens the same page with the same tags as before
@@ -926,8 +986,24 @@ as every event. Every plan button opens the same page with the same tags as befo
 
 ### `pro_hint`
 
-(5.0.7.) The one quiet "Pro would have made this faster" line under a finished Free render.
-`action` is `shown`, `dismissed` or `opened` (once each per line); `lane` names the measured
-setting it was for (`h3_high_i2v_5s`, `h3_high_i2v_10s`, `ltx_high_t2v_5s`, `ltx_high_i2v_5s`).
-No times, no prompt, no file. The line itself appears only on a Mac and settings with a measured
-speed-up, at most once a day, and ends after three dismissals.
+(5.0.7; rebuilt around Fast draft in 5.0.20.) The one quiet "Pro would have made this clip in
+about 50 s instead of 98 s, with Fast draft" line under a finished Free LTX-2.5 clip.
+`action` is `shown`, `dismissed` or `opened` (once each per line). `lane` names the measured
+setting it was for (`ltx_fast_draft_5s`). `mac_class` is `streamed` (24 GB or less, the model
+streams from disk) or `resident` (32 GB and more): the Mac class whose measured ratio the number
+came from. No times, no prompt, no file. The line appears only where Fast draft would have served
+the clip and a measured ratio exists for this Mac class; never twice in one run of the app, at
+least two days apart, never on the render the star card asks about, and it ends after three
+dismissals. Read it as views (`shown`) against clicks (`opened`) and against Pro sales.
+
+
+### Image partial results and training causes
+
+An image completion may carry `image_partial: true`, `images_finished`,
+`images_requested`, and `image_last_line`. The last line contains only literal
+recognized diagnostic fragments from `image_diagnostics.LAST_LINE_PHRASES`;
+unknown prose is withheld. No prompts, file names or paths are sent.
+Image stall failure signatures place the same filtered last-line detail first.
+Training `train_error` additionally allows permission, network, timeout,
+invalid_data, shape_mismatch, metal_error, io_error, type_error, assertion,
+and process_exit. Training continues to send only closed category/stage words.

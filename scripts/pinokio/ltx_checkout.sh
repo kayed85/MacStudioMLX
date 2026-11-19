@@ -47,7 +47,7 @@
 # A tag is the only form of this reference that an upstream history rewrite
 # cannot take away.
 #
-# `v0.14.19+ltx25.7` on mrbizarro/ltx-2-mlx == v0.14.19 plus:
+# `v0.14.19+ltx25.9` on mrbizarro/ltx-2-mlx == v0.14.19 plus:
 #   - the LTX-2.5 port (versioned DiT config, duration head, Euler-ancestral
 #     sampler, the vendored Gemma 4 text tower, encoder keyed off the checkpoint)
 #   - unfused runtime LoRAs (c78cc71..3259338)
@@ -66,16 +66,26 @@
 #   - ltx25.7: IC-LoRA `source_video=` — Upscale ×2 from the clip's own latent
 #     (Stage 1 skipped, latent-upsampled, N-step control-aware refine) and the
 #     2.5 distilled schedules on the IC lane instead of the 2.3 constants.
+#   - ltx25.9: the Gemma attention mask is built in the text tower's own dtype
+#     (H36): a float16 tower stopped every render at once with "Mask type must
+#     promote to output type float16". bfloat16 towers compute the same bytes.
 #
-# The three packages declare `0.14.19+ltx25.7`, and `_LTX_EXPECTED_VERSION` in
+# The three packages declare `0.14.19+ltx25.9`, and `_LTX_EXPECTED_VERSION` in
 # mlx_warm_helper.py must equal that string. Move the two together or the
 # version-skew gate reports a permanent false alarm.
 #
 # To bump: retag on the fork, change LTX_PIN here, change the documented value
 # in install.js, bump the three pyprojects AND _LTX_EXPECTED_VERSION, run
 # `node scripts/check_ltx_pin.js`, smoke-test on dev, push.
-LTX_PIN="v0.14.19+ltx25.7"
+LTX_PIN="v0.14.19+ltx25.9"
+# GitHub first, our own server (same tags, same commits) as the backup (owner, 17 Nov 2026:
+# our server's bandwidth is for outages). Either source alone is enough. No credential prompt:
+# a hidden GitHub repo answers 401, which must move on, not wait for a password.
 LTX_FORK_URL="https://github.com/mrbizarro/ltx-2-mlx.git"
+LTX_FORK_URL_BACKUP="https://phosphene.video/git/ltx-2-mlx.git"
+export GIT_TERMINAL_PROMPT=0
+# A transfer slower than 1 KB/s for 20 s counts as failed, so a hanging GitHub hands over quickly.
+export GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=20
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT/ltx-2-mlx" || { echo "FATAL error: the video engine folder is missing ($ROOT/ltx-2-mlx) - its download did not finish. Click Install again (or Update again) with a working internet connection."; exit 1; }
@@ -106,9 +116,15 @@ git remote set-url fork "$LTX_FORK_URL"
 # And the fetch is FATAL. Without the pin fetched there is nothing correct to
 # check out; carrying on would either fail obscurely or, worse, succeed against
 # a stale local tag. An Update that stops here has changed nothing.
-if ! git fetch fork "+refs/tags/$LTX_PIN:refs/tags/$LTX_PIN"; then
-  echo "FATAL error: could not download the video engine version Phosphene needs ($LTX_PIN from $LTX_FORK_URL). Nothing was changed - check your internet connection (a VPN, proxy or blocked GitHub is the usual cause), then click Install again, or Update again."
-  exit 1
+# The first source's own output is defanged (an "error:" line there must not stop Pinokio while the
+# second source can still answer); the second one is the real verdict.
+git fetch fork "+refs/tags/$LTX_PIN:refs/tags/$LTX_PIN" 2>&1 | sed -u -e 's/[Ee]rror:/problem -/g' -e 's/[Ee]rrno /errno-/g'
+if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+  echo "WARN: $LTX_FORK_URL did not answer; trying $LTX_FORK_URL_BACKUP"
+  if ! git fetch "$LTX_FORK_URL_BACKUP" "+refs/tags/$LTX_PIN:refs/tags/$LTX_PIN"; then
+    echo "FATAL error: could not download the video engine version Phosphene needs ($LTX_PIN from $LTX_FORK_URL or $LTX_FORK_URL_BACKUP). Nothing was changed - check your internet connection (a VPN or proxy is the usual cause), then click Install again, or Update again."
+    exit 1
+  fi
 fi
 
 # --- 3.8.1 HOTFIX: discard local edits BEFORE the pin move -------------------

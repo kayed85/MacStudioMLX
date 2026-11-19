@@ -36,10 +36,14 @@
 # keeps its H3 step optional: scripts/post_update.sh runs this file through
 # `defang`, which turns the FATAL line into a WARN and never ends the Update.
 set -u
-H3_PIN_SHA="953ec466586d6b35823e475ce64e43b43fa7f39a"
-H3_PIN_REF="phosphene/v5.0-image7"
+H3_PIN_SHA="26010372e81af2224da97e6ea27e6be3bcb6d957"
+H3_PIN_REF="phosphene/v5.0-lowram1"
 H3_LOCAL_BRANCH="phosphene-pinned"
 H3_URL="https://github.com/mrbizarro/minimax-h3-mlx.git"
+# GitHub first (owner, 17 Nov 2026), our own server (same commits) as the backup, then the
+# checkout's origin. No credential prompt: a hidden GitHub repo must move on at once.
+H3_MIRROR_URL="https://phosphene.video/git/minimax-h3-mlx.git"
+export GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=20
 H3_DIR="${1:-}"
 if [ -z "$H3_DIR" ] || [ ! -d "$H3_DIR/.git" ]; then
   echo "FATAL error: the Hailuo H3 engine is not on this Mac ('${H3_DIR:-<none>}' is missing) - its download did not finish. Check your internet connection (a VPN, proxy or blocked GitHub is the usual cause), then click Install again."
@@ -51,7 +55,10 @@ have_pin() { git cat-file -e "${H3_PIN_SHA}^{commit}" 2>/dev/null; }
 # The ref first (one round trip, and it keeps the pin reachable locally); the
 # bare commit as a fallback for a remote where the ref was renamed but the
 # commit is still reachable from something else.
-git fetch --force origin "$H3_PIN_REF" >/dev/null 2>&1 || true
+have_pin || git fetch --force "$H3_URL" "$H3_PIN_REF" >/dev/null 2>&1 || true
+have_pin || git fetch --force "$H3_MIRROR_URL" "$H3_PIN_REF" >/dev/null 2>&1 || true
+have_pin || git fetch --force "$H3_MIRROR_URL" "$H3_PIN_SHA" >/dev/null 2>&1 || true
+have_pin || git fetch --force origin "$H3_PIN_REF" >/dev/null 2>&1 || true
 have_pin || git fetch --force origin "$H3_PIN_SHA" >/dev/null 2>&1 || true
 if ! have_pin; then
   echo "FATAL error: could not download the Hailuo H3 engine version Phosphene needs (${H3_PIN_SHA:0:7} from $(git remote get-url origin)). The H3 folder was left as it was - check your internet connection, then click Install again."

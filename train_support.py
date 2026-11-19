@@ -271,8 +271,8 @@ def _train_weak_advice(verdict: str, preset: str = "", is_style: bool = False) -
         f"{head} This was already the High preset, so the next levers are the "
         "dataset rather than the recipe: more images (20-40), sharper and more "
         "varied in pose and lighting, and captions that name the trigger plainly. "
-        "Please attach the training log to https://github.com/mrbizarro/phosphene/issues/62 "
-        "— a weak High run is the case that issue is still open on."
+        "Please send the training log with Report a bug (the bug icon at the top) "
+        "— a weak High run is the case we are still collecting."
     )
 
 
@@ -605,6 +605,8 @@ def train_error_for_exit(rc: int, trainer_error: dict | None, tail=None) -> str:
         return trainer_error["error_class"]
     if rc == -9:
         return "oom"
+    if rc in (-6, 134):
+        return "metal_error"
     exc = train_exception_from_tail(tail)
     if exc:
         return train_class_from_exception_name(*exc)
@@ -684,7 +686,8 @@ def train_class_from_exception_name(name: str, message: str = "") -> str:
         return "import_error"
     if name == "FileNotFoundError":
         return "missing_file"
-    return "other"
+    from lora_lab.failure import classify_detail
+    return classify_detail(name, message)
 
 
 def train_failure_message(rc: int, trainer_error: dict | None, tail=None) -> str:

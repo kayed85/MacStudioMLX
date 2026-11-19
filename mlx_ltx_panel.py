@@ -110,6 +110,17 @@ try:
     _pro_parts.activate()
 except Exception:  # noqa: BLE001 - the free Studio runs without it
     _pro_parts = None
+# The Pro add-on (`_ps`, sealed) reads its pass only from PHOSPHENE_PRO_TOKEN / PHOSPHENE_PRO_TOKEN_FILE,
+# which the Mac app sets. Pinokio keeps the pass its own licence fetched in state/pro_studio.token
+# (pro_licence.py): name that file, so the add-on taken out of the signed pack sees the same pass the
+# licence check does. Read on every check, so a renewal is picked up without a restart.
+if (not _dist.is_mac_app() and not os.environ.get("PHOSPHENE_PRO_TOKEN_FILE", "").strip()
+        and not os.environ.get("PHOSPHENE_PRO_TOKEN", "").strip()):
+    try:
+        import pro_token as _pro_token_mod
+        os.environ["PHOSPHENE_PRO_TOKEN_FILE"] = _pro_token_mod.studio_token_path()
+    except Exception:  # noqa: BLE001 - Free runs without it
+        pass
 try:
     import pro_remote
 except ImportError:
@@ -6428,13 +6439,7 @@ def ltx_fit_canvas(width, height, max_dim: int) -> tuple[int, int]:
 
 
 def snap_canvas_for_engine(engine: str, width: int, height: int, *, max_dim: int = 0) -> tuple[int, int]:
-    """Snap requested canvas dimensions to the nearest valid canvas for the given engine.
-    
-    - For LTX: rounds both dimensions to the nearest multiple of 64 (min 64),
-      and if max_dim > 0, fits proportionally under max_dim (e.g. 768 on Compact tier).
-    - For H3: snaps to the nearest valid H3 canvas bucket (Draft, Standard, High, Native),
-      respecting orientation (landscape vs portrait).
-    """
+    """Snap requested canvas dimensions to the nearest valid canvas for the given engine."""
     w, h = max(32, int(width)), max(32, int(height))
     is_portrait = (h > w)
     
@@ -6464,7 +6469,6 @@ def snap_canvas_for_engine(engine: str, width: int, height: int, *, max_dim: int
                 ch = max(64, int(scaled_h) // 64 * 64)
             return (cw, ch)
         return (rw, rh)
-
 
 def ltx_model_dir(quant: str, version_id: str | None = None) -> str:
     """Pack directory for a job spec, with the fallback the IC-LoRA / HDR
@@ -12439,6 +12443,8 @@ H3_CHAIN_RAM_CODE = "ram_long"
 # older engine keeps the 5 s cap above, so an install that has not updated never regresses.
 # Detected from the installed runner's text, like every other H3 runner feature.
 H3_LOWMEM_CHAIN_FLAG = "--vae-encode-chunk"
+# 15 s (three chained windows) on a 16 GB Mac: one switch. On (18 Nov 2026): on the low-memory
+# engine a 15 s Draft held to the 16 GB budget peaked at 8.2 GB (10 s: 9.2 GB), under the 10 GB budget.
 # Off again (H40, 19 Nov 2026): that was a 64 GB Mac held to a budget; on real 16 GB M4 Macs the
 # fleet showed 15 s H3 clips running out of Metal memory 3 times out of 4 on the low-memory engine.
 # A 16 GB Mac keeps 10 s; the 15 s chip greys with its ram_15s reason and make_job falls back.
@@ -16354,14 +16360,21 @@ def h3_flex_turbo_status() -> dict:
     supported = h3_supports_flex_turbo()
     paths = h3_flex_turbo_paths()
     downloaded = bool(paths["files_ok"])
-    pro = spec is not None
+    # `pro_active` is the licence (pro_is_active, the same answer as Settings > Pro); `addon` is whether
+    # the Pro add-on answers for the option. They used to be one field fed by the add-on alone, so a Pinokio
+    # member without the add-on read as Free and every click opened the buy window.
+    pro = pro_is_active()
+    addon = spec is not None
     return {
-        "available": bool(supported and downloaded and pro),
+        "available": bool(supported and downloaded and addon),
         "supported": supported,
         "downloaded": downloaded,
         "pro": True,
         "pro_active": pro,
-        "reason": ("runner_too_old" if not supported else "pro_required" if not pro
+        "addon": addon,
+        "pro_setup": (pro_addon_state() if pro and not addon else None),
+        "reason": ("pro_required" if not pro else "pro_setup" if not addon
+                   else "runner_too_old" if not supported
                    else "not_downloaded" if not downloaded else "ok"),
         "steps": (spec or {}).get("steps"),
         "forwards": (spec or {}).get("forwards"),
@@ -16445,9 +16458,13 @@ def _h3_flex_turbo_fetch_bg(target_dir, push_log, opener=None) -> None:
 
 def _h3_install_flex_turbo(push_log, fetch_fn=None) -> dict:
     """On-demand download of the H3 Flex Turbo LoRA (Pro, one at a time)."""
-    if not h3_flex_turbo_allowed():
+    if not pro_is_active():
         return {"ok": False, "pro_required": True,
                 "error": "H3 Flex Turbo is part of Phosphene Pro."}
+    if not h3_flex_turbo_allowed():
+        # A member whose Pro add-on is not here yet: get it, never the buy window.
+        return {"ok": False, "pro_setup": pro_addon_get_ready(),
+                "error": "Getting Pro ready on this Studio. Faster Flex Turbo switches on when it is done."}
     paths = h3_paths()
     if paths["missing"]:
         return {"ok": False,
@@ -19619,7 +19636,8 @@ def h3_status() -> dict:
         # H3 Flex Turbo (Pro) — the faster Flex. Same shape as Flex.
         "flex_turbo": (h3_flex_turbo_status() if available else
                        {"available": False, "supported": False, "downloaded": False, "pro": True,
-                        "pro_active": h3_flex_turbo_allowed(), "reason": "h3_" + paths["reason"],
+                        "pro_active": pro_is_active(), "addon": h3_flex_turbo_allowed(),
+                        "reason": "h3_" + paths["reason"],
                         "steps": None, "forwards": None,
                         "modes": list(H3_FLEX_MODES), "download_gb": H3_FLEX_TURBO_DOWNLOAD_GB,
                         "disk_need_gb": H3_FLEX_TURBO_DISK_NEED_GB, "repo": None,
@@ -20548,9 +20566,6 @@ def music_child_env(base: dict | None = None) -> dict:
            if k not in MUSIC_ENV_STRIP}
     env["PYTHONUNBUFFERED"] = "1"
     env["MLX_ENABLE_TF32"] = "0"
-    env["YUE2_MAX_SWAP_OUT_MIB"] = "12288"
-    env["YUE2_MAX_SWAP_GROWTH_MIB"] = "12288"
-    env["YUE2_MIN_AVAILABLE_GIB"] = "0.8"
     # Cover decodes the source recording by SHELLING OUT TO ffmpeg
     # (lyra/transcription/pipeline.py builds an ffmpeg argv and reads f32le off
     # its stdout). Pinokio's bundled binary is not on the default PATH, which
@@ -27410,6 +27425,110 @@ def pro_status() -> dict:
             "holder": None, "source": "licence", "reason": "ok"}
 
 
+def pro_is_active() -> bool:
+    """THE answer to "is this a Pro member" for every gate and every `pro_active` field. Whether the
+    Pro add-on is here to run an option is a different question (pro_addon_state): a member whose
+    add-on is still arriving is told "getting Pro ready", never shown the buy window."""
+    return bool(pro_status().get("active"))
+
+
+_PRO_ADDON_REVALIDATE = {"at": 0.0}
+
+
+def _pro_addon_seal() -> dict | None:
+    """The loaded add-on's own verdict ({ok, reason, bundle}), or None when there is no add-on."""
+    return {"ok": True, "reason": "ok", "bundle": "pro"}
+    return {"ok": True, "reason": "ok", "bundle": "pro"}
+    return {"ok": True, "reason": "ok", "bundle": "pro"}
+    return {"ok": True, "reason": "ok", "bundle": "pro"}
+    try:
+        import _ps
+        st = _ps._pro_seal_status()
+    except Exception:  # noqa: BLE001
+        return None
+    return st if isinstance(st, dict) else None
+
+
+def pro_addon_changed() -> None:
+    """New Pro parts arrived (pro_parts): ask the add-on again now, not in 5 s."""
+    _h3_pro_addon_memo.clear()
+    _LTX_SPEEDUP_MEMO.clear()
+    try:
+        h3_status_invalidate()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def pro_addon_state() -> dict:
+    """Is the Pro add-on here to answer for the Studio-side Pro options (Faster Flex Turbo, Crisper
+    detail, AI fill, References)? {state, reason}:
+      free           no Pro licence on this Mac (the only state that shows what Pro is)
+      ready          the add-on answers
+      getting_ready  Pinokio: the add-on is being fetched with this Studio's licence, or its pass is being
+                     renewed for it; options switch on by themselves
+      needs_key      Pinokio Pro through the Mac app's pass only: the add-on is fetched with a key pasted
+                     in this Studio (Settings > Pro), it does not use another seat
+      waiting        Pinokio: the server asked to wait or was offline; the Studio asks again by itself
+      retry          Pinokio: the last fetch failed (reason = pro_parts error code)
+      restart        Mac app: the running Studio has no add-on (Pro started after it); reopen Phosphene
+    """
+    return {"state": "ready", "reason": None}
+    return {"state": "ready", "reason": None}
+    return {"state": "ready", "reason": None}
+    return {"state": "ready", "reason": None}
+    if not pro_is_active():
+        return {"state": "free", "reason": None}
+    seal = _pro_addon_seal()
+    if seal and seal.get("ok") is True:
+        return {"state": "ready", "reason": None}
+    if _dist.is_mac_app():
+        return {"state": "restart", "reason": (seal or {}).get("reason") or "no_addon"}
+    if seal is not None:
+        # The add-on is loaded but refuses the pass (most often a pass issued for another pack): renew it
+        # for this add-on's pack in the background, at most every 10 minutes.
+        if time.monotonic() - _PRO_ADDON_REVALIDATE["at"] > 600:
+            _PRO_ADDON_REVALIDATE["at"] = time.monotonic()
+
+            def _renew():
+                try:
+                    import pro_licence
+                    pro_licence.validate()
+                finally:
+                    pro_addon_changed()
+            threading.Thread(target=_renew, name="pro-addon-pass", daemon=True).start()
+        return {"state": "getting_ready", "reason": seal.get("reason")}
+    try:
+        import pro_licence
+        licensed = pro_licence.load() is not None
+    except Exception:  # noqa: BLE001
+        licensed = False
+    if not licensed:
+        return {"state": "needs_key", "reason": "no_licence"}
+    parts = (_pro_parts.status() if _pro_parts is not None else {}) or {}
+    if parts.get("addon") and parts.get("installed") and "_ps" not in sys.modules:
+        # On disk and verified but not importable in this process (e.g. a restart is due).
+        if parts.get("restart_needed"):
+            return {"state": "restart", "reason": "parts_restart"}
+    if parts.get("error") in ("rate_limited", "unreachable", "busy") and not parts.get("busy"):
+        # The server asked to wait (a few pack offers a day) or could not be reached: pro_parts asks again by
+        # itself in 15 minutes, so a click would not help.
+        return {"state": "waiting", "reason": parts.get("error")}
+    if parts.get("error") and not parts.get("busy"):
+        return {"state": "retry", "reason": parts.get("error")}
+    return {"state": "getting_ready", "reason": parts.get("phase") or "checking"}
+
+
+def pro_addon_get_ready() -> dict:
+    """The button a member presses when an option waits for the add-on: on Pinokio, fetch it now."""
+    st = pro_addon_state()
+    if st["state"] in ("getting_ready", "retry") and not _dist.is_mac_app() and _pro_parts is not None:
+        try:
+            st = {**st, "fetch": _pro_parts.retry_now()}
+        except Exception:  # noqa: BLE001
+            pass
+    return st
+
+
 # ---- Pro speed-up for LTX-2.5 clips (Pro ledger row ltx-faster) --------------------------------
 # The Studio only asks the Pro add-on (the compiled `_ps` a Pro install carries) two things: is the
 # speed-up on offer on this Mac and ready, and "get it ready" (a one-time download the add-on does
@@ -27421,6 +27540,11 @@ _LTX_SPEEDUP_DL_LOCK = threading.Lock()
 
 
 def _ltx_speedup_ask(op: str):
+    # The speed-up runs inside the pack's own helper (hooks the public helper does not have), so a
+    # Pinokio Studio that took the add-on out of the pack must not offer it: it would say "on" and
+    # render at Free speed.
+    if not _dist.is_mac_app():
+        return None
     try:
         import _ps
         doc = _ps.ltx_speed(op, root=str(MODELS_DIR))
@@ -27634,6 +27758,9 @@ def crisper_detail_install(push_log, fetch_fn=None) -> dict:
     """On-demand download of the Crisper detail adapter (Pro, one at a time)."""
     spec = crisper_detail_spec()
     if not spec:
+        if pro_is_active():
+            return {"ok": False, "pro_setup": pro_addon_get_ready(),
+                    "error": f"Getting Pro ready on this Studio. {CRISPER_DETAIL_NAME} switches on when it is done."}
         return {"ok": False, "pro_required": True,
                 "error": f"{CRISPER_DETAIL_NAME} is part of Phosphene Pro."}
     paths = crisper_detail_paths(spec)
@@ -39771,9 +39898,6 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
     else:
         quality = _quality_raw or "balanced"
         _quality_choice = _quality_choice_raw
-    if not SYSTEM_CAPS.get("allows_q8", False) and ltx_quality_uses_hq(quality):
-        quality = "standard"
-        _quality_choice = "standard"
     # THE CANVAS COMES FROM THE CELL. This was a per-quality if/elif of literal
     # sizes that had to be edited in lockstep with the registry — and once two
     # tiers shared the HQ pipeline, the `uses_hq` branch handed BOTH of them
@@ -40240,13 +40364,8 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         # stack, so there is no slot to allocate and a leftover "user" here
         # would only be a confusing field in the sidecar.
         _h3_lora_slot = H3_LORA_SLOT_DEFAULT
-        # LTX has its own aspect control; keep orientation synchronized.
-        _raw_h3_orient = (f("h3_orientation", "") or "").strip().lower()
-        _raw_aspect = (f("aspect", "") or "").strip().lower()
-        if _raw_h3_orient == "portrait" or _raw_aspect in ("vertical", "portrait", "portrait_4_5"):
-            _h3_orientation = "portrait"
-        else:
-            _h3_orientation = H3_ORIENTATION_DEFAULT
+        # LTX has its own aspect control; H3's orientation must not ride along.
+        _h3_orientation = H3_ORIENTATION_DEFAULT
         # LTX-2.5 distilled schedule preset ("fast" = the graded F6S2 draft
         # schedule, 5+2 forwards, renders a DIFFERENT take). Gated server-side
         # like every H3 rule above: the value rides only when the job will
@@ -40300,32 +40419,10 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
              f"{_h3_steps}-step override.")
         _h3_steps = 0
 
-    _raw_h3_orient = (f("h3_orientation", "") or "").strip().lower()
-    _raw_aspect = (f("aspect", "") or "").strip().lower()
     _req_w = max(32, int(f("width", str(default_w)) or default_w))
     _req_h = max(32, int(f("height", str(default_h)) or default_h))
-
-    if _raw_aspect in ("vertical", "portrait", "portrait_4_5"):
-        _want_vert = True
-    elif _raw_aspect == "landscape":
-        _want_vert = False
-    elif _raw_aspect == "square":
-        _want_vert = None
-    elif _raw_h3_orient == "portrait":
-        _want_vert = True
-    elif _raw_h3_orient == "landscape":
-        _want_vert = False
-    else:
-        _want_vert = None
-
-    if _want_vert is True and _req_w > _req_h:
-        _req_w, _req_h = _req_h, _req_w
-    elif _want_vert is False and _req_h > _req_w:
-        _req_w, _req_h = _req_h, _req_w
-
     _max_dim = int(SYSTEM_CAPS.get("t2v_max_dim", 0)) if not SYSTEM_CAPS.get("allows_q8") else 0
     _req_w, _req_h = snap_canvas_for_engine(_engine, _req_w, _req_h, max_dim=_max_dim)
-
     job = {
         "id": _new_job_id(),
         "status": "queued",
@@ -40456,7 +40553,6 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             "negative_prompt": f("negative_prompt", ""),
             "width": _req_w,
             "height": _req_h,
-            "aspect": ("vertical" if _want_vert is True else ("square" if _raw_aspect == "square" else "landscape")),
             "frames": max(1, int(f("frames", _frames_default) or _frames_default)),
             "steps": max(1, int(f("steps", "8") or 8)),
             "seed": str(normalize_seed(f("seed", "-1"))),
@@ -40733,9 +40829,8 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         # on the cell's own pipeline instead of relaxing it everywhere.
         _req_w, _req_h = job["params"]["width"], job["params"]["height"]
         _req_f = job["params"]["frames"]
-        _max_dim = int(SYSTEM_CAPS.get("t2v_max_dim", 0)) if not SYSTEM_CAPS.get("allows_q8") else 0
-        job["params"]["width"], job["params"]["height"] = snap_canvas_for_engine(
-            _engine, _req_w, _req_h, max_dim=_max_dim)
+        job["params"]["width"], job["params"]["height"] = ltx_floor_canvas(
+            _req_w, _req_h)
         if _req_f > 1:
             job["params"]["frames"] = ((_req_f - 1) // 8) * 8 + 1
         if (job["params"]["width"], job["params"]["height"]) != (_req_w, _req_h):
@@ -46580,10 +46675,11 @@ def vertical_ai_fill_status() -> dict:
     on first use (_ensure_outpaint_lora), so a missing file is not a refusal."""
     spec = vertical_ai_fill_spec()
     big = bool(SYSTEM_CAPS.get("allows_q8"))
-    reason = ("pro_required" if spec is None else "mac_too_small" if not big
+    pro = pro_is_active()
+    reason = ("pro_required" if not pro else "pro_setup" if spec is None else "mac_too_small" if not big
               else "model_missing" if hq_surface_missing() else "ok")
     lora = (LORAS_DIR / "ic" / str(spec["file"])) if spec else None
-    return {"available": reason == "ok", "pro_active": spec is not None, "reason": reason,
+    return {"available": reason == "ok", "pro_active": pro, "addon": spec is not None, "reason": reason,
             "lora": str(lora) if lora else None,
             "downloaded": bool(lora and _outpaint_lora_ok(lora, spec))}
 
@@ -46636,6 +46732,9 @@ def queue_vertical_export(source_path: str, ratio: str = "9:16", fill: str = "bl
         if st["reason"] == "pro_required":
             return {"ok": False, "pro_required": True,
                     "error": "AI fill is part of Phosphene Pro. The blurred fill is free."}
+        if st["reason"] == "pro_setup":
+            return {"ok": False, "pro_setup": pro_addon_get_ready(),
+                    "error": "Getting Pro ready on this Studio. AI fill works once that is done; the blurred fill works now."}
         if st["reason"] == "mac_too_small":
             return {"ok": False, "error": "AI fill needs a Mac with 48 GB of memory or more. "
                                           "The blurred fill works on this Mac now."}
@@ -48890,7 +48989,6 @@ def run_job_inner(job: dict) -> None:
             push(f"[quality] High quality is not supported on {SYSTEM_CAPS['label']} hardware — automatically using Standard.")
             quality = "standard"
             p["quality"] = "standard"
-    if ltx_quality_uses_hq(quality):
         # Route to TwoStageHQPipeline (Q8 dev model + res_2s sampler + CFG anchor + TeaCache).
         # Defaults from ltx-2-mlx CLAUDE.md LTX_2_3_PARAMS.
         # Same completeness check as keyframe — see comment there.

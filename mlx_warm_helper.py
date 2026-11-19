@@ -1563,6 +1563,8 @@ def _install_split_prompt_encode_patch() -> None:
     are refused below 48 GB anyway. Off the streamed path nothing changes."""
     global _SPLIT_ENCODE_PATCH_INSTALLED
     _install_lowram_decode()
+    import ltx_watchdog
+    ltx_watchdog.install()
     if _SPLIT_ENCODE_PATCH_INSTALLED:
         return
     import ltx_pipelines_mlx.utils.blocks as _blocks
@@ -1746,6 +1748,7 @@ def _install_a2v_frame_rate_patch() -> None:
     presence as evidence the upstream bug is still live.
     """
     global _A2V_FRAME_RATE_PATCH_INSTALLED
+    _install_image_crf_fallback()  # H18: every pipe builder runs this; a stalled one-frame ffmpeg must not kill i2v
     if _A2V_FRAME_RATE_PATCH_INSTALLED:
         return
     try:
@@ -1795,6 +1798,35 @@ def _install_a2v_frame_rate_patch() -> None:
         # will take effect on its later import (uses _orchestration name)
         pass
     _A2V_FRAME_RATE_PATCH_INSTALLED = True
+
+
+def _install_image_crf_fallback() -> None:
+    """H18: the engine round-trips the start picture through a one-frame
+    ffmpeg H.264 encode (``media_io.preprocess``) with a 60 s timeout. When
+    that ffmpeg stalls, the whole render died with
+    "Command '[ffmpeg, -y, -f, rawvideo, -pix_fmt, rgb24, -s, ...]' timed
+    out after 60 seconds". The round-trip only softens the picture to match
+    training, so on any ffmpeg failure use the picture as it is and go on.
+    Idempotent."""
+    try:
+        import ltx_pipelines_mlx.utils.media_io as _mio
+    except Exception:  # noqa: BLE001 — engine missing: nothing to patch
+        return
+    _orig = getattr(_mio, "preprocess", None)
+    if _orig is None or getattr(_orig, "_phos_crf_fallback", False):
+        return
+    import subprocess as _sp
+
+    def _preprocess(image, crf=getattr(_mio, "DEFAULT_IMAGE_CRF", 33)):
+        try:
+            return _orig(image, crf)
+        except (_sp.TimeoutExpired, _sp.CalledProcessError, RuntimeError, OSError) as exc:
+            print(f"[warm-helper] start picture ffmpeg round-trip failed, "
+                  f"using the picture as is: {str(exc)[:160]}", flush=True)
+            return image
+
+    _preprocess._phos_crf_fallback = True
+    _mio.preprocess = _preprocess
 
 
 def _attach_streamed_loras(pipe, model, active) -> None:
@@ -3586,7 +3618,7 @@ def configure_acceleration(mode: str) -> str:
 # of letting it surface as an un-triageable TypeError mid-render.
 #
 # 2026-08-12: this is a FORK BUILD, not an upstream tag. The vendored checkout
-# is mrbizarro/ltx-2-mlx at the immutable tag `v0.14.19+ltx25.7` — v0.14.19 plus
+# is mrbizarro/ltx-2-mlx at the immutable tag `v0.14.19+ltx25.9` — v0.14.19 plus
 # the LTX-2.5 port (keyframe pos-emb, Gemma 4 tower, ancestral sampler). The
 # release segment stays 0.14.19 because that is genuinely what it branches from;
 # the `+ltx25.N` local segment is what makes the two distinguishable.
@@ -3611,7 +3643,7 @@ def configure_acceleration(mode: str) -> str:
 # — a skew gate blind to the one skew that mattered. Bumping the pin here
 # without bumping the packages (or the reverse) puts it back into permanent
 # SKEW warnings, so the two move together or not at all.
-_LTX_EXPECTED_VERSION = "0.14.19+ltx25.7"
+_LTX_EXPECTED_VERSION = "0.14.19+ltx25.9"
 
 
 def _detect_ltx_version() -> dict:
@@ -5331,18 +5363,18 @@ for line in sys.__stdin__:
 
     if action == "generate_outpaint":
         # "Make it vertical", Pro layer: the bands above and below a landscape
-        # clip are painted by the In/Outpainting IC-LoRA instead of a blur.
-        # Lightricks' LTX-2.5 outpaint workflow, step for step (the geometry,
-        # the green reference and the blends are vertical_outpaint.py):
-        #   reference: source centred on the canvas, bands flat #66FF00
-        #   stage 1:   half res, 8 distilled steps, IC-LoRA 1.0 (unfused: Q4
+        # clip are painted by an IC-LoRA instead of a blur (geometry, reference
+        # and blends: vertical_outpaint.py):
+        #   reference: source centred on the canvas, bands one flat colour
+        #   stage 1:   half res on the distilled table, the IC-LoRA unfused (Q4
         #              cannot hold a fused adapter, see generate_restore)
         #   blend:     stage-1 frames pyramid-blended with the real source
-        #   stage 2:   the blend upsampled x2 and refined 2 steps from sigma
-        #              0.725 with the reference re-applied (source_video mode
-        #              of ICLoraPipeline; its 2-step tail IS 0.725/0.4219/0)
+        #   stage 2:   the blend upsampled x2 and refined with the reference
+        #              re-applied (source_video mode of ICLoraPipeline)
         #   final:     scaled to the output canvas, blended with the source
         #              again, the middle pasted back untouched, source audio.
+        # The recipe (adapter, strength, step counts, band colour) arrives in the
+        # job from the Pro add-on; a job without it is refused, never guessed.
         # Windows (long takes) are rendered one after another in this one
         # job and joined; the pipeline is built once and reused.
         job_id = msg.get("id", "?")
@@ -5373,7 +5405,15 @@ for line in sys.__stdin__:
             fps = float(p.get("frame_rate") or 24.0)
             total = int(p["frames"])
             lora = _resolve_lora_path(str(p["lora_path"]))
-            strength = float(p.get("lora_strength") or vo.OUTPAINT_LORA_STRENGTH)
+            try:
+                strength = float(p["lora_strength"])
+                stage1_steps, refine_steps = int(p["stage1_steps"]), int(p["refine_steps"])
+                fill = str(p["fill"])
+            except (KeyError, TypeError, ValueError):
+                raise RuntimeError("the AI fill job carries no recipe (it comes from Phosphene Pro)")
+            seam, keep = int(p.get("seam_inset", vo.SEAM_INSET)), int(p.get("keep_inset", vo.KEEP_INSET))
+            half_seam = int(p.get("half_seam_inset", max(1, seam // 2)))
+            half_keep = int(p.get("half_keep_inset", max(1, keep // 2)))
             _preflight_distilled_loras([(lora, strength)], model_dir)
             release_pipelines("outpaint render incoming")
             try:
@@ -5391,13 +5431,13 @@ for line in sys.__stdin__:
             emit({"event": "log", "line":
                   f"step:generate_outpaint {src_w}x{src_h} -> canvas {cw}x{ch} -> "
                   f"{out_w}x{out_h} {total}f in {len(wins)} window(s), "
-                  f"stage1={vo.STAGE1_STEPS} refine={vo.REFINE_STEPS} lora x{strength}"})
+                  f"lora x{strength}"})
             parts = []
             for wi, (start, count) in enumerate(wins):
                 n = vo.render_frames(count)
                 _apply_vae_streaming_decision(n)
                 ref = str(work / f"w{wi}_ref.mp4")
-                r = subprocess.run(vo.reference_args(src, ref, src_w, src_h, cw, ch, n,
+                r = subprocess.run(vo.reference_args(src, ref, src_w, src_h, cw, ch, n, fill=fill,
                                                      start_frame=start, fps=fps, ffmpeg=ffmpeg),
                                    capture_output=True, text=True, errors="replace")
                 if r.returncode != 0:
@@ -5408,23 +5448,24 @@ for line in sys.__stdin__:
                 pipe.generate_and_save(
                     prompt=prompt, output_path=s1, video_conditioning=[(ref, 1.0)],
                     height=ch, width=cw, num_frames=n, frame_rate=fps, seed=seed + wi,
-                    stage1_steps=_thin_cap(model_dir, "stage1_steps", vo.STAGE1_STEPS),
+                    stage1_steps=_thin_cap(model_dir, "stage1_steps", stage1_steps),
                     skip_stage_2=True)
                 _mlx_phase_mem(f"outpaint w{wi} stage 1")
                 s1b = str(work / f"w{wi}_s1_blend.mp4")
                 vo.composite_video(s1, ref, s1b, cw // 2, ch // 2, src_w, src_h, n,
-                                   fps=fps, lossless=True, seam_inset=3, keep_inset=20,
+                                   fps=fps, lossless=True, seam_inset=half_seam, keep_inset=half_keep,
                                    ffmpeg=ffmpeg, source_is_canvas=True)
                 emit({"event": "log", "line": f"outpaint window {wi + 1}/{len(wins)}: stage 2"})
                 s2 = str(work / f"w{wi}_s2.mp4")
                 pipe.generate_and_save(
                     prompt=prompt, output_path=s2, video_conditioning=[(ref, 1.0)],
                     height=ch, width=cw, num_frames=n, frame_rate=fps, seed=seed + wi,
-                    source_video=s1b, refine_steps=vo.REFINE_STEPS)
+                    source_video=s1b, refine_steps=refine_steps)
                 _mlx_phase_mem(f"outpaint w{wi} stage 2")
                 part = str(work / f"w{wi}_final.mp4")
                 vo.composite_video(s2, src, part, out_w, out_h, src_w, src_h, count,
-                                   start_frame=start, fps=fps, lossless=True, ffmpeg=ffmpeg)
+                                   start_frame=start, fps=fps, lossless=True, ffmpeg=ffmpeg,
+                                   seam_inset=seam, keep_inset=keep)
                 parts.append(part)
             vo.join_parts(parts, src, out_path, fps=fps, crf=p.get("crf", 18),
                           audio=bool(p.get("keep_audio", True)), ffmpeg=ffmpeg,
@@ -5496,6 +5537,26 @@ for line in sys.__stdin__:
                 "- Rhyme when it lands naturally; never force a rhyme with a weak line.",
                 f"- Match this musical style: {style}." if style else "- Fit a contemporary song.",
                 f"- Write in {language}." if language else "- Write in the language of the concept.",
+                # Issue #88: stock Gemma turned dark or angry concepts into
+                # greeting-card verse (conflict dropped, hope added, hard
+                # details swapped for storms and shadows). The block below is
+                # adapted from the reporter's tested prompt. It cannot lift the
+                # model's own guard-rails, but it stops the prompt from inviting
+                # the softening.
+                "",
+                "TREAT THE SUBJECT HONESTLY:",
+                "- Do not sanitise, soften or sentimentalise the subject. Keep the",
+                "  uncomfortable details from the concept when they matter.",
+                "- Do not swap hard things (poverty, addiction, grief, abuse, failure)",
+                "  for generic metaphors about darkness, storms or shadows.",
+                "- People may be flawed, angry, selfish or contradictory. Not everyone",
+                "  has to be noble or inspiring.",
+                "- Do not add hope the concept does not have. If there is hope, keep it",
+                "  small and earned. If it is unresolved, leave it unresolved.",
+                "- If the material is angry, let it sound angry. A blunt line can hit",
+                "  harder than a polished one.",
+                "- Lines the user already wrote that are strong, specific and singable",
+                "  stay as they are. Improve only what needs it.",
             ]
             if section:
                 system = "\n".join([
@@ -5620,6 +5681,9 @@ for line in sys.__stdin__:
                 "concrete images over abstractions, a chorus that is the hook, rhyme",
                 "only where it lands. Write in the language the client used unless they",
                 "asked for another.",
+                # Issue #88, same rule as write_lyrics' honesty block.
+                "Treat the subject honestly: keep its hard or uncomfortable details,",
+                "do not soften it or add hope it does not have.",
             ])
             messages = [{"role": "system", "content": system},
                         {"role": "user", "content": description}]

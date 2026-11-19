@@ -2562,11 +2562,6 @@ function _pickerCropTargetCanvas(key) {
   } else {
     w = parseInt((document.getElementById('width') || {}).value || '0', 10);
     h = parseInt((document.getElementById('height') || {}).value || '0', 10);
-    const o = (document.getElementById('h3_orientation') || {}).value;
-    const a = (document.getElementById('aspect') || {}).value;
-    const isPort = (o === 'portrait' || a === 'vertical' || a === 'portrait');
-    if (isPort && w > h) { const tmp = w; w = h; h = tmp; }
-    else if (!isPort && (o === 'landscape' || a === 'landscape') && h > w) { const tmp = w; w = h; h = tmp; }
   }
   if (!(w > 0) || !(h > 0)) return null;
   return { w, h };

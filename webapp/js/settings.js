@@ -314,7 +314,7 @@ function updateModelsCard(s) {
       : '<svg class="ph" aria-hidden="true"><use href="#ph-download-simple"/></svg>';
     title.textContent = T('settings.hailuo_h3_can_run_on', 'Hailuo H3 can run on this Mac');
     sub.textContent = built
-      ? T('settings.its_compact_engine_just_needs', 'Its compact engine just needs building — no download.')
+      ? T('settings.one_last_setup_step', 'One last setup step: about 5 minutes, nothing to download.')
       : T('settings.needs_its_compact_q8_engine', 'Needs its compact (Q8) engine, built during install.');
     setActions(`<button onclick="openH3InstallCard()">${T('settings.set_up_h3', 'Set up H3 →')}</button>`);
     return;
@@ -328,16 +328,11 @@ function updateModelsCard(s) {
     // two-way venv_broken guess blamed the checkout whenever the venv was
     // simply never built.
     const _miss = (h3s.missing || []).map(String);
-    sub.innerHTML = h3s.venv_broken
-      ? T('settings.h3_s_python_environment_points', 'H3’s Python environment points at a moved or deleted interpreter. ')
-        + 'Rebuilding takes ~2 minutes and <b>re-downloads nothing</b>.'
-      : _miss.some(m => m.includes('venv'))
-      ? T('settings.h3_s_python_environment_was', 'H3’s Python environment was never built. Building it takes ~2 ')
-        + 'minutes and <b>re-downloads nothing</b>.'
+    sub.innerHTML = (h3s.venv_broken || _miss.some(m => m.includes('venv')))
+      ? T('settings.h3_quick_repair_two_minutes', 'A quick repair: about 2 minutes, nothing to download.')
       : _miss.some(m => m.includes('runner') || m.includes('scripts/'))
-      ? T('settings.h3_s_code_checkout_is', 'H3’s code checkout is missing or incomplete. Restoring it takes ~1 ')
-        + 'minute and <b>re-downloads nothing</b>.'
-      : T('settings.missing', 'Missing: ') + escapeHtml(_miss[0] || 'see the repair card') + '.';
+      ? T('settings.h3_quick_repair_one_minute', 'A quick repair: about a minute, nothing to download.')
+      : T('settings.h3_quick_repair', 'A quick repair. Nothing is downloaded again.');
     setActions(`<button onclick="openH3InstallCard()">${T('settings.how_to_repair_h3', 'How to repair H3')}</button>`);
     return;
   }
@@ -554,8 +549,8 @@ function openTierModal() {
     // look "broken" with empty content.
     document.getElementById('tierModalBlurb').innerHTML =
       '<div style="color: var(--danger, #f85149)">' + distText(
-        T('settings.could_not_load_tier_info', 'Could not load tier info — the panel server may have stopped responding. Check the Pinokio terminal and restart the panel if needed.'),
-        T('settings.could_not_load_tier_info_2', 'Could not load tier info — the studio server may have stopped responding. Check the logs with Help \u2192 Open Logs Folder and use Studio \u2192 Restart Engine if needed.')) + '</div>';
+        T('settings.could_not_check_this_mac_pinokio', 'Could not check what this Mac can run. Restart Phosphene in Pinokio, then open this again.'),
+        T('settings.could_not_check_this_mac_app', 'Could not check what this Mac can run. Use Studio \u2192 Restart Engine, then open this again.')) + '</div>';
     document.getElementById('tierCapsList').innerHTML = '';
     console.error('tier modal fetch failed:', err);
   });
@@ -634,6 +629,25 @@ function bugComposeTitle(title, what) {
   const first = line.length > 72 ? line.slice(0, 71).replace(/\s+\S*$/, '') + '…' : line;
   return '[bug] ' + first;
 }
+// 5.0.40: where a report goes follows ONE server switch (report_links.py,
+// BOOT.report_target): 'github', 'gitlab' or 'mail'. GitHub has been
+// unreachable since 16 Nov 2026, so the bug button must not open a 404.
+function bugTarget() { return (BOOT && BOOT.report_target) || 'github'; }
+function bugSubmitLabel() {
+  const t = bugTarget();
+  if (t === 'mail') return T('settings.email_the_report', 'Email the report');
+  if (t === 'gitlab') return T('settings.open_the_report_page', 'Open the report page');
+  return T('settings.open_github_issue', 'Open GitHub issue');
+}
+function bugTargetCopy() {
+  const hint = document.getElementById('bugModalHint');
+  const x = document.getElementById('bugNoGithubLink');
+  const mail = bugTarget() === 'mail';
+  if (hint && mail) {
+    hint.textContent = T('settings.opens_an_email_to_the', 'Opens an email to the Phosphene team. Environment info, version, and the recent log (errors first) are filled in for you.');
+  }
+  if (x) x.hidden = mail;
+}
 async function openBugModal() {
   const modal = document.getElementById('bugModal');
   modal.style.display = 'flex';
@@ -651,7 +665,8 @@ async function openBugModal() {
   bodyEl.value = 'Loading environment…';
   statusEl.textContent = '';
   submitBtn.disabled = false;
-  submitBtn.textContent = T('settings.open_github_issue', 'Open GitHub issue');
+  submitBtn.textContent = bugSubmitLabel();
+  bugTargetCopy();
   // A finished report rewires this button to "Done — close"; without this
   // the NEXT report's "Open GitHub issue" just closed the dialog.
   submitBtn.onclick = submitBugReport;
@@ -752,7 +767,7 @@ async function submitBugReport() {
       bugWhatShow(true);
       statusEl.textContent = '';
       submitBtn.disabled = false;
-      submitBtn.textContent = T('settings.open_github_issue', 'Open GitHub issue');
+      submitBtn.textContent = bugSubmitLabel();
       document.getElementById('bugWhat')?.focus();
       return;
     }
@@ -766,14 +781,18 @@ async function submitBugReport() {
       // context, which a click handler counts as.
       try { await navigator.clipboard.writeText(data.zipPath); } catch (e) { /* ignore */ }
       statusEl.innerHTML =
-        'Crash report bundled. Drag this file into the GitHub issue:<br>' +
+        (bugTarget() === 'mail'
+          ? T('settings.crash_report_bundled_attach', 'Crash report bundled. Attach this file to the email:')
+          : 'Crash report bundled. Drag this file into the GitHub issue:') + '<br>' +
         '<code style="font-size:11px">' + data.zipPath + '</code><br>' +
         '<span style="color:var(--success,#3fb950)">(path copied to clipboard)</span>';
       submitBtn.textContent = T('settings.done_close', 'Done — close');
       submitBtn.disabled = false;
       submitBtn.onclick = closeBugModal;
     } else {
-      statusEl.textContent = T('settings.github_issue_opened_in_a', 'GitHub issue opened in a new tab.');
+      statusEl.textContent = bugTarget() === 'mail'
+        ? T('settings.your_report_opened_in_your', 'Your report opened in your mail app.')
+        : T('settings.github_issue_opened_in_a', 'GitHub issue opened in a new tab.');
       submitBtn.textContent = T('settings.done_close', 'Done — close');
       submitBtn.disabled = false;
       submitBtn.onclick = closeBugModal;
@@ -896,7 +915,11 @@ function renderModelsDriveRows() {
 async function openSettingsModal() {
   const modal = document.getElementById('settingsModal');
   modal.style.display = 'flex';
+  _settingsCloseArmed = false;
   renderModelsDriveRows();
+  refreshOutputsFolder();
+  renderSettingsPro();
+  renderMacStatsRow();
   document.getElementById('settingsStatus').textContent = '';
   document.getElementById('settingsStatus').className = 'settings-status';
   refreshStorageSection();
@@ -929,7 +952,7 @@ async function openSettingsModal() {
       <div class="preset-text">
         <div class="preset-label">${escapeHtml(p.label)}</div>
         <div class="preset-blurb">${escapeHtml(p.blurb)}</div>
-        <div class="preset-spec">pix_fmt=${p.pix_fmt} · crf=${p.crf}</div>
+        <div class="preset-spec">${escapeHtml(settingsFormatWords(p.pix_fmt, p.crf))}</div>
       </div>`;
     card.addEventListener('click', () => selectPreset(key));
     grid.appendChild(card);
@@ -943,8 +966,8 @@ async function openSettingsModal() {
     <input type="radio" name="settingsPreset" value="custom" ${cur.output_preset === 'custom' ? 'checked' : ''}>
     <div class="preset-text">
       <div class="preset-label">${T('settings.custom', 'Custom')}</div>
-      <div class="preset-blurb">${T('settings.set_pix_fmt_and_crf', 'Set pix_fmt and CRF manually. For unusual workflows: 10-bit HDR, format-specific delivery, or non-standard CRF for video production work.')}</div>
-      <div class="preset-spec">pix_fmt=${cur.output_pix_fmt} · crf=${cur.output_crf}</div>
+      <div class="preset-blurb">${T('settings.choose_colour_detail_and_quality', 'Choose colour detail and quality yourself: 10-bit for HDR, a specific delivery format, or a different quality number.')}</div>
+      <div class="preset-spec">${escapeHtml(settingsFormatWords(cur.output_pix_fmt, cur.output_crf))}</div>
     </div>`;
   custom.addEventListener('click', () => selectPreset('custom'));
   grid.appendChild(custom);
@@ -995,17 +1018,33 @@ async function openSettingsModal() {
       const fits = h3s.bf16_fits !== false;
       fullOpt.disabled = !fits;
       fullOpt.textContent = fits
-        ? T('settings.full_bf16_42_gib_peak', 'Full (bf16) — 42 GiB peak')
-        : T('settings.full_bf16_needs', 'Full (bf16) — needs ') + Math.round(h3s.min_ram_gb || 60) + T('settings.gb_of_memory_not_this', ' GB of memory, not this Mac');
+        ? T('settings.full_quality_needs_about_42', 'Full quality: needs about 42 GB of memory')
+        : T('settings.full_quality_needs', 'Full quality: needs ') + Math.round(h3s.min_ram_gb || 60) + T('settings.gb_of_memory_more_than', ' GB of memory, more than this Mac has');
       if (h3s.bf16_fits === false && ditSelect.value === 'bf16') ditSelect.value = 'auto';
     }
   }
 
-  // Token rows. We never receive the actual key from the server (the
-  // /settings GET returns has_X booleans only), so we display either
-  // "set" with an empty placeholder input, or "—" with the placeholder.
-  // Inputs start empty on every modal open; user pastes when they want
-  // to change.
+  renderGroupBaseline();
+  renderTokenRows(cur);
+
+  // Spicy mode — render current state. _spicyArmed is the mid-confirm
+  // state (clicked once, waiting for the second click). It lives only
+  // on the JS side; only ON/OFF gets persisted.
+  _spicyArmed = false;
+  renderSpicyState(!!cur.spicy_mode);
+
+  // Anonymous usage analytics — badge, hint (shows the actual install id
+  // so "you are a random ID" is verifiable, not a claim), and the two
+  // maintainer key rows. Same has_X-boolean treatment as the other
+  // secrets: the keys never come back from the server.
+  renderAnalyticsState(cur);
+}
+
+// Token rows. We never receive the actual key from the server (the
+// /settings GET returns has_X booleans only), so we display either
+// "set" with an empty placeholder input, or "—" with the placeholder.
+// Inputs start empty; user pastes when they want to change.
+function renderTokenRows(cur) {
   setTokenStatus('civitaiKey', cur.has_civitai_key);
   setTokenStatus('hfToken', cur.has_hf_token);
   // Placeholders reflect the saved state so an empty input doesn't read
@@ -1023,18 +1062,129 @@ async function openSettingsModal() {
     : 'hf_…';
   document.getElementById('civitaiKeyClear').style.display = cur.has_civitai_key ? '' : 'none';
   document.getElementById('hfTokenClear').style.display = cur.has_hf_token ? '' : 'none';
+}
 
-  // Spicy mode — render current state. _spicyArmed is the mid-confirm
-  // state (clicked once, waiting for the second click). It lives only
-  // on the JS side; only ON/OFF gets persisted.
-  _spicyArmed = false;
-  renderSpicyState(!!cur.spicy_mode);
+// ---- "While rendering": the one group that waits for Save -------------------
+// Everything else in Settings saves on change. These three controls (live
+// preview, H3 model, output format) are deferred because an output-format save
+// restarts the render helper. Save/Undo light up only when something differs
+// from what is saved; Done/Close/Esc with unsaved changes asks once.
+const PIX_FMT_WORDS = {
+  yuv420p: T('settings.standard_colour', 'Standard colour'), yuv422p: T('settings.more_colour', 'More colour'), yuv444p: T('settings.full_colour', 'Full colour'),
+  yuv420p10le: T('settings.10_bit_colour', '10-bit colour'), yuv422p10le: T('settings.10_bit_more_colour', '10-bit, more colour'), yuv444p10le: T('settings.10_bit_full_colour', '10-bit, full colour'),
+};
+function settingsFormatWords(pixFmt, crf) {
+  const c = Number(crf);
+  const q = c === 0 ? 'lossless' : ('quality ' + c);
+  return (PIX_FMT_WORDS[pixFmt] || pixFmt) + ' \u00b7 ' + q;
+}
+let _settingsCloseArmed = false;
+function renderGroupValues() {
+  const checked = document.querySelector('#settingsPresets input[type="radio"]:checked');
+  const preset = checked ? checked.value : 'standard';
+  const v = {
+    preset,
+    live: document.getElementById('settingsLivePreview')?.value || 'on',
+    dit: document.getElementById('settingsH3Dit')?.value || 'auto',
+  };
+  if (preset === 'custom') {
+    v.pix = document.getElementById('settingsPixFmt').value;
+    v.crf = String(document.getElementById('settingsCrfNum').value);
+  }
+  return JSON.stringify(v);
+}
+let _settingsGroupBaseline = '';
+function renderGroupBaseline() {
+  _settingsGroupBaseline = renderGroupValues();
+  const grp = document.getElementById('settingsRenderGroup');
+  if (grp && !grp.dataset.wired) {
+    grp.dataset.wired = '1';
+    grp.addEventListener('change', renderGroupDirty);
+  }
+  renderGroupDirty();
+}
+function renderGroupIsDirty() {
+  return !!_settingsGroupBaseline && renderGroupValues() !== _settingsGroupBaseline;
+}
+function renderGroupDirty() {
+  const dirty = renderGroupIsDirty();
+  const save = document.getElementById('settingsApplyBtn');
+  const undo = document.getElementById('settingsUndoBtn');
+  if (save) save.disabled = !dirty;
+  if (undo) undo.disabled = !dirty;
+  const st = document.getElementById('settingsRenderStatus');
+  const notSaved = T('settings.not_saved_yet', 'Not saved yet.');
+  if (st && dirty) { st.textContent = notSaved; st.className = 'settings-status'; }
+  else if (st && st.textContent === notSaved) { st.textContent = ''; }
+  if (!dirty) _settingsCloseArmed = false;
+}
+// Put the group back to what is saved (the old footer Cancel only closed the
+// dialog and left these edits in place for the next open).
+function undoRenderSettings() {
+  const cur = (_settingsCache && _settingsCache.settings) || {};
+  selectPreset(cur.output_preset || 'standard');
+  document.getElementById('settingsPixFmt').value = cur.output_pix_fmt;
+  document.getElementById('settingsCrfRange').value = cur.output_crf;
+  document.getElementById('settingsCrfNum').value = cur.output_crf;
+  const lp = document.getElementById('settingsLivePreview');
+  if (lp) lp.value = (cur.live_preview === 'off') ? 'off' : 'on';
+  const dit = document.getElementById('settingsH3Dit');
+  if (dit) { const v = String(cur.h3_dit || 'auto').toLowerCase(); dit.value = ['auto', 'bf16', 'q8'].includes(v) ? v : 'auto'; }
+  renderGroupDirty();
+  const st = document.getElementById('settingsRenderStatus');
+  if (st) { st.textContent = T('settings.back_to_your_saved_choices', 'Back to your saved choices.'); st.className = 'settings-status'; }
+}
 
-  // Anonymous usage analytics — badge, hint (shows the actual install id
-  // so "you are a random ID" is verifiable, not a claim), and the two
-  // maintainer key rows. Same has_X-boolean treatment as the other
-  // secrets: the keys never come back from the server.
-  renderAnalyticsState(cur);
+// ---- Pro, inside Settings -----------------------------------------------------
+// Pinokio: the Studio's own Pro dialog takes the licence key (openProModal).
+// Mac app: the licence lives in the app; the button opens the app's Pro sheet
+// (native cap "pro", app 5.0.23+), else says where it is in the menu bar.
+async function renderSettingsPro() {
+  const badge = document.getElementById('settingsProBadge');
+  const text = document.getElementById('settingsProText');
+  const btn = document.getElementById('settingsProBtn');
+  if (!badge || !text || !btn) return;
+  let st = null;
+  try { const r = await fetch('/pro/status', { cache: 'no-store' }); if (r.ok) st = await r.json(); } catch (_) { st = null; }
+  const on = !!(st && st.active);
+  badge.textContent = on ? 'ON' : 'FREE';
+  badge.className = 'spicy-state' + (on ? ' on' : '');
+  const caps = Array.isArray(window.__phosNativeCaps) ? window.__phosNativeCaps : [];
+  if (isMacApp()) {
+    text.textContent = on ? T('settings.pro_is_on_for_this', 'Pro is on for this Mac.') : T('settings.free_pro_adds_faster_renders', 'Free. Pro adds faster renders and more.');
+    btn.textContent = on ? T('settings.manage_licence', 'Manage licence\u2026') : T('settings.get_pro_or_enter_a', 'Get Pro or enter a licence key\u2026');
+    btn.hidden = !caps.includes('pro');
+    if (!caps.includes('pro')) text.textContent += ' Licence: Phosphene > Phosphene Pro\u2026 in the menu bar.';
+  } else {
+    text.textContent = on ? T('settings.pro_is_on_for_this', 'Pro is on for this Mac.') : T('settings.free_paste_the_licence_key', 'Free. Paste the licence key from your purchase email to turn Pro on.');
+    btn.textContent = on ? T('settings.manage_licence_2', 'Manage licence') : T('settings.enter_licence_key', 'Enter licence key');
+    btn.hidden = false;
+  }
+}
+function settingsProOpen(btn) {
+  if (isMacApp()) {
+    try { window.webkit.messageHandlers.phosphene.postMessage({ type: 'openPro' }); return; }
+    catch (_) { phosToast('Choose Phosphene > Phosphene Pro\u2026 in the menu bar.', 'info'); return; }
+  }
+  openProModal(btn);
+}
+
+// ---- Mac app: one analytics switch ---------------------------------------------
+// The app's own switch (Phosphene > Settings…, Privacy) governs the app and this
+// Studio, so the Studio's section is hidden there (data-hide-mac-app) and this
+// row points to it. "modelStorage" is the 5.0.22 message that opens the app's
+// Settings window; the row only shows when the app can do that.
+function renderMacStatsRow() {
+  const row = document.getElementById('settingsMacStatsSection');
+  if (!row) return;
+  row.hidden = !isMacApp();
+  const caps = Array.isArray(window.__phosNativeCaps) ? window.__phosNativeCaps : [];
+  const btn = document.getElementById('settingsMacStatsBtn');
+  if (btn) btn.hidden = !caps.includes('modelStorage');
+}
+function openMacAppSettings() {
+  try { window.webkit.messageHandlers.phosphene.postMessage({ type: 'modelStorage' }); }
+  catch (_) { phosToast('Choose Phosphene > Settings\u2026 in the menu bar.', 'info'); }
 }
 
 // ---- Appearance ------------------------------------------------------------
@@ -1090,6 +1240,7 @@ function renderNotifyState(cur) {
       : perm === 'unsupported' ? T('settings.a_chime_in_this_tab_3', 'A chime in this tab.')
       : T('settings.a_chime_in_this_tab_4', 'A chime in this tab. Allow browser alerts to be told when the tab is in the background')
           + (cur.push_available ? T('settings.or_even_when_it_is', ', or even when it is closed.') : '.');
+    hint.textContent = T('settings.saves_right_away', 'Saves right away. ') + hint.textContent;
   }
   // PUSH, for a closed tab. Offered when the install can sign pushes and the
   // browser can hold a subscription; the button says which state it is in.
@@ -1119,7 +1270,7 @@ async function toggleNotify() {
   } catch (e) {}
   if (target && typeof playDoneChime === 'function') playDoneChime(false);
   renderNotifyState((_settingsCache && _settingsCache.settings) || {});
-  if (typeof phosToast === 'function') phosToast(target ? T('settings.completion_alerts_on_saved', 'Completion alerts on — saved.') : T('settings.completion_alerts_off_saved', 'Completion alerts off — saved.'), { duration: 2500 });
+  if (typeof phosToast === 'function') phosToast(target ? T('settings.render_finished_alerts_on_saved', 'Render-finished alerts on. Saved.') : T('settings.render_finished_alerts_off_saved', 'Render-finished alerts off. Saved.'), { duration: 2500 });
 }
 // ---- Push: the alert that reaches a closed tab ---------------------------
 // The browser keeps a subscription for this origin; the panel signs pushes
@@ -1194,7 +1345,7 @@ function renderAnalyticsState(cur) {
       hint.textContent = T('settings.off_nothing_is_sent_and', 'Off — nothing is sent, and nothing is written to ')
         + T('settings.the_local_usage_log_either', 'the local usage log either.');
     } else if (!cur.has_analytics_key) {
-      hint.innerHTML = T('settings.on_but_no_project_key', 'On, but no project key is configured — this panel is ')
+      hint.innerHTML = T('settings.on_but_no_project_key_2', 'On, but no project key is configured — Phosphene is ')
         + 'sending <b>nothing</b> over the network. Events are only written to '
         + T('settings.the_local_log', 'the local log.');
     } else {
@@ -1230,8 +1381,8 @@ async function toggleAnalytics() {
     renderAnalyticsState(_settingsCache.settings || {});
     if (status) {
       status.textContent = target
-        ? T('settings.anonymous_usage_analytics_on', 'Anonymous usage analytics ON')
-        : T('settings.anonymous_usage_analytics_off_nothing', 'Anonymous usage analytics OFF · nothing will be sent or logged');
+        ? T('settings.usage_stats_on_saved', 'Usage stats on. Saved.')
+        : T('settings.usage_stats_off_saved_nothing', 'Usage stats off. Saved: nothing will be sent or logged.');
       status.className = 'settings-status ok';
     }
   } catch (e) {
@@ -1398,10 +1549,10 @@ function toggleTokenVisibility(inputId, btn) {
   if (!inp) return;
   if (inp.type === 'password') {
     inp.type = 'text';
-    btn.textContent = 'hide';
+    btn.textContent = T('settings.hide', 'Hide');
   } else {
     inp.type = 'password';
-    btn.textContent = 'show';
+    btn.textContent = T('settings.show', 'Show');
   }
 }
 
@@ -1485,18 +1636,40 @@ async function clearToken(which) {
       body: new URLSearchParams(fd),
     });
     const data = await r.json();
+    const hint = document.getElementById(which === 'civitai' ? 'civitaiTestResult' : 'hfTestResult');
     if (!r.ok || data.error) {
-      alert(T('settings.could_not_clear', 'Could not clear: ') + (data.error || `HTTP ${r.status}`));
+      if (hint) hint.textContent = T('settings.could_not_remove_the_key', 'Could not remove the key: ') + (data.error || `HTTP ${r.status}`);
       return;
     }
-    // Refresh the modal so the status flips back to "not set".
-    openSettingsModal();
+    // Flip only the token rows back to "not set": reopening the whole dialog
+    // would also throw away unsaved "While rendering" changes.
+    if (data.settings) {
+      _settingsCache = { ...(_settingsCache || {}), settings: data.settings };
+      renderTokenRows(data.settings);
+    } else {
+      openSettingsModal();
+    }
   } catch (e) {
-    alert(T('settings.network_error', 'Network error: ') + (e.message || e));
+    const hint = document.getElementById(which === 'civitai' ? 'civitaiTestResult' : 'hfTestResult');
+    if (hint) hint.textContent = T('settings.could_not_reach_phosphene', 'Could not reach Phosphene: ') + (e.message || e);
   }
 }
 
+// Done, Close, a click outside and Esc all land here. Unsaved "While
+// rendering" changes are never dropped silently: the first try says so and
+// the second closes without them (the next open reads the saved values).
 function closeSettingsModal() {
+  if (renderGroupIsDirty() && !_settingsCloseArmed) {
+    _settingsCloseArmed = true;
+    const st = document.getElementById('settingsStatus');
+    if (st) {
+      st.textContent = T('settings.your_rendering_changes_are_not', 'Your rendering changes are not saved. Click Save, or Done again to close without them.');
+      st.className = 'settings-status err';
+    }
+    document.getElementById('settingsRenderGroup')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    return;
+  }
+  _settingsCloseArmed = false;
   document.getElementById('settingsModal').style.display = 'none';
 }
 
@@ -1508,13 +1681,11 @@ function selectPreset(key) {
   });
   document.getElementById('settingsCustomSection').style.display =
     key === 'custom' ? 'block' : 'none';
-  // Clear status so it doesn't claim "saved" after a fresh selection.
-  document.getElementById('settingsStatus').textContent = '';
-  document.getElementById('settingsStatus').className = 'settings-status';
+  renderGroupDirty();
 }
 
 async function applySettings() {
-  const status = document.getElementById('settingsStatus');
+  const status = document.getElementById('settingsRenderStatus');
   const btn = document.getElementById('settingsApplyBtn');
   status.textContent = T('settings.saving', 'Saving…');
   status.className = 'settings-status';
@@ -1531,14 +1702,8 @@ async function applySettings() {
   fd.set('live_preview', document.getElementById('settingsLivePreview')?.value || 'on');
   const _dit = document.getElementById('settingsH3Dit')?.value;
   if (_dit) fd.set('h3_dit', _dit);
-  // Tokens — only send a key when the input has a value. Empty input
-  // means "leave as-is" (clearing is explicit via the Clear button).
-  // This protects against accidentally wiping a saved key by clicking
-  // Apply on an unchanged form.
-  const civInput = document.getElementById('civitaiKeyInput').value.trim();
-  if (civInput) fd.set('civitai_api_key', civInput);
-  const hfInput = document.getElementById('hfTokenInput').value.trim();
-  if (hfInput)  fd.set('hf_token', hfInput);
+  // Keys are not part of this Save: each key row saves with its own
+  // "Save & test" button (the hint says so).
   try {
     // Convert FormData → URLSearchParams so the body is sent as
     // x-www-form-urlencoded — the panel's parse_qs only understands
@@ -1557,13 +1722,15 @@ async function applySettings() {
       btn.disabled = false;
       return;
     }
-    status.textContent = data.helper_restarted
-      ? T('settings.saved_helper_restarted_takes_effect', 'Saved. Helper restarted — takes effect on the next render.')
-      : T('settings.saved', 'Saved.');
-    status.className = 'settings-status ok';
-    btn.disabled = false;
     // Refresh cache so a re-open shows the new values without a stale flash.
     _settingsCache = { ...(_settingsCache || {}), settings: data.settings };
+    renderGroupBaseline();
+    status.textContent = data.helper_restarted
+      ? T('settings.saved_next_render_uses_it', 'Saved. Your next render uses it.')
+      : T('settings.saved', 'Saved.');
+    status.className = 'settings-status ok';
+    const top = document.getElementById('settingsStatus');
+    if (top && top.className.includes('err')) { top.textContent = ''; top.className = 'settings-status'; }
   } catch (e) {
     status.textContent = T('settings.network_error', 'Network error: ') + (e.message || e);
     status.className = 'settings-status err';
@@ -1697,9 +1864,72 @@ async function proStatusRefresh() {
   if (btn) { btn.hidden = isMacApp(); btn.textContent = active ? T('settings.licence', 'Licence') : 'Pro'; }
   if (mark) { mark.hidden = !active; mark.textContent = active && st.label ? st.label : 'Pro'; }
   globalThis.proSpeedStatus = (st && st.ltx_speedup) || null;
+  globalThis.proCrisperStatus = (st && st.crisper_detail) || null;
   proMarksApply();
   proSpeedRender();
+  crisperRender();
+  proDraftRender();
   return st;
+}
+
+// ---- Crisper detail, in the composer tools (Pro ledger row ltx-crisper-detail) -------------------------------
+// Free: the pill with a "Pro" tag; a click opens the Pro door and the box stays off. Pro: a real switch, off by
+// default and remembered; ticking it starts the one-time download when the adapter is not here yet. Whether a
+// render takes it is decided by the Studio and the Pro add-on (the lanes it was measured on), never here.
+const CRISPER_KEY = 'phos_crisper_detail';
+function crisperRender() {
+  const pill = document.getElementById('crisperPill');
+  const box = document.getElementById('crisperToggle');
+  if (!pill || !box) return;
+  const st = globalThis.proCrisperStatus || {};
+  if (!proIsOn()) {                             // Free: what Pro adds, and the door
+    pill.hidden = false; box.checked = false;
+    pill.title = proSpotText('ltx-crisper-detail', false);
+    return;
+  }
+  if (!st.offered) { pill.hidden = true; box.checked = false; return; }   // Pro without the add-on: nothing to switch
+  pill.hidden = false;
+  let choice = 'off';
+  try { choice = localStorage.getItem(CRISPER_KEY) || 'off'; } catch (e) { /* keep off */ }
+  box.checked = choice === 'on';
+  const q = (document.getElementById('quality') || {}).value || '';
+  // A failed or refused download is said plainly (the install reply or the download state), never hidden
+  // behind "first use downloads": switching the pill off and on asks again.
+  const err = st.error || globalThis._crisperInstallError || '';
+  pill.title = !box.checked ? T('settings.crisper_off_title', 'Crisper detail: off. Switch it on for noticeably finer detail on LTX-2.5 clips (Quick, Balanced and Standard) in about the same render time; the take changes.')
+    : q === 'high' ? T('settings.crisper_high_title', 'Crisper detail is on for Quick, Balanced and Standard; High renders as usual.')
+    : (err && !st.downloaded && !st.downloading) ? T('settings.crisper_failed_title', 'Crisper detail: the download did not finish ({error}). Switch it off and on to try again; until then this clip renders as usual.', {error: err})
+    : st.downloading ? (st.total_mb ? T('settings.crisper_downloading_title', 'Crisper detail: getting ready (one-time download, {mb} of {total} MB).', {mb: st.mb, total: st.total_mb})
+      : T('settings.crisper_downloading_short', 'Crisper detail: getting ready (one-time download).'))
+    : !st.downloaded ? T('settings.crisper_first_use_title', 'Crisper detail: on. The first use downloads {gb} GB once.', {gb: st.gb || 1.2})
+    : T('settings.crisper_on_title', 'Crisper detail: on. This clip renders in about the usual time with finer detail.');
+  if (box.checked && !st.downloaded && !st.downloading && !err && !globalThis._crisperAsked) {
+    globalThis._crisperAsked = true;
+    crisperPrepare();
+  }
+  // Until the one-time download is done, look again every 20 s so the tooltip moves on by itself.
+  if (box.checked && !st.downloaded && !err && !globalThis._crisperTimer) {
+    globalThis._crisperTimer = setTimeout(() => { globalThis._crisperTimer = null; proStatusRefresh(); }, 20000);
+  }
+}
+function crisperChanged() {
+  const box = document.getElementById('crisperToggle');
+  if (!box) return;
+  if (!proIsOn()) { box.checked = false; openProModal(document.getElementById('crisperPill')); return; }
+  try { localStorage.setItem(CRISPER_KEY, box.checked ? 'on' : 'off'); } catch (e) { /* not remembered */ }
+  globalThis._crisperAsked = false;
+  globalThis._crisperInstallError = '';
+  crisperRender();
+}
+async function crisperPrepare() {
+  // Read the reply: a refusal (low disk, Pro required) arrives here and nowhere else.
+  try {
+    const r = await fetch('/pro/crisper-detail/install', { method: 'POST', cache: 'no-store' });
+    let body = {};
+    try { body = await r.json(); } catch (_) { body = {}; }
+    if (!r.ok && !body.already_running) globalThis._crisperInstallError = String(body.error || ('HTTP ' + r.status));
+  } catch (_) { globalThis._crisperInstallError = T('settings.crisper_no_reply', 'no reply from the Studio'); }
+  setTimeout(proStatusRefresh, 1500);
 }
 
 // ---- Pro speed-up, beside Quality (Pro ledger row ltx-faster) -----------------------------------------------
@@ -1743,6 +1973,49 @@ function proSpeedRender() {
     globalThis._proSpeedTimer = setTimeout(() => { globalThis._proSpeedTimer = null; proStatusRefresh(); }, 20000);
   }
 }
+// ---- Pro Fast draft, on the Speed row's Fast draft pill ---------------------------------------------
+// Free: the pill runs the engine's fast schedule, and a quiet line says what Pro adds, with the measured
+// times (server facts: ltx_speedup.fast_draft). Pro: the same pill asks for the Pro draft
+// (#pro_fast_draft=on); the server decides whether this render can use it and falls back to the fast
+// schedule when not. Words only here; no number is computed in the page.
+function proDraftFmt(sec, unitOf) {
+  // one unit per pair (pro_speedup.fmt_secs): seconds unless the larger time is 10 minutes or more
+  const n = Number(sec) || 0, big = Math.max(n, Number(unitOf) || 0);
+  return big < 600 ? Math.round(n) + ' s' : Math.max(1, Math.round(n / 60)) + ' min';
+}
+const PRO_DRAFT_CLASS_LABEL = {resident: T('settings.on_a_64_gb_mac', 'on a 64 GB Mac'), streamed: T('settings.with_a_16_gb_memory_limit', 'with a 16 GB memory limit')};
+function proDraftMeasuredText(fd) {
+  const rows = (fd && fd.measured) || {};
+  const parts = ['resident', 'streamed'].filter(k => rows[k]).map(k =>
+    T('settings.free_to_draft_where', '{free} to {draft} {where}', {free: proDraftFmt(rows[k].free_s), draft: proDraftFmt(rows[k].draft_s, rows[k].free_s), where: PRO_DRAFT_CLASS_LABEL[k] || ''}).trim());
+  return parts.length ? T('settings.measured_on_a_5_second_clip', ' Measured on a 5-second clip: {parts}.', {parts: parts.join('; ')}) : '';
+}
+function proDraftRender() {
+  const note = document.getElementById('proDraftNote');
+  const field = document.getElementById('pro_fast_draft');
+  const st = globalThis.proSpeedStatus || {};
+  const fd = st.fast_draft || {};
+  const armed = typeof schedPresetActive === 'function' && schedPresetActive();
+  const pro = proIsOn();
+  if (field) field.value = (pro && armed && st.offered) ? 'on' : 'off';
+  if (!note) return;
+  if (!armed || fd.fits_this_mac === false) { note.hidden = true; return; }
+  const q = (document.getElementById('quality') || {}).value || '';
+  let text;
+  if (!pro) {
+    text = T('settings.pro_adds_fast_draft_in_about_half', 'Pro adds: Fast draft in about half the time, a different take of the same scene.')
+      + proDraftMeasuredText(fd);
+  } else if (!st.offered) {
+    note.hidden = true; return;                    // not in this install: the pill is the Free fast schedule
+  } else if (q !== 'balanced') {
+    text = T('settings.on_with_your_pro_fast_draft_runs_on', 'On with your Pro: Fast draft runs on Balanced. At this quality the pill uses the usual fast schedule.');
+  } else {
+    text = T('settings.on_with_your_pro_fast_draft_about_half', 'On with your Pro: Fast draft, about half the time of a usual clip, a different take of the same scene.')
+      + (st.ready ? '' : T('settings.first_use_downloads_gb_once', ' First use downloads {gb} GB once.', {gb: st.gb || 1.2}));
+  }
+  note.innerHTML = proNoteHtml(text);
+  note.hidden = false;
+}
 function proSpeedChanged() {
   const box = document.getElementById('proSpeedToggle');
   try { localStorage.setItem(PRO_SPEED_KEY, box.checked ? 'on' : 'off'); } catch (e) { /* this render only */ }
@@ -1755,10 +2028,18 @@ function proSpeedChanged() {
 // anything going Free. AI fill has no ledger row yet; its words are the 5.0.16 release notes.
 // Display text only. Whether a feature runs is decided where it runs, from the signed licence.
 const PRO_FEATURES = [
+  { id: 'ltx-crisper-detail', name: T('settings.crisper_detail', 'Crisper detail'),
+    line: T('settings.crisper_detail_line', 'Noticeably finer detail on LTX-2.5 clips: skin, hair, fabric and backgrounds, in about the same render time (Quick, Balanced and Standard). Off by default; the take changes when it is on.'),
+    short: T('settings.crisper_detail_short', 'noticeably finer detail on LTX-2.5 clips in about the same render time.'),
+    where: T('settings.crisper_detail_where', 'The Crisper detail pill under the prompt, on LTX-2.5') },
   { id: 'ltx-faster', name: T('settings.faster_ltx_clips', 'Faster LTX clips'),
     line: T('settings.ltx_2_5_clips_render', 'LTX-2.5 clips render with less waiting: about a quarter less on a 5-second clip and about a fifth less on a 10-second clip (Balanced; measured on an M4 Max 64 GB). On by default; switch it off for any render. Macs with 16 GB or more.'),
     short: T('settings.about_a_quarter_less_waiting_2', 'about a quarter less waiting on LTX clips, on Macs with 16 GB or more.'),
     where: T('settings.beside_quality_on_ltx_2', 'Beside Quality, on LTX-2.5 Balanced') },
+  { id: 'ltx-fast-draft', name: T('settings.fast_draft_in_half_the_time', 'Fast draft in half the time'),
+    line: T('settings.pick_fast_draft_on_the_speed_row', 'Pick Fast draft on the Speed row and an LTX-2.5 Balanced clip comes back in about half the time of a usual clip: a different take of the same scene, for trying ideas. Measured on a 5-second clip: 50 s instead of 98 s with a 16 GB memory limit, 76 s instead of 150 s on a 64 GB Mac. Macs with 16 GB or more.'),
+    short: T('settings.fast_draft_in_about_half_the_time', 'Fast draft in about half the time of a usual LTX clip, on Macs with 16 GB or more.'),
+    where: T('settings.speed_row_fast_draft_on_ltx', 'Speed row, Fast draft, on LTX-2.5 Balanced') },
   { id: 'h3-flex-turbo', name: T('settings.faster_flex_turbo', 'Faster Flex Turbo'),
     line: T('settings.flex_turbo_renders_about_1', 'Flex Turbo renders about 1.5× faster than Flex on Free (M4 Max 64 GB; Macs with 36 GB or more). A little softer; for drafts.'),
     short: 'about 1.5× faster than Flex on Free. A little softer; for drafts.',
@@ -1767,6 +2048,10 @@ const PRO_FEATURES = [
     line: T('settings.a_quicker_fast_mode_for', 'A quicker Fast mode for P-H3-Image: about 22 s for the next picture on a 64 GB M4 Max, at a smaller size. Free keeps its own 56 s default.'),
     short: T('settings.fast_makes_the_next_picture', 'Fast makes the next picture in about 22 s on a 64 GB M4 Max, at a smaller size. Free keeps its own 56 s default.'),
     where: T('settings.images_p_h3_image_version', 'Images, P-H3-Image, Version Fast') },
+  { id: 'h3-references', name: T('settings.references_on_hailuo_h3', 'References on Hailuo H3'),
+    line: T('settings.references_line', 'Build a new Hailuo H3 shot around up to 3 pictures of people, things or places: they keep their look in the scene your prompt describes. 5-second clips; a one-time download of about 43 GB. Macs with 32 GB or more.'),
+    short: T('settings.references_short', 'the people, things and places in your pictures keep their look in the shot your prompt describes.'),
+    where: T('settings.references_where', 'Hailuo H3, Text, under Face to keep') },
   { id: 'vertical-ai-fill', name: T('settings.make_it_vertical_ai_fill', 'Make it vertical (AI fill)'),
     line: T('settings.ai_paints_real_picture_above', 'AI paints real picture above and below, as if the clip was shot tall. For Macs with 48 GB or more.'),
     short: T('settings.ai_paints_real_picture_above_2', 'AI paints real picture above and below. For Macs with 48 GB or more.'),
@@ -1780,6 +2065,44 @@ const PRO_FEATURES = [
 const PRO_SUPPORT = { name: T('settings.priority_support', 'Priority support'), line: T('settings.pro_questions_and_feature_requests', 'Pro questions and feature requests go to the front of the queue.') };
 const proFeature = id => PRO_FEATURES.find(f => f.id === id) || null;
 const proIsOn = () => !!document.documentElement.dataset.pro;
+
+// ---- A member's Pro option that waits for the Pro add-on ---------------------------------------------------
+// "Is Pro on" has ONE answer (the licence: /pro/status active, data-pro). Whether the Pro add-on is here to run an
+// option is a second, separate one (/pro/status addon.state, or the option's own `addon`). A member whose add-on
+// is not here yet is told what happens next and the Studio fetches it; the buy window is for Free only.
+// Before 5.0.72 Pinokio never fetched the add-on, Faster Flex Turbo read its own "Pro" from it, and a paying
+// member's every click opened the buy window while Settings > Pro said Pro was on.
+function proAddonText(state, feature) {
+  const f = feature || T('settings.pro_this_option', 'This Pro option');
+  if (state === 'needs_key') return T('settings.pro_addon_needs_key', '{feature} needs your Pro key in this Studio once: paste it in Settings > Pro. It does not use another seat.', {feature: f});
+  if (state === 'restart') return T('settings.pro_addon_restart', '{feature}: quit and reopen Phosphene to finish switching Pro on.', {feature: f});
+  if (state === 'waiting') return T('settings.pro_addon_waiting', '{feature}: getting Pro ready on this Studio. The download server asked to wait, so the Studio tries again by itself in about 15 minutes.', {feature: f});
+  if (state === 'retry') return T('settings.pro_addon_retry', '{feature}: getting Pro ready did not finish. Click again to try again.', {feature: f});
+  return T('settings.pro_addon_getting_ready', '{feature}: getting Pro ready on this Studio (a one-time download). It switches on by itself in a minute or two.', {feature: f});
+}
+async function proAddonGetReady(feature, opener = null) {
+  let st = null;
+  try {
+    const r = await fetch('/pro/addon/get-ready', { method: 'POST', cache: 'no-store' });
+    if (r.status === 402) { openProModal(opener); return null; }   // really Free: show what Pro is
+    st = await r.json().catch(() => null);
+  } catch (_) { st = null; }
+  const state = (st && st.state) || 'getting_ready';
+  if (state === 'ready') return st;
+  if (typeof phosToast === 'function') phosToast(proAddonText(state, feature), { kind: state === 'retry' ? 'danger' : 'info' });
+  // Look again until it is here; each look redraws the options that wait for it.
+  if (state === 'getting_ready' && !globalThis._proAddonTimer) {
+    globalThis._proAddonTimer = setTimeout(async () => {
+      globalThis._proAddonTimer = null;
+      const s2 = await proStatusRefresh();
+      if (s2 && s2.addon && s2.addon.state === 'getting_ready') proAddonGetReady.poll = (proAddonGetReady.poll || 0) + 1;
+      if (s2 && s2.addon && s2.addon.state === 'getting_ready' && proAddonGetReady.poll < 30) {
+        globalThis._proAddonTimer = setTimeout(() => { globalThis._proAddonTimer = null; proStatusRefresh(); }, 10000);
+      }
+    }, 10000);
+  }
+  return st;
+}
 // The words a spot shows, for who is looking: a Pro member is told it is on, a Free user what Pro adds.
 const proLeadText = on => on ? T('settings.on_with_your_pro', 'On with your Pro:') : T('settings.pro_adds', 'Pro adds:');
 function proSpotText(id, on = proIsOn()) {
@@ -1922,10 +2245,76 @@ function closeProModal() {
   if (proReturnFocus && proReturnFocus.isConnected) proReturnFocus.focus();
 }
 
+// ---- Saved files folder (Settings > Saved files) -------------------------
+// Where finished videos and pictures go. The server keeps the rules
+// (output_folder.py): renders are made on this Mac first, then each finished
+// file is copied to the chosen folder and checked; an unplugged drive only
+// means files wait on this Mac until it is back.
+function outputsFolderSentence(d) {
+  if (!d || !d.path) {
+    return T('settings.outputs_default_folder', 'Saving to the default folder: {path}', {path: d && d.default_path || ''});
+  }
+  if (!d.reachable) {
+    return T('settings.outputs_not_connected', '{folder} is not connected. New videos and pictures stay on this Mac and are copied there when it is back.', {folder: d.path});
+  }
+  let line = T('settings.outputs_saving_to', 'Saving new videos and pictures to {folder}', {folder: d.path});
+  if (d.waiting > 0) line += ' ' + TP('settings.outputs_waiting', d.waiting, {one: '({count} file is waiting to be copied.)', other: '({count} files are waiting to be copied.)'});
+  return line;
+}
+async function refreshOutputsFolder() {
+  const cur = document.getElementById('outputsFolderCurrent');
+  if (!cur) return;
+  try {
+    const r = await fetch('/outputs/folder');
+    const d = await r.json();
+    cur.textContent = outputsFolderSentence(d);
+    document.getElementById('outputsFolderResetBtn').hidden = !d.path;
+    const st = document.getElementById('outputsFolderStatus');
+    if (st) st.textContent = d.last_error || '';
+  } catch (e) { cur.textContent = ''; }
+}
+async function setOutputsFolder(path) {
+  const st = document.getElementById('outputsFolderStatus');
+  path = String(path || '').trim();
+  if (!path) { st.textContent = T('settings.outputs_choose_first', 'Choose a folder first.'); return; }
+  try {
+    const r = await fetch('/outputs/folder/set', {method: 'POST', body: new URLSearchParams({path})});
+    const d = await r.json();
+    if (!r.ok) { st.textContent = d.error || T('settings.outputs_could_not_use', 'That folder could not be used.'); return; }
+    st.textContent = T('settings.outputs_set_done', 'Done. New videos and pictures will be saved in {folder}.', {folder: d.path});
+    refreshOutputsFolder().then(() => { st.textContent = T('settings.outputs_set_done', 'Done. New videos and pictures will be saved in {folder}.', {folder: d.path}); });
+  } catch (e) { st.textContent = e.message || String(e); }
+}
+async function pickOutputsFolder() {
+  const st = document.getElementById('outputsFolderStatus');
+  st.textContent = T('settings.outputs_picker_open', 'A folder window is open. It may be behind this window.');
+  try {
+    const r = await fetch('/outputs/folder/pick', {method: 'POST', body: new URLSearchParams()});
+    const d = await r.json();
+    if (d.cancelled) { st.textContent = ''; return; }
+    if (d.error || !d.path) {
+      st.textContent = d.error || T('settings.outputs_picker_failed', 'The folder window could not open. Paste the folder\'s full path instead.');
+      const det = document.getElementById('outputsFolderTyped'); if (det) det.open = true;
+      return;
+    }
+    await setOutputsFolder(d.path);
+  } catch (e) { st.textContent = e.message || String(e); }
+}
+async function resetOutputsFolder() {
+  const st = document.getElementById('outputsFolderStatus');
+  try {
+    await fetch('/outputs/folder/reset', {method: 'POST', body: new URLSearchParams()});
+    await refreshOutputsFolder();
+    st.textContent = T('settings.outputs_reset_done', 'New files go to the default folder again. Files already copied stay where they are.');
+  } catch (e) { st.textContent = e.message || String(e); }
+}
+
 Object.assign(globalThis, {
-  proSpeedRender, proSpeedChanged,
+  proSpeedRender,
+  refreshOutputsFolder, setOutputsFolder, pickOutputsFolder, resetOutputsFolder, outputsFolderSentence, proSpeedChanged, proDraftRender,
+  crisperRender, crisperChanged, crisperPrepare,
   downloadFirstVideo,
-  openProModal, closeProModal, proStatusRefresh,
+  openProModal, closeProModal, proStatusRefresh, proAddonText, proAddonGetReady,
   openYourPro, closeYourPro, proMarksApply, proSpotText, proNoteHtml,
   proLicenceActivate, proLicenceRefresh, proLicenceDeactivate,
   pushSubscription, pushToggle, pushTest,
@@ -1933,7 +2322,8 @@ Object.assign(globalThis, {
   renderNotifyState, toggleNotify, askNotifyPermission,
   updateModelsCard, dismissModelsCard, applyTierGates, openTierModal,
   closeTierModal, openBugModal, closeBugModal, submitBugReport, copyBugDiagnostics, bugWhatInput,
-  openSettingsModal, renderModelsDriveRows, modelsDriveView, toggleAnalytics, saveAnalyticsKey, clearAnalyticsKey,
+  openSettingsModal, renderModelsDriveRows, renderGroupDirty, undoRenderSettings, settingsProOpen,
+  openMacAppSettings, renderSettingsPro, modelsDriveView, toggleAnalytics, saveAnalyticsKey, clearAnalyticsKey,
   toggleSpicyMode, onTokenInput, toggleTokenVisibility, testToken,
   clearToken, closeSettingsModal, applySettings, _applyHdrPillAvailability,
   // inline-handler targets: generated markup resolves these through the

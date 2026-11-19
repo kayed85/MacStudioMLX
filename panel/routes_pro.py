@@ -2,10 +2,14 @@
 
 GET /pro/status    {active, plan, until, holder, source}; Free is the default and nothing here nags
 GET /pro/compare   the bundled "same clip, Free vs Pro" comparisons (assets/pro/compare.json)
+POST /pro/crisper-detail/install   fetch the Crisper detail adapter (Pro; 402 on Free, 503 while Pro gets ready)
+POST /pro/addon/get-ready   a member's option waits for the Pro add-on: fetch it now (Pinokio)
 
 Pro is on only with a signed capability token for this Mac (pro_token.py, passed by the Mac app).
 """
 from __future__ import annotations
+
+import re
 
 import json
 from pathlib import Path
@@ -20,6 +24,11 @@ def get_pro_status(h, parsed) -> None:
     doc = P.pro_status()
     # The LTX Pro speed-up beside Quality: on offer / ready / downloading, and why not (no "how").
     doc["ltx_speedup"] = P.ltx_speedup_status()
+    # Crisper detail (Pro ledger row ltx-crisper-detail): offered / downloaded / downloading, and why not.
+    doc["crisper_detail"] = P.crisper_detail_status()
+    # Whether the Pro add-on is here for the options that ask it (pro_addon_state): "free" only without a
+    # licence. A member's option that waits for it shows "getting Pro ready", never the buy window.
+    doc["addon"] = P.pro_addon_state()
     # Pinokio only: whether this Studio can take a licence key itself (the Mac app has its own door).
     doc["licence_here"] = not P._dist.is_mac_app()
     if doc["licence_here"]:
@@ -28,7 +37,20 @@ def get_pro_status(h, parsed) -> None:
     h._json(doc)
 
 
-def _whats_new_doc(force: bool) -> dict:
+# Crisper detail: fetch the adapter the Pro add-on names (pinned revision + sha256, never re-hosted).
+# Pro only; the first render with the switch on starts the same download by itself.
+@post("/pro/crisper-detail/install")
+def post_crisper_detail_install(h, path, qs, ctype) -> None:
+    result = P.crisper_detail_install(P.push)
+    if not result.get("ok"):
+        h._json(result, 402 if result.get("pro_required") else
+                503 if result.get("pro_setup") else
+                409 if result.get("already_running") else 400)
+        return
+    h._json(result, 202 if result.get("started") else 200)
+
+
+def _whats_new_doc(force: bool, lang: str | None = None) -> dict:
     import whats_new
     root = Path(P.ROOT)
     try:
@@ -44,15 +66,19 @@ def _whats_new_doc(force: bool) -> dict:
         whats_new.mark_seen(Path(P.STATE_DIR), version)
         return {"show": False}
     return whats_new.card(root, Path(P.STATE_DIR), version, pro, force=force,
-                          pack_json=root / "pro_engine" / "whats_new_pro.json")
+                          pack_json=root / "pro_engine" / "whats_new_pro.json", lang=lang)
 
 
 @get("/whats-new")
 def get_whats_new(h, parsed) -> None:
     """The once-per-version "What's new" card; ?force=1 reopens this version's card (version pill)."""
     from urllib.parse import parse_qs
-    force = (parse_qs(parsed.query).get("force") or [""])[0] in ("1", "true")
-    h._json(_whats_new_doc(force))
+    qs = parse_qs(parsed.query)
+    force = (qs.get("force") or [""])[0] in ("1", "true")
+    # the page's own language (BOOT.i18n.lang), so the lines match the window's buttons (owner, 17 Nov 2026)
+    lang = (qs.get("lang") or [""])[0]
+    lang = lang if re.fullmatch(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?", lang or "") else None
+    h._json(_whats_new_doc(force, lang))
 
 
 @get("/whats-new/how")
@@ -86,7 +112,9 @@ def _licence_call(h, name: str, with_key: bool = False) -> None:
     try:
         doc = getattr(pro_licence, name)(form.get("key", "")) if with_key else getattr(pro_licence, name)()
     except Exception as exc:  # noqa: BLE001
-        doc = {"ok": False, "message": "The licence check failed: %s" % type(exc).__name__}
+        # Plain words (17 Nov 2026): the exception name goes to the log, not the screen.
+        print("[pro] licence check failed: %s" % type(exc).__name__, flush=True)
+        doc = {"ok": False, "message": "Could not check your licence just now. Check your internet connection, then try again."}
     doc["pro_status"] = P.pro_status()
     h._json(doc)
 
@@ -119,3 +147,11 @@ def get_pro_compare(h, parsed) -> None:
     except (OSError, ValueError):
         data = {"items": []}
     h._json(data)
+
+
+@post("/pro/addon/get-ready")
+def post_pro_addon_get_ready(h, path, qs, ctype) -> None:
+    """A Pro member pressed an option that waits for the Pro add-on: on Pinokio, fetch it now.
+    Free gets 402 (the page shows what Pro is); a member always gets the add-on's state."""
+    st = P.pro_addon_get_ready()
+    h._json(st, 402 if st.get("state") == "free" else 200)

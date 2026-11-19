@@ -23,6 +23,8 @@ it can.
 | **≥ 36 GB** (`H3_MIN_RAM_GB_Q8`), Q8 DiT pack on disk | quantised Q8 DiT | Renders. |
 | **≥ 36 GB, Q8 DiT pack absent** | — | **Not a hardware verdict.** `scripts/pinokio/h3_build_q8.sh` builds that pack locally in ~5 min / ~22 GB with **no extra download**, and "Install Hailuo H3" runs it automatically below 60 GB. The switcher shows H3 as an offer, the inline card names the step, and `h3_status()` carries `needs_q8_dit: true` with the sentence in `ram_note`. The sentence depends on whether the ~75 GB is already on disk: never installed → the sidebar's **Install Hailuo H3** (a real download, the Q8 build is its last step); weights present → **Build Hailuo H3 compact engine** (minutes, no download). Both entries are in the Pinokio sidebar while the panel runs, too (4.15.3; before that they appeared only with the panel stopped). |
 | **16–35 GB** (`H3_MIN_RAM_GB_LOWMEM`, 5.0.7) | Q8 DiT, streamed (`--low-memory auto`) | Renders when the installed runner has `--low-memory`; Draft and Standard from 16 GB, High from 18 GB. Pin `59da147` (`phosphene/v5.0-image4`). On a runner without the flag the floor stays 36. |
+| **16–35 GB, Clean up sound** | the same streamed lane | Offered when the runner also has `--revoice-kv-store`: the re-voice store goes to a scratch file when it does not fit (same sound byte for byte), and the price is the streamed peak plus four blocks of it (`h3_revoice_fits`, `h3_lowmem_peak_gib`). Measured on a 64 GB Mac capped like a 16 GB one: Standard 5 s 6.4 GiB, Standard 10 s 9.0 GiB. An older runner keeps the resident price, so Clean up sound stays refused below ~36 GB. |
+| **16 GB, clips longer than 5 s** | the same streamed lane | 5.0.53 capped 16 GB Macs at 5 s (`H3_CHAIN_MIN_RAM_GB`): a chain's second window peaked at ~13.9 GB. When the runner also has `--vae-encode-chunk` (`h3_lowmem_chain_supported`), the carried frames are encoded a few at a time and priced in the admission check (Draft 10 s 12.9 → 7.5 GB, Standard 10 s 13.0 → 7.6 GB on a 64 GB Mac held to a 16 GB budget), and 16 GB Macs are offered 10 s. 15 s waits on `H3_LOWMEM_16GB_ALLOWS_15S`; the single-pass 10 s stays off. An older runner keeps the 5 s cap. |
 | **< 16 GB** | — | Genuinely out of reach. The refusal states 16. |
 
 `h3_ram_verdict()` is the single place those bands are decided. The render
@@ -495,9 +497,10 @@ answered by the Pro add-on (`h3_flex_turbo_spec()` in the panel asks it), so a F
 shows the row as a Pro option and nothing more. Panel: `h3_flex_turbo_status()` in `/status` as
 `h3.flex_turbo`, `h3_flex_turbo=1` in make_job (rides every Flex gate), `POST
 /h3/flex-turbo/install` (402 without Pro), picker entry `h3flexturbo`, timing lane `flex_turbo`.
-Pro gate: `h3_flex_turbo_allowed()` (Pro ledger row `h3-flex-turbo`). Credit: the Pika H3 Flex
-Turbo LoRA by akhaliq, fusing Pika H3 Flex (Pika Labs) with LightX2V's MiniMax-H3 Turbo; weights
-under the MiniMax H3 Community License.
+Pro gate: `h3_flex_turbo_allowed()` (Pro ledger row `h3-flex-turbo`). Credit: Pika H3 Flex (Pika
+Labs) with LightX2V's MiniMax-H3 Turbo; weights under the MiniMax H3 Community License. The
+adapter's own credit line comes with the Pro add-on's answer and is shown in the picker, the log
+and every sidecar the option renders.
 
 ### Pika H3 Flex: Pika Labs' six-step H3, natively on Apple Silicon (2026-10-30)
 
@@ -720,8 +723,7 @@ Picture 1). The prompt the user typed is kept in the sidecar; `h3.reference`
 records the still that was packed.
 
 Identity, Standard Fast text-only cafe scene, two seeds, ArcFace against the
-Mr Bizarro still centroid with the reference photo itself excluded (PM hub report
-for every arm):
+Mr Bizarro still centroid with the reference photo itself excluded (every arm):
 
 | Arm | seed 5201 median (min) | seed 5202 median (min) | Time |
 |---|---|---|---|
@@ -979,7 +981,7 @@ five-tap Qwen3-VL-4B text encoder + connector and a new single-frame ViT image d
   and checked against `DECODER_SHA256` 0415dda9; the 5.6 GB original is deleted after and never fetched again.
 - Studio: `image_engine.kind = "ph3image"`, engines `ph3image_draft_inline` / `ph3image_standard_inline` / `ph3image_inline`
   (2 / 4 / 8 MP), `POST /image/ph3image/install` (H3 licence gate), `/status` block `ph3image`, capability row `images.p_h3_image`.
-- Measured, M4 Max 64 GB (ports/p-h3-image-pruna/bench/RESULT.md in the PM hub): 2 MP 75 s, 4 MP 146 s (15.4 s/step),
+- Measured, M4 Max 64 GB: 2 MP 75 s, 4 MP 146 s (15.4 s/step),
   8 MP 312 s; peak 24.2 / 24.7 / 25.5 GB. Real-weight parity vs Pruna's code: text taps cos >= 0.99994, connector 1.000,
   decoder fp32 126.8 dB.
 - Not ported: edit mode (1-8 reference images; needs the VAE encoder mapping and the vision tower), the 19 GB prompt rewriter.
@@ -988,8 +990,7 @@ five-tap Qwen3-VL-4B text encoder + connector and a new single-frame ViT image d
 
 `MiniMaxAI/MiniMax-H3-Image` @ 6534ea1c: a 33B DiT (H3 minus audio), six forwards with one fused output head each
 (`pdd_fused_heads.safetensors`), no guidance and no negative prompt, 4 to 16 MP (a request below 4 MP is generated on a
-4 MP canvas and resized back), text to image and edit (5.0.19, below). Port notes:
-`ports/minimax-h3-image` in the PM hub.
+4 MP canvas and resized back), text to image and edit (5.0.19, below).
 
 - Runner: `scripts/generate_h3_image.py PROMPT -o OUT --root <models>/minimax-h3-image --text-dir <ddalcu-q8> --text-config
   <upstream-meta/FL2VA/text_encoder/config.json> --aspect A --mp 4|8|16 --seed N --metrics M`. Staged: text encoder out, then the
@@ -1017,6 +1018,51 @@ five-tap Qwen3-VL-4B text encoder + connector and a new single-frame ViT image d
 - Studio: up to 6 pictures (`IMAGE_MAX_REFS_H3IMAGE`), offered only when the installed runner has `--match-reference`
   (`h3image_edit_supported()`); aspect key `match` = Same as picture. All of it is Free (owner, 12 Nov 2026). The engine pin has NOT moved to `42fdc21`: the branch must be
   pushed to the engine repo and `scripts/pinokio/h3_checkout.sh` bumped before users get it. Gap table: `docs/H3_IMAGE_GAPS.md`.
+
+## Restyle a picture (R&D L55, 15 Nov 2026) — content-preserving style transfer on the H3 runner
+
+One picture in, the same scene back in the style the prompt names (a clay figurine, a flat vector icon, pixel art, a felt
+doll, a painting). No new model: the H3 video pack's FL2VA Q8 DiT and text encoder, the P-H3-Image single-frame decoder, and
+a 298 MB rank-16 adapter (`witcherderivia/minimax-h3-image-restyle` @ b506c0bb, `h3-lora-image-restyle.safetensors`, the
+8500-step file, Apache-2.0) fetched at a pinned revision and digest, never re-hosted. Free for everyone (owner, card #788).
+
+- The recipe, as measured: the content picture is the ONLY keyframe anchor (FL2VA's `first` slot held at its training noise
+  level, 0.999); the style comes from the prompt, never from a second picture (a style picture in `last` makes the model copy one
+  of the two anchors: 2 of 4 with two anchors, 5 of 6 with one); one latent target frame plus two throw-away audio latents; 16
+  sigma points, video shift 12 (15 forwards, no guidance); the adapter at run time, scale 1.3 (1.0 is enough for the easy
+  pairs, 1.3 carried the hard ones); the P-H3-Image single-frame decoder (the video VAE cannot decode one latent frame).
+- Adapter layout: the file is a ComfyUI export (`lora_unet_blocks_N_attn_qkv_proj.lora_down.weight`, fused qkv rows
+  contiguous q|k|v; the engine's row-norm F-test says 160 under that grouping vs 3.7 under ours, all 50 blocks). The runner
+  re-keys it ONCE beside itself (`h3-lora-image-restyle.ourkeys.safetensors`) and applies it with `permute_qkv=True`,
+  `swap_fc1=False`; alpha 16 = rank 16, so scale is applied as given. 200 modules apply (no adaLN pairs in the file).
+- Runner: the STUDIO's own `scripts/h3_restyle.py PROMPT -o OUT --content PIC --engine-root <H3 checkout> --dit <q8 dit>
+  --text-dir <ddalcu-q8> --text-config <upstream text_encoder/config.json> --decoder <p-h3-image>/vae --lora <adapter>
+  [--lora-scale 1.3 --steps 16 --mp 1.0 --seed N --metrics M]`, run in the H3 pack's interpreter. It imports only the engine's
+  own modules (`adaln`, `packing`, `scheduler`, `text_encoder`, `pipeline.encode_keyframe_rows`, `vae_stream`, `load`, `lora`,
+  `ph3_image_vae`), all present at the current engine pin 953ec46, so the pin does NOT move for this feature. Staged: text
+  encoder out, keyframe encoder out, DiT + adapter, decoder. Fresh scheduler objects per picture (a reused one continues past
+  the last sigma: NaN, black picture); a non-finite latent exits 4 instead of writing a black PNG.
+- Fetch: the panel's own digest-pinned download (`_h3restyle_download_bg`: bytes + sha256, atomic rename), `POST
+  /image/h3restyle/install` behind the H3 licence screen (the adapter is Apache-2.0, the base is MiniMax H3). It refuses until
+  the P-H3-Image decoder is on disk (the chip offers that download first).
+- Studio: `image_engine.kind = "h3restyle"`, engine `h3restyle_inline` (one recipe), exactly one reference (the picture to
+  restyle; `image_max_refs` = 1), the output takes the picture's shape (the size choice is disabled), `/status` block
+  `h3restyle` (reason ladder `h3_missing` / `engine_too_old` / `decoder_missing` / `not_downloaded` / `ok`), picker entry
+  `h3_restyle`, capability row `images.h3_restyle` (`preview`, `edit`, 15 steps, not Pro), pre-flight priced at
+  `H3RESTYLE_PEAK_GB`. Gate: `test_h3_restyle.py`.
+- Measured, M4 Max 64 GB (L55; 1 MP at the content's shape, 15 forwards, one anchor): 105-108 s denoise, about 2 min per
+  picture end to end in one process, 27.6 GB peak (the text-encoder phase sets it; the DiT phase is lower). 5 of 6 pairs
+  restyled with their content kept (clay horse, flat-icon cathedral, modernist group painting, felt doll, pixel lighthouse);
+  the watercolour pair came back as a photo. Painterly targets are the adapter's weak spot (it is at 1.6 % of its planned
+  training); 3D/clay, flat vector, pixel and felt are its strong ones. The author's 10000-step file is stronger on the group
+  photo but was not the file the recipe was measured with, so the 8500 one ships.
+
+### MiniMax-H3-Image streamed memory
+
+- Engine runner flags `--memory resident|lowmem|auto`, `--budget-gb`: the runner streams the Qwen3-VL text encoder
+  per layer and the DiT per block. Same pixels, peak 4.8 / 6.2 / 8.2 GB at 4 / 8 / 16 MP (was 28 GB). The Studio
+  feature-detects the flags from the installed runner (`h3image_lowmem_supported`); an older engine keeps the
+  resident path and its 48 GB floor.
 
 ## What H3 does *not* do
 
@@ -1107,3 +1153,11 @@ restart. `GET /status` → `.h3` tells you what resolved:
 Metrics for every run are kept at `state/h3_metrics/<job_id>.json` (the runner's
 own phase timings, peak GiB, packed rows), and summarised into the render's
 `<output>.mp4.json` sidecar under the `h3` key.
+
+## Pin 2601037 (5.0.56, 18 Nov 2026)
+
+`phosphene/v5.0-lowram1` = 0158f42 + one low-memory commit: MiniMax-H3-Image gets a streamed memory mode (`--memory auto --budget-gb`, text encoder and DiT read as they run), edit references are priced by size with a lighter-reference rung, long chains hand frames between windows in small chunks (`--vae-encode-chunk`) and count that step in the memory check, Clean up sound can keep its store on disk (`--revoice-kv-store`), and encodes never load the decoder. On 36 GB+ Macs nothing changes (same frames, sound and pixels as 0158f42, measured on an M4 Max 64 GB). The Studio turns on the 16-35 GB paths only when the installed runner has these switches. Mac app runner archive = OUR archive of the commit (sha256 568577fb..., 425,305 bytes).
+
+## Pin 0158f42 (5.0.35, 17 Nov 2026)
+
+`phosphene/v5.0-image8` = 953ec46 + two fixes: `memory_plan` prices the video decoder from its measured curve and steps the decode ladder only when the decode pass itself does not fit (16-24 GB Macs no longer drop to one tile per call when the faster finish fits; frames unchanged), and `scripts/run_tests.sh` exits 1 on a failed test. The Mac app's runner archive is OUR archive of that commit (`git archive | gzip -n -9`, Phosphene-mirror), not GitHub's tarball.

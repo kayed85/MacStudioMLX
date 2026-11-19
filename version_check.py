@@ -26,6 +26,7 @@ panel/routes_meta.py and the tests are unchanged.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -62,6 +63,13 @@ P = None  # the running mlx_ltx_panel module; assigned at wiring time
 _VERSION_LOCK = threading.Lock()
 _VERSION_REPO_OWNER = "mrbizarro"
 _VERSION_REPO_NAME = "phosphene"
+# Since 17 Nov 2026 every release also writes public main's VERSION, BROADCAST.json
+# and its last 30 commits (the GitHub commits-API shape) to our own server. That copy
+# is the BACKUP (owner: GitHub first, our server only when GitHub fails, so the
+# 30-minute check of every install costs our server nothing on normal days).
+# "" turns our server off.
+_OWN_MAIN_MIRROR = os.environ.get(
+    "PHOSPHENE_MAIN_MIRROR", "https://phosphene.video/app/Phosphene-mirror/main/")
 _VERSION_POLL_INTERVAL_SEC = 30 * 60          # 30 minutes between checks
 _VERSION_STARTUP_DELAY_SEC = 30                # don't compete with boot
 _VERSION_STATE: dict = {
@@ -133,6 +141,36 @@ def _fetch_raw_text(url: str, timeout: int = 10) -> str | None:
             return resp.read().decode("utf-8", "replace").strip() or None
     except Exception:
         return None
+
+
+def _main_file_urls(name: str) -> list[str]:
+    """Where public main's `name` can be read: raw.githubusercontent.com first,
+    then our server (only for the public repo itself)."""
+    urls = [f"https://raw.githubusercontent.com/{P._VERSION_REPO_OWNER}/"
+            f"{P._VERSION_REPO_NAME}/main/{name}"]
+    if (_OWN_MAIN_MIRROR and P._VERSION_REPO_OWNER == "mrbizarro"
+            and P._VERSION_REPO_NAME.lower() == "phosphene"):
+        urls.append(_OWN_MAIN_MIRROR + name)
+    return urls
+
+
+def _fetch_main_text(name: str) -> str | None:
+    """Public main's `name` as text from the first source that answers.
+
+    VERSION alone is also read from our server (a few bytes) and the newer of the
+    two wins: a GitHub that answers but fell behind (a push that has not happened
+    yet) must never hide a release from every install."""
+    urls = _main_file_urls(name)
+    for i, url in enumerate(urls):
+        text = P._fetch_raw_text(url)
+        if not text:
+            continue
+        if name == "VERSION" and i == 0 and len(urls) > 1:
+            other = P._fetch_raw_text(urls[-1])
+            if other and P._version_is_newer(other.strip(), text.strip()):
+                return other
+        return text
+    return None
 
 
 def _capture_boot_head() -> None:
@@ -289,11 +327,22 @@ def _fetch_remote_commits(limit: int = 30) -> list[dict] | None:
     try:
         with _urlreq.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-        if not isinstance(data, list):
-            return None
-        return data
+        if isinstance(data, list):
+            return data
     except (_urlerr.URLError, _urlerr.HTTPError, OSError, ValueError, TimeoutError):
-        return None
+        pass
+    # GitHub did not answer (or hides the repo): our server's copy, same shape.
+    own = _main_file_urls("commits.json")
+    if len(own) > 1:
+        raw = P._fetch_raw_text(own[-1])
+        try:
+            data = json.loads(raw) if raw else None
+        except ValueError:
+            data = None
+        if (isinstance(data, list) and data and isinstance(data[0], dict)
+                and data[0].get("sha")):
+            return data[:limit]
+    return None
 
 
 def _parse_broadcast(raw: bytes | str, local_version: str = "") -> dict | None:
@@ -335,19 +384,22 @@ def _fetch_broadcast() -> dict | None:
     """GET BROADCAST.json from public main. None on any failure or absence."""
     import urllib.request as _urlreq
     import urllib.error as _urlerr
-    url = (f"https://raw.githubusercontent.com/{P._VERSION_REPO_OWNER}/"
-           f"{P._VERSION_REPO_NAME}/main/BROADCAST.json")
-    req = _urlreq.Request(url, headers={
-        "User-Agent": "phosphene-panel-version-check",
-    })
-    try:
-        with _urlreq.urlopen(req, timeout=10) as resp:
-            raw = resp.read(64 * 1024)
-    except (_urlerr.URLError, _urlerr.HTTPError, OSError, ValueError,
-            TimeoutError):
+    raw = None
+    for url in _main_file_urls("BROADCAST.json"):
+        req = _urlreq.Request(url, headers={
+            "User-Agent": "phosphene-panel-version-check",
+        })
+        try:
+            with _urlreq.urlopen(req, timeout=10) as resp:
+                raw = resp.read(64 * 1024)
+            break
+        except (_urlerr.URLError, _urlerr.HTTPError, OSError, ValueError,
+                TimeoutError):
+            continue
+    if raw is None:
         return None
     with P._VERSION_LOCK:
-        local = P._VERSION_STATE.get("local_version") or ""
+        local = P.running_version()
     return P._parse_broadcast(raw, local)
 
 
@@ -363,12 +415,29 @@ def _check_remote_once() -> None:
     with P._VERSION_LOCK:
         suppress = P._VERSION_STATE["suppress_reason"]
         local_sha = P._VERSION_STATE["local_sha"]
+    # Studio notices concern the running Studio, including app tarballs.
+    # The native updater still owns installation; no git request is made here
+    # for app installs. Honour an explicit opt-out on every distribution.
+    if P.VERSION_CHECK_ENABLED and (not suppress or P._dist.is_mac_app()):
+        broadcast = P._fetch_broadcast()
+        with P._VERSION_LOCK:
+            P._VERSION_STATE["broadcast"] = broadcast
     if suppress:
-        return                             # never poll in suppressed states
+        _report_no_prompt_reason(suppress)
+        return                             # never poll git in suppressed states
     commits = P._fetch_remote_commits(limit=30)
     if commits is None:
+        # 5.0.28 (owner, 16 Nov: "are they getting notified properly?"): half
+        # of the Pinokio installs that were behind never saw the update
+        # pop-up in a week. The commits API is rate-limited per IP (60 an
+        # hour, shared behind a VPN, office or carrier NAT) and blocked in
+        # places; the raw VERSION file is served by a CDN. When the API
+        # fails, a strictly newer public VERSION still announces the update.
+        if _version_only_fallback():
+            return
         with P._VERSION_LOCK:
             P._VERSION_STATE["error"] = "could not reach github.com"
+        _report_no_prompt_reason("offline")
         return
     if not commits:
         with P._VERSION_LOCK:
@@ -417,10 +486,7 @@ def _check_remote_once() -> None:
     # GET on raw.githubusercontent.com — no rate limit concern at our
     # 30-min cadence. Tolerate missing-file silently: older origin/main
     # commits predate VERSION, and we still have the SHA fallback.
-    remote_version = P._fetch_raw_text(
-        f"https://raw.githubusercontent.com/{P._VERSION_REPO_OWNER}/"
-        f"{P._VERSION_REPO_NAME}/main/VERSION"
-    )
+    remote_version = _fetch_main_text("VERSION")
     # 4.17.5 (fleet): "Phosphene 4.17.4 is out - you're on 4.17.4". A local
     # HEAD that is not among public main's commits (a local merge or commit
     # on main, a re-made history) read as "30+ behind" even when the tree
@@ -438,9 +504,6 @@ def _check_remote_once() -> None:
     local_is_newer = P._version_is_newer(_local_v, remote_version)
     if same_release or local_is_newer:
         behind_by, more, ahead = 0, False, []
-    # The maintainer broadcast rides the same 30-min cadence. Failures and
-    # absence read as "no message" — _fetch_broadcast never raises.
-    broadcast = P._fetch_broadcast()
     with P._VERSION_LOCK:
         P._VERSION_STATE["remote_sha"] = remote_sha
         P._VERSION_STATE["remote_short"] = remote_sha[:7]
@@ -452,7 +515,62 @@ def _check_remote_once() -> None:
         P._VERSION_STATE["commits_ahead"] = ahead
         P._VERSION_STATE["checked_ts"] = time.time()
         P._VERSION_STATE["error"] = None
-        P._VERSION_STATE["broadcast"] = broadcast
+
+
+
+_NO_PROMPT_REPORTED = False
+
+
+def _report_no_prompt_reason(reason: str) -> None:
+    """Once per process, tell the anonymous usage count WHY this install
+    cannot be offered an update (closed words only, no paths or names), so
+    a Mac that never sees the pop-up is visible instead of silent. Skipped
+    for the Mac app (its own updater) and the explicit opt-out."""
+    global _NO_PROMPT_REPORTED
+    if _NO_PROMPT_REPORTED:
+        return
+    r = str(reason or "")
+    if r == "offline":
+        action = "check_offline"
+    elif r.startswith("local changes"):
+        action = "check_modified"
+    elif r.startswith("on branch"):
+        action = "check_branch"
+    elif r == "not a git checkout":
+        action = "check_no_git"
+    else:
+        return                              # Mac app, opt-out: nothing to report
+    _NO_PROMPT_REPORTED = True
+    try:
+        P._analytics_capture("update_prompt", {
+            "action": action, "version": P.running_version()})
+    except Exception:
+        pass
+
+
+def _version_only_fallback() -> bool:
+    """The commits API failed: compare the public VERSION file instead.
+    True when that settled the state (newer = behind by at least one, same
+    or older = current); False when VERSION is unreachable too."""
+    remote_version = _fetch_main_text("VERSION")
+    with P._VERSION_LOCK:
+        local_v = (P._VERSION_STATE.get("local_version") or "").strip()
+    remote_v = (remote_version or "").strip()
+    if not remote_v or not local_v or P._version_tuple(remote_v) is None:
+        return False
+    newer = P._version_is_newer(remote_v, local_v)
+    with P._VERSION_LOCK:
+        P._VERSION_STATE["remote_version"] = remote_v
+        P._VERSION_STATE["remote_sha"] = None
+        P._VERSION_STATE["remote_short"] = None
+        P._VERSION_STATE["behind_by"] = 1 if newer else 0
+        P._VERSION_STATE["behind_more_than"] = bool(newer)
+        P._VERSION_STATE["local_unlisted_same_release"] = False
+        P._VERSION_STATE["local_newer_than_remote"] = P._version_is_newer(local_v, remote_v)
+        P._VERSION_STATE["commits_ahead"] = []
+        P._VERSION_STATE["checked_ts"] = time.time()
+        P._VERSION_STATE["error"] = None
+    return True
 
 
 def version_check_loop() -> None:

@@ -1,15 +1,8 @@
-# Phosphene / MacStudioMLX: local AI video, music & speech studio for Mac
+# Phosphene: free local AI video generator for Mac
 
-**Phosphene / MacStudioMLX is an open-source Mac app that creates AI video with sound, pictures, songs and speech locally on Apple Silicon.** It runs LTX-2.5, MiniMax H3 (Hailuo H3), FLUX, and YuE2 locally with MLX: offline, no cloud, no API key, no account, no NVIDIA GPU needed.
+**Phosphene is a free, open-source Mac app that makes AI video with sound, pictures, songs and speech on your own Apple Silicon Mac.** It runs LTX-2.5, MiniMax H3 (Hailuo H3) and MiniMax-H3-Image locally with MLX: offline, no cloud, no API key, no account, no NVIDIA GPU.
 
-**Release: v5.0.26 (Customized & Unlocked Edition)** · Apple Silicon M1 to M5 · from 16 GB unified RAM
-
-### ✨ Key Features & Customizations in this Build
-- **Pro Unlocked**: All Pro modes and capabilities enabled locally.
-- **H3 Faster Flex Turbo**: 4-step fast generation enabled and tuned for 16 GB Apple Silicon Macs.
-- **Arabic & Jordanian Dialect Support**: Built-in Arabic (`العربية الفصحى`) and Jordanian (`اللهجة الأردنية`) dialogue prompts and line generation.
-- **Arabic Singing & Music Studio**: Integrated YuE2 music engine with **ArabMaqamRock v3** LoRA adapters for full Arabic maqam compositions and vocal acoustics.
-- **16 GB Apple Silicon Memory Optimization**: Relaxed memory pressure and swap limits so generation finishes without premature termination.
+**Current release: v5.0.72.** Mac app or Pinokio · M1 to M5 · from 16 GB of memory · MIT licence · made by Mr Bizarro
 
 <p align="center">
   <a href="https://phosphene.video/?utm_source=github&amp;utm_medium=readme&amp;utm_campaign=home&amp;utm_content=hero"><img src="assets/readme/app_video.webp" alt="The Phosphene Mac app: the Video tab with LTX-2.5 selected, a prompt box, the player and a gallery of AI video clips made locally on a Mac" width="100%"></a>
