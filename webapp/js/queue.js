@@ -2098,7 +2098,7 @@ function snapAspectToImage(path) {
     const r = probe.naturalWidth / probe.naturalHeight;
     const target = r >= 1 ? 'landscape' : 'vertical';
     if (document.getElementById('aspect').value !== target) setAspect(target);
-    if (typeof setH3Orientation === 'function') {
+    if (currentEngine() === 'h3' && typeof setH3Orientation === 'function') {
       setH3Orientation(r >= 1 ? 'landscape' : 'portrait');
     }
   };

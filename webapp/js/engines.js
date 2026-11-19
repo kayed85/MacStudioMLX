@@ -2446,11 +2446,6 @@ function renderTierAxes(engine) {
         if (typeof openModelsModal === 'function') openModelsModal();
         return;
       }
-      if (b.classList.contains('is-unavailable') || b.getAttribute('aria-disabled') === 'true') {
-        const tip = b.getAttribute('title') || 'Not available on this hardware tier.';
-        if (typeof phosToast === 'function') phosToast(tip, { kind: 'warning' });
-        return;
-      }
       E.setQuality(b.getAttribute(`data-${qAttr}`));
     };
   });
@@ -2701,8 +2696,6 @@ function setH3Quality(key) {
   const q = h3QualityByKey(key);
   if (!q) return;
   _h3ApplyShape(q.key, h3CurrentLength());
-  const qEl = document.getElementById('quality');
-  if (qEl) qEl.value = (key === 'high' || key === 'native') ? 'standard' : (key === 'draft' ? 'quick' : 'standard');
 }
 // Set the DURATION. Canvas is untouched.
 function setH3Length(key) {
