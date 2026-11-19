@@ -28,9 +28,9 @@ INSTALL_BUDGET = 3 * 1024**3
 PACKS = json.loads((ROOT / "data/flux3_models.json").read_text())
 PRESETS = {
     f"flux3_{variant}_q{q}": {"variant": variant, "quantize": q,
-        "steps": 50 if variant == "base" else 16,
+        "steps": 50 if variant == "base" else 4,
         "guidance": 3.5 if variant == "base" else None,
-        "label": f"{CREDIT} / {'Base Quality' if variant == 'base' else 'Standard'} / Q{q}"}
+        "label": f"{CREDIT} / {'Base Quality' if variant == 'base' else 'Turbo 4-Step'} / Q{q}"}
     for variant in ("distilled", "base") for q in (8, 6, 4)
 }
 
@@ -312,9 +312,12 @@ def generate(prompt, n, width, height, output_dir, base_seed, config, refs, on_l
     _run([sys.executable, "-S", str(ROOT / "scripts/pinokio/flux3_env.py"), str(worker_root())], env, on_log,
          guard=[(worker_root(), RESERVE)] if installing else [])
     first_seed = base_seed if base_seed is not None else secrets.randbelow(2**31)
+    user_steps = int(getattr(config, "mflux_steps", 0) or 0)
+    steps = user_steps if user_steps > 0 else (50 if config.flux3_variant == "base" else 4)
     request = dict(prompt=prompt, seeds=[first_seed + i for i in range(n)],
                    width=width, height=height, output_dir=str(output_dir), refs=refs,
-                   variant=config.flux3_variant, quantize=config.mflux_quantize)
+                   variant=config.flux3_variant, quantize=config.mflux_quantize,
+                   steps=steps)
     tail = []
     result = _run([str(worker_python()), str(ROOT / "scripts/flux3_worker.py")], env, on_log, request,
                   timeout=1800 + 3600 * n,

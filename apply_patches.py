@@ -338,6 +338,17 @@ def patch_engines_js(version_dir: Path):
         print(f"[+] Added snapCanvasForEngine to engines.js")
     return True
 
+def patch_flux3_worker(version_dir: Path):
+    path = version_dir / "scripts" / "flux3_worker.py"
+    if not path.is_file():
+        return False
+    content = path.read_text(encoding="utf-8")
+    content = content.replace('"--steps", "50" if request["variant"] == "base" else "16"',
+                              '"--steps", str(request.get("steps") or ("4" if request["variant"] == "distilled" else "50"))')
+    path.write_text(content, encoding="utf-8")
+    print("[+] Patched flux3_worker.py for Turbo 4-Step")
+    return True
+
 def patch_flux3_engine(version_dir: Path):
     path = version_dir / "flux3_engine.py"
     if not path.is_file():
@@ -364,6 +375,7 @@ def main():
     patch_index_html(target_path)
     patch_engines_js(target_path)
     patch_flux3_engine(target_path)
+    patch_flux3_worker(target_path)
 
     print(f"[✔] All patches applied to {target_path.name}")
 
