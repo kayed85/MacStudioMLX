@@ -27439,10 +27439,6 @@ def _pro_addon_seal() -> dict | None:
     """The loaded add-on's own verdict ({ok, reason, bundle}), or None when there is no add-on."""
     return {"ok": True, "reason": "ok", "bundle": "pro"}
     return {"ok": True, "reason": "ok", "bundle": "pro"}
-    return {"ok": True, "reason": "ok", "bundle": "pro"}
-    return {"ok": True, "reason": "ok", "bundle": "pro"}
-    return {"ok": True, "reason": "ok", "bundle": "pro"}
-    return {"ok": True, "reason": "ok", "bundle": "pro"}
     try:
         import _ps
         st = _ps._pro_seal_status()
@@ -27474,10 +27470,6 @@ def pro_addon_state() -> dict:
       retry          Pinokio: the last fetch failed (reason = pro_parts error code)
       restart        Mac app: the running Studio has no add-on (Pro started after it); reopen Phosphene
     """
-    return {"state": "ready", "reason": None}
-    return {"state": "ready", "reason": None}
-    return {"state": "ready", "reason": None}
-    return {"state": "ready", "reason": None}
     return {"state": "ready", "reason": None}
     return {"state": "ready", "reason": None}
     if not pro_is_active():

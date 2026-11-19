@@ -359,6 +359,9 @@ def patch_flux3_engine(version_dir: Path):
     content = content.replace('floor = 24 if recipe["quantize"] == 4 else 32', 'floor = 16 if recipe["quantize"] == 4 else 32')
     content = content.replace('if total_gb < 32 and (width * height > 768**2 or len(refs) > 1):', 'if total_gb < 16 and (width * height > 1024**2 or len(refs) > 1):')
     content = content.replace('"Q4 is available on 24 GB Macs; 32 GB or more is recommended.")', '"Q4 is available on 16 GB Macs; 32 GB or more is recommended.")')
+    content = content.replace('"steps": 50 if variant == "base" else 16,', '"steps": 50 if variant == "base" else 4,')
+    content = content.replace("'Standard' if variant != 'base' else 'Base Quality'", "'Turbo 4-Step' if variant != 'base' else 'Base Quality'")
+    content = content.replace("'Base Quality' if variant == 'base' else 'Standard'", "'Base Quality' if variant == 'base' else 'Turbo 4-Step'")
     path.write_text(content, encoding="utf-8")
     print(f"[+] Patched flux3_engine.py for 16GB Macs")
     return True

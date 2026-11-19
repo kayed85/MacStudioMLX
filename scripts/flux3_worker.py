@@ -68,11 +68,10 @@ def fetch(pack):
 
 def cli_args(request, model, seed, output):
     base = "flux3-image-klein" + ("-base" if request["variant"] == "base" else "")
-    steps = str(request.get("steps") or ("4" if request["variant"] == "distilled" else "50"))
     args = ["mflux-generate-flux3", "--model", str(model), "--base-model", base,
             "--prompt", request["prompt"], "--seed", str(seed),
             "--width", str(request["width"]), "--height", str(request["height"]),
-            "--steps", steps,
+            "--steps", str(request.get("steps") or ("4" if request["variant"] == "distilled" else "50")),
             "--output", str(output), "--metadata", "--low-ram"]
     if request["variant"] == "base":
         args += ["--guidance", "3.5"]
