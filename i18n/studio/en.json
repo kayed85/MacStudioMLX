@@ -25406,6 +25406,10 @@
    "text": "Your Pro",
    "note": "Studio · heading · in the Studio, the main Phosphene window where the user makes videos, pictures and music",
    "where": "index.html:7192"
-  }
+  },
+  "sbAspectRow.aspect": "Format & Platform <span class=\"cz-label-hint\">dimensions & camera framing</span>",
+  "sbAspectGroup.landscape": "Landscape / YouTube",
+  "sbAspectGroup.reels": "Reels / TikTok",
+  "sbAspectGroup.square": "Square Post"
  }
 }

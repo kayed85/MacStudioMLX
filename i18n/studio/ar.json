@@ -5119,7 +5119,11 @@
   "studioSection.aspect": "الأبعاد",
   "studioSection.candidates_n": "المرشحين (ن)",
   "studioSection.make_or_change_a": "إنشاء صورة أو تغييرها <0> قم بإسقاط صورة لتحريرها، أو اترك الفتحات فارغة ووصف واحدة بالكلمات أدناه · يقوم FLUX 3 Klein وIdeogram 4 بإنشاء صور من النص وحده </0>",
-  "studioSection.seed": "رقم البذرة (Seed)"
+  "studioSection.seed": "رقم البذرة (Seed)",
+  "sbAspectRow.aspect": "المنصة والأبعاد <span class=\"cz-label-hint\">تأطير الكاميرا والقياسات</span>",
+  "sbAspectGroup.landscape": "أفقي / يوتيوب",
+  "sbAspectGroup.reels": "ريلز / تيك توك",
+  "sbAspectGroup.square": "منشور مربع"
  },
  "source": {}
 }

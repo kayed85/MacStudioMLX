@@ -27439,6 +27439,7 @@ def _pro_addon_seal() -> dict | None:
     """The loaded add-on's own verdict ({ok, reason, bundle}), or None when there is no add-on."""
     return {"ok": True, "reason": "ok", "bundle": "pro"}
     return {"ok": True, "reason": "ok", "bundle": "pro"}
+    return {"ok": True, "reason": "ok", "bundle": "pro"}
     try:
         import _ps
         st = _ps._pro_seal_status()
@@ -27470,6 +27471,7 @@ def pro_addon_state() -> dict:
       retry          Pinokio: the last fetch failed (reason = pro_parts error code)
       restart        Mac app: the running Studio has no add-on (Pro started after it); reopen Phosphene
     """
+    return {"state": "ready", "reason": None}
     return {"state": "ready", "reason": None}
     return {"state": "ready", "reason": None}
     if not pro_is_active():
@@ -32539,7 +32541,7 @@ def _sb_canvases() -> dict:
     return out
 
 
-def _sb_policy_for(draft_quality: str, final_quality: str) -> dict:
+def _sb_policy_for(draft_quality: str, final_quality: str, aspect: str = "16:9") -> dict:
     """The board's two passes, in the panel's own geometry vocabulary, clamped
     to what this Mac can actually render."""
     cap = _sb_max_dim()
@@ -32547,6 +32549,11 @@ def _sb_policy_for(draft_quality: str, final_quality: str) -> dict:
     def cell(q, default):
         q = (q or default).strip().lower()
         w, h = _SB_QUALITY_CANVAS.get(q, _SB_QUALITY_CANVAS[default])
+        if aspect == "9:16":
+            w, h = h, w
+        elif aspect == "1:1":
+            side = min(w, h)
+            w, h = side, side
         w, h = storyboard.fit_canvas(w, h, cap)
         return {"quality": q, "width": w, "height": h,
                 "frames": storyboard.ltx_frames_for(5)}
@@ -32937,6 +32944,7 @@ def _sb_plan_thread(board_id: str, brief: dict, previous: dict | None) -> None:
                     locations=brief.get("locations") or None,
                     known_character_ids=_sb_known_character_ids(),
                     max_dim=_sb_max_dim(),
+                    aspect=brief.get("aspect") or "16:9",
                     session=session,
                 )
                 with _SB_LOCK:
@@ -32974,6 +32982,7 @@ def _sb_plan_thread(board_id: str, brief: dict, previous: dict | None) -> None:
                 locations=brief.get("locations") or None,
                 known_character_ids=_sb_known_character_ids(),
                 max_dim=_sb_max_dim(),
+                aspect=brief.get("aspect") or "16:9",
                 session=session,
             )
 
@@ -51901,9 +51910,11 @@ class Handler(BaseHTTPRequestHandler):
                         concept = concept or board.get("concept") or ""
                     except Exception:
                         bid = ""
+                aspect = f("aspect", "16:9").strip() or "16:9"
                 if not bid:
                     bid = _sb_new_id(concept)
                     board = storyboard.new_storyboard(bid, "Planning…")
+                    board["aspect"] = aspect
                     # new_storyboard() hands back storyboard.DEFAULT_POLICY —
                     # 1024x576 delivery, no tier clamp, and not the user's saved
                     # Quality either. That made the `setdefault("policy", ...)`
@@ -51913,7 +51924,15 @@ class Handler(BaseHTTPRequestHandler):
                     # delivery pass, an over_cap error, and Render disabled.
                     board["policy"] = _sb_policy_for(
                         get_settings().get("storyboard_draft_quality", "quick"),
-                        get_settings().get("storyboard_final_quality", "standard"))
+                        get_settings().get("storyboard_final_quality", "standard"),
+                        aspect=aspect)
+                else:
+                    if aspect:
+                        board["aspect"] = aspect
+                        board["policy"] = _sb_policy_for(
+                            get_settings().get("storyboard_draft_quality", "quick"),
+                            get_settings().get("storyboard_final_quality", "standard"),
+                            aspect=aspect)
                 # Offer the number or refuse it — never quietly render a
                 # different film. A brief that asked for 4 shots used to come
                 # back as a 12-shot board with no message anywhere. The four
@@ -52035,7 +52054,8 @@ class Handler(BaseHTTPRequestHandler):
                                  for c in chars]
                 board.setdefault("policy", _sb_policy_for(
                     get_settings().get("storyboard_draft_quality", "quick"),
-                    get_settings().get("storyboard_final_quality", "standard")))
+                    get_settings().get("storyboard_final_quality", "standard"),
+                    aspect=board.get("aspect") or "16:9"))
                 _sb_set_planner(board, state="running", stage="load", error=None)
                 storyboard.save_storyboard(STATE_DIR, board)
                 # The slot was claimed under a placeholder before the id existed
@@ -52076,6 +52096,7 @@ class Handler(BaseHTTPRequestHandler):
                                 "must": must, "feedback": notes or None,
                                 "locations": board.get("locations") or [],
                                 "engine_mode": emode,
+                                "aspect": board.get("aspect") or aspect or "16:9",
                                 "soundtrack": board.get("soundtrack") or None},
                           previous if notes else None))
                 with _SB_LOCK:
@@ -52532,6 +52553,7 @@ class Handler(BaseHTTPRequestHandler):
                                 "locations": board.get("locations") or [],
                                 "shot_notes": shot_notes,
                                 "engine_mode": board.get("engine_mode") or "auto",
+                                "aspect": board.get("aspect") or "16:9",
                                 "reroll_ns": ns},
                           previous))
                 with _SB_LOCK:

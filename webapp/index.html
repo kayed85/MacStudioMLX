@@ -3682,6 +3682,15 @@ The same wizard walks out of frame. Audio: footsteps on leaves." data-i18n-place
         </div>
       </div>
 
+      <div class="cz-control" id="sbAspectRow">
+        <div class="cz-label" data-i18n="sbAspectRow.aspect">Format & Platform <span class="cz-label-hint">dimensions & camera framing</span></div>
+        <div class="pill-group cols-3" id="sbAspectGroup">
+          <button type="button" class="pill-btn active" data-sb-aspect="16:9"><span>16:9</span><span class="sub" data-i18n="sbAspectGroup.landscape">Landscape / YouTube</span></button>
+          <button type="button" class="pill-btn" data-sb-aspect="9:16"><span>9:16</span><span class="sub" data-i18n="sbAspectGroup.reels">Reels / TikTok</span></button>
+          <button type="button" class="pill-btn" data-sb-aspect="1:1"><span>1:1</span><span class="sub" data-i18n="sbAspectGroup.square">Square Post</span></button>
+        </div>
+      </div>
+
       <!-- The film-level engine. It is a PLANNING input, not a label: the two
            engines want prompts written differently, so this is asked before the
            plan exists and changing it means re-planning (the Re-plan modal
@@ -5114,7 +5123,7 @@ The last line" data-i18n-placeholder="musicLyricsRaw.placeholder.verse_write_the
          pressing F when an output is selected. Click outside the media or
          press Esc to close. -->
     <div class="expand-lightbox" id="expandLightbox" style="display:none"
-         onclick="if(event.target===this)closeExpandLightbox()">
+         onclick="if(event.target===this || event.target.tagName==='IMG')closeExpandLightbox()">
       <button class="expand-close" type="button" onclick="closeExpandLightbox()" title="Close (Esc)" data-i18n-title="expandLightbox.title.close_esc">
         <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
           <path d="M5 5 L15 15 M15 5 L5 15" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>

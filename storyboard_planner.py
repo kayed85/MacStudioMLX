@@ -542,7 +542,8 @@ Every other shot in the film has NEITHER key.
 
 
 def _build_system_prompt(engine_hint: str, has_characters: bool,
-                         allow_hidden: bool = False) -> str:
+                         allow_hidden: bool = False,
+                         aspect: str = "16:9") -> str:
     dialect = """\
 THE TARGET DIALECT
 
@@ -663,6 +664,25 @@ nothing. Replace each with the visible fact underneath it.
             "FACES: this brief explicitly asked for hidden or obscured faces, so L11 is "
             "relaxed for the shots where the brief wants it - you may use \"hidden\" as a\n"
             "\"face\" value on those shots. Every other shot still keeps its face readable.\n")
+    if aspect == "9:16":
+        parts.append("""\
+CAMERA FRAMING & COMPOSITION: VERTICAL 9:16 (Instagram Reels / TikTok / Shorts)
+The entire film is shot and composed strictly for vertical mobile display (9:16 portrait).
+- Keep human subjects and faces centered horizontally with generous headroom.
+- Never place critical action or faces near the left/right frame borders where vertical mobile cropping occurs.
+- Prefer vertical medium shots, vertical close-ups, and forward/backward tracking. Avoid wide landscape horizon blocking.
+""")
+    elif aspect == "1:1":
+        parts.append("""\
+CAMERA FRAMING & COMPOSITION: SQUARE 1:1 (Instagram Feed / Square)
+The film is composed strictly for a 1:1 square canvas.
+- Keep subjects and actions balanced in the center with equal margins around the frame.
+""")
+    else:
+        parts.append("""\
+CAMERA FRAMING & COMPOSITION: WIDESCREEN 16:9 (YouTube / Cinema)
+The film is composed for cinematic widescreen 16:9 display.
+""")
     return "\n".join(parts)
 
 
@@ -675,8 +695,15 @@ def _build_user_prompt(
     locations: Sequence[Dict[str, str]] = (),
     screenplay: str = "",
     floor_plan: str = "",
+    aspect: str = "16:9",
 ) -> str:
     lines = ["BRIEF", "", "CONCEPT: %s" % concept.strip(), "", "SHOT COUNT: exactly %d shots." % n_shots]
+    if aspect == "9:16":
+        lines += ["", "TARGET PLATFORM & ASPECT: 9:16 Vertical (Instagram Reels / TikTok / Mobile). Compose shots vertically."]
+    elif aspect == "1:1":
+        lines += ["", "TARGET PLATFORM & ASPECT: 1:1 Square (Instagram Feed). Compose shots centered in square frame."]
+    else:
+        lines += ["", "TARGET PLATFORM & ASPECT: 16:9 Widescreen (YouTube / Cinema)."]
     if style and style.strip():
         lines += ["", "STYLE (applies to every shot; keep it identical across all of them): %s"
                   % style.strip()]
@@ -2819,6 +2846,7 @@ def plan_film(
     python_exe: Optional[Any] = None,
     session: Optional[PlannerSession] = None,
     timeout_s: float = DEFAULT_TIMEOUT_S,
+    aspect: str = "16:9",
 ) -> Dict[str, Any]:
     """Concept -> film spec that `storyboard.validate_storyboard()` accepts.
 
@@ -2900,13 +2928,13 @@ def plan_film(
     budget = int(max_tokens) if max_tokens else min(
         8192, max(1200, 380 * (1 if fb_mode == "shot" else n_shots) + 500))
 
-    system = _build_system_prompt(engine, bool(cast), allow_hidden)
+    system = _build_system_prompt(engine, bool(cast), allow_hidden, aspect=aspect)
     if fb_mode == "shot":
         user = _build_shot_feedback_prompt(previous, fb_shot, fb_note)
     elif fb_mode == "film":
         user = _build_film_feedback_prompt(previous, fb_note, n_shots)
     else:
-        user = _build_user_prompt(concept, n_shots, style, cast, must, locs)
+        user = _build_user_prompt(concept, n_shots, style, cast, must, locs, aspect=aspect)
 
     owned = session is None
     sess = session or PlannerSession(model_path=model_path, python_exe=python_exe,
@@ -2974,7 +3002,8 @@ def plan_film(
     # end — arriving silently, through the pass itself.
     if scene_text or floor_plan or _views:
         user = _build_user_prompt(concept, n_shots, style, cast, must, locs,
-                                  screenplay=scene_text, floor_plan=floor_plan)
+                                  screenplay=scene_text, floor_plan=floor_plan,
+                                  aspect=aspect)
     try:
         result = _plan_with_session(
             sess, system=system, user=user, fb_mode=fb_mode, fb_shot=fb_shot,

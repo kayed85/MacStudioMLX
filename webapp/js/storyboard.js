@@ -232,6 +232,13 @@ function sbInit() {
   } else { sbRenderCast(); }
   sbConceptInput();
   sbMustInput();
+  const sbAspectBtns = document.querySelectorAll('#sbAspectGroup .pill-btn');
+  sbAspectBtns.forEach(b => {
+    b.onclick = () => {
+      sbAspectBtns.forEach(x => x.classList.remove('active'));
+      b.classList.add('active');
+    };
+  });
   // Restore the last board the user was on, same idiom as phos_workflow.
   let last = '';
   try { last = localStorage.getItem('phos_sb_open') || ''; } catch (e) {}
@@ -439,6 +446,12 @@ function sbSetTake(secs) {
   _sbTake = Number(secs) || 60;
   document.querySelectorAll('#sbTakeGroup .pill-btn').forEach(b =>
     b.classList.toggle('active', Number(b.dataset.sbTake) === _sbTake));
+}
+let _sbAspect = '16:9';
+function sbSetAspect(aspect) {
+  _sbAspect = aspect || '16:9';
+  document.querySelectorAll('#sbAspectGroup .pill-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.sbAspect === _sbAspect));
 }
 function sbShotsValue() {
   if (_sbTake) return Math.round(_sbTake / 5);
@@ -761,6 +774,9 @@ async function sbPlan() {
   if (sbEl('sbAnchorStills')) fd.set('anchor_stills', sbEl('sbAnchorStills').checked ? '1' : '0');
   if (sbEl('sbStillsFirst')) fd.set('stills_first', sbEl('sbStillsFirst').checked ? '1' : '0');
   if (sbEl('sbLongWindows')) fd.set('long_windows', sbEl('sbLongWindows').checked ? '1' : '0');
+  const aspectBtn = document.querySelector('#sbAspectGroup .pill-btn.active');
+  const aspect = (aspectBtn && aspectBtn.dataset.sbAspect) || '16:9';
+  fd.set('aspect', aspect);
   let r;
   try {
     r = await (await fetch('/storyboard/plan', { method: 'POST', body: fd })).json();
@@ -1236,6 +1252,7 @@ function sbRenderPlan(r) {
     const el = sbEl(id);
     if (el && key in b) el.checked = !!b[key];
   }
+  if (b.aspect) sbSetAspect(b.aspect);
   sbStillsFirstSync();
   // 4.17: the brief's Length (shot count / One-take seconds) and Engine are
   // the NEW-film form — the next "Plan" reads them. Opening a board used to
@@ -2929,6 +2946,8 @@ document.addEventListener('click', (ev) => {
   if (chip) { sbSetShots(chip.dataset.sbShots === 'take' ? 'take' : Number(chip.dataset.sbShots)); return; }
   const tk = ev.target.closest && ev.target.closest('#sbTakeGroup [data-sb-take]');
   if (tk) { sbSetTake(tk.dataset.sbTake); return; }
+  const asp = ev.target.closest && ev.target.closest('#sbAspectGroup [data-sb-aspect]');
+  if (asp) { sbSetAspect(asp.dataset.sbAspect); return; }
   const eng = ev.target.closest && ev.target.closest('#sbEngineGroup [data-sb-engine]');
   if (eng) { sbSetEngineMode(eng.dataset.sbEngine); return; }
   const reng = ev.target.closest && ev.target.closest('#sbReplanEngineGroup [data-sb-engine]');
