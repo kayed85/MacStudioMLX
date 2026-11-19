@@ -131,7 +131,14 @@ function musicFormChanged() {
     : `YuE2 needs ${music.min_ram_gb} GB of unified memory`);
 }
 function musicFormParams() {
-  const instrumental = document.getElementById('musicInstrumental').checked;
+  let instrumental = Boolean((document.getElementById('musicInstrumental') || {}).checked);
+  const lyricsVal = ((document.getElementById('musicLyrics') || {}).value || '').trim();
+  if (lyricsVal && instrumental) {
+    instrumental = false;
+    const instEl = document.getElementById('musicInstrumental');
+    if (instEl) instEl.checked = false;
+    if (typeof musicFormChanged === 'function') musicFormChanged();
+  }
   return new URLSearchParams({
     mode: 'music', engine: 'music',
     // WHICH TASK WAS CHOSEN, in words the server can check (M6-07): a cover
@@ -139,7 +146,7 @@ function musicFormParams() {
     // path left empty was indistinguishable from Write and composed a new
     // song instead of refusing.
     music_task: (document.getElementById('musicTask') || {}).value || 'write',
-    music_lyrics: instrumental ? '' : document.getElementById('musicLyrics').value,
+    music_lyrics: instrumental ? '' : ((document.getElementById('musicLyrics') || {}).value || ''),
     music_style: document.getElementById('musicStyle').value,
     music_mode: document.getElementById('musicMode').value,
     music_instrumental: instrumental ? 'on' : 'off',
@@ -238,6 +245,13 @@ function musicLoraToggled(el) {
     row.classList.toggle('active', on);
     const value = Number(row.querySelector('input[type="range"]').value);
     row.querySelector('.range-val').textContent = value.toFixed(2);
+    if (on && row.dataset.id && row.dataset.id.toLowerCase().includes('arabmaqamrock')) {
+      const modeEl = document.getElementById('musicMode');
+      if (modeEl && modeEl.value !== 'off') {
+        const offBtn = document.querySelector('#musicModePills button[data-value="off"]');
+        if (offBtn && typeof musicPick === 'function') musicPick('musicMode', offBtn);
+      }
+    }
   }
   musicFormChanged();
 }

@@ -104,6 +104,7 @@
 <symbol id="eng-mark-img-edit" viewBox="0 0 24 24"><rect x="3.4" y="4.4" width="13.2" height="13.2" rx="2.4" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12.4 19.6l1-3.4 6-6 2.4 2.4-6 6z" fill="currentColor"/></symbol>
 <symbol id="eng-mark-img-ideogram" viewBox="0 0 24 24"><rect x="3.4" y="4.4" width="17.2" height="15.2" rx="2.6" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8 9h8M12 9v7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>
 <symbol id="eng-mark-img-h3i" viewBox="0 0 24 24"><rect x="3.4" y="4.4" width="17.2" height="15.2" rx="2.6" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8 8.6v6.8M12.4 8.6v6.8M8 12h4.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M15.4 9.2h2.4M16.6 9.2v5.6M15.4 14.8h2.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
+<symbol id="eng-mark-img-h3r" viewBox="0 0 24 24"><rect x="3.4" y="4.4" width="17.2" height="15.2" rx="2.6" fill="none" stroke="currentColor" stroke-width="2"/><path d="M7.4 15.6l4.2-4.2 2.4 2.4 3.2-3.2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="8.6" cy="8.8" r="1.3" fill="currentColor"/></symbol>
 <symbol id="eng-mark-img-ph3" viewBox="0 0 24 24"><rect x="3.4" y="4.4" width="17.2" height="15.2" rx="2.6" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8 8.6v6.8M12.4 8.6v6.8M8 12h4.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M15.6 10.6v2.8M17.6 9.4v5.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
 <symbol id="ph-speaker-slash" viewBox="0 0 256 256"><line x1="48" y1="40" x2="208" y2="216" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M80,168H32a8,8,0,0,1-8-8V96a8,8,0,0,1,8-8H80l72-56V147" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M152,179v45L94.4,179.2" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 </defs>
@@ -136,12 +137,12 @@
   </div>
 </div>
 
-<!-- ONE MODAL, TWO SPEAKERS (v4.9): the update pop-up and the maintainer
-     broadcast share this chrome. A POP-UP, not just the banner, is the owner's
-     explicit ruling: "it should be a pop-up... people who don't update will be
-     annoyed by it every time they open the app" — that is the design, not a
-     defect. Dismissal lasts one page load for updates; broadcasts dismiss
-     forever per message id. Body renders as textContent, never HTML. -->
+<!-- ONE MODAL, TWO SPEAKERS: updates and developer notices.
+     A new release is announced when Studio opens.
+     Later is remembered for that release across page reloads.
+     The header still offers the update when the person is ready.
+     Developer notices use their own once-per-message dismissal.
+     Both use textContent for the body, never HTML. -->
 <div id="phModalWrap" hidden>
   <div id="phModal" role="dialog" aria-modal="true" aria-labelledby="phModalTitle">
     <div id="phModalKicker"></div>
@@ -227,7 +228,7 @@
       <!-- SYS-19: "Helper" is the internal subprocess name (mlx_warm_helper.py);
            from a creator's chair this row answers "can I render right now",
            which "Engine" says plainly. -->
-      <div class="hc-row" data-pill="helperPill"><span class="hc-label" data-i18n="healthPop.engine">Engine</span></div>
+      <div class="hc-row" data-pill="helperPill"><span class="hc-label" data-i18n="healthPop.video">Video</span></div>
       <div class="hc-row" data-pill="modelsPill"><span class="hc-label" data-i18n="healthPop.models">Models</span></div>
       <div class="hc-row" data-pill="comfyPill"><span class="hc-label" data-i18n="healthPop.comfyui">ComfyUI</span></div>
       <div class="hc-row" data-pill="queuePill"><span class="hc-label" data-i18n="healthPop.queue">Queue</span></div>
@@ -236,7 +237,7 @@
     <span id="tierPill" class="pill" style="cursor:pointer" onclick="openTierModal()" title="Click to see what this Mac can do" data-i18n-title="tierPill.title.click_to_see_what" data-i18n="tierPill.click_for_system_info">click for system info</span>
     <span id="memPill" class="pill" data-i18n="memPill.memory">memory…</span>
     <span id="comfyPill" class="pill" style="display:none" data-i18n="comfyPill.comfy">comfy…</span>
-    <span id="helperPill" class="pill" data-i18n="helperPill.engine">engine…</span>
+    <span id="helperPill" class="pill" data-i18n="helperPill.starting">starting…</span>
     <!-- Models pill: shows roll-up status (X / Y models ready) and click-opens
          a modal with per-repo download buttons. Color reflects readiness:
          pill-good = all models present, pill-warn = base ready but Q8 missing,
@@ -703,6 +704,9 @@
       <input type="hidden" name="schedule_preset" id="schedule_preset" value="">
       <!-- The Pro speed-up switch's value ("on"/"off"), written by proSpeedRender(). -->
       <input type="hidden" name="pro_speedup_choice" id="pro_speedup_choice" value="on">
+      <!-- Pro Fast draft ("on"/"off"), written by proDraftRender(): on for a Pro member with the Speed
+           row's Fast draft armed. The server decides whether the render can use it. -->
+      <input type="hidden" name="pro_fast_draft" id="pro_fast_draft" value="off">
 
       <div id="warnBanner" class="warn-banner"></div>
 
@@ -790,12 +794,14 @@
                hidden input is in the make_job allowlist (h3_reference). -->
           <div class="mode-only h3-ref-section" id="h3RefSection">
             <h2 data-i18n="h3RefSection.face_to_keep_optional">Face to keep <span class="h2-hint">· optional · Hailuo H3</span></h2>
+            <div class="h3-refs-p1" id="h3RefsP1" hidden data-i18n="h3RefsP1.picture_1_only">Picture 1</div>
             <div class="picker" data-key="h3_reference">
               <div class="picker-drop" id="picker_drop_h3_reference">
                 <div class="picker-empty">
                   <div class="picker-icon"><svg class="ph"><use href="#ph-user-plus"/></svg></div>
-                  <div class="picker-cta" data-i18n="picker_drop_h3_reference.drop_a_clear_photo">Drop a <strong>clear photo of the face</strong>, or <strong>click to browse</strong></div>
-                  <div class="hint" data-i18n="picker_drop_h3_reference.h3_keeps_this_face">H3 keeps this face in the scene your prompt describes. Adds about a minute at Standard.</div>
+                  <div class="picker-cta h3-refs-p1-cta" data-i18n="picker_drop_h3_reference.drop_a_picture_refs">Drop <strong>a picture</strong>: a person, a thing or a place, or <strong>click to browse</strong></div>
+                  <div class="picker-cta h3-face-cta" data-i18n="picker_drop_h3_reference.drop_a_clear_photo">Drop a <strong>clear photo of the face</strong>, or <strong>click to browse</strong></div>
+                  <div class="hint h3-face-cta" data-i18n="picker_drop_h3_reference.h3_keeps_this_face">H3 keeps this face in the scene your prompt describes. Adds about a minute at Standard.</div>
                 </div>
                 <img class="picker-preview" id="picker_preview_h3_reference" alt="" style="display:none">
                 <button type="button" class="picker-clear" id="picker_clear_h3_reference" title="Clear" style="display:none" data-i18n-title="picker_clear_h3_reference.title.clear"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>
@@ -805,6 +811,63 @@
               <div class="picker-recent" id="picker_recent_h3_reference_wrap" style="display:none">
                 <div class="picker-recent-label" data-i18n="picker_recent_h3_reference_wrap.recent_uploads_click_to">Recent uploads · click to use</div>
                 <div class="picker-recent-strip" id="picker_recent_h3_reference"></div>
+              </div>
+            </div>
+            <!-- References (Pro ledger row h3-references): MiniMax H3's own reference model, up to
+                 three pictures (people, things, places) the shot is built around. _h3RefsUpdate() in
+                 queue.js shows it on H3 Text from /status h3.references. ONE tier switch: `locked`
+                 (Free) draws the same switch greyed with one line and the Pro door on click; `offered`
+                 (Pro with the recipe) makes it live. On, the photo above is Picture 1 and two more
+                 slots open; before the first use the Get panel says what the download takes on this
+                 Mac. h3_refs, h3_reference2 and h3_reference3 are in the make_job allowlist. -->
+            <div class="h3-refs" id="h3RefsBlock" style="display:none">
+              <label class="h3-refs-switch" id="h3RefsSwitch"><input type="checkbox" name="h3_refs" id="h3_refs" value="on" onchange="h3RefsChanged()">
+                <span data-i18n="h3RefsBlock.references_build_the_shot"><strong>References</strong> · build the shot around up to 3 pictures: people, things or places</span><span class="pro-tag" data-pro-feature="h3-references">Pro</span></label>
+              <p class="pro-note" id="h3RefsFreeLine" hidden></p>
+              <div class="hint" id="h3RefsHint" style="display:none" data-i18n="h3RefsBlock.hint_pictures">The pictures are not the first frame: your prompt decides the shot and can name them ("the woman from Picture 2"). Clips of 5 seconds.</div>
+              <div class="h3-refs-more" id="h3RefsMore" style="display:none">
+              <div class="picker h3-refs-picker" data-key="h3_reference2">
+                <div class="picker-drop" id="picker_drop_h3_reference2">
+                  <div class="picker-empty">
+                    <div class="picker-icon"><svg class="ph"><use href="#ph-image"/></svg></div>
+                    <div class="picker-cta" data-i18n="picker_drop_h3_reference2.picture_n">Picture 2 <span class="h2-hint">· optional</span></div>
+                  </div>
+                  <img class="picker-preview" id="picker_preview_h3_reference2" alt="" style="display:none">
+                  <button type="button" class="picker-clear" id="picker_clear_h3_reference2" title="Clear" style="display:none" data-i18n-title="picker_clear_h3_reference2.title.clear"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>
+                </div>
+                <input type="file" id="picker_file_h3_reference2" accept="image/*" style="display:none">
+                <input type="hidden" name="h3_reference2" id="h3_reference2" value="">
+                <div class="picker-recent" id="picker_recent_h3_reference2_wrap" style="display:none">
+                  <div class="picker-recent-strip" id="picker_recent_h3_reference2"></div>
+                </div>
+              </div>
+              <div class="picker h3-refs-picker" data-key="h3_reference3">
+                <div class="picker-drop" id="picker_drop_h3_reference3">
+                  <div class="picker-empty">
+                    <div class="picker-icon"><svg class="ph"><use href="#ph-image"/></svg></div>
+                    <div class="picker-cta" data-i18n="picker_drop_h3_reference3.picture_n">Picture 3 <span class="h2-hint">· optional</span></div>
+                  </div>
+                  <img class="picker-preview" id="picker_preview_h3_reference3" alt="" style="display:none">
+                  <button type="button" class="picker-clear" id="picker_clear_h3_reference3" title="Clear" style="display:none" data-i18n-title="picker_clear_h3_reference3.title.clear"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>
+                </div>
+                <input type="file" id="picker_file_h3_reference3" accept="image/*" style="display:none">
+                <input type="hidden" name="h3_reference3" id="h3_reference3" value="">
+                <div class="picker-recent" id="picker_recent_h3_reference3_wrap" style="display:none">
+                  <div class="picker-recent-strip" id="picker_recent_h3_reference3"></div>
+                </div>
+              </div>
+              </div>
+              <div class="h3-refs-get" id="h3RefsGet" style="display:none">
+                <p class="h3-refs-plan" id="h3RefsPlan"></p>
+                <p class="h3-refs-check" id="h3RefsCheck" hidden></p>
+                <div class="h3-refs-progress" id="h3RefsProgress" hidden>
+                  <div class="h3-refs-bar"><span id="h3RefsBarFill"></span></div>
+                  <span class="h3-refs-progress-text" id="h3RefsProgressText"></span>
+                </div>
+                <div class="h3-refs-get-row">
+                  <button type="button" class="btn" id="h3RefsGetBtn" onclick="h3RefsGet()" data-i18n="h3RefsGet.get_references">Get References</button>
+                  <span class="hint" id="h3RefsGetNote"></span>
+                </div>
               </div>
             </div>
           </div>
@@ -1214,8 +1277,6 @@
             <option value="Mandarin Chinese" data-i18n="h3DialogueLang.mandarin">Mandarin</option>
             <option value="Korean" data-i18n="h3DialogueLang.korean">Korean</option>
             <option value="Portuguese" data-i18n="h3DialogueLang.portuguese">Portuguese</option>
-            <option value="Arabic">العربية الفصحى (Arabic)</option>
-            <option value="Jordanian Arabic">اللهجة الأردنية (Jordanian)</option>
           </select>
           <span class="ct-spacer"></span>
           <span class="h3-prompt-helper-words" id="h3DialogueWordCount" hidden></span>
@@ -1275,6 +1336,18 @@
                imports all stay in place. Re-exposing is a one-line
                un-comment when Phase 2 lands. -->
           <input type="hidden" id="hdr" name="hdr" value="off">
+          <!-- Crisper detail (Pro ledger row ltx-crisper-detail), crisperRender() in settings.js:
+               noticeably finer detail on LTX-2.5 Quick/Balanced/Standard clips in about the same render
+               time. A Pro member gets the switch (off by default, remembered); a Free user sees what
+               Pro adds and the Pro door. What it fetches and applies comes from the Pro add-on,
+               never from here. -->
+          <label class="toggle-pill" id="crisperPill" data-ltx-only
+                 title="Noticeably finer detail on LTX-2.5 clips (Quick, Balanced and Standard), in about the same render time." data-i18n-title="crisperPill.title.noticeably_finer_detail_on">
+            <input type="checkbox" id="crisperToggle" name="crisper_detail" onchange="crisperChanged()" aria-label="Crisper detail" data-i18n-aria-label="crisperToggle.aria-label.crisper_detail">
+            <span class="toggle-dot"></span>
+            <span data-i18n="crisperPill.crisper_detail">Crisper detail</span>
+            <span class="pro-tag" id="crisperTag" data-pro-feature="ltx-crisper-detail" style="margin-left:4px">Pro</span>
+          </label>
           <!--
           <label class="toggle-pill" id="hdrPill"
                  title="HDR via the official Lightricks LTX-2.3-22b IC-LoRA-HDR.">
@@ -1500,7 +1573,7 @@
         <input type="hidden" name="h3_clean_sound" id="h3_clean_sound" value="">
         <!-- Pika H3 Flex (a Speed choice): "1" when the third pill renders. -->
         <input type="hidden" name="h3_flex" id="h3_flex" value="0">
-        <!-- H3 Flex Turbo (5.0, Pro): "1" when the four-step Flex renders. -->
+        <!-- H3 Flex Turbo (5.0, Pro): "1" when the faster Flex renders. -->
         <input type="hidden" name="h3_flex_turbo" id="h3_flex_turbo" value="0">
         <!-- Which of H3's ONE adapter slots this render spends. Its runner's
              `--lora` takes a single path (default=None, not append), so Turbo
@@ -1602,10 +1675,13 @@
                 </button>
                 <button type="button" class="pill-btn" data-sched-preset="fast"
                         title="The engine's fast draft schedule (5+2 forwards). Renders a DIFFERENT take — the same prompt and seed land on a different shot than Tuned, so use it to explore, then re-render keepers on Tuned." data-i18n-title="schedPresetGroup.title.the_engine_s_fast">
-                  <span data-i18n="schedPresetGroup.fast_draft">Fast draft</span>
+                  <span><span data-i18n="schedPresetGroup.fast_draft">Fast draft</span><span class="pro-tag" data-pro-feature="ltx-fast-draft">Pro</span></span>
                   <span class="sub" id="schedFastSub" data-i18n="schedFastSub.different_take">different take</span>
                 </button>
               </div>
+              <!-- Pro Fast draft (proDraftRender, settings.js): with Fast draft picked, one quiet line.
+                   Free: what Pro adds, with the measured times. Pro: that it is on, or why not here. -->
+              <p class="pro-note" id="proDraftNote" hidden></p>
             </div>
             <div>
               <div class="qs-label">
@@ -2458,6 +2534,12 @@ The same wizard walks out of frame. Audio: footsteps on leaves." data-i18n-place
              paused" plus a bare Resume button. This surfaces the same
              reason where the person is actually looking. Populated by
              poll() from /status.paused_reason. -->
+        <!-- Saved files folder unreachable (drive unplugged): renders carry on
+             and stay on this Mac; queue.js fills the sentence from /status. -->
+        <div class="breaker-notice" id="outputsFolderNotice" hidden>
+          <svg class="ph" aria-hidden="true"><use href="#ph-warning-fill"/></svg>
+          <span id="outputsFolderNoticeText"></span>
+        </div>
         <div class="breaker-notice" id="breakerNotice" hidden>
           <svg class="ph" aria-hidden="true"><use href="#ph-warning-fill"/></svg>
           <span id="breakerNoticeText"></span>
@@ -2834,10 +2916,14 @@ The same wizard walks out of frame. Audio: footsteps on leaves." data-i18n-place
               <option value="ph3image_inline" data-i18n="imgStudioEngine.p_h3_image_high">P-H3-Image High (8 MP, ~5 min)</option>
               <!-- MiniMax-H3-Image (MiniMax), port ports/minimax-h3-image. The times in these labels are
                    replaced at load by /image/engine_status `version_label`, which reads
-                   H3IMAGE_MEASURED_ETA in mlx_ltx_panel.py (placeholders until the bench). -->
+                   H3IMAGE_MEASURED_ETA / H3IMAGE_LOWMEM_ETA in mlx_ltx_panel.py. -->
               <option value="h3image_draft_inline" data-i18n="imgStudioEngine.minimax_h3_image_draft">MiniMax-H3-Image &mdash; Draft (4 MP)</option>
               <option value="h3image_standard_inline" data-i18n="imgStudioEngine.minimax_h3_image_standard">MiniMax-H3-Image &mdash; Standard (8 MP)</option>
               <option value="h3image_high_inline" data-i18n="imgStudioEngine.minimax_h3_image_high">MiniMax-H3-Image &mdash; High (16 MP)</option>
+              <!-- Restyle a picture on Hailuo H3 (R&D L55): one picture in, the same scene back in the style the
+                   prompt names. Free (owner, card 788). The time in the label is replaced at load by
+                   /image/engine_status `version_label` (H3RESTYLE_MEASURED_ETA in mlx_ltx_panel.py). -->
+              <option value="h3restyle_inline" data-i18n="imgStudioEngine.restyle_a_picture">Restyle a picture (on MiniMax H3) (1 MP, ~2 min)</option>
               <option value="mock_inline" id="imgStudioMockOption" hidden data-i18n="imgStudioMockOption.mock_testing_debug_only">Mock (testing — debug only)</option>
             </select>
             <span class="studio-version-only" id="imgStudioVersionOnly" hidden></span>
@@ -4097,7 +4183,7 @@ The last line" data-i18n-placeholder="musicLyricsRaw.placeholder.verse_write_the
           <div class="hint" data-i18n="musicCustomPane.prose_not_fields_put">Prose, not fields. Put the tempo, the language and the singer in the sentence.</div>
           <div class="composer-tools">
             <label class="toggle-pill" id="musicInstrumentalPill" title="When on, the model is asked for a track with no vocal line. Your lyrics stay in the box and are not used." data-i18n-title="musicInstrumentalPill.title.when_on_the_model">
-              <input type="checkbox" id="musicInstrumental" onchange="musicFormChanged()"><span class="dot"></span><span data-i18n="musicInstrumentalPill.instrumental">Instrumental</span>
+              <input type="checkbox" id="musicInstrumental" onchange="musicFormChanged()"><span class="dot"></span><span data-i18n="musicInstrumentalPill.instrumental">Instrumental (No vocals / بدون غناء)</span>
             </label>
           </div>
           <!-- Instrumental is two recipes, and which one runs depends on one
@@ -5207,6 +5293,8 @@ The last line" data-i18n-placeholder="musicLyricsRaw.placeholder.verse_write_the
             <button type="button" class="smt-btn active" data-sb-stage="list" onclick="sbSetStage('list')" data-i18n="sbStageToggle.shot_list">Shot list</button>
             <button type="button" class="smt-btn" data-sb-stage="player" onclick="sbPlayBoard()" data-i18n="sbStageToggle.player">Player</button>
           </div>
+          <!-- Which clip the player shows: "Shot 3 · Draft · 640×384" and, beside a draft, Make final (owner, 19 Nov 2026). -->
+          <span class="sb-play-pass" id="sbPlayPass" hidden></span>
           <!-- "All storyboards" used to sit here. It lives on the rail now,
                with the rest of the navigation, so there is one place to look
                rather than a different one on every stage state. -->
@@ -5278,6 +5366,8 @@ The last line" data-i18n-placeholder="musicLyricsRaw.placeholder.verse_write_the
           <button type="button" class="smt-btn active" data-sb-view="list" onclick="sbSetShotView('list')" data-i18n="sbShotViewToggle.list">List</button>
           <button type="button" class="smt-btn" data-sb-view="grid" onclick="sbSetShotView('grid')" data-i18n="sbShotViewToggle.grid">Grid</button>
         </div>
+        <!-- One-time hint: drafts first, then Make final (painted by sbRenderDraftHint). -->
+        <div class="sb-draft-hint" id="sbDraftHint" hidden></div>
         <ol class="sb-shots" id="sbShots"></ol>
         <div class="sb-addrow"><button type="button" class="ghost-btn" onclick="sbAddShot()" data-i18n="sbPlan.add_a_shot">+ Add a shot</button></div>
 
@@ -6445,10 +6535,23 @@ The last line" data-i18n-placeholder="musicLyricsRaw.placeholder.verse_write_the
       <h2 id="settingsModalTitle" data-i18n="settingsModalTitle.settings">Settings</h2>
       <button class="ghost-btn" onclick="closeSettingsModal()" data-i18n="settingsModal.close">Close</button>
     </div>
-    <div class="models-hint" data-i18n="settingsModal.models_rendering_output_format">
-      Models, rendering, output format, accounts and privacy. Saved to
-      <code>panel_settings.json</code> and applied to every new render.
-      Files already in the gallery are not re-encoded.
+    <div class="models-hint" data-i18n="settingsModal.your_choices_are_saved">
+      Your choices are saved on this Mac and used for every new render.
+      Finished files are not changed. Most choices save right away; the
+      rendering choices wait for their own Save button.
+    </div>
+
+    <!-- Phosphene Pro: status and licence entry inside Settings (settings.js
+         renderSettingsPro). Pinokio opens the Studio's own Pro dialog, which
+         takes the key; the Mac app keeps its licence in the app, so the button
+         opens the app's Pro sheet (native cap "pro", else the menu-bar path). -->
+    <div class="settings-section" id="settingsProSection">
+      <h3>Phosphene Pro</h3>
+      <div class="spicy-row">
+        <span class="spicy-state" id="settingsProBadge" data-i18n="settingsProBadge.free">FREE</span>
+        <span class="hint" id="settingsProText" style="flex:1" data-i18n="settingsProText.free_on_this_mac">Free on this Mac.</span>
+        <button type="button" class="ghost-btn" id="settingsProBtn" onclick="settingsProOpen(this)" data-i18n="settingsProBtn.enter_licence_key">Enter licence key</button>
+      </div>
     </div>
 
     <!-- SYS-28: reordered 2026-09-29 to match how people actually reach
@@ -6481,6 +6584,29 @@ The last line" data-i18n-placeholder="musicLyricsRaw.placeholder.verse_write_the
       <div class="models-drive-row" hidden></div>
     </div>
 
+    <!-- Saved files: where finished videos and pictures are kept (settings.js
+         refreshOutputsFolder). Renders are still made on this Mac first; each
+         finished file is copied to the chosen folder and checked. -->
+    <div class="settings-section" id="settingsOutputsFolder">
+      <h3 data-i18n="settingsOutputsFolder.saved_files">Saved files</h3>
+      <div class="hint" style="margin-bottom:8px" data-i18n="settingsOutputsFolder.choose_where_new_videos">
+        Choose where new videos and pictures are saved, for example a folder on an external drive.
+        Each finished file is copied there and checked. Files you already made stay where they are,
+        and your gallery keeps showing everything.
+      </div>
+      <div class="of-current" id="outputsFolderCurrent" role="status"></div>
+      <div class="of-actions">
+        <button type="button" class="primary-btn" id="outputsFolderPickBtn" onclick="pickOutputsFolder()" data-i18n="settingsOutputsFolder.choose_folder">Choose folder…</button>
+        <button type="button" class="ghost" id="outputsFolderResetBtn" onclick="resetOutputsFolder()" hidden data-i18n="settingsOutputsFolder.use_the_default">Use the default folder</button>
+      </div>
+      <details class="of-typed" id="outputsFolderTyped">
+        <summary class="hint" data-i18n="settingsOutputsFolder.or_paste_a_full">Or paste a folder's full path</summary>
+        <input type="text" id="outputsFolderPath" placeholder="/Volumes/My Drive/Phosphene" aria-label="Folder path" data-i18n-aria-label="outputsFolderPath.aria-label.folder_path" data-i18n-placeholder="outputsFolderPath.placeholder.volumes_my_drive_phosphene">
+        <button type="button" class="ghost" onclick="setOutputsFolder(document.getElementById('outputsFolderPath').value)" data-i18n="settingsOutputsFolder.use_this_folder">Use this folder</button>
+      </details>
+      <div class="hint" id="outputsFolderStatus" role="status" aria-live="polite"></div>
+    </div>
+
     <!-- Storage stays visible even when there is nothing to reclaim. -->
     <div class="settings-section" id="settingsStorageSection" style="display:none">
       <h3 data-i18n="settingsStorageSection.storage">Storage</h3>
@@ -6494,17 +6620,14 @@ The last line" data-i18n-placeholder="musicLyricsRaw.placeholder.verse_write_the
     </div>
 
     <div class="settings-section">
-      <h3 data-i18n="settingsModal.model_files">Model files</h3>
-      <div class="hint" style="margin-bottom:8px" data-i18n="settingsModal.verify_every_installed_model">
-        Verify every installed model weight against the official checksums on
-        Hugging Face. A file that's the right size but the wrong content — an
-        interrupted, mirrored, or stale download — decodes to garbled / "mosaic"
-        video. This catches it and offers a one-click re-download. Takes 1–2
-        minutes (it hashes every file).
+      <h3 data-i18n="settingsModal.check_model_files">Check model files</h3>
+      <div class="hint" style="margin-bottom:8px" data-i18n="settingsModal.if_videos_come_out">
+        If videos come out garbled, check that every model downloaded
+        correctly. Anything broken gets a one-click re-download. Takes 1–2 minutes.
       </div>
       <div class="settings-row">
         <button type="button" class="primary-btn" id="deepVerifyBtn"
-                onclick="startDeepVerify()" data-i18n="deepVerifyBtn.verify_model_files_checksum">Verify model files (checksum)</button>
+                onclick="startDeepVerify()" data-i18n="deepVerifyBtn.check_now">Check now</button>
         <span class="hint" id="deepVerifyStatus" style="margin-left:10px"></span>
       </div>
     </div>
@@ -6522,105 +6645,113 @@ The last line" data-i18n-placeholder="musicLyricsRaw.placeholder.verse_write_the
       </div>
     </div>
 
-    <div class="settings-section">
-      <h3 data-i18n="settingsModal.memory_speed">Memory / speed</h3>
+    <!-- Rendering choices: the ONE group that waits for Save (settings.js
+         renderGroup*). Everything else in this dialog saves the moment it is
+         changed and says so. Before 5.0.23 a footer Apply/Cancel looked like it
+         covered the whole dialog while only these controls waited for it, and
+         Cancel did not undo the instant ones. These stay deferred because an
+         output-format save restarts the render helper: saving on every click
+         (or every quality-slider step) would restart it again and again. -->
+    <div class="settings-group" id="settingsRenderGroup">
+      <div class="settings-group-head">
+        <h3 data-i18n="settingsRenderGroup.while_rendering">While rendering</h3>
+        <span class="hint" data-i18n="settingsRenderGroup.these_wait_for_save">These wait for Save.</span>
+      </div>
       <!-- The Memory-policy select that lived here was REMOVED (owner ruling
-           2026-09-01): the helper never read the value, so Safe/Auto/Fast
-           changed nothing about any render — the engine's own budget-aware
-           decoder has owned this since the v0.14.8 pin. A control that does
-           nothing teaches users not to trust the ones that do. -->
-      <div class="settings-row" style="margin-top:10px">
-        <label data-i18n="settingsModal.live_preview">Live preview</label>
+           2026-09-01): the helper never read the value. -->
+      <div class="settings-row">
+        <label for="settingsLivePreview" data-i18n="settingsRenderGroup.live_preview">Live preview</label>
         <select id="settingsLivePreview" style="flex:1">
-          <option value="on" data-i18n="settingsLivePreview.on_show_the_shot">On — show the shot as it forms</option>
+          <option value="on" data-i18n="settingsLivePreview.on_show_the_shot">On: show the shot as it forms</option>
           <option value="off" data-i18n="settingsLivePreview.off">Off</option>
         </select>
       </div>
-      <!-- SYS-28: the select above used to read as "On" whenever the SAVED
-           preference was on, even when the 22 MB decoder (TAE) is missing
-           from disk and every render is silently preview-less — the same gap
-           the Now card's `preview_state.reason === 'missing_decoder'` branch
-           (preview.js) already covers on the main screen. Settings had no
-           equivalent, so a user who only ever opens Settings never learns
-           why the toggle "does nothing." BOOT.ltx.preview_state is server-
-           computed (mlx_ltx_panel.py, live_preview_state()) — this just
-           surfaces it here too, with the same one-click fix. -->
+      <!-- Hint sits directly under its own control (before 5.0.23 it sat under
+           the H3 paragraph and read as a claim about the H3 model). -->
+      <div class="hint" style="margin-top:6px" data-i18n="settingsRenderGroup.never_changes_the_finished">
+        Never changes the finished video and costs almost no time. Turning it
+        off also removes the Stop early button.
+      </div>
+      <!-- SYS-28: shown when the 22 MB preview add-on is missing
+           (BOOT.ltx.preview_state.reason === 'missing_decoder'). -->
       <div class="hint" id="settingsLivePreviewNote" style="margin-top:6px" hidden></div>
-      <!-- H3 DiT. The setting has been honoured by `h3_dit_choice()` and
-           validated by the settings handler since it was added, and its own
-           docstring says "`h3_dit` in Settings" — but no control was ever
-           built, so the only way to reach it was a hand-written POST. The
-           owner watched H3 sit at ~50 GB and asked why we could not reduce it;
-           the answer was a setting he could not see. Numbers here are measured,
-           not estimated (640x384/73f, seed 424242, same-seed A/B). -->
-      <div class="settings-row" style="margin-top:10px" id="settingsH3DitRow" hidden>
-        <label data-i18n="settingsH3DitRow.hailuo_h3_model">Hailuo H3 model</label>
+      <!-- H3 model size (h3_dit: auto | bf16 | q8, honoured by h3_dit_choice()).
+           Plain words in the menu; the engine names stay out of the labels.
+           Measured 640x384/73f same-seed A/B: Full 38.9 GiB in 196.9 s,
+           Compact 21.4 GiB in 200.1 s. -->
+      <div class="settings-row" style="margin-top:12px" id="settingsH3DitRow" hidden>
+        <label for="settingsH3Dit" data-i18n="settingsH3DitRow.hailuo_h3_model">Hailuo H3 model</label>
         <select id="settingsH3Dit" style="flex:1">
-          <option value="auto" data-i18n="settingsH3Dit.automatic_best_quality_this">Automatic — best quality this Mac can hold</option>
-          <option value="bf16" data-i18n="settingsH3Dit.full_bf16_42_gib">Full (bf16) — 42 GiB peak</option>
-          <option value="q8" data-i18n="settingsH3Dit.compact_q8_21_gib">Compact (Q8) — 21 GiB peak, half the memory</option>
+          <option value="auto" data-i18n="settingsH3Dit.automatic_recommended">Automatic (recommended)</option>
+          <option value="bf16" data-i18n="settingsH3Dit.full_quality_needs_about">Full quality: needs about 42 GB of memory</option>
+          <option value="q8" data-i18n="settingsH3Dit.compact_about_21_gb">Compact: about 21 GB, same look</option>
         </select>
       </div>
-      <div class="hint" id="settingsH3DitHint" style="margin-top:6px" hidden data-i18n="settingsH3DitHint.measured_on_the_same">
-        Measured on the same prompt and seed: <b>Full 38.9 GiB</b> peak in 196.9 s
-        versus <b>Compact 21.4 GiB</b> in 200.1 s — <b>45 % less memory for 1.6 %
-        more time</b>. Automatic prefers the Compact engine on every size of Mac;
-        Full runs only when you choose it here — or when the Compact engine is
-        not built on this install (re-run the H3 engine Install to build it).
-        The memory Compact gives back is memory H3 was holding, not memory it
-        needed.
+      <div class="hint" id="settingsH3DitHint" style="margin-top:6px" hidden data-i18n="settingsH3DitHint.compact_uses_about_half">
+        Compact uses about half the memory for about 2 % more time, and is what
+        Automatic picks.
       </div>
-      <div class="hint" style="margin-top:6px" data-i18n="settingsModal.never_changes_the_result">
-        Never changes the result — the clip is byte-for-byte the same either way.
-        Costs a fraction of the render: about 0.2 % on High, a few per cent on a
-        short draft, where the render is short enough for the decode to show.
-        Turning it off also removes the Stop-early button.
-      </div>
-    </div>
 
-    <div class="settings-section">
-      <h3 data-i18n="settingsModal.output_format">Output format</h3>
+      <h4 class="settings-subhead" data-i18n="settingsRenderGroup.output_format">Output format</h4>
       <div class="preset-grid" id="settingsPresets">
         <!-- populated by openSettingsModal() from /settings -->
       </div>
-    </div>
 
-    <div class="settings-section" id="settingsCustomSection" style="display:none">
-      <h3 data-i18n="settingsCustomSection.custom_advanced">Custom (advanced)</h3>
-      <div class="settings-row" style="margin-bottom:10px">
-        <label data-i18n="settingsCustomSection.pix_fmt">pix_fmt</label>
-        <select id="settingsPixFmt" style="flex:1">
-          <option value="yuv420p" data-i18n="settingsPixFmt.yuv420p_web_standard_broad">yuv420p — web standard, broad support</option>
-          <option value="yuv422p" data-i18n="settingsPixFmt.yuv422p_pro_more_chroma">yuv422p — pro, more chroma than 420p</option>
-          <option value="yuv444p" data-i18n="settingsPixFmt.yuv444p_full_chroma_no">yuv444p — full chroma, no subsampling</option>
-          <option value="yuv420p10le" data-i18n="settingsPixFmt.yuv420p10le_10_bit_hdr">yuv420p10le — 10-bit, HDR-ready</option>
-          <option value="yuv422p10le" data-i18n="settingsPixFmt.yuv422p10le_10_bit_pro">yuv422p10le — 10-bit pro</option>
-          <option value="yuv444p10le" data-i18n="settingsPixFmt.yuv444p10le_10_bit_full">yuv444p10le — 10-bit, full chroma</option>
-        </select>
+      <div id="settingsCustomSection" style="display:none; margin-top:10px">
+        <div class="settings-row" style="margin-bottom:10px">
+          <label for="settingsPixFmt" data-i18n="settingsCustomSection.colour_detail">Colour detail</label>
+          <select id="settingsPixFmt" style="flex:1">
+            <option value="yuv420p" data-i18n="settingsPixFmt.standard_plays_everywhere">Standard: plays everywhere</option>
+            <option value="yuv422p" data-i18n="settingsPixFmt.more_colour_for_editing">More colour, for editing</option>
+            <option value="yuv444p" data-i18n="settingsPixFmt.full_colour">Full colour</option>
+            <option value="yuv420p10le" data-i18n="settingsPixFmt.10_bit_ready_for">10-bit, ready for HDR</option>
+            <option value="yuv422p10le" data-i18n="settingsPixFmt.10_bit_more_colour">10-bit, more colour</option>
+            <option value="yuv444p10le" data-i18n="settingsPixFmt.10_bit_full_colour">10-bit, full colour</option>
+          </select>
+        </div>
+        <div class="settings-row">
+          <label for="settingsCrfRange" data-i18n="settingsCustomSection.quality">Quality</label>
+          <input type="range" id="settingsCrfRange" min="0" max="30" step="1"
+                 style="flex:1; width:auto" oninput="document.getElementById('settingsCrfNum').value = this.value; renderGroupDirty()">
+          <input type="number" id="settingsCrfNum" min="0" max="30" step="1"
+                 style="width:60px" aria-label="Quality number"
+                 oninput="document.getElementById('settingsCrfRange').value = this.value; renderGroupDirty()" data-i18n-aria-label="settingsCrfNum.aria-label.quality_number">
+        </div>
+        <div class="hint" style="margin-top:6px" data-i18n="settingsCustomSection.lower_number_bigger_better">
+          Lower number = bigger, better file. 0 is lossless, 18 looks lossless,
+          23 is typical for the web.
+        </div>
+        <details class="settings-details">
+          <summary data-i18n="settingsCustomSection.details">Details</summary>
+          <div class="hint" data-i18n="settingsCustomSection.colour_detail_is_the">
+            Colour detail is the ffmpeg pixel format (yuv420p, yuv422p, yuv444p,
+            and their 10-bit "10le" forms). Quality is the H.264 CRF value.
+          </div>
+        </details>
       </div>
-      <div class="settings-row">
-        <label data-i18n="settingsCustomSection.crf">CRF</label>
-        <input type="range" id="settingsCrfRange" min="0" max="30" step="1"
-               style="flex:1; width:auto" oninput="document.getElementById('settingsCrfNum').value = this.value">
-        <input type="number" id="settingsCrfNum" min="0" max="30" step="1"
-               style="width:60px"
-               oninput="document.getElementById('settingsCrfRange').value = this.value">
-      </div>
-      <div class="hint" style="margin-top:6px" data-i18n="settingsCustomSection.0_mathematically_lossless_18">
-        0 = mathematically lossless · 18 = visually lossless ·
-        23 = web default · 28+ = lossy
+
+      <div class="settings-group-foot">
+        <span class="settings-status" id="settingsRenderStatus" role="status" aria-live="polite"></span>
+        <button type="button" class="ghost-btn" id="settingsUndoBtn" onclick="undoRenderSettings()" disabled data-i18n="settingsUndoBtn.undo_changes">Undo changes</button>
+        <button type="button" class="primary-btn" id="settingsApplyBtn" onclick="applySettings()" disabled data-i18n="settingsApplyBtn.save">Save</button>
       </div>
     </div>
 
     <div class="settings-section">
-      <h3 data-i18n="settingsModal.api_tokens">API tokens</h3>
-      <div class="hint" style="margin-bottom:8px" data-i18n="settingsModal.saved_locally_in_never">
-        Saved locally in <code>panel_settings.json</code>. Never sent
-        anywhere except as auth headers to civitai.com / huggingface.co.
-        Power users can override with <code>CIVITAI_API_KEY</code> /
-        <code>HF_TOKEN</code> env vars; the saved value here wins when
-        both are set.
+      <h3 data-i18n="settingsModal.download_keys">Download keys</h3>
+      <div class="hint" style="margin-bottom:8px" data-i18n="settingsModal.kept_on_this_mac">
+        Kept on this Mac and only ever sent to civitai.com or huggingface.co
+        when you download from them. Each key saves when you click
+        Save &amp; test.
       </div>
+      <details class="settings-details" data-hide-mac-app>
+        <summary data-i18n="settingsModal.details">Details</summary>
+        <div class="hint" data-i18n="settingsModal.saved_in_the_environment">
+          Saved in <code>panel_settings.json</code>. The environment variables
+          <code>CIVITAI_API_KEY</code> and <code>HF_TOKEN</code> also work; a key
+          saved here wins when both are set.
+        </div>
+      </details>
 
       <!-- CivitAI token row -->
       <div class="token-row">
@@ -6630,14 +6761,14 @@ The last line" data-i18n-placeholder="musicLyricsRaw.placeholder.verse_write_the
         </div>
         <div class="token-row-input">
           <input type="password" id="civitaiKeyInput" autocomplete="off"
-                 placeholder="paste key here…"
-                 oninput="onTokenInput('civitai')" data-i18n-placeholder="civitaiKeyInput.placeholder.paste_key_here">
+                 placeholder="paste key here…" aria-label="CivitAI API key"
+                 oninput="onTokenInput('civitai')" data-i18n-placeholder="civitaiKeyInput.placeholder.paste_key_here" data-i18n-aria-label="civitaiKeyInput.aria-label.civitai_api_key">
           <button type="button" class="ghost-btn" id="civitaiKeyToggle"
-                  onclick="toggleTokenVisibility('civitaiKeyInput', this)" data-i18n="civitaiKeyToggle.show">show</button>
+                  onclick="toggleTokenVisibility('civitaiKeyInput', this)" data-i18n="civitaiKeyToggle.show">Show</button>
           <button type="button" class="primary-btn token-savetest"
-                  onclick="testToken('civitai')" title="Save the pasted key and verify it with CivitAI" data-i18n-title="settingsModal.title.save_the_pasted_key" data-i18n="settingsModal.save_test">save & test</button>
+                  onclick="testToken('civitai')" title="Save the pasted key and verify it with CivitAI" data-i18n-title="settingsModal.title.save_the_pasted_key" data-i18n="settingsModal.save_test">Save &amp; test</button>
           <button type="button" class="ghost-btn" id="civitaiKeyClear"
-                  onclick="clearToken('civitai')" style="display:none" data-i18n="civitaiKeyClear.clear">clear</button>
+                  onclick="clearToken('civitai')" style="display:none" data-i18n="civitaiKeyClear.remove">Remove</button>
         </div>
         <div class="hint" id="civitaiTestResult" data-i18n="civitaiTestResult.required_for_installing_civitai">
           Required for installing CivitAI LoRAs.
@@ -6654,14 +6785,14 @@ The last line" data-i18n-placeholder="musicLyricsRaw.placeholder.verse_write_the
         </div>
         <div class="token-row-input">
           <input type="password" id="hfTokenInput" autocomplete="off"
-                 placeholder="hf_…"
-                 oninput="onTokenInput('hf')" data-i18n-placeholder="hfTokenInput.placeholder.hf">
+                 placeholder="hf_…" aria-label="Hugging Face token"
+                 oninput="onTokenInput('hf')" data-i18n-placeholder="hfTokenInput.placeholder.hf" data-i18n-aria-label="hfTokenInput.aria-label.hugging_face_token">
           <button type="button" class="ghost-btn" id="hfTokenToggle"
-                  onclick="toggleTokenVisibility('hfTokenInput', this)" data-i18n="hfTokenToggle.show">show</button>
+                  onclick="toggleTokenVisibility('hfTokenInput', this)" data-i18n="hfTokenToggle.show">Show</button>
           <button type="button" class="primary-btn token-savetest"
-                  onclick="testToken('hf')" title="Save the pasted token and verify it with Hugging Face" data-i18n-title="settingsModal.title.save_the_pasted_token" data-i18n="settingsModal.save_test_2">save & test</button>
+                  onclick="testToken('hf')" title="Save the pasted token and verify it with Hugging Face" data-i18n-title="settingsModal.title.save_the_pasted_token" data-i18n="settingsModal.save_test_2">Save &amp; test</button>
           <button type="button" class="ghost-btn" id="hfTokenClear"
-                  onclick="clearToken('hf')" style="display:none" data-i18n="hfTokenClear.clear">clear</button>
+                  onclick="clearToken('hf')" style="display:none" data-i18n="hfTokenClear.remove">Remove</button>
         </div>
         <div class="hint" id="hfTestResult" data-i18n="hfTestResult.required_for_gated_loras">
           <!-- SYS-28: this used to say "HDR + Control LoRAs" needed a token,
@@ -6688,8 +6819,8 @@ The last line" data-i18n-placeholder="musicLyricsRaw.placeholder.verse_write_the
          tampered client can't bypass this. -->
     <div class="settings-section">
       <h3 data-i18n="settingsModal.spicy_mode_adult_content">Spicy mode <span class="hint" style="font-weight:400">(adult content)</span></h3>
-      <div class="hint" style="margin-bottom:10px" data-i18n="settingsModal.when_off_the_civitai">
-        When OFF, the CivitAI LoRA browser hides NSFW models entirely —
+      <div class="hint" style="margin-bottom:10px" data-i18n="settingsModal.saves_right_away_when">
+        Saves right away. When OFF, the CivitAI LoRA browser hides NSFW models entirely —
         the "Show NSFW" toggle disappears and any NSFW result the API
         returns is filtered out. When ON, you can choose per-search whether
         to include NSFW results. The server enforces this gate even if the
@@ -6715,10 +6846,15 @@ The last line" data-i18n-placeholder="musicLyricsRaw.placeholder.verse_write_the
          receiver, or the project owner switching the fleet on, pastes
          keys there. Reuses the spicy-row / token-row markup so this
          section inherits the modal's existing styling with no new CSS. -->
-    <div class="settings-section">
-      <h3 data-i18n="settingsModal.anonymous_usage_analytics">Anonymous usage analytics</h3>
-      <div class="hint" style="margin-bottom:10px" data-i18n="settingsModal.sends_anonymous_counts_so">
-        Sends anonymous counts so bugs in the field get noticed: panel
+    <!-- Mac app: ONE analytics switch, the app's own (Phosphene > Settings…,
+         Privacy). It governs the app and this Studio (the app starts the Studio
+         with PHOSPHENE_ANALYTICS_DISABLED=1 when it is off and posts the change
+         here at once), so this section is hidden there and the row after it
+         points to the app's switch instead. Pinokio keeps this section. -->
+    <div class="settings-section" data-hide-mac-app>
+      <h3 data-i18n="settingsModal.share_anonymous_usage_stats">Share anonymous usage stats</h3>
+      <div class="hint" style="margin-bottom:10px" data-i18n="settingsModal.saves_right_away_sends">
+        Saves right away. Sends anonymous counts so bugs in the field get noticed: Phosphene
         version, hardware class (e.g. <em>M4 Max, 64 GB</em>), which
         model generation you render with, which optional packs are
         installed, and for each render the engine,
@@ -6726,13 +6862,13 @@ The last line" data-i18n-placeholder="musicLyricsRaw.placeholder.verse_write_the
         plus the first line of the error when one fails.
         <b>Never your prompts, filenames, paths, images or video.</b>
         You are a random ID, generated on this Mac and tied to nothing.
-        The panel sends no location, but the address your computer
+        Phosphene sends no location, but the address your computer
         connects from resolves to a <b>country and city</b> at the
         receiver, and those are kept next to the event; the address
-        itself is discarded. That is the one thing on this list the
-        panel doesn't send and can't stop — turning analytics off is
+        itself is discarded. That is the one thing on this list
+        Phosphene doesn't send and can't stop — turning analytics off is
         what stops it, because then no request is made at all.
-        <span data-hide-mac-app data-i18n="settingsModal.everything_the_panel_would">Everything the panel would send is also written in plain text to
+        <span data-hide-mac-app data-i18n="settingsModal.everything_phosphene_would_send">Everything Phosphene would send is also written in plain text to
         <code>state/usage-log.jsonl</code> so you can read it yourself;
         the full schema is in <code>docs/ANALYTICS.md</code>.</span>
       </div>
@@ -6802,6 +6938,15 @@ The last line" data-i18n-placeholder="musicLyricsRaw.placeholder.verse_write_the
       </details>
     </div>
 
+    <div class="settings-section" id="settingsMacStatsSection" hidden>
+      <h3 data-i18n="settingsMacStatsSection.share_anonymous_usage_stats">Share anonymous usage stats</h3>
+      <div class="hint" style="margin-bottom:8px" data-i18n="settingsMacStatsSection.one_switch_covers_the">
+        One switch covers the whole app: it is in the app's own Settings,
+        under Privacy.
+      </div>
+      <button type="button" class="ghost" id="settingsMacStatsBtn" onclick="openMacAppSettings()" data-i18n="settingsMacStatsBtn.open_phosphene_settings">Open Phosphene Settings…</button>
+    </div>
+
     <!-- Appearance. Three answers — dark, light, follow the system — kept
          in this browser and applied before the first paint from main.js.
          Same row shape as the switches below. -->
@@ -6819,7 +6964,7 @@ The last line" data-i18n-placeholder="musicLyricsRaw.placeholder.verse_write_the
 
     <div class="settings-section">
       <h3 data-i18n="settingsModal.appearance">Appearance</h3>
-      <div class="hint" style="margin-bottom:10px" data-i18n="settingsModal.the_panel_s_palette">The panel's palette. "System" follows the Mac's own light or dark setting and switches live. Saved in this browser only.</div>
+      <div class="hint" style="margin-bottom:10px" data-i18n="settingsModal.phosphene_s_colours_system">Phosphene's colours. "System" follows the Mac's own light or dark setting. Saves right away.</div>
       <div class="pill-group cols-3" id="appearanceGroup">
         <button type="button" class="pill-btn active" data-appearance="dark" onclick="setAppearance('dark')" data-i18n="appearanceGroup.dark">Dark</button>
         <button type="button" class="pill-btn" data-appearance="light" onclick="setAppearance('light')" data-i18n="appearanceGroup.light">Light</button>
@@ -6832,7 +6977,7 @@ The last line" data-i18n-placeholder="musicLyricsRaw.placeholder.verse_write_the
          background — once the person has allowed them. Same row shape as
          the analytics switch below. -->
     <div class="settings-section">
-      <h3 data-i18n="settingsModal.completion_alerts">Completion alerts</h3>
+      <h3 data-i18n="settingsModal.tell_me_when_a">Tell me when a render finishes</h3>
       <div class="hint" style="margin-bottom:10px" id="notifyHint"></div>
       <div class="spicy-row">
         <span class="spicy-state on" id="notifyStateBadge" data-i18n="notifyStateBadge.on">ON</span>
@@ -6849,10 +6994,12 @@ The last line" data-i18n-placeholder="musicLyricsRaw.placeholder.verse_write_the
       </div>
     </div>
 
+    <!-- One Done. Everything outside "While rendering" is already saved;
+         Done with unsaved rendering changes asks first (settings.js
+         closeSettingsModal) instead of dropping them silently. -->
     <div class="settings-foot">
-      <span class="settings-status" id="settingsStatus"></span>
-      <button class="ghost-btn" onclick="closeSettingsModal()" data-i18n="settingsModal.cancel">Cancel</button>
-      <button class="primary-btn" id="settingsApplyBtn" onclick="applySettings()" data-i18n="settingsApplyBtn.apply">Apply</button>
+      <span class="settings-status" id="settingsStatus" role="status" aria-live="polite"></span>
+      <button class="primary-btn" id="settingsDoneBtn" onclick="closeSettingsModal()" data-i18n="settingsDoneBtn.done">Done</button>
     </div>
   </div>
 </div>
@@ -6972,6 +7119,7 @@ The last line" data-i18n-placeholder="musicLyricsRaw.placeholder.verse_write_the
         </div>
       </section>
       <section class="pro-plan pro-plan-founding">
+        <span class="pro-plan-badge" data-i18n="proModal.best_value_first_100">Best value · first 100 buyers</span>
         <h3 data-i18n="proModal.founding_3_years_of">Founding <span>3 years of Pro</span></h3>
         <p class="pro-plan-price" data-i18n="proModal.once"><strong>$199</strong> once</p>
         <p class="pro-plan-line" data-i18n="proModal.pro_for_3_years">Pro for 3 years, about $6 a month. No renewal, nothing to cancel.</p>
@@ -7222,7 +7370,7 @@ The last line" data-i18n-placeholder="musicLyricsRaw.placeholder.verse_write_the
       <h2 id="bugModalTitle" data-i18n="bugModalTitle.report_a_bug">Report a bug</h2>
       <button class="ghost-btn" onclick="closeBugModal()" data-i18n="bugModal.close">Close</button>
     </div>
-    <div class="models-hint" data-i18n="bugModal.opens_a_pre_filled">
+    <div class="models-hint" id="bugModalHint" data-i18n="bugModal.opens_a_pre_filled">
       Opens a pre-filled GitHub issue in a new tab. Environment info, version,
       and the recent log (errors first) are filled in for you.
     </div>
@@ -7264,7 +7412,7 @@ The last line" data-i18n-placeholder="musicLyricsRaw.placeholder.verse_write_the
            already are. -->
       <div id="bugSubmitRow" style="display:flex; gap:8px; justify-content:flex-end; align-items:center; flex-wrap:wrap">
         <span id="bugStatus" style="flex:1; font-size:12px; color:var(--muted)"></span>
-        <a href="https://x.com/PhospheneAI" target="_blank" rel="noopener"
+        <a href="https://x.com/PhospheneAI" target="_blank" rel="noopener" id="bugNoGithubLink"
            style="font-size:11.5px; color:var(--muted)" data-i18n="bugSubmitRow.no_github_reach_out">No GitHub? Reach out on X →</a>
         <button class="ghost-btn" onclick="copyBugDiagnostics()" data-i18n="bugSubmitRow.copy_diagnostics">Copy diagnostics</button>
         <button class="ghost-btn" onclick="closeBugModal()" data-i18n="bugSubmitRow.cancel">Cancel</button>
