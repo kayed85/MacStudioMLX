@@ -215,6 +215,10 @@ def patch_mlx_ltx_panel(version_dir: Path):
     content = content.replace('swap_growth = float(os.environ.get("LTX_MAX_SWAP_GROWTH_MIB", "2048"))',
                               'swap_growth = float(os.environ.get("LTX_MAX_SWAP_GROWTH_MIB", "12288"))')
 
+    # 7. FLUX2 preflight calibration for 16GB Macs
+    content = content.replace('("flux2", 4):      8.0,', '("flux2", 4):      5.5,')
+    content = content.replace('("flux2", 6):      8.0,', '("flux2", 6):      7.5,')
+
     path.write_text(content, encoding="utf-8")
     return True
 
@@ -376,6 +380,7 @@ def install_storyboard_enhancements(version_dir: Path):
         ("i18n/studio/en.json", version_dir / "i18n" / "studio" / "en.json"),
         ("webapp/js/storyboard.js", version_dir / "webapp" / "js" / "storyboard.js"),
         ("webapp/style/panel.css", version_dir / "webapp" / "style" / "panel.css"),
+        ("webapp/index.html", version_dir / "webapp" / "index.html"),
     ]
     for rel_src, dst in files_to_sync:
         src = repo / rel_src

@@ -3969,7 +3969,7 @@ def _h3_turbo_download_bg(target_dir, push_log, asset: dict | None = None) -> No
         h = hashlib.sha256()
         written = 0
         last_log = 0.0
-        with urllib.request.urlopen(req, timeout=60) as resp, \
+        with _hf_urlopen(req, timeout=60) as resp, \
                 open(tmp, "wb") as fh:
             while True:
                 chunk = resp.read(1 << 20)
@@ -16105,7 +16105,7 @@ def _h3_tristep_download_bg(target_dir, push_log, asset: dict | None = None,
     import urllib.request
     asset = asset or {"file": H3_TRISTEP_FILE, "url": H3_TRISTEP_URL,
                       "sha256": H3_TRISTEP_SHA256, "bytes": H3_TRISTEP_BYTES}
-    opener = opener or urllib.request.urlopen
+    opener = opener or _hf_urlopen
     total = int(asset["bytes"])
     total_mb = total // (1 << 20)
     target_dir = Path(target_dir)
@@ -16424,7 +16424,7 @@ def _h3_flex_turbo_fetch_bg(target_dir, push_log, opener=None) -> None:
             req = urllib.request.Request(url, headers={"User-Agent": "Phosphene"})
             if have:
                 req.add_header("Range", f"bytes={have}-")
-            with (opener or urllib.request.urlopen)(req, timeout=60) as r, open(part, "ab" if have and getattr(r, "status", 200) == 206 else "wb") as fh:
+            with (opener or _hf_urlopen)(req, timeout=60) as r, open(part, "ab" if have and getattr(r, "status", 200) == 206 else "wb") as fh:
                 if not (have and getattr(r, "status", 200) == 206):
                     have = 0
                 while True:
@@ -17488,7 +17488,7 @@ def _h3restyle_download_bg(target_dir, push_log, opener=None) -> None:
         h = hashlib.sha256()
         written = 0
         last_log = 0.0
-        with (opener or urllib.request.urlopen)(req, timeout=60) as resp, open(tmp, "wb") as fh:
+        with (opener or _hf_urlopen)(req, timeout=60) as resp, open(tmp, "wb") as fh:
             while True:
                 chunk = resp.read(1 << 20)
                 if not chunk:
@@ -22775,6 +22775,26 @@ def h3_app_runner_loop(delay_s: float = 20.0, sleep=time.sleep) -> None:
         sleep(H3_APP_RUNNER_RETRY_S)
 
 
+def _hf_source():
+    """scripts/hf_source.py: where Hugging Face files come from (huggingface.co, or the China
+    mirror when it cannot be reached; 5.0.76). Imported by name so a compiled Pro copy works.
+    None when it is missing, which means Hugging Face only, as before."""
+    import importlib
+    try:
+        return importlib.import_module("scripts.hf_source")
+    except ImportError:
+        return None
+
+
+def _hf_urlopen(req, timeout=60):
+    """urllib.request.urlopen for the pinned-checksum Hugging Face downloads (the H3 add-ons,
+    Restyle, Crisper detail): the China mirror rule, never a login sent to the mirror."""
+    hs = _hf_source()
+    if hs is None:
+        return urllib.request.urlopen(req, timeout=timeout)
+    return hs.urlopen(req, timeout)
+
+
 # ---- Download Hailuo H3 inside the Mac app (5.0.9) ---------------------------------
 # A fresh Mac-app user had no way to get H3: the app builds the runner only when the
 # weights are already on the Mac, and the weights only came from Pinokio's install_h3.js.
@@ -27438,8 +27458,6 @@ _PRO_ADDON_REVALIDATE = {"at": 0.0}
 def _pro_addon_seal() -> dict | None:
     """The loaded add-on's own verdict ({ok, reason, bundle}), or None when there is no add-on."""
     return {"ok": True, "reason": "ok", "bundle": "pro"}
-    return {"ok": True, "reason": "ok", "bundle": "pro"}
-    return {"ok": True, "reason": "ok", "bundle": "pro"}
     try:
         import _ps
         st = _ps._pro_seal_status()
@@ -27471,8 +27489,6 @@ def pro_addon_state() -> dict:
       retry          Pinokio: the last fetch failed (reason = pro_parts error code)
       restart        Mac app: the running Studio has no add-on (Pro started after it); reopen Phosphene
     """
-    return {"state": "ready", "reason": None}
-    return {"state": "ready", "reason": None}
     return {"state": "ready", "reason": None}
     if not pro_is_active():
         return {"state": "free", "reason": None}
@@ -27854,7 +27870,7 @@ def _crisper_detail_fetch_bg(target_dir, push_log, opener=None) -> None:
             req = urllib.request.Request(url, headers={"User-Agent": "Phosphene"})
             if have:
                 req.add_header("Range", f"bytes={have}-")
-            with (opener or urllib.request.urlopen)(req, timeout=60) as r:
+            with (opener or _hf_urlopen)(req, timeout=60) as r:
                 resumed = bool(have and getattr(r, "status", 200) == 206)
                 if not resumed:
                     have = 0
@@ -32541,7 +32557,7 @@ def _sb_canvases() -> dict:
     return out
 
 
-def _sb_policy_for(draft_quality: str, final_quality: str, aspect: str = "16:9") -> dict:
+def _sb_policy_for(draft_quality: str, final_quality: str) -> dict:
     """The board's two passes, in the panel's own geometry vocabulary, clamped
     to what this Mac can actually render."""
     cap = _sb_max_dim()
@@ -32549,11 +32565,6 @@ def _sb_policy_for(draft_quality: str, final_quality: str, aspect: str = "16:9")
     def cell(q, default):
         q = (q or default).strip().lower()
         w, h = _SB_QUALITY_CANVAS.get(q, _SB_QUALITY_CANVAS[default])
-        if aspect == "9:16":
-            w, h = h, w
-        elif aspect == "1:1":
-            side = min(w, h)
-            w, h = side, side
         w, h = storyboard.fit_canvas(w, h, cap)
         return {"quality": q, "width": w, "height": h,
                 "frames": storyboard.ltx_frames_for(5)}
@@ -32944,7 +32955,6 @@ def _sb_plan_thread(board_id: str, brief: dict, previous: dict | None) -> None:
                     locations=brief.get("locations") or None,
                     known_character_ids=_sb_known_character_ids(),
                     max_dim=_sb_max_dim(),
-                    aspect=brief.get("aspect") or "16:9",
                     session=session,
                 )
                 with _SB_LOCK:
@@ -32982,7 +32992,6 @@ def _sb_plan_thread(board_id: str, brief: dict, previous: dict | None) -> None:
                 locations=brief.get("locations") or None,
                 known_character_ids=_sb_known_character_ids(),
                 max_dim=_sb_max_dim(),
-                aspect=brief.get("aspect") or "16:9",
                 session=session,
             )
 
@@ -41160,7 +41169,10 @@ _PREFLIGHT_BASE_GB: dict[tuple[str, int], float] = {
     ("ideogram", 6): 24.0,
     ("ideogram", 8): 32.0,
     # FLUX.2 — distilled 4B and base 4B/9B variants
-    # Klein 4B 4-bit runs smoothly on 16 GB Macs with 5.5 GB free headroom.
+    # 4.19.10, measured: Klein 4B 4-bit at 1024x1024 peaks 11.5 GiB of MLX
+    # memory (mflux --low-ram changes nothing). 8 GB free is the admission
+    # line (what Auto has always been priced at): macOS compresses the rest,
+    # and 16 GB Macs complete these renders (fleet: 86 in 30 days).
     ("flux2", 4):      5.5,
     ("flux2", 6):      7.5,
     ("flux2", 8):     12.0,
@@ -46079,8 +46091,13 @@ def run_take_job_inner(job: dict) -> None:
         # trusted from the manifest — a Stop during (or before) the previous
         # run's frame extraction recorded a path that was never written, and
         # the resumed part then started from a missing image and failed again.
-        if not Path(resume_outs[-1]).is_file():
-            raise RuntimeError(f"part {start_k} of this take is no longer on disk — "
+        # H42: every kept part is joined at the end, not only the last one.
+        # Only the last was checked, so a take whose EARLIER part was deleted
+        # (stopped takes show their parts in the gallery) re-rendered the rest
+        # and then died at the join: "ffmpeg exit 254: Error opening input".
+        _gone = [i + 1 for i, o in enumerate(resume_outs) if not Path(o).is_file()]
+        if _gone:
+            raise RuntimeError(f"part {_gone[0]} of this take is no longer on disk — "
                                "it can't be resumed")
         last_png = str(take_dir / f"part{start_k}_last.png")
         _take_last_frame(ff, resume_outs[-1], last_png, job)
@@ -51907,11 +51924,9 @@ class Handler(BaseHTTPRequestHandler):
                         concept = concept or board.get("concept") or ""
                     except Exception:
                         bid = ""
-                aspect = f("aspect", "16:9").strip() or "16:9"
                 if not bid:
                     bid = _sb_new_id(concept)
                     board = storyboard.new_storyboard(bid, "Planning…")
-                    board["aspect"] = aspect
                     # new_storyboard() hands back storyboard.DEFAULT_POLICY —
                     # 1024x576 delivery, no tier clamp, and not the user's saved
                     # Quality either. That made the `setdefault("policy", ...)`
@@ -51921,15 +51936,7 @@ class Handler(BaseHTTPRequestHandler):
                     # delivery pass, an over_cap error, and Render disabled.
                     board["policy"] = _sb_policy_for(
                         get_settings().get("storyboard_draft_quality", "quick"),
-                        get_settings().get("storyboard_final_quality", "standard"),
-                        aspect=aspect)
-                else:
-                    if aspect:
-                        board["aspect"] = aspect
-                        board["policy"] = _sb_policy_for(
-                            get_settings().get("storyboard_draft_quality", "quick"),
-                            get_settings().get("storyboard_final_quality", "standard"),
-                            aspect=aspect)
+                        get_settings().get("storyboard_final_quality", "standard"))
                 # Offer the number or refuse it — never quietly render a
                 # different film. A brief that asked for 4 shots used to come
                 # back as a 12-shot board with no message anywhere. The four
@@ -52051,8 +52058,7 @@ class Handler(BaseHTTPRequestHandler):
                                  for c in chars]
                 board.setdefault("policy", _sb_policy_for(
                     get_settings().get("storyboard_draft_quality", "quick"),
-                    get_settings().get("storyboard_final_quality", "standard"),
-                    aspect=board.get("aspect") or "16:9"))
+                    get_settings().get("storyboard_final_quality", "standard")))
                 _sb_set_planner(board, state="running", stage="load", error=None)
                 storyboard.save_storyboard(STATE_DIR, board)
                 # The slot was claimed under a placeholder before the id existed
@@ -52093,7 +52099,6 @@ class Handler(BaseHTTPRequestHandler):
                                 "must": must, "feedback": notes or None,
                                 "locations": board.get("locations") or [],
                                 "engine_mode": emode,
-                                "aspect": board.get("aspect") or aspect or "16:9",
                                 "soundtrack": board.get("soundtrack") or None},
                           previous if notes else None))
                 with _SB_LOCK:
@@ -52550,7 +52555,6 @@ class Handler(BaseHTTPRequestHandler):
                                 "locations": board.get("locations") or [],
                                 "shot_notes": shot_notes,
                                 "engine_mode": board.get("engine_mode") or "auto",
-                                "aspect": board.get("aspect") or "16:9",
                                 "reroll_ns": ns},
                           previous))
                 with _SB_LOCK:
