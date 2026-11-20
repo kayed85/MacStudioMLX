@@ -364,6 +364,25 @@ function sbApplyStylePreset(style) {
 }
 window.sbApplyStylePreset = sbApplyStylePreset;
 
+function sbOpenStillLightbox(path, title) {
+  const lb = document.getElementById('expandLightbox');
+  const stage = document.getElementById('expandStage');
+  const meta = document.getElementById('expandMeta');
+  if (!lb || !stage) return;
+  document.querySelectorAll('video, audio').forEach(m => {
+    try { m.pause(); } catch (e) {}
+  });
+  stage.innerHTML = `<img src="/image?path=${encodeURIComponent(path)}" alt="${escapeHtml(title || 'Still image')}" style="max-width:92vw;max-height:88vh;object-fit:contain;border-radius:6px;box-shadow:0 8px 32px rgba(0,0,0,0.8);cursor:pointer;" onclick="closeExpandLightbox()">`;
+  if (meta) {
+    meta.textContent = title || (path ? path.split('/').pop() : '') || '';
+  }
+  const actions = document.getElementById('expandActions');
+  if (actions) actions.innerHTML = '';
+  lb.classList.remove('is-idle');
+  lb.style.display = 'flex';
+}
+window.sbOpenStillLightbox = sbOpenStillLightbox;
+
 // ---- the brief -------------------------------------------------------------
 let _sbDraftTimer = null;
 function sbConceptInput() {
@@ -1748,8 +1767,9 @@ function sbShotCard(s, r, errs) {
     && !s.still_approved;
   const stillBlock = s.still ? `
     <div class="sb-still${awaitingApproval ? ' sb-still-awaiting' : ''}" title="${userStill ? T('storyboard.the_photo_this_shot_starts', 'The photo this shot starts from') : T('storyboard.the_still_this_shot_starts', 'The still this shot starts from')}">
-      <a href="/image?path=${encodeURIComponent(s.still)}" target="_blank" rel="noopener" title="${TA('storyboard.open_the_still', 'Open the still')}">
-        <img src="/image?w=480&path=${encodeURIComponent(s.still)}" alt="Anchor still for shot ${n}" loading="lazy"></a>
+      <div class="sb-still-thumb" onclick="sbOpenStillLightbox('${escapeHtml(s.still)}', '${escapeHtml(s.title ? ('Shot ' + n + ': ' + s.title) : ('Shot ' + n))}')" style="cursor:pointer;" title="${TA('storyboard.open_the_still', 'Open the still')}">
+        <img src="/image?w=480&path=${encodeURIComponent(s.still)}" alt="Anchor still for shot ${n}" loading="lazy">
+      </div>
       <span class="sb-still-tag">${awaitingApproval ? T('storyboard.approve_this_still_before_it', 'approve this still before it renders') : userStill ? T('storyboard.starts_from_your_photo', 'starts from your photo') : T('storyboard.starts_from_this_still', 'starts from this still')}</span>
       ${awaitingApproval ? `
       <button type="button" class="sb-err-fix sb-still-approve" data-act="approve-still" title="${TA('storyboard.render_the_video_from_this', 'Render the video from this still')}">${T('storyboard.approve', 'Approve')}</button>` : ''}
