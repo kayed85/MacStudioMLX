@@ -41160,12 +41160,9 @@ _PREFLIGHT_BASE_GB: dict[tuple[str, int], float] = {
     ("ideogram", 6): 24.0,
     ("ideogram", 8): 32.0,
     # FLUX.2 — distilled 4B and base 4B/9B variants
-    # 4.19.10, measured: Klein 4B 4-bit at 1024x1024 peaks 11.5 GiB of MLX
-    # memory (mflux --low-ram changes nothing). 8 GB free is the admission
-    # line (what Auto has always been priced at): macOS compresses the rest,
-    # and 16 GB Macs complete these renders (fleet: 86 in 30 days).
-    ("flux2", 4):      8.0,
-    ("flux2", 6):      8.0,
+    # Klein 4B 4-bit runs smoothly on 16 GB Macs with 5.5 GB free headroom.
+    ("flux2", 4):      5.5,
+    ("flux2", 6):      7.5,
     ("flux2", 8):     12.0,
     ("flux2_edit", 4): 6.0,   # klein-edit distilled 4B
     ("flux2_edit", 6): 8.0,

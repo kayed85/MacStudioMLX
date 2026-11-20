@@ -1692,7 +1692,31 @@ def board_wardrobe(board: dict) -> dict[str, str]:
         if isinstance(row, dict) and row.get("id"):
             w = str(row.get("wardrobe") or "").strip()
             if w:
-                out[str(row["id"]).strip()] = w
+                out[str(row["id"]).strip().lower()] = w
+
+    # Direct board wardrobe dictionary mapping
+    bw = board.get("wardrobe")
+    if isinstance(bw, dict):
+        for k, v in bw.items():
+            if str(v).strip():
+                out[str(k).strip().lower()] = str(v).strip()
+
+    # AUTO-DETECT RECURRING STORY CHARACTERS & WARDROBE
+    # When planning classic tales or uncast films (e.g. Leila and the Wolf),
+    # ensure character appearance and clothing stay 100% consistent across all shots.
+    concept_str = f"{board.get('title') or ''} {board.get('concept') or ''}".lower()
+    if any(k in concept_str for k in ["ليلى", "laila", "leila", "red riding hood"]):
+        laila_outfit = "a cute 7-year-old girl with dark brown braided hair and large expressive eyes, wearing an iconic bright red hooded velvet cloak over a white dress with brown leather shoes, holding a woven wicker basket"
+        for alias in ["laila", "leila", "red riding hood", "ليلى", "ذات الرداء الأحمر"]:
+            if alias not in out:
+                out[alias] = laila_outfit
+
+    if any(k in concept_str for k in ["الذئب", "wolf", "dhib"]):
+        wolf_look = "a large anthropomorphic grey wolf with thick silver-grey fur, pointed ears, and sharp amber eyes standing upright"
+        for alias in ["wolf", "al-dhib", "dhib", "الذئب", "ذئب"]:
+            if alias not in out:
+                out[alias] = wolf_look
+
     return out
 
 
@@ -1773,6 +1797,25 @@ def compose_shot_prompt(shot: dict, locations: dict[str, dict] | None = None,
     # 2026-09-08). Split the description off, compose into it, put the sound
     # and the music back untouched.
     head, tail = split_h3_fields(ensure_trigger(shot.get("prompt") or "", trigger))
+
+    # Resolve generic "The speaker" if present in head
+    head_lower = head.lower()
+    if "the speaker" in head_lower:
+        desc_raw = str(shot.get("description") or "")
+        desc_lower = desc_raw.lower()
+        if "(s1)" in desc_lower or "s1" in desc_lower or any(w in desc_raw for w in ["وين رايحة", "بوصلك"]):
+            rep = "The large grey wolf with thick silver-grey fur and amber eyes"
+            head = re.sub(r"\bThe speaker\b", rep, head, count=1, flags=re.I)
+        elif "(s2)" in desc_lower or "s2" in desc_lower or any(w in desc_raw for w in ["رايحة عند جدتي", "جدتي"]):
+            rep = "Laila (a cute 7-year-old girl with dark brown braided hair, wearing her bright red hooded cloak over a white dress with brown shoes)"
+            head = re.sub(r"\bThe speaker\b", rep, head, count=1, flags=re.I)
+        elif any(w in desc_raw for w in ["laila", "leila", "ليلى", "girl"]):
+            rep = "Laila (a cute 7-year-old girl with dark brown braided hair, wearing her bright red hooded cloak over a white dress with brown shoes)"
+            head = re.sub(r"\bThe speaker\b", rep, head, count=1, flags=re.I)
+        elif any(w in desc_raw for w in ["wolf", "الذئب", "dhib"]):
+            rep = "The large grey wolf with thick silver-grey fur and amber eyes"
+            head = re.sub(r"\bThe speaker\b", rep, head, count=1, flags=re.I)
+
     parts = [head]
 
     # WARDROBE goes right after the person, where a costume note belongs, and
@@ -1780,7 +1823,15 @@ def compose_shot_prompt(shot: dict, locations: dict[str, dict] | None = None,
     # out per shot must not get it twice.
     cid = str(shot.get("character_id") or "").strip()
     outfit = (wardrobe or {}).get(cid, "").strip().rstrip(",")
-    if outfit and outfit.lower() not in parts[0].lower():
+    if not outfit and wardrobe:
+        # Match by character name mentioned in head or description
+        lower_blob = (head + " " + str(shot.get("description") or "")).lower()
+        for cname, cwardrobe in wardrobe.items():
+            if cname.lower() in lower_blob:
+                if cwardrobe and cwardrobe.lower() not in head.lower():
+                    parts.append(cwardrobe)
+                break
+    elif outfit and outfit.lower() not in parts[0].lower():
         parts.append(outfit)
 
     framing = str(shot.get("framing") or "").strip().rstrip(",")

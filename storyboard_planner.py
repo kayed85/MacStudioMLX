@@ -721,9 +721,16 @@ ARABIC DIALOGUE & NATURAL SPEECH ARTICULATION LAWS (مخارج الحروف وا
    - Concise spoken lines: 3 to 7 words per 5-second shot for natural pacing.
    - NEVER write English words or transliteration inside `<d>`.
 3. PHONEME ARTICULATION & NATURAL LIP-SYNC (مخارج الحروف والشفاه تتماشى مع اللفظ):
-   - In the visual description OUTSIDE the `<d>` tag, describe the speaker's vocal delivery and realistic mouth/lip articulation:
-     "The speaker, with a clear, authentic Arabic voice (S1), their lips and mouth articulating each Arabic syllable and letter naturally with synchronized lip movements and clear pronunciation, says: <d>[Arabic] ...</d>. Exactly as the voice stops speaking, the jaw ceases motion and the mouth settles into a natural closed rest."
-   - This directs the video engine to render realistic lip movements matching the spoken Arabic words, with no unnatural lingering mouth motion.
+   - In the visual description OUTSIDE the `<d>` tag, describe the character speaking with realistic mouth/lip articulation:
+     "Laila, wearing her bright red hooded cloak, speaking with a clear, authentic Arabic voice, her lips and mouth articulating each Arabic syllable and letter naturally with synchronized lip movements and clear pronunciation, says: <d>[Arabic] ...</d>. Exactly as the voice stops speaking, the jaw ceases motion and the mouth settles into a natural closed rest."
+   - Or for the wolf:
+     "The large grey wolf with amber eyes, speaking with a deep authentic Arabic voice, his mouth articulating each Arabic syllable and letter naturally with synchronized lip movements, says: <d>[Arabic] ...</d>. Exactly as the voice stops speaking, the jaw ceases motion and the mouth settles into a natural closed rest."
+4. STRICT CHARACTER APPEARANCE & WARDROBE CONSISTENCY (ثبات مظهر وملابس الشخصيات في كل لقطة):
+   - Every character MUST have identical visual features and identical clothing in EVERY shot they appear in!
+   - NEVER write a generic "The speaker"! Always specify WHO is speaking and WHAT they are wearing:
+     * Laila: "Laila, a 7-year-old girl with dark brown braided hair, wearing her iconic bright red hooded velvet cloak over a white dress with brown leather shoes, holding a woven wicker basket"
+     * Wolf: "The large anthropomorphic grey wolf with thick silver-grey fur and amber eyes"
+   - Repeat the character's exact wardrobe in EVERY shot featuring them so the image generator keeps their clothing 100% consistent!
 """ % dialect)
     return "\n".join(parts)
 
@@ -752,7 +759,12 @@ def _build_user_prompt(
             "- Spoken dialogue MUST be written in genuine Arabic script inside `<d>[Arabic] ...</d>` tags.",
             "- Use natural, expressive conversational phrasing in %s." % dialect,
             "- Describe the speaker's mouth and lip articulation matching the spoken Arabic letters/phonemes.",
-            "- NEVER write English dialogue inside `<d>` for an Arabic story."
+            "- NEVER write English dialogue inside `<d>` for an Arabic story.",
+            "",
+            "STRICT CHARACTER & WARDROBE CONTINUITY (ثبات الشخصيات والملابس):",
+            "- Maintain 100% IDENTICAL clothing, hairstyle, and appearance for each character in EVERY shot.",
+            "- In every shot of Little Red Riding Hood (Laila), explicitly describe her in her bright red hooded cloak over her white dress with brown boots.",
+            "- In dialogue shots, NEVER say generic 'The speaker' — always name the character (e.g. 'Laila, in her bright red hooded cloak...' or 'The grey wolf with amber eyes...') and repeat their wardrobe.",
         ]
     if aspect == "9:16":
         lines += ["", "TARGET PLATFORM & ASPECT: 9:16 Vertical (Instagram Reels / TikTok / Mobile). Compose shots vertically."]

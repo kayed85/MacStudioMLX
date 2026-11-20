@@ -14630,10 +14630,12 @@ html[data-theme="light"] .expand-lightbox { background: rgba(2, 4, 12, .96); }
 }
 .expand-actions .ghost-btn:hover { background: rgba(255, 255, 255, .08); color: #fff; box-shadow: none; }
 .expand-close {
-  top: 14px; right: 18px; width: 38px; height: 38px; border: 0; background: rgba(255, 255, 255, .06);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .14); color: #f4f4f5;
+  top: 16px; right: 20px; width: 44px; height: 44px; border: 2px solid rgba(255, 255, 255, 0.4);
+  background: rgba(220, 38, 38, 0.92); box-shadow: 0 4px 20px rgba(0, 0, 0, 0.75); color: #ffffff;
+  border-radius: 50%; display: flex; align-items: center; justify-content: center; z-index: 100000;
+  cursor: pointer; transition: transform 0.15s ease, background 0.15s ease;
 }
-.expand-close:hover { background: rgba(255, 255, 255, .12); transform: none; }
+.expand-close:hover { background: #ef4444; transform: scale(1.12); }
 .expand-bar {
   position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); margin: 0;
   height: 52px; padding: 0 8px; gap: 4px; border: 0; border-radius: 26px;
