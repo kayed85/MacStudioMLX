@@ -25407,9 +25407,25 @@
    "note": "Studio · heading · in the Studio, the main Phosphene window where the user makes videos, pictures and music",
    "where": "index.html:7192"
   },
-  "sbAspectRow.aspect": "Format & Platform <span class=\"cz-label-hint\">dimensions & camera framing</span>",
-  "sbAspectGroup.landscape": "Landscape / YouTube",
-  "sbAspectGroup.reels": "Reels / TikTok",
-  "sbAspectGroup.square": "Square Post"
+  "sbAspectRow.aspect": {
+   "text": "Format & Platform <span class=\"cz-label-hint\">dimensions & camera framing</span>",
+   "note": "Studio · text · Storyboard brief platform & aspect",
+   "where": "index.html:3685"
+  },
+  "sbAspectGroup.landscape": {
+   "text": "Landscape / YouTube",
+   "note": "Studio · button · Storyboard aspect 16:9",
+   "where": "index.html:3687"
+  },
+  "sbAspectGroup.reels": {
+   "text": "Reels / TikTok",
+   "note": "Studio · button · Storyboard aspect 9:16",
+   "where": "index.html:3688"
+  },
+  "sbAspectGroup.square": {
+   "text": "Square Post",
+   "note": "Studio · button · Storyboard aspect 1:1",
+   "where": "index.html:3689"
+  }
  }
 }

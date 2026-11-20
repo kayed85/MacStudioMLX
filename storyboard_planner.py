@@ -541,10 +541,36 @@ Every other shot in the film has NEITHER key.
 """
 
 
+def _detect_arabic_brief(concept: str, style: str = "", must: Iterable[str] = ()) -> Tuple[bool, str]:
+    """Detect if the brief requests Arabic and resolve any specified dialect."""
+    text = " ".join([str(concept or ""), str(style or "")] + [str(m) for m in (must or [])])
+    is_ar = bool(re.search(r'[\u0600-\u06FF]', text))
+    lower = text.lower()
+    dialect = "Arabic"
+    if any(k in text for k in ["أردني", "أردنية", "الاردن", "الاردنية", "اردني", "اردنية"]) or "jordanian" in lower:
+        dialect = "Jordanian Arabic (عامية أردنية)"
+        is_ar = True
+    elif any(k in text for k in ["شامي", "شامية", "سوري", "لبناني", "فلسطيني"]) or any(k in lower for k in ["levantine", "syrian", "lebanese", "palestinian"]):
+        dialect = "Levantine Arabic (لهجة شامية)"
+        is_ar = True
+    elif any(k in text for k in ["مصري", "مصرية"]) or "egyptian" in lower:
+        dialect = "Egyptian Arabic (لهجة مصرية)"
+        is_ar = True
+    elif any(k in text for k in ["خليجي", "خليجية", "سعودي", "سعودية", "إماراتي"]) or any(k in lower for k in ["gulf", "saudi", "khaliji"]):
+        dialect = "Gulf Arabic (لهجة خليجية)"
+        is_ar = True
+    elif is_ar or "arabic" in lower or "عربي" in text or "عربية" in text:
+        dialect = "Arabic (عربي)"
+        is_ar = True
+    return is_ar, dialect
+
+
 def _build_system_prompt(engine_hint: str, has_characters: bool,
                          allow_hidden: bool = False,
-                         aspect: str = "16:9") -> str:
-    dialect = """\
+                         aspect: str = "16:9",
+                         arabic_mode: bool = False,
+                         dialect: str = "Arabic") -> str:
+    h3_dialect_doc = """\
 THE TARGET DIALECT
 
 Your "description", "soundscape" and "music" for an H3 shot are assembled by the program
@@ -617,7 +643,7 @@ other keys. Do not wrap the object in an array.
         parts.append("EVERY shot in this film uses the LTX register shown above, whether or\n"
                      "not it has a character_id. Never write [Shot 1], <d> tags or field labels.\n")
     else:
-        parts.append(dialect)
+        parts.append(h3_dialect_doc)
         parts.append(_H3_EXAMPLES)
         if has_characters and engine_hint != "h3":
             parts.append(_LTX_EXAMPLE)
@@ -683,6 +709,22 @@ The film is composed strictly for a 1:1 square canvas.
 CAMERA FRAMING & COMPOSITION: WIDESCREEN 16:9 (YouTube / Cinema)
 The film is composed for cinematic widescreen 16:9 display.
 """)
+    if arabic_mode:
+        parts.append("""\
+ARABIC DIALOGUE & NATURAL SPEECH ARTICULATION LAWS (مخارج الحروف والشفاه وحركة النطق الطبيعية):
+1. STORY FIDELITY & CHARACTERS:
+   - When the concept requests a specific story (such as "ليلى والذئب" / Little Red Riding Hood):
+     You MUST depict the true classic story! Feature Little Red Riding Hood with her red hooded cloak and basket of treats, the sunlit forest path with towering trees, and the cunning Wolf (الذئب) lurking among the trees. Never replace it with an unrelated modern domestic scene (like playing with toys in an apartment)!
+2. AUTHENTIC ARABIC DIALOGUE:
+   - Spoken dialogue lines MUST be wrapped in `<d>[Arabic] ...</d>` written in genuine Arabic script in %s.
+   - Write natural colloquial phrasing (e.g. عامية أردنية: الذئب: <d>[Arabic] وين رايحة يا حلوة بهالغابة لحالك؟</d> - ليلى: <d>[Arabic] رايحة عند دار ستي، دير بالك تقرب علي!</d>).
+   - Concise spoken lines: 3 to 7 words per 5-second shot for natural pacing.
+   - NEVER write English words or transliteration inside `<d>`.
+3. PHONEME ARTICULATION & NATURAL LIP-SYNC (مخارج الحروف والشفاه تتماشى مع اللفظ):
+   - In the visual description OUTSIDE the `<d>` tag, describe the speaker's vocal delivery and realistic mouth/lip articulation:
+     "The speaker, with a clear, authentic Arabic voice (S1), their lips and mouth articulating each Arabic syllable and letter naturally with synchronized lip movements and clear pronunciation, says: <d>[Arabic] ...</d>. Exactly as the voice stops speaking, the jaw ceases motion and the mouth settles into a natural closed rest."
+   - This directs the video engine to render realistic lip movements matching the spoken Arabic words, with no unnatural lingering mouth motion.
+""" % dialect)
     return "\n".join(parts)
 
 
@@ -698,6 +740,20 @@ def _build_user_prompt(
     aspect: str = "16:9",
 ) -> str:
     lines = ["BRIEF", "", "CONCEPT: %s" % concept.strip(), "", "SHOT COUNT: exactly %d shots." % n_shots]
+    is_ar, dialect = _detect_arabic_brief(concept, style, must_include)
+    if is_ar:
+        lines += [
+            "",
+            "STORY FIDELITY: When the concept is a known story or fable (e.g. 'ليلى والذئب' / Little Red Riding Hood):",
+            "  Depict the true story with Little Red Riding Hood in her red cloak carrying her basket, the enchanted forest path, and the wolf.",
+            "  DO NOT invent an unrelated modern room/toy scene.",
+            "",
+            "DIALOGUE LANGUAGE & DIALECT: %s." % dialect,
+            "- Spoken dialogue MUST be written in genuine Arabic script inside `<d>[Arabic] ...</d>` tags.",
+            "- Use natural, expressive conversational phrasing in %s." % dialect,
+            "- Describe the speaker's mouth and lip articulation matching the spoken Arabic letters/phonemes.",
+            "- NEVER write English dialogue inside `<d>` for an Arabic story."
+        ]
     if aspect == "9:16":
         lines += ["", "TARGET PLATFORM & ASPECT: 9:16 Vertical (Instagram Reels / TikTok / Mobile). Compose shots vertically."]
     elif aspect == "1:1":
@@ -800,21 +856,22 @@ def _build_user_prompt(
 
 
 _SCREENPLAY_SYSTEM = """\
-You are a screenwriter. You write the SCENE, not a shot list. Prose and dialogue only.
+You are a master screenwriter. You write the SCENE or story breakdown, not a shot list. Prose and dialogue only.
 
 Rules:
-1. It is ONE continuous scene in ONE place, unless the brief names more. Everyone in it can
-   see and hear everyone else. Do not cut to somewhere nobody could hear the last line.
-2. Give it a shape: an opening, a turn in the middle, and a button at the end. A run of
-   equally-weighted moments is not a scene.
-3. WRITE THE ACTUAL LINES. Every line of dialogue is words a person says out loud, in double
-   quotes, attributed by name. Never "he explains the situation" — write what he says.
-   A sung line works the same way: write the exact lyric in double quotes and mark the
-   attribution "(sings)" after the name. Never "she sings the chorus" — write the words.
+1. STORY FIDELITY & COHESION: If the brief specifies a narrative story, fable, or classic tale (such as 'ليلى والذئب' / Little Red Riding Hood):
+   faithfully depict THAT requested story with its authentic characters, iconic setting, and true story arc (e.g. Little Red Riding Hood in her red hooded cloak carrying her basket, the path through the sunlit forest, and the cunning Wolf).
+   NEVER replace a requested story with an unrelated domestic living room scene!
+2. Give it a shape: an opening, an encounter or turn in the middle, and a clear button at the end.
+3. WRITE THE ACTUAL LINES IN THE REQUESTED LANGUAGE & DIALECT:
+   If the brief is in Arabic or requests an Arabic dialect (e.g. Jordanian / عامية أردنية / شامية):
+   write ALL spoken dialogue lines in genuine Arabic script in that authentic dialect (e.g. الذئب: "وين رايحة يا حلوة بهالغابة؟").
+   NEVER write English dialogue or transliteration.
+   Every line of dialogue is words a person says out loud, in double quotes, attributed by name.
 4. Spread the dialogue across the scene. Do not put every line in the first beat.
 5. Some beats have no dialogue at all. Those are where the scene breathes; say what the
    person is DOING instead.
-6. Keep it short: 8-14 beats, one or two sentences each. This is a 30-60 second scene.
+6. Keep it short: 6-12 beats, one or two sentences each. This is a 30-60 second scene.
 
 Output plain text, one beat per line, in this form:
 
@@ -843,9 +900,8 @@ def _screenplay_text(resp: Dict[str, Any]) -> str:
 
 
 # A beat line or an attributed line of dialogue. Anything else is chatter.
-# The class carries parentheses so a sung attribution — NAME (sings): "..." —
-# survives the filter; without them every lyric line was silently dropped.
-_SCREENPLAY_LINE_RE = re.compile(r"^(?:BEAT\b|[A-Z][A-Za-z0-9 _\'()-]{0,30}:)")
+# Supports English and Arabic names (e.g. ليلى: or الذئب:).
+_SCREENPLAY_LINE_RE = re.compile(r"^(?:BEAT\b|[\w\u0600-\u06FF][\w\u0600-\u06FF _\'()-]{0,30}:)")
 
 
 def _build_screenplay_prompt(concept: str, n_shots: int, style: str,
@@ -854,6 +910,19 @@ def _build_screenplay_prompt(concept: str, n_shots: int, style: str,
                              locations: Sequence[Dict[str, str]] = ()) -> str:
     lines = ["CONCEPT: %s" % (concept or "").strip(), "",
              "LENGTH: about %d beats." % max(6, min(14, n_shots))]
+    is_ar, dialect = _detect_arabic_brief(concept, style, must_include)
+    if is_ar:
+        lines += [
+            "",
+            "STORY FIDELITY & LANGUAGE REQUIREMENT:",
+            "- If the concept is a known story or fable (e.g. 'ليلى والذئب' / Little Red Riding Hood):",
+            "  You MUST write the scene faithfully about that story: Little Red Riding Hood (ليلى) in her red cloak meeting the Wolf (الذئب) in the forest.",
+            "  Do NOT replace it with an unrelated domestic scene.",
+            "- DIALOGUE LANGUAGE: ALL dialogue lines MUST be written in genuine Arabic script in %s." % dialect,
+            "- Spoken lines must use authentic natural dialect phrasing (e.g. عامية أردنية طبيعية).",
+            "- Format: NAME: \"line in Arabic\" (e.g. الذئب: \"وين رايحة يا حلوة بهالغابة؟\").",
+            "- NEVER write English dialogue lines."
+        ]
     if cast:
         lines += ["", "WHO IS IN IT:"]
         for c in cast:
@@ -1748,14 +1817,16 @@ def _prose_dialogue(text: str) -> List[str]:
 
 
 def _convert_prose_dialogue(text: str) -> Tuple[str, int]:
-    """Rewrap prose-quoted lines as <d>[English] ...</d>. Returns (text, count)."""
+    """Rewrap prose-quoted lines as <d>[Language] ...</d>. Returns (text, count)."""
     if _has_dialogue(text):
         return text, 0
     n = [0]
 
     def repl(m):
         n[0] += 1
-        return "%s<d>[English] %s</d>" % (m.group(1), m.group(2).strip())
+        content = m.group(2).strip()
+        lang = "Arabic" if re.search(r'[\u0600-\u06FF]', content) else "English"
+        return "%s<d>[%s] %s</d>" % (m.group(1), lang, content)
 
     out = _PROSE_DIALOGUE_RE.sub(repl, text or "")
     if n[0] and "ceases speaking motion" not in out:
@@ -2928,7 +2999,9 @@ def plan_film(
     budget = int(max_tokens) if max_tokens else min(
         8192, max(1200, 380 * (1 if fb_mode == "shot" else n_shots) + 500))
 
-    system = _build_system_prompt(engine, bool(cast), allow_hidden, aspect=aspect)
+    is_ar, dialect = _detect_arabic_brief(concept, style, must)
+    system = _build_system_prompt(engine, bool(cast), allow_hidden, aspect=aspect,
+                                  arabic_mode=is_ar, dialect=dialect)
     if fb_mode == "shot":
         user = _build_shot_feedback_prompt(previous, fb_shot, fb_note)
     elif fb_mode == "film":

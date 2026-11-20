@@ -276,7 +276,8 @@ def live_strings(lang: str, base: Path = STUDIO_DIR) -> dict:
         ent = src.get(k)
         if not ent or v in ("", None):
             continue
-        if placeholders(v) - placeholders(ent.get("text")):
+        ent_text = ent.get("text") if isinstance(ent, dict) else str(ent)
+        if placeholders(v) - placeholders(ent_text):
             continue                      # a marker the English no longer has
         out[k] = v
     return out
