@@ -366,6 +366,27 @@ def patch_flux3_engine(version_dir: Path):
     print(f"[+] Patched flux3_engine.py for 16GB Macs")
     return True
 
+def install_storyboard_enhancements(version_dir: Path):
+    import shutil
+    repo = Path("/Users/mk/MacStudioMLX")
+    files_to_sync = [
+        ("storyboard.py", version_dir / "storyboard.py"),
+        ("storyboard_planner.py", version_dir / "storyboard_planner.py"),
+        ("i18n.py", version_dir / "i18n.py"),
+        ("i18n/studio/en.json", version_dir / "i18n" / "studio" / "en.json"),
+        ("webapp/js/storyboard.js", version_dir / "webapp" / "js" / "storyboard.js"),
+        ("webapp/style/panel.css", version_dir / "webapp" / "style" / "panel.css"),
+    ]
+    for rel_src, dst in files_to_sync:
+        src = repo / rel_src
+        if src.is_file():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dst)
+            print(f"[+] Synced {rel_src} -> {dst}")
+        else:
+            print(f"[-] Source {src} not found")
+    return True
+
 def install_arabic_catalog(version_dir: Path):
     import shutil
     src = Path("/Users/mk/MacStudioMLX/i18n/studio/ar.json")
@@ -398,6 +419,7 @@ def main():
     patch_flux3_engine(target_path)
     patch_flux3_worker(target_path)
     install_arabic_catalog(target_path)
+    install_storyboard_enhancements(target_path)
 
     print(f"[✔] All patches applied to {target_path.name}")
 
