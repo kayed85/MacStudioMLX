@@ -355,6 +355,15 @@ async function sbTick() {
   else await sbRefreshBoards();
 }
 
+function sbApplyStylePreset(style) {
+  const el = sbEl('sbStyle');
+  if (el) {
+    el.value = style;
+    el.focus();
+  }
+}
+window.sbApplyStylePreset = sbApplyStylePreset;
+
 // ---- the brief -------------------------------------------------------------
 let _sbDraftTimer = null;
 function sbConceptInput() {

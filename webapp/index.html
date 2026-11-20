@@ -3735,7 +3735,13 @@ The same wizard walks out of frame. Audio: footsteps on leaves." data-i18n-place
       <div class="cz-control" id="sbStyleRow">
         <div class="cz-label" data-i18n="sbStyleRow.look_goes_on_every">Look <span class="cz-label-hint">goes on every shot</span></div>
         <input type="text" id="sbStyle" class="sb-input"
-               placeholder="16mm, cold morning light, handheld, muted greens" data-i18n-placeholder="sbStyle.placeholder.16mm_cold_morning_light">
+               placeholder="3D Pixar animation style, warm vibrant colors..." data-i18n-placeholder="sbStyle.placeholder.16mm_cold_morning_light">
+        <div class="sb-style-chips" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;">
+          <button type="button" class="q-chip" onclick="sbApplyStylePreset('3D Pixar animation style, cute expressive characters, vibrant warm colors, high detail')">🎨 Pixar 3D (بيكسار)</button>
+          <button type="button" class="q-chip" onclick="sbApplyStylePreset('Cinematic live-action film, realistic cinematic lighting, 35mm lens, photorealistic')">🎬 Cinematic (سينمائي واقعي)</button>
+          <button type="button" class="q-chip" onclick="sbApplyStylePreset('Anime style, Studio Ghibli inspired, vibrant colors, hand-drawn look')">🌸 Anime (أنمي غيبلي)</button>
+          <button type="button" class="q-chip" onclick="sbApplyStylePreset('Claymation stop-motion animation, handcrafted, warm studio lighting')">🧸 Claymation (صلصال)</button>
+        </div>
       </div>
 
       <div class="cz-control" id="sbCastRow">
