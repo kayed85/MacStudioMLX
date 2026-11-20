@@ -1509,7 +1509,8 @@ def shot_pacing_problem(prompt: str, duration_s: float) -> str | None:
                     f"mid-sentence. Shorten the line, or lengthen the shot to "
                     f"at least {speech_fit_frames(words, slow=slow, sung=sung)} frames")
     last = spans[-1].rstrip()
-    if last and last[-1] not in ".!?":
+    stripped_last = last.rstrip("\"'”’»«)]} ")
+    if stripped_last and stripped_last[-1] not in ".!?؟۔…":
         return (f"the line ends {last[-12:]!r} — no full stop, so it plays as "
                 f"a sentence that never finishes. Close the thought")
     return None
