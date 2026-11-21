@@ -110,13 +110,7 @@ def patch_mlx_ltx_panel(version_dir: Path):
                 content = content[:doc_end_line+1] + '    return {"state": "ready", "reason": None}\n' + content[doc_end_line+1:]
                 print(f"[+] Patched pro_addon_state")
 
-    # 2. H3 flex turbo spec
-    old_turbo = '''def h3_flex_turbo_spec() -> dict | None:
-    """What H3 Flex Turbo needs and runs, from the Pro add-on. None on Free."""
-    if not bool(pro_status().get("active")):
-        return None
-    return _h3_pro_addon("h3_flex_turbo")'''
-
+    # 2. H3 flex turbo spec & argv
     new_turbo = '''def h3_flex_turbo_spec() -> dict | None:
     """What H3 Flex Turbo needs and runs."""
     return {
@@ -132,9 +126,20 @@ def patch_mlx_ltx_panel(version_dir: Path):
         "argv": ["--steps", "4", "--lora", "{adapter}:1.0"],
         "record": {"turbo_steps": 4},
     }'''
-    if old_turbo in content:
-        content = content.replace(old_turbo, new_turbo, 1)
+
+    target_turbo = "def h3_flex_turbo_spec() -> dict | None:"
+    target_turbo_end = "def h3_flex_turbo_paths() -> dict:"
+    if target_turbo in content and target_turbo_end in content:
+        s_idx = content.find(target_turbo)
+        e_idx = content.find(target_turbo_end, s_idx)
+        content = content[:s_idx] + new_turbo + "\n\n\n" + content[e_idx:]
         print(f"[+] Patched h3_flex_turbo_spec")
+
+    old_argv = '    import _ps\n    return _ps.h3_flex_turbo_argv(str(resolved["lora"]))'
+    new_argv = '    return ["--steps", "4", "--lora", f"{resolved[\'lora\']}:1.0"]'
+    if old_argv in content:
+        content = content.replace(old_argv, new_argv, 1)
+        print(f"[+] Patched h3_flex_turbo_argv")
 
     # 3. Canvas snapping function
     snap_def = '''def snap_canvas_for_engine(engine: str, width: int, height: int, *, max_dim: int = 0) -> tuple[int, int]:
