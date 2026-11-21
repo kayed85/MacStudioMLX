@@ -408,6 +408,7 @@ def install_storyboard_enhancements(version_dir: Path):
         ("webapp/style/panel.css", version_dir / "webapp" / "style" / "panel.css"),
         ("webapp/index.html", version_dir / "webapp" / "index.html"),
         ("webapp/js/queue.js", version_dir / "webapp" / "js" / "queue.js"),
+        ("webapp/js/stage.js", version_dir / "webapp" / "js" / "stage.js"),
     ]
     for rel_src, dst in files_to_sync:
         src = repo / rel_src

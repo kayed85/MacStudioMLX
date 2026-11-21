@@ -68,7 +68,7 @@ function imgStudioUpdateValidity() {
     // engine that actually does this.
     invalidReason = T('stage.this_engine_composes_against_a', 'This engine composes against a photo — drop one into a slot above, or pick FLUX.2, FLUX 3 or Ideogram 4 in Model (top of the column) to make a picture from words alone.');
   }
-  if (!invalidReason && flux3 && _IMG_HOST_RAM_GB < 32) {
+  if (!invalidReason && flux3 && _IMG_HOST_RAM_GB < 16) {
     const aspect = (document.getElementById('imgStudioAspect') || {}).value || '';
     if (!aspect.endsWith('s') || refsCount > 1) {
       invalidReason = T('stage.on_a_24_gb_mac', 'On a 24 GB Mac, choose Q4, a small image size and at most one reference.');
