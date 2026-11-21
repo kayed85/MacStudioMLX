@@ -83,8 +83,8 @@ def cover_decode_reason(exc) -> str:
 
 
 def parse_args(argv=None):
-    admission_only = "--admission-only" in (argv if argv is not None else sys.argv[1:])
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    admission_only = "--admission-only" in (argv if argv is not None else sys.argv[1:])
     p.add_argument("--model-dir", required=not admission_only, type=Path, help="converted generator dir (conversion.json)")
     p.add_argument("--vae-dir", required=not admission_only, type=Path, help="YuE2-Vae dir (model.safetensors + config.json)")
     p.add_argument("--output", required=not admission_only, type=Path, help=".wav or .flac")
@@ -237,8 +237,9 @@ def music_admission_snapshot() -> dict:
     total = hostinfo.total_ram_bytes() / 2**30
     free = hostinfo.available_bytes() / 2**30
     level = hostinfo.pressure_level()
+    # Measured song peak is about 11 GiB. Leave the guard's minimum free
+    # beside that peak, rather than the old 6 GiB pre-load threshold.
     # Calibrated for 16GB Apple Silicon machines:
-    # YuE2 8-bit peak MLX footprint is ~8.35 GiB.
     min_avail = float(os.environ.get("YUE2_MIN_AVAILABLE_GIB", "0.8"))
     need = 7.5 + min_avail if total <= 16 else 11.0 + min_avail
     verdict = ("unknown" if total <= 0 else "cannot" if total < 16 else
