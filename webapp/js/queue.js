@@ -6404,9 +6404,8 @@ function selectOutput(path, options) {
   }
   if (overlayActions) overlayActions.style.display = '';
 
-  // Load params is video-only — image sidecars use the library@1 schema
-  // which doesn't carry the i2v/t2v form fields the loader expects.
-  document.getElementById('loadParamsBtn').disabled = !(o && o.has_sidecar) || isPhoto || isAudio;
+  // Load params: enabled for videos and music with a sidecar (image sidecars use library@1 schema)
+  document.getElementById('loadParamsBtn').disabled = !(o && o.has_sidecar) || isPhoto;
   // New Take (VC-03) replays a sidecar too, so the same video-with-sidecar
   // gate applies. Works on a One Shot clip too — the endpoint re-runs the
   // whole take with a fresh seed (routes_queue.py post_queue_newtake).
@@ -8210,6 +8209,30 @@ async function loadParams(recipe) {
       ta.value = JSON.stringify(_ideoSrc, null, 2);
       if (typeof ideoApplyRaw === 'function') { try { ideoApplyRaw(); } catch (_) {} }  // rehydrate boxes
     }
+    return;
+  }
+  // Music sidecars: restore into Music Studio
+  if (data && (data.engine === 'music' || (p && p.mode === 'music') || (data.output && String(data.output).endsWith('.wav')))) {
+    const wf = document.querySelector('[data-workflow="music"]');
+    if (wf) wf.click();
+    if (p || data) {
+      if (typeof setMusicComposerMode === 'function') setMusicComposerMode('custom');
+      const titleEl = document.getElementById('musicTitle');
+      if (titleEl && (p?.music_title || data?.title)) { titleEl.value = p?.music_title || data?.title || ''; }
+      const styleEl = document.getElementById('musicStyle');
+      if (styleEl && (p?.music_style || data?.style)) { styleEl.value = p?.music_style || data?.style || ''; }
+      const lyricsEl = document.getElementById('musicLyricsRaw') || document.getElementById('musicLyrics');
+      if (lyricsEl && (p?.music_lyrics || data?.lyrics)) {
+        lyricsEl.value = p?.music_lyrics || data?.lyrics || '';
+        if (typeof musicLyricsRawChanged === 'function') musicLyricsRawChanged();
+      }
+      const instEl = document.getElementById('musicInstrumental');
+      if (instEl && typeof (p?.music_instrumental ?? data?.instrumental) !== 'undefined') {
+        instEl.checked = !!(p?.music_instrumental ?? data?.instrumental);
+      }
+      if (typeof musicFormChanged === 'function') musicFormChanged();
+    }
+    _flashActionDone('loadParamsBtn', T('queue.loaded', 'Loaded'));
     return;
   }
   // A One Shot reopens as One Shot, before any other branch reads `p` (a
