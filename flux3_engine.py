@@ -148,7 +148,7 @@ def require_space(path, extra=0, reserve=RESERVE):
 
 def ram_need(config):
     pack_for(config)
-    return {4: 18.5, 6: 20.6, 8: 22.8}[config.mflux_quantize]
+    return {4: 7.0, 6: 20.6, 8: 22.8}[config.mflux_quantize]
 
 
 def validate(config, width, height, refs, total_gb=None):
@@ -179,7 +179,7 @@ def status(engine, total_gb):
                 partial=done > 0 and complete < pack["bytes"], partial_gb=done / 1e9,
                 family_installed=True, worker_installed=worker_ready(),
                 lazy_install=True, download_gb=pack["bytes"] / 1e9,
-                ram_need_gb={4: 18.5, 6: 20.6, 8: 22.8}[recipe["quantize"]],
+                ram_need_gb={4: 7.0, 6: 20.6, 8: 22.8}[recipe["quantize"]],
                 mac_gb_needed=floor, fits_mac=total_gb >= floor,
                 sec_per_image=0, cold_start_sec=0, samples_source="unmeasured",
                 gated=False, license_url=LICENCE_URL)

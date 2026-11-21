@@ -384,6 +384,7 @@ def patch_flux3_engine(version_dir: Path):
         print(f"[-] {path} not found")
         return False
     content = path.read_text(encoding="utf-8")
+    content = content.replace('{4: 18.5, 6: 20.6, 8: 22.8}', '{4: 7.0, 6: 20.6, 8: 22.8}')
     content = content.replace('floor = 24 if config.mflux_quantize == 4 else 32', 'floor = 16 if config.mflux_quantize == 4 else 32')
     content = content.replace('floor = 24 if recipe["quantize"] == 4 else 32', 'floor = 16 if recipe["quantize"] == 4 else 32')
     content = content.replace('if total_gb < 32 and (width * height > 768**2 or len(refs) > 1):', 'if total_gb < 16 and (width * height > 1024**2 or len(refs) > 1):')
