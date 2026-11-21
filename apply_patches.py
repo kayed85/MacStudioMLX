@@ -64,6 +64,26 @@ def patch_yue2_run(version_dir: Path):
         'swap_growth = float(os.environ.get("YUE2_MAX_SWAP_GROWTH_MIB", "12288"))'
     )
     
+    # Admission check calibration for 16GB Macs:
+    old_parse = 'p.add_argument("--model-dir", required=True'
+    new_parse = 'admission_only = "--admission-only" in (argv if argv is not None else sys.argv[1:])\n    p.add_argument("--model-dir", required=not admission_only'
+    if old_parse in content and 'admission_only =' not in content:
+        content = content.replace(old_parse, new_parse, 1)
+        content = content.replace('p.add_argument("--vae-dir", required=True', 'p.add_argument("--vae-dir", required=not admission_only', 1)
+        content = content.replace('p.add_argument("--output", required=True', 'p.add_argument("--output", required=not admission_only', 1)
+
+    old_admission = '''    need = 11.0 + float(os.environ.get("YUE2_MIN_AVAILABLE_GIB", "1.5"))
+    verdict = ("unknown" if total <= 0 else "cannot" if total < 16 else
+               "busy" if free < need or level != 1 else "ok")'''
+    new_admission = '''    # Calibrated for 16GB Apple Silicon machines:
+    min_avail = float(os.environ.get("YUE2_MIN_AVAILABLE_GIB", "0.8"))
+    need = 7.5 + min_avail if total <= 16 else 11.0 + min_avail
+    verdict = ("unknown" if total <= 0 else "cannot" if total < 16 else
+               "busy" if free < need or level > 1 else "ok")'''
+    if old_admission in content:
+        content = content.replace(old_admission, new_admission, 1)
+        print(f"[+] Patched yue2_run.py admission check for 16GB Macs")
+
     old_abort = '''        if swapped > swap_out * mib or growth > swap_growth * mib:
             raise MemoryError(f"Stopping: the system is swapping ({swapped / mib:.0f} MiB out, "
                               f"{growth / mib:.0f} MiB swap growth)")'''
