@@ -55638,14 +55638,7 @@ HTML = (ROOT / "webapp" / "index.html").read_text(encoding="utf-8")
 # from here when populated. Dev keeps reading from disk so a hard-refresh
 # still picks up edits without a restart (docs/ARCHITECTURE.md).
 _WEBAPP_SNAPSHOT: dict[str, bytes] = {}
-if PROFILE != "dev":
-    try:
-        _wa = ROOT / "webapp"
-        for _f in _wa.rglob("*"):
-            if _f.is_file():
-                _WEBAPP_SNAPSHOT[_f.relative_to(_wa).as_posix()] = _f.read_bytes()
-    except Exception:                                      # noqa: BLE001
-        _WEBAPP_SNAPSHOT = {}
+# Disabled so that webapp files are always read live from disk on reload
 
 
 def _diagnose_port_busy(port: int) -> str:

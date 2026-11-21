@@ -68,12 +68,7 @@ function imgStudioUpdateValidity() {
     // engine that actually does this.
     invalidReason = T('stage.this_engine_composes_against_a', 'This engine composes against a photo — drop one into a slot above, or pick FLUX.2, FLUX 3 or Ideogram 4 in Model (top of the column) to make a picture from words alone.');
   }
-  if (!invalidReason && flux3 && _IMG_HOST_RAM_GB < 16) {
-    const aspect = (document.getElementById('imgStudioAspect') || {}).value || '';
-    if (!aspect.endsWith('s') || refsCount > 1) {
-      invalidReason = T('stage.on_a_24_gb_mac', 'On a 24 GB Mac, choose Q4, a small image size and at most one reference.');
-    }
-  }
+  // FLUX 3 restriction removed for 16GB Macs
   // Non-blocking notice (does NOT disable Generate): Ideogram is text-only,
   // so a loaded reference is silently dropped unless the reference bridge is
   // on. Surface that trap with a way out (turn on the bridge, or switch to a

@@ -244,6 +244,9 @@ def patch_mlx_ltx_panel(version_dir: Path):
     content = content.replace('("flux2", 4):      8.0,', '("flux2", 4):      5.5,')
     content = content.replace('("flux2", 6):      8.0,', '("flux2", 6):      7.5,')
 
+    # 8. Disable _WEBAPP_SNAPSHOT to always read webapp files live from disk
+    content = content.replace('if PROFILE != "dev":\n    try:\n        _wa = ROOT / "webapp"', 'if False:\n    try:\n        _wa = ROOT / "webapp"')
+
     path.write_text(content, encoding="utf-8")
     return True
 
@@ -408,6 +411,7 @@ def install_storyboard_enhancements(version_dir: Path):
         ("webapp/style/panel.css", version_dir / "webapp" / "style" / "panel.css"),
         ("webapp/index.html", version_dir / "webapp" / "index.html"),
         ("webapp/js/queue.js", version_dir / "webapp" / "js" / "queue.js"),
+        ("webapp/js/stage.js", version_dir / "webapp" / "js" / "stage.js"),
         ("webapp/js/stage.js", version_dir / "webapp" / "js" / "stage.js"),
     ]
     for rel_src, dst in files_to_sync:
