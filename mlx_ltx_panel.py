@@ -1664,6 +1664,7 @@ def _settings_defaults() -> dict:
         # would mean asking someone to log into GitHub inside a local video
         # panel to suppress a prompt. Clicking through, or saying you already
         # starred, sets this once and the ask never returns on this install.
+        "update_automatically": True,
         "update_banner_dismissed": "",
         "star_prompt_done": False,
         # Broadcast messages the user already dismissed (list of message ids,
@@ -2021,6 +2022,15 @@ def _validate_settings_patch(patch: dict) -> tuple[dict, str | None]:
     # accepted here — they're panel bookkeeping written via
     # _settings_set_internal(), and a form must not be able to set the
     # install id (that would let a page correlate installs).
+    if "update_automatically" in patch:
+        v = patch["update_automatically"]
+        if isinstance(v, bool):
+            out["update_automatically"] = v
+        elif str(v).strip().lower() in ("true", "false", "1", "0", "on", "off"):
+            out["update_automatically"] = str(v).strip().lower() in ("true", "1", "on")
+        else:
+            return {}, "Invalid automatic update choice"
+
     if "analytics_enabled" in patch:
         # Same urlencoded-bool coercion as spicy_mode / models_card_dismissed.
         v = patch["analytics_enabled"]
@@ -2147,6 +2157,7 @@ def get_settings_public() -> dict:
         # no matter what the user had chosen.
         "h3_dit": str(s.get("h3_dit", "auto") or "auto"),
         "h3_vae_fp16": bool(s.get("h3_vae_fp16", True)),
+        "update_automatically": bool(s.get("update_automatically", True)),
         "update_banner_dismissed": str(s.get("update_banner_dismissed", "") or ""),
         "star_prompt_done": bool(s.get("star_prompt_done", False)),
         "broadcast_seen_ids": list(s.get("broadcast_seen_ids") or []),
@@ -5921,7 +5932,8 @@ def job_needs_ltx_base(params: dict | None) -> bool:
         return True
     if str(p.get("mode") or "t2v").strip().lower() in _NO_LTX_BASE_MODES:
         return False
-    return (str(p.get("engine") or "ltx").strip().lower()) not in _NO_LTX_BASE_ENGINES
+    eng = str(p.get("engine") or (p.get("take") or {}).get("engine") or "ltx").strip().lower()
+    return eng not in _NO_LTX_BASE_ENGINES
 
 
 def base_models_refusal(params: dict | None) -> dict | None:
@@ -6328,13 +6340,13 @@ def ltx_text_encoder_preflight(feature: str, version_id: str | None = None) -> N
         return
     ver = model_version(version_id)
     missing = sorted(missing, key=lambda f: not f.endswith(".safetensors"))   # the weights first
-    shown = ", ".join(missing[:3]) + (" …" if len(missing) > 3 else "")
+    shown = ", ".join(missing)
     raise RuntimeError(
         f"{feature} can't run: the {ver['label']} text encoder model is "
         f"incomplete. Missing {len(missing)} file(s) in "
         f"{text_encoder_dir(version_id)}: {shown}. "
-        f"Use the Repair banner in Settings → Model files to fetch it again; "
-        f"your other models are kept.")
+        f"Press Repair to re-download only the missing files, or open "
+        f"Settings → Model files; your other models are kept.")
 
 
 _HQ_WEIGHTS_FALLBACK = {
@@ -6683,14 +6695,15 @@ def _ltx_dit_pack_preflight(quant: str, feature: str,
         if not missing:
             return
     ver = model_version(version_id)
-    shown = ", ".join(missing[:3]) + (" …" if len(missing) > 3 else "")
+    shown = ", ".join(missing)
     raise RuntimeError(
         f"{feature} can't run: the {ver['label']} {quant.upper()} model is "
         f"incomplete. Missing {len(missing)} file(s) in "
         f"{pack_path(quant, version_id)}: {shown}. "
         f"Rendering anyway produces garbled 'mosaic' output rather than an "
-        f"error, which is why this stops here. Use the Repair banner in "
-        f"Settings → Model files, or re-download {repo['repo_id']}."
+        f"error, which is why this stops here. Press Repair to re-download "
+        f"only the missing files, or open Settings → Model files to "
+        f"re-download {repo['repo_id']}."
     )
 
 
@@ -7913,7 +7926,7 @@ def _download_register(proc) -> bool:
     return not cancelled
 
 
-def _download_thread(repo: dict) -> str:
+def _download_thread(repo: dict, only_files: list[str] | None = None) -> str:
     """Run `hf download <repo_id> --local-dir <repo.local_dir>` and stream
     stdout/stderr line-by-line into STATE['log']. Sets DOWNLOAD["active"]
     back to False on exit (success or fail). Files land at repo['local_dir']
@@ -7957,6 +7970,7 @@ def _download_thread(repo: dict) -> str:
     env = os.environ.copy()
     env["LTX_MODELS_DIR"] = str(MODELS_DIR)
 
+    only = list(dict.fromkeys(str(f) for f in (only_files or ()) if f))
     if is_release_mirror:
         # sys.executable, not HF_BIN: the fetcher is stdlib-only and runs under
         # the panel's own interpreter. No hf, no token, no Hub. It shards, it
@@ -7966,9 +7980,15 @@ def _download_thread(repo: dict) -> str:
         cmd = [sys.executable, str(ROOT / "scripts" / "fetch_pack_release.py"),
                "--repo-key", str(repo.get("key") or ""), "--root", str(ROOT),
                "--dest", str(target)]
-        push(f"[mirror] {repo.get('key')} → {target} (~{repo.get('size_gb','?')} GB) "
-             f"from the {mirror.get('release_repo')} release "
-             f"{mirror.get('tag')} — sharded, sha256-verified, resumable")
+        for fname in only:
+            cmd.extend(["--only", fname])
+        if only:
+            push(f"[mirror] repairing {repo.get('key')} → {target} — "
+                 f"only {len(only)} missing/bad file(s): {', '.join(only)}")
+        else:
+            push(f"[mirror] {repo.get('key')} → {target} (~{repo.get('size_gb','?')} GB) "
+                 f"from the {mirror.get('release_repo')} release "
+                 f"{mirror.get('tag')} — sharded, sha256-verified, resumable")
     else:
         dl_tag = "hf"
         cmd = [str(HF_BIN), "download", repo_id, "--local-dir", str(target)]
@@ -7980,12 +8000,16 @@ def _download_thread(repo: dict) -> str:
         # 25 GB Q4 into 56 GB. `download_include` is the explicit allowlist of
         # patterns we ship to the user; everything else stays on the Hub. See
         # required_files.json for the comment block on this.
-        include_patterns = repo.get("download_include") or []
+        include_patterns = only if only else (repo.get("download_include") or [])
         for pat in include_patterns:
             cmd.extend(["--include", pat])
-        if include_patterns:
-            push(f"[hf] filtering {repo_id} download to {len(include_patterns)} pattern(s) — only the files the panel actually loads.")
-        push(f"[hf] {repo_id} → {target} (~{repo.get('size_gb','?')} GB) — resumable")
+        if only:
+            push(f"[hf] repairing {repo_id} → {target} — "
+                 f"only {len(only)} missing/bad file(s): {', '.join(only)}")
+        else:
+            if include_patterns:
+                push(f"[hf] filtering {repo_id} download to {len(include_patterns)} pattern(s) — only the files the panel actually loads.")
+            push(f"[hf] {repo_id} → {target} (~{repo.get('size_gb','?')} GB) — resumable")
 
         # HF_HUB_ENABLE_HF_TRANSFER=1 turns on the Rust downloader; if
         # hf_transfer isn't installed the hf CLI logs a warning and falls back
@@ -8072,9 +8096,20 @@ def _download_thread(repo: dict) -> str:
                 push(f"[{dl_tag}:{repo['key']}] {buf.strip()[:300]}")
             rc = proc.wait()
             if rc == 0:
-                push(f"[{dl_tag}] {dl_label} downloaded successfully.")
-                outcome = "ok"
-                break
+                still_bad = (
+                    [f for f in only if not pack_file_ok(target / f, f, repo)]
+                    if only else pack_files_missing(target, repo)
+                )
+                if still_bad:
+                    msg = (f"[{dl_tag}] {dl_label} size check failed after download — "
+                           f"still incomplete ({len(still_bad)} file(s)): "
+                           f"{', '.join(still_bad)}")
+                    push(msg)
+                    failure_lines = (failure_lines + [msg])[-12:]
+                else:
+                    push(f"[{dl_tag}] {dl_label} downloaded and verified by size.")
+                    outcome = "ok"
+                    break
             if is_release_mirror and rc == PACK_FETCH_BUSY_RC:
                 # Mac app review #7: another fetcher (the Mac app's own model
                 # download, or a second studio) holds this pack folder. The
@@ -8185,6 +8220,9 @@ def model_download_failure_message(detail: str) -> str:
     detail = detail.lower()
     if "same path" in detail:
         return "Model folder unavailable for download. " + model_path_guard.REMEDY
+    if "size check failed" in detail:
+        return ("Some model files did not match the expected size after downloading. "
+                "Press Repair model again to retry those files. Completed files are kept.")
     if any(word in detail for word in ("sha256 mismatch", "assembled sha256", "hash mismatch")):
         return ("The download failed its safety check. Try again to fetch a clean copy. "
                 "Other completed files are kept.")
@@ -11220,7 +11258,7 @@ def _h3image_mem_mode(setting: str, asked: bool) -> str:
 # 4.19.6: the non-watchdog GPU aborts in prompt encoding that pass on a later,
 # fresh start (fleet 4.19.2+: M2 Max / macOS 15.x, M1 Max / macOS 26.6) - see
 # WarmHelper.run. Re-run once, in a fresh helper, after this pause.
-METAL_ABORT_RETRY_LINES = ("gpu_internal", "gpu_victim", "gpu_other")
+METAL_ABORT_RETRY_LINES = ("gpu_internal", "gpu_victim", "gpu_oom", "gpu_other")
 try:
     METAL_ABORT_COOLDOWN_SEC = max(0, int(os.environ.get("LTX_METAL_ABORT_COOLDOWN_SEC") or 45))
 except ValueError:
@@ -11377,7 +11415,8 @@ def h3_watchdog_line(lines) -> bool:
 
 
 _H3_METAL_OOM_RX = re.compile(
-    r"Insufficient Memory|kIOGPUCommandBufferCallbackErrorOutOfMemory",
+    r"Insufficient Memory|kIOGPUCommandBufferCallbackErrorOutOfMemory"
+    r"|metalalloc|kIOReturnNoSpace",
     re.IGNORECASE)
 
 
@@ -11395,6 +11434,77 @@ def h3_metal_oom_message(frames: int | None = None) -> str:
             "it ran out of memory). "
             + ("Make a shorter clip (5 s), " if longer else "Try a shorter clip, ")
             + "or a lower setting such as Draft, and quit other apps before you retry.")
+
+
+_H3_CRASH_PHASE_MAP = {
+    "text_encode_q8": "encode",
+    "text_cache_load": "encode",
+    "keyframe_encode": "encode",
+    "dit_load_bf16": "load",
+    "dit_load_q8": "load",
+    "dit_load_q4": "load",
+    "adaln_cache_and_noise": "load",
+    "joint_denoise": "denoise",
+    "video_vae_decode": "decode",
+    "audio_vae_decode": "decode",
+    "encode_mux": "decode",
+    "stitch": "decode",
+}
+
+
+def _h3_crash_phase(bare_phase: str | None) -> str:
+    """Map an H3 runner phase label onto CRASH_PHASES (encode/load/denoise/decode/start)."""
+    return _H3_CRASH_PHASE_MAP.get(str(bare_phase or "").strip(), "start")
+
+
+def h3_metal_crash_line(lines) -> str:
+    """Closed Metal/GPU crash_line class from an H3 runner tail, or "" if none."""
+    for ln in reversed(list(lines or ())):
+        cls = crash_line_class(ln)
+        if cls.startswith("gpu_"):
+            return cls
+    return ""
+
+
+def h3_watchdog_message(frames: int | None = None, *, was_short: bool = False,
+                        detail: str = "") -> str:
+    """Plain-words message for a Hailuo H3 GPU-watchdog stop (H79).
+    Leads with the watchdog cause inside the 80-char fleet mirror signature
+    (splitting first-hit from repeat-on-short-steps, and splitting both from
+    Metal OOM and other Metal driver errors) while preserving the metal_watchdog
+    analytics needle."""
+    longer = int(frames or 0) > 130          # longer than one 5 s window
+    low = str(detail or "").lower()
+    tag = ("Impacting Interactivity" if "impacting" in low
+           else "Caused GPU Timeout Error")
+    tail = f" ({detail[:180]})" if detail else f" ({tag})"
+    if detail and not _H3_WATCHDOG_RX.search(detail):
+        tail = f" ({tag}: {detail[:160]})"
+    if was_short:
+        return (
+            "Hailuo H3 stopped by macOS's GPU watchdog (short GPU steps already on). "
+            "Your Mac's graphics chip stopped this render to keep the screen responsive. "
+            + ("Try a 5-second clip or Draft quality, " if longer
+               else "Try a shorter clip or Draft quality, ")
+            + f"and close other apps that use the graphics chip heavily.{tail}")
+    return (
+        "Hailuo H3 stopped by macOS's GPU watchdog (switching to short GPU steps). "
+        "Your Mac's graphics chip stopped this render to keep the screen responsive. "
+        "Press Retry: from now on this Mac renders Hailuo H3 in smaller GPU steps, "
+        f"the remedy LTX videos already use; it may be a little slower.{tail}")
+
+
+def h3_metal_driver_message(crash_line: str, *, rc: int = 1,
+                            detail: str = "") -> str:
+    """Plain-words message for a non-OOM, non-watchdog Metal command-buffer stop
+    in Hailuo H3 (H79). Names the closed Metal sub-cause in the first 80 chars
+    so it never conflates with watchdog or allocation in the fleet mirror."""
+    cls = str(crash_line or "gpu_other").strip() or "gpu_other"
+    tail = f" ({detail[:180]})" if detail else ""
+    return (
+        f"Hailuo H3 graphics driver stopped the render (Metal: {cls}, exited with code {int(rc)}). "
+        "Try a shorter clip or Draft quality, quit other apps that use graphics, "
+        f"and update macOS if it keeps happening.{tail}")
 
 
 def h3_watchdog_mark(now: float | None = None) -> None:
@@ -11688,6 +11798,28 @@ def h3_estimate_minutes(w: int, h: int, window_frames: int, windows: int,
     per_fwd = _h3_forward_seconds(rows)
     fixed = _h3_fixed_seconds(w, h, window_frames)
     return (windows * max(0, int(forwards)) * per_fwd + windows * fixed) / 60.0 * _h3_speed_factor(windows)
+
+
+H3_IDLE_MIN_SEC = 20 * 60
+H3_IDLE_MAX_SEC = 90 * 60
+
+
+def h3_idle_limit_sec(modeled_step_sec: float, decode_sec: float = 0.0, *,
+                      low_memory: bool = False,
+                      measured_step_sec: float = 0.0) -> int:
+    """Seconds of stdout silence before an H3 render is declared hung.
+
+    The original 20-minute constant assumed ~2 min per denoise forward (4.8.2).
+    Native (1344x768), 10 s single-pass (243 f) and --low-memory streamed runs
+    on slower Macs (M1 Max 3x, M2 Max 32 GB) legitimately spend 15-44 min on
+    one silent forward or VAE decode, so a flat 20-minute cutoff killed healthy
+    renders mid-step (H64). Allow at least 3x (4x when block-streaming on
+    --low-memory) the longest expected or observed silent phase, floored at
+    20 minutes and capped at 90 minutes."""
+    longest = max(0.0, float(modeled_step_sec or 0.0),
+                  float(decode_sec or 0.0), float(measured_step_sec or 0.0))
+    mult = 4.0 if low_memory else 3.0
+    return max(H3_IDLE_MIN_SEC, min(H3_IDLE_MAX_SEC, int(math.ceil(longest * mult))))
 
 
 def h3_memory_budget(total_ram_gb: float | None = None) -> tuple[float, float]:
@@ -16061,6 +16193,65 @@ def h3_refs_install(push_log) -> dict:
     return h3_refs.start(root, spec, H3_ROOT, paths.get("python"), push_log,
                          free_gb=_h3_refs_free_gb(root), ram_gb=float(SYSTEM_RAM_GB or 0) or None,
                          gate=_h3_refs_build_gate)
+
+
+def h3_refs_refusal(params: dict | None) -> dict | None:
+    """Submit-time refusal for /queue/add and /queue/batch when a job asks for
+    References before its model is ready on this Mac (H62). Returns None when
+    the job does not use References or is ready; otherwise a 400 payload whose
+    `code` lets the UI offer the one-click download instead of failing later."""
+    p = params or {}
+    if str(p.get("engine") or "ltx").strip().lower() != "h3":
+        return None
+    if not p.get("h3_refs") or str(p.get("mode") or "t2v").strip().lower() not in h3_refs.MODES:
+        return None
+    spec = h3_refs_spec()
+    if not spec:
+        return {
+            "error": (f"{h3_refs.NAME} is part of Phosphene Pro, and Pro is not active "
+                      "on this Mac. Switch References off to render with Face to keep."),
+            "code": "h3_refs_unavailable",
+        }
+    floor = h3_refs.min_ram_gb(spec)
+    if SYSTEM_RAM_GB and float(SYSTEM_RAM_GB) + 0.5 < floor:
+        return {
+            "error": (f"{h3_refs.NAME} needs a Mac with {floor:.0f} GB of memory or more; "
+                      f"this Mac has {float(SYSTEM_RAM_GB):.0f} GB. Switch References off to "
+                      "render with Face to keep."),
+            "code": "h3_refs_ram",
+        }
+    if h3_available() and not h3_supports_reference():
+        return {
+            "error": (f"{h3_refs.NAME} needs a newer Hailuo H3. "
+                      + _dist.say("Press Update in Pinokio (your downloads stay), then come back.",
+                                  "Phosphene updates it by itself; if this stays, quit and reopen Phosphene.")),
+            "code": "h3_refs_runner",
+        }
+    paths = h3_refs_paths(spec)
+    if paths["files_ok"]:
+        return None
+    st = h3_refs.state()
+    installing = st.get("status") == "running"
+    root = _h3_refs_models_root()
+    pl = h3_refs.plan(root, spec, _h3_refs_free_gb(root), float(SYSTEM_RAM_GB or 0) or None)
+    if installing:
+        error = (f"{h3_refs.NAME} is still downloading and setting up on this Mac. "
+                 "Generate again when it finishes, or switch References off.")
+    elif pl.get("disk_ok") is False:
+        need = round(pl.get("disk_need_gb") or 66)
+        error = (f"The models disk has {pl.get('free_gb')} GB free; {h3_refs.NAME} needs "
+                 f"about {need} GB free while it builds. Free some space on it, then come back.")
+    else:
+        error = (f"{h3_refs.NAME} is not downloaded yet: "
+                 + "; ".join(paths["missing"])
+                 + ". Click Get References to download it once.")
+    return {
+        "error": error,
+        "code": "h3_refs_missing",
+        "installing": installing,
+        "can_install": (not installing) and (pl.get("disk_ok") is not False),
+        "have_gb": pl.get("have_gb") or 0,
+    }
 
 
 H3_REFS_BUILD_HOLD = ("Queue held: References is being set up on this Mac (about 10 minutes). "
@@ -22342,6 +22533,9 @@ def _analytics_scrub_text(text, secrets=()) -> str:
             if len(sec) >= 6 and sec in s:
                 s = s.replace(sec, "<redacted>")
         s = _analytics_redact_paths(s)
+        # Process addresses are not causes; keep equivalent ffmpeg failures
+        # together before truncation and fingerprinting.
+        s = re.sub(r"\b0x[0-9a-fA-F]+\b", "<address>", s)
         s = " ".join(s.split())
         return s[:ANALYTICS_STR_MAX]
     except Exception:
@@ -24177,8 +24371,9 @@ def _star_prompt_after_job(job: dict) -> None:
 PRO_HINT_MAX_DISMISSALS = 3
 PRO_HINT_GAP_SEC = 48 * 3600
 PRO_HINT_WHERE = ("topbar", "remote_hint", "remote_panel", "pro_modal", "star_card",
-                  "speedup_line", "feature_gate", "settings", "whats_new",
-                  "whats_new_speed", "your_pro")
+                  "speedup_line", "fast_draft_line", "vertical_hint", "feature_gate",
+                  "settings", "whats_new", "whats_new_speed", "how_take",
+                  "your_pro", "china_renew")
 # pro_click (docs/ANALYTICS.md): `open` the Pro window opened, `get` a Get Pro / plan link pressed,
 # and inside the window `restore` (Restore Pro), `key` (a licence key submitted; never the key), `close`.
 PRO_CLICK_ACTIONS = ("open", "get", "restore", "key", "close")
@@ -26338,6 +26533,37 @@ def _video_has_audio(path: str) -> bool:
     return _probe_audio_state(path) == "audio"
 
 
+def a2v_audio_refusal(path: str, start_time=0.0) -> str | None:
+    """Plain-English refusal when a Lip-sync (a2v) input has no audio track or
+    `start_time` is at/past the end of the file; None when readable or unknowable.
+
+    H73 (fleet Nov 2026, 2 Macs, 8 failed renders in 7 days): LTX Lip-sync
+    raised raw `No audio found in <path>` from `load_audio()` when handed a
+    file without an audio track or a `start_time` past the end. Only definite
+    findings refuse ("none" from ffprobe, or a known duration <= start_time);
+    "unknown" leaves the file to the engine (same rule as H37 on v2a).
+    """
+    name = Path(str(path)).name or str(path)
+    state = _probe_audio_state(str(path))
+    if state == "none":
+        return (f"Phosphene could not read the audio in {name}: it has no audio "
+                "track (it may be a silent video or a picture). Nothing was "
+                "rendered. Pick an audio file (WAV, MP3, M4A, FLAC) or a video "
+                "with sound.")
+    try:
+        start_t = max(0.0, float(start_time or 0.0))
+    except (TypeError, ValueError):
+        start_t = 0.0
+    if state == "audio" and start_t > 0.0:
+        dur = probe_media_duration(path)
+        if dur is not None and start_t >= dur - 0.05:
+            return (f"Phosphene could not read the audio in {name}: Start at "
+                    f"{start_t:.1f}s is past the end of the file ({dur:.1f}s). "
+                    "Nothing was rendered. Set Start at earlier in the track, "
+                    "or pick a longer audio file.")
+    return None
+
+
 def ltx_grid_frames_up(frames: int) -> int:
     """The smallest LTX frame count (1 + 8k, at least 9) that holds `frames`."""
     frames = max(1, int(frames))
@@ -27566,7 +27792,7 @@ SIDECAR_WARNING = ("The clip was saved, but its settings record ({name}) could n
 # The ratios come from pro_perks.json (the one list of Pro perks and their measurements).
 PRO_SPEEDUPS = {"h3": pro_perks.ratio("h3-faster", 1.48), "ltx": pro_perks.ratio("ltx-faster", 1.29),
                 "image": pro_perks.ratio("ph3-image-fast-pro", 1.54)}
-PRO_PLANS = {"monthly": "Pro", "yearly": "Pro", "founding": "Founding", "hardship": "Pro", "pro": "Pro", "dev": "Pro"}
+PRO_PLANS = {"monthly": "Pro", "yearly": "Pro", "year_cny_wechat": "Pro", "founding": "Founding", "hardship": "Pro", "pro": "Pro", "dev": "Pro"}
 
 
 def pro_status() -> dict:
@@ -28763,11 +28989,17 @@ class WarmHelper:
                 f"bytes) but helper silent for {elapsed:.0f}s after "
                 f"decode-done. SIGKILLing helper; render counted as done."
             )
-            # SIGKILL from a background thread to avoid blocking the panic
-            # tick. The kill is fully external so the helper's GIL
-            # situation doesn't matter.
-            threading.Thread(target=self.kill, daemon=True,
-                             name="phos-panic-kill").start()
+            # Detach self.proc BEFORE returning "done" so the next queued job
+            # starts a fresh helper and never races with the background kill
+            # thread (H66). Kill only the detached process.
+            with self.lock:
+                stale_proc = self.proc
+                self.proc = None
+                if stale_proc is not None:
+                    _proc_guard_clear("helper")
+            if stale_proc is not None:
+                threading.Thread(target=self._kill_proc, args=(stale_proc,),
+                                 daemon=True, name="phos-panic-kill").start()
             note_engine_restart()
             return {
                 "event": "done",
@@ -28958,6 +29190,19 @@ class WarmHelper:
                         and self._crash_line in METAL_ABORT_RETRY_LINES
                         and self._last_phase == "encode"
                         and not self.is_alive()):
+                    with LOCK:
+                        cancelled = bool(job is not None
+                                         and job.get("cancel_requested"))
+                    if cancelled:
+                        raise
+                    # H72 (fleet, 5.0.80 M2 Pro 16 GB): Metal OutOfMemory in
+                    # prompt encoding skipped both the memory hold and the
+                    # automatic retry. Wait for free memory on small Macs
+                    # first (H43/#206), or refuse plainly with what to close.
+                    if (self._crash_line == "gpu_oom"
+                            and small_mac_for_encode_hold()):
+                        metal_watchdog_mark_mac_encode_kill()
+                        ltx_encode_memory_hold(job)
                     abort_retry_used = True
                     if self._abort_cooldown(job):
                         raise
@@ -29120,9 +29365,10 @@ class WarmHelper:
                 raise RuntimeError(
                     f"helper timed out after {timeout:g}s waiting for a response"
                 )
+            res = self._dispatch_run_event(ev)
             if self.is_alive():
                 self._jobs_in_proc += 1
-            return self._dispatch_run_event(ev)
+            return res
 
     # 4.17.3 (fleet): "helper pipe closed without an event; returncode=None"
     # — 23 failed renders over 30 days on 15 installs, three of them on
@@ -29249,29 +29495,47 @@ class WarmHelper:
         if ev.get("event") == "error":
             raise RuntimeError(plain_model_load_error(ev.get("error", "helper error")))
         if ev.get("event") == "exit":
-            raise RuntimeError(f"helper exited mid-job: {ev.get('reason')}")
+            reason = str(ev.get("reason") or "")
+            # The helper already announced its exit (e.g. SIGTERM handler ->
+            # sys.exit(0), which can take 1-2 s to tear down MLX). Reap and
+            # detach self.proc now so the next queued job never writes into
+            # the dying helper and fails seconds later with returncode=0 (H66).
+            self.kill()
+            if reason.startswith("sigterm("):
+                sig = "SIGINT" if reason == "sigterm(2)" else "SIGTERM"
+                raise RuntimeError(
+                    f"The render engine was stopped from outside Phosphene ({sig}): "
+                    "macOS or another program ended it while the clip was rendering. "
+                    "Nothing is wrong with your settings — press Retry."
+                )
+            raise RuntimeError(f"helper exited mid-job: {reason}")
         return ev
+
+    def _kill_proc(self, proc: subprocess.Popen | None) -> None:
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            pgid = os.getpgid(proc.pid)
+            os.killpg(pgid, signal.SIGTERM)
+            push(f"helper SIGTERM sent (pgid {pgid})")
+        except ProcessLookupError:
+            pgid = None
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            if pgid is not None:
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except Exception:
+                    pass
 
     def kill(self) -> None:
         with self.lock:
-            if self.proc is None or self.proc.poll() is not None:
-                self.proc = None
+            proc = self.proc
+            if proc is None:
                 return
-            try:
-                pgid = os.getpgid(self.proc.pid)
-                os.killpg(pgid, signal.SIGTERM)
-                push(f"helper SIGTERM sent (pgid {pgid})")
-            except ProcessLookupError:
-                pgid = None
-            try:
-                self.proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                if pgid is not None:
-                    try:
-                        os.killpg(pgid, signal.SIGKILL)
-                    except Exception:
-                        pass
             self.proc = None
+            self._kill_proc(proc)
             _proc_guard_clear("helper")
 
     def is_alive(self) -> bool:
@@ -29301,7 +29565,23 @@ def _gpu_steps_note(job: dict) -> None:
 
 
 HELPER = WarmHelper()
-atexit.register(HELPER.kill)
+
+
+def _kill_helper_at_exit() -> None:
+    """Atexit + shutdown hook — mark any running job cancelled before
+    stopping the warm helper, mirroring _kill_train_proc (H66). Quitting
+    Phosphene mid-render is not a failed render."""
+    try:
+        with LOCK:
+            cur = STATE.get("current")
+            if cur is not None:
+                cur["cancel_requested"] = True
+    except Exception:                                  # noqa: BLE001
+        pass
+    HELPER.kill()
+
+
+atexit.register(_kill_helper_at_exit)
 atexit.register(caffeinate_off)
 
 
@@ -29509,10 +29789,16 @@ def reap_orphan_subprocesses() -> None:
 
 
 def _kill_image_procs() -> None:
-    """Atexit hook — SIGTERM any in-flight image-engine subprocesses
-    (HiDream BF16 helper, mflux per-family binaries). Each engine registers
-    its Popen via _register_active_proc; kill_active_image_procs walks
-    the set and SIGTERMs each process group."""
+    """Atexit hook — mark any running job cancelled before SIGTERMing in-flight
+    image-engine subprocesses (H70, mirroring _kill_helper_at_exit). Quitting
+    Phosphene mid-picture is not a failed render."""
+    try:
+        with LOCK:
+            cur = STATE.get("current")
+            if cur is not None:
+                cur["cancel_requested"] = True
+    except Exception:                                  # noqa: BLE001
+        pass
     try:
         agent_image_engine.kill_active_image_procs()
     except Exception:
@@ -30074,6 +30360,7 @@ def stop_current_job(timeout: float = 5.0, expect_id: str | None = None) -> bool
         h3_pgid = STATE.get("h3_pgid")
         music_pgid = STATE.get("music_pgid")
         speech_pgid = STATE.get("speech_pgid")
+        image_procs = agent_image_engine.snapshot_active_image_procs()
     push("Stop requested — killing helper + ffmpeg post-process + training subprocess to abort current job.")
     HELPER.kill()
     if music_pgid:
@@ -30082,11 +30369,12 @@ def stop_current_job(timeout: float = 5.0, expect_id: str | None = None) -> bool
         _stop_speech_proc(pgid=speech_pgid)
     # Image-engine subprocesses (HiDream's BF16 helper, mflux's per-family
     # binaries) live outside HELPER. Without this they would run to
-    # completion regardless of /stop. Each engine registers its Popen via
-    # _register_active_proc; kill_active_image_procs sends SIGTERM to the
-    # whole process group of each.
+    # completion regardless of /stop. Snapshotted under LOCK alongside
+    # cancel_requested so a next picture job starting during HELPER.kill()
+    # is never hit by this /stop (H70).
     try:
-        n_killed = agent_image_engine.kill_active_image_procs()
+        n_killed = (agent_image_engine.kill_active_image_procs(image_procs)
+                    if image_procs else 0)
         if n_killed:
             push(f"SIGTERM sent to {n_killed} image subprocess(es)")
     except Exception as e:        # noqa: BLE001
@@ -33323,6 +33611,12 @@ def _sb_plan_thread(board_id: str, brief: dict, previous: dict | None) -> None:
 def _sb_enqueue(job_form: dict) -> str:
     """Enqueue one shot exactly the way /queue/add does. No private path."""
     job = make_job(job_form)
+    _h3_ref = h3_job_settings_refusal(job.get("params") or {})
+    if _h3_ref:
+        raise CharacterRequestError(_h3_ref[1])
+    _base = base_models_refusal(job.get("params") or {})
+    if _base:
+        raise CharacterRequestError(_base["error"])
     job["params"]["source"] = "storyboard"
     with QUEUE_COND:
         STATE["queue"].append(job)
@@ -38084,6 +38378,40 @@ def _engine_would_be_h3(requested: str, mode: str) -> bool:
     return bool(h3_capable())
 
 
+def _parse_character_ids_field(form: dict[str, list[str]] | dict[str, str]) -> list[str]:
+    """Return ordered deduplicated character IDs from `character_ids` or legacy `character_id`."""
+    def _f(name: str) -> str:
+        v = form.get(name, "")
+        if isinstance(v, list):
+            v = v[0] if v else ""
+        return str(v or "").strip()
+    raw_multi = _f("character_ids")
+    ids: list[str] = []
+    if raw_multi:
+        if raw_multi.startswith("["):
+            try:
+                parsed = json.loads(raw_multi)
+                if isinstance(parsed, list):
+                    ids = [str(x or "").strip() for x in parsed if str(x or "").strip()]
+            except ValueError:
+                ids = []
+        else:
+            ids = [x.strip() for x in raw_multi.split(",") if x.strip()]
+    single = _f("character_id")
+    if single and single not in ids:
+        if not ids:
+            ids = [single]
+        else:
+            ids.insert(0, single)
+    out: list[str] = []
+    seen: set[str] = set()
+    for cid in ids:
+        if cid and cid not in seen:
+            seen.add(cid)
+            out.append(cid)
+    return out
+
+
 def _validate_character_quality(form: dict[str, list[str]] | dict[str, str]) -> str | None:
     """Validate the complete trained-character contract before enqueueing.
 
@@ -38111,61 +38439,40 @@ def _validate_character_quality(form: dict[str, list[str]] | dict[str, str]) -> 
             v = v[0] if v else default
         return str(v or "").strip()
     quality = _f("quality", "balanced").lower()
-    cid = _f("character_id", "")
-    if cid:
+    cids = _parse_character_ids_field(form)
+    if cids:
         try:
-            char = next((c for c in list_characters() if c.get("id") == cid), None)
+            all_chars = list_characters()
         except Exception as exc:  # noqa: BLE001 - turn discovery failure into API 400
-            return f"could not resolve character {cid!r}: {exc}"
-        if not char:
-            return f"character {cid!r} not found; request was not queued"
-        # H3 uses pictures, not the face adapter; LTX can use a picture
-        # before training. Keep the declared-but-missing adapter check below.
-        if _engine_would_be_h3(_f("engine", ENGINE_DEFAULT), _f("mode", "t2v")):
-            return None
-        if not char.get("face_lora_path"):
-            return None
-        if char.get("ltx_compatible") is False:
-            return str(char.get("ltx_compat_reason") or
-                       f"character {cid!r} is incompatible with the active "
-                       "LTX generation; request was not queued")
-        face = Path(str(char.get("face_lora_path") or ""))
-        if not face.is_file():
-            return (f"character {cid!r} is missing its face LoRA; request was "
-                    "not queued")
+            return f"could not resolve character {cids[0]!r}: {exc}"
+        by_id = {c.get("id"): c for c in all_chars}
+        is_h3 = _engine_would_be_h3(_f("engine", ENGINE_DEFAULT), _f("mode", "t2v"))
         no_voice = _f("no_voice", "off").lower() in ("on", "true", "1", "yes")
-        # A CHARACTER THAT NEVER HAD A VOICE IS NOT A BROKEN CHARACTER.
-        #
-        # `list_characters()` sets audio_lora_path to None when no
-        # `.audio.safetensors` sits beside the face file — that is how a
-        # face-only character is REPRESENTED, and the UI has always treated it
-        # as a first-class state (the "silent" badge). Refusing it here made
-        # every silent character unrenderable on every path, with no way to opt
-        # out: the No-voice pill is hidden precisely for these characters, so
-        # `no_voice` could never be sent. The shipped one-click SAMPLE
-        # CHARACTER is exactly this shape — one face file, no audio — so
-        # from-zero onboarding produced a character the panel then refused.
-        #
-        # The contract this check exists to enforce is "a character's declared
-        # voice must actually be there", and it is preserved by asking the
-        # right question: DECLARED but MISSING is a corrupt bundle and still
-        # refuses; NEVER DECLARED is silent by construction and renders.
-        audio_declared = str(char.get("audio_lora_path") or "").strip()
-        if audio_declared and not no_voice and not Path(audio_declared).is_file():
-            # A saved library voice replaces this adapter. A broken original
-            # must not prevent rendering the explicitly selected replacement.
-            from voices import VoiceLibrary, resolve_render_voice
-            try:
-                replacement = resolve_render_voice(VoiceLibrary(STATE_DIR), form, list_characters(), cid)
-            except ValueError as exc:
-                return str(exc)
-            if not replacement:
-                return (f"character {cid!r} is missing its trained voice LoRA. "
-                        "Restore/train the voice file, or submit no_voice=on "
-                        "explicitly; request was not queued")
-        # Character mode on Q4 submits with Quick/Balanced/Standard. The
-        # identity match is imperfect but the requested face + voice pair is
-        # present. Q8 users who pick quality=high get the full-fidelity path.
+        for cid in cids:
+            char = by_id.get(cid)
+            if not char:
+                return f"character {cid!r} not found; request was not queued"
+            if is_h3 or not char.get("face_lora_path"):
+                continue
+            if char.get("ltx_compatible") is False:
+                return str(char.get("ltx_compat_reason") or
+                           f"character {cid!r} is incompatible with the active "
+                           "LTX generation; request was not queued")
+            face = Path(str(char.get("face_lora_path") or ""))
+            if not face.is_file():
+                return (f"character {cid!r} is missing its face LoRA; request was "
+                        "not queued")
+            audio_declared = str(char.get("audio_lora_path") or "").strip()
+            if len(cids) == 1 and audio_declared and not no_voice and not Path(audio_declared).is_file():
+                from voices import VoiceLibrary, resolve_render_voice
+                try:
+                    replacement = resolve_render_voice(VoiceLibrary(STATE_DIR), form, all_chars, cid)
+                except ValueError as exc:
+                    return str(exc)
+                if not replacement:
+                    return (f"character {cid!r} is missing its trained voice LoRA. "
+                            "Restore/train the voice file, or submit no_voice=on "
+                            "explicitly; request was not queued")
         return None
     # No character_id — but a raw train_character LoRA in `loras` triggers
     # the same quality concern. 2026-06-26: we allow it on Q4 (same
@@ -39326,6 +39633,25 @@ def image_refs_refusal(engine_override, refs) -> str | None:
             f"render has {n}. Remove {n - cap} of them, then generate again.")
 
 
+def _resolve_image_ref_path(raw: str) -> tuple[str, Path]:
+    """Normalize and resolve one Image reference path.
+
+    Relative paths resolve under UPLOADS; a leading ``<UPLOADS.name>/``
+    prefix (for example ``panel_uploads/foo.png``) is also accepted when
+    the process working directory is not the repo root (the Mac app).
+    """
+    r = normalize_pasted_path(raw)
+    rp = Path(r)
+    if not rp.is_absolute():
+        cand = UPLOADS / rp
+        if not cand.is_file() and rp.parts[:1] == (UPLOADS.name,):
+            alt = UPLOADS.joinpath(*rp.parts[1:])
+            if alt.is_file():
+                cand = alt
+        rp = cand
+    return r, rp.resolve()
+
+
 def image_job_input_refusal(p: dict) -> str | None:
     """job_input_refusal for an Image job: what can only fail, said before it
     is queued.
@@ -39339,12 +39665,31 @@ def image_job_input_refusal(p: dict) -> str | None:
 
     Also (fleet 4.19.16, an Image job with more than 3 references): too many
     reference images for the engine - the worker used to discover it after
-    the job's turn and file it as a failed render."""
+    the job's turn and file it as a failed render.
+
+    H77 (fleet 5.0.57-5.0.83): missing reference images in ``refs`` passed
+    /queue/add, /queue/retry and /queue/batch because this check never tested
+    that each attached picture was still on disk, failing at worker time with
+    ``ref image not found``."""
     refs = p.get("refs") or []
-    if isinstance(refs, list):
-        why = image_refs_refusal(p.get("engine_override"), refs)
-        if why:
-            return why
+    if not isinstance(refs, list):
+        return "refs must be a list of paths"
+    why = image_refs_refusal(p.get("engine_override"), refs)
+    if why:
+        return why
+    for r in refs:
+        if not isinstance(r, str) or not r.strip():
+            return "Each reference image must be a file path."
+        r_norm = normalize_pasted_path(r)
+        try:
+            r_norm, rp = _resolve_image_ref_path(r)
+            exists = rp.is_file()
+        except OSError:
+            exists = False
+        if not exists:
+            return (f"The reference image is no longer on disk: {r_norm}. It was "
+                    "moved, renamed or deleted after it was picked. Remove it or "
+                    "pick it again, then generate again.")
     for entry in (p.get("loras") or []):
         lp = str((entry or {}).get("path") or "").strip() if isinstance(entry, dict) else ""
         if not lp or not lp.startswith(("/", "~")):
@@ -39462,6 +39807,123 @@ def delete_in_use_refusal(paths, what: str = "file") -> str | None:
             f"Delete it after {it}, or take {those} off the queue first.")
 
 
+H3_REFS_INCOMPATIBLE_FLAGS = (
+    ("h3_turbo", "Turbo"),
+    ("h3_tristep", "Fast"),
+    ("h3_v13", "Best (v1.3)"),
+    ("h3_flex", "H3 Flex"),
+    ("h3_flex_turbo", "H3 Flex Turbo"),
+    ("h3_clean_sound", "Clean up sound"),
+)
+
+
+def h3_refs_incompatible_settings(params: dict) -> list[str]:
+    """Selected H3 settings that References cannot run with (in order), or []."""
+    p = params or {}
+    if str(p.get("engine") or "ltx").strip().lower() != "h3":
+        return []
+    m = str(p.get("mode") or "t2v").strip().lower()
+    if not bool(p.get("h3_refs")) or m not in h3_refs.MODES:
+        return []
+    bad = [label for key, label in H3_REFS_INCOMPATIBLE_FLAGS if bool(p.get(key))]
+    loras = p.get("loras") or []
+    if any(isinstance(e, dict) and str(e.get("path") or "").strip() for e in loras):
+        bad.append("LoRAs")
+    return bad
+
+
+def h3_refs_settings_refusal(params: dict) -> str | None:
+    """Why a References job's selected settings cannot be queued as-is, or None."""
+    p = params or {}
+    if str(p.get("engine") or "ltx").strip().lower() != "h3":
+        return None
+    m = str(p.get("mode") or "t2v").strip().lower()
+    if not bool(p.get("h3_refs")) or m not in h3_refs.MODES:
+        return None
+    bad = h3_refs_incompatible_settings(p)
+    if bad:
+        fixes: list[str] = []
+        if any(p.get(k) for k in ("h3_turbo", "h3_tristep", "h3_v13", "h3_flex", "h3_flex_turbo")):
+            fixes.append("switch Speed to Best")
+        if p.get("h3_clean_sound"):
+            fixes.append("turn off Clean up sound")
+        if "LoRAs" in bad:
+            fixes.append("un-pick LoRAs")
+        fix_text = ", ".join(fixes) if fixes else "clear those settings"
+        return (
+            f"{h3_refs.NAME} runs on its own sampler and cannot use {', '.join(bad)}. "
+            f"{fix_text[0].upper() + fix_text[1:]}, or switch {h3_refs.NAME} off."
+        )
+    tier_cfg = H3_TIERS.get(str(p.get("h3_tier") or "")) or {}
+    chain_windows = int(p.get("h3_chain_windows") or tier_cfg.get("chain_windows") or 1)
+    if chain_windows > 1:
+        return (
+            f"{h3_refs.NAME} makes clips of up to 5 seconds for now. "
+            f"Pick 5 s, or switch {h3_refs.NAME} off for a longer clip."
+        )
+    return None
+
+
+def h3_a2v_trim_plan(params: dict) -> dict | None:
+    """Trim details when an H3 Lip-sync request would be shortened past H3_A2V_MAX_SECONDS.
+
+    Never applies to LTX (returns None for every non-H3 or non-a2v job)."""
+    p = params or {}
+    if str(p.get("engine") or "ltx").strip().lower() != "h3":
+        return None
+    if str(p.get("mode") or "").strip().lower() != "a2v":
+        return None
+    audio = str(p.get("audio") or "").strip()
+    start_t = max(0.0, float(p.get("audio_start_time") or 0.0))
+    raw_frames = int(p.get("h3_a2v_frames") or p.get("frames") or 0)
+    want_s = raw_frames / float(H3_FPS) if raw_frames > 0 else 0.0
+    total = None
+    if audio and Path(audio).is_file():
+        probed = probe_media_duration(audio)
+        if probed and probed > 0:
+            total = float(probed)
+    avail = max(0.0, total - start_t) if total is not None else None
+    effective_s = min(want_s, avail) if avail is not None else want_s
+    if effective_s <= H3_A2V_MAX_SECONDS + 1e-6:
+        return None
+    return {
+        "audio": audio,
+        "name": Path(audio).name if audio else "audio",
+        "start_s": start_t,
+        "total_s": total,
+        "avail_s": avail,
+        "requested_s": effective_s,
+        "max_s": float(H3_A2V_MAX_SECONDS),
+    }
+
+
+def h3_a2v_trim_refusal(params: dict) -> str | None:
+    """Refuse unconfirmed H3 Lip-sync audio trimming before enqueue; LTX unchanged."""
+    if bool((params or {}).get("h3_audio_trim_confirmed")):
+        return None
+    info = h3_a2v_trim_plan(params)
+    if not info:
+        return None
+    return (
+        f"Hailuo H3 Lip-sync renders up to {info['max_s']:.0f}s per clip, "
+        f"so {info['name']} ({info['requested_s']:.1f}s from {info['start_s']:.1f}s) "
+        f"would be trimmed to {info['max_s']:.0f}s. Shorten the duration, move Start at "
+        f"later, switch to LTX for longer audio, or confirm trimming "
+        f"(h3_audio_trim_confirmed=1)."
+    )
+
+
+def h3_job_settings_refusal(params: dict) -> tuple[str, str] | None:
+    """Pre-queue H3 settings refusal as (code, message), or None."""
+    msg = h3_refs_settings_refusal(params)
+    if msg:
+        return ("h3_refs_conflict", msg)
+    msg = h3_a2v_trim_refusal(params)
+    if msg:
+        return ("h3_audio_trim_required", msg)
+    return None
+
+
 def job_input_refusal(params: dict) -> str | None:
     """Why this job can only fail for want of an input, or None.
 
@@ -39564,6 +40026,11 @@ def job_input_refusal(params: dict) -> str | None:
         if not _exists(audio):
             return (f"audio file not found: {audio}. It was moved or deleted "
                     "after it was picked - pick it again in the Audio slot.")
+        # H73 (fleet Nov 2026, 2 Macs, 8 failed renders): refuse a file with
+        # no audio track or Start at past the end before it queues.
+        _a_ref = a2v_audio_refusal(audio, p.get("audio_start_time"))
+        if _a_ref:
+            return _a_ref
     elif m == "keyframe":
         # 4.19.2 (fleet 4.19.1): a Keyframes job with no start image reached
         # its turn and failed "start_image not found:" - checked here instead,
@@ -39609,6 +40076,9 @@ def job_input_refusal(params: dict) -> str | None:
             return (f"The LoRA {Path(lp).name} is no longer on disk ({lp}). It was "
                     "moved or deleted after it was picked - pick it again, or "
                     "un-pick it and render again.")
+    _h3_ref = h3_job_settings_refusal(p)
+    if _h3_ref:
+        return _h3_ref[1]
     return None
 
 
@@ -39623,7 +40093,12 @@ def copy_attached_reference(value: str) -> str:
         return value
     src = Path(value)
     if not src.is_absolute() and not src.is_file():
-        src = UPLOADS / src
+        cand = UPLOADS / src
+        if not cand.is_file() and src.parts[:1] == (UPLOADS.name,):
+            alt = UPLOADS.joinpath(*src.parts[1:])
+            if alt.is_file():
+                cand = alt
+        src = cand
     if not src.is_file():
         return value
     src = src.resolve()
@@ -39726,12 +40201,19 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         mode_in = "t2v"
         form["mode"] = "t2v"
     _selected_character = None
-    if f("character_id"):
-        _selected_character = next((c for c in list_characters()
-                                    if c["id"] == f("character_id")), None)
-        if not _selected_character:
-            raise CharacterRequestError("Character not found")
-        if (not _selected_character.get("face_lora_path") and mode_in == "t2v"
+    _selected_characters: list[dict] = []
+    _requested_cids = _parse_character_ids_field(form)
+    if _requested_cids:
+        _chars_pool = {c["id"]: c for c in list_characters()}
+        for _rcid in _requested_cids:
+            _cobj = _chars_pool.get(_rcid)
+            if not _cobj:
+                raise CharacterRequestError("Character not found")
+            _selected_characters.append(_cobj)
+        _selected_character = _selected_characters[0]
+        if (len(_selected_characters) == 1
+                and not _selected_character.get("face_lora_path")
+                and mode_in == "t2v"
                 and not _engine_would_be_h3(f("engine", ENGINE_DEFAULT), mode_in)):
             pictures = _selected_character.get("pictures") or []
             if pictures:
@@ -40101,11 +40583,16 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
     # while API replay may submit the real pipeline quality. Both must become
     # the same job dict, and High · 720p must reach ``high_720p`` rather than an
     # unknown string that falls through to the distilled lane.
-    _character_id = f("character_id", "")
+    _character_id = _selected_characters[0]["id"] if _selected_characters else f("character_id", "")
     _quality_choice_raw = f("quality_choice", "")
     _quality_raw = f("quality", "")
     _character_quality = None
-    if _character_id and _selected_character.get("face_lora_path"):
+    _has_ltx_face_lora = (
+        bool(_selected_characters)
+        and any(c.get("face_lora_path") for c in _selected_characters)
+        and not _engine_would_be_h3(f("engine", ENGINE_DEFAULT), mode_in)
+    )
+    if _has_ltx_face_lora:
         _character_quality = resolve_character_quality(
             _quality_choice_raw or _quality_raw, ACTIVE_MODEL_VERSION)
         if _character_quality is None:
@@ -40326,7 +40813,9 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
     # lightx2v v1.3 on Best at High: on by default wherever it can run (the
     # resolution is below, after Fast); "0" from the API keeps the full
     # sampler, as a Steps pin does.
-    _h3_v13_off = (f("h3_v13", "") or "").strip().lower() in ("0", "false", "off", "no")
+    _h3_v13_raw = (f("h3_v13", "") or "").strip().lower()
+    _h3_v13_want = _h3_v13_raw in ("1", "true", "on", "yes")
+    _h3_v13_off = _h3_v13_raw in ("0", "false", "off", "no")
     _h3_v13 = False
     # Clean up sound (re-voice the Fast render's sound): "1" / "0", absent =
     # H3_REVOICE_DEFAULT. Only ever on with Fast; resolved below.
@@ -40372,6 +40861,7 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
     _h3_reference2 = (f("h3_reference2", "") or "").strip()
     _h3_reference3 = (f("h3_reference3", "") or "").strip()
     _h3_refs = f("h3_refs", "").strip().lower() in ("1", "true", "on", "yes")
+    _h3_audio_trim_confirmed = (f("h3_audio_trim_confirmed", "") or "").strip().lower() in ("1", "true", "on", "yes")
     _h3_chain_prompts: list[str] = []
     if _engine == "h3":
         # The same predicate the switcher uses for the affordance, so the two
@@ -40422,7 +40912,8 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                 # Analytics (length_capped_from): this Mac's memory shortened the clip.
                 _h3_capped_from = H3_TIERS[_h3_tier]["length"]
             _h3_tier = _fallback
-        if _h3_turbo and h3_available():
+        _h3_refs_on = bool(_h3_refs and mode_in in h3_refs.MODES)
+        if not _h3_refs_on and _h3_turbo and h3_available():
             _turbo = h3_turbo_status()
             if not _turbo["available"]:
                 push("Turbo requested but " + (
@@ -40437,7 +40928,7 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         # step-distillation adapters on one render is a recipe nobody
         # validated) — Fast wins when both arrive, and says so. A Steps pin
         # keeps Best unless the form explicitly asked for Fast.
-        if _h3_tristep_want is not False and h3_available():
+        if not _h3_refs_on and _h3_tristep_want is not False and h3_available():
             _tcell = H3_TIERS[_h3_tier]
             if not h3_cell_takes_tristep(_tcell):
                 if _h3_tristep_want:
@@ -40465,7 +40956,7 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                 push(f"Fast runs {H3_TRISTEP_FORWARDS} forwards on "
                      f"its own ladder — ignoring the {_h3_steps}-step override.")
                 _h3_steps = 0
-        if _h3_tristep and mode_in not in ("a2v", "v2a"):
+        if not _h3_refs_on and _h3_tristep and mode_in not in ("a2v", "v2a"):
             _want = H3_REVOICE_DEFAULT if _h3_clean_want is None else _h3_clean_want
             if _want and h3_available():
                 if not h3_supports_revoice():
@@ -40488,7 +40979,7 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                     elif _h3_clean_want:
                         push(_why + " Rendering with Fast's own sound.")
                         _h3_clean_dropped = "ram"
-        if H3_TIERS[_h3_tier].get("fast_hd"):
+        if not _h3_refs_on and H3_TIERS[_h3_tier].get("fast_hd"):
             # Fast HD is a recipe, not a canvas: the 3-step Fast pass, then the
             # x2 Upscale & Face Fix. Both are forced here so a stale Speed pill
             # or Export choice cannot quietly render half of it.
@@ -40502,7 +40993,7 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         # adapter is built. Never with Fast or Turbo, never under a Steps pin
         # (the pin IS the way to ask for the full sampler), never where it
         # was not validated (other canvases, the dense pass, media modes).
-        if _h3_flex_turbo_want and h3_available():
+        if not _h3_refs_on and _h3_flex_turbo_want and h3_available():
             _tst = h3_flex_turbo_status()
             if mode_in not in H3_FLEX_MODES or not h3_cell_takes_flex(H3_TIERS[_h3_tier]):
                 push(f"{H3_FLEX_TURBO_NAME} runs Text and Image on 5 s windows - "
@@ -40522,7 +41013,7 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                 _h3_tristep = _h3_turbo = _h3_clean_sound = False
                 _h3_steps = 0
                 _h3_flex_want = False
-        if _h3_flex_want and h3_available():
+        if not _h3_refs_on and _h3_flex_want and h3_available():
             _fcell = H3_TIERS[_h3_tier]
             _fst = h3_flex_status()
             if mode_in not in H3_FLEX_MODES:
@@ -40543,12 +41034,21 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                          "ladder - Fast, Turbo and any Steps pin are off for this render.")
                 _h3_tristep = _h3_turbo = _h3_clean_sound = False
                 _h3_steps = 0
-        if (not _h3_flex and not _h3_flex_turbo and not _h3_v13_off and not _h3_tristep and not _h3_turbo
+        if (not _h3_refs_on and not _h3_flex and not _h3_flex_turbo and not _h3_v13_off and not _h3_tristep and not _h3_turbo
                 and not _h3_steps
                 and mode_in in H3_V13_MODES and h3_available()
                 and h3_cell_takes_v13(H3_TIERS[_h3_tier])
                 and h3_v13_status()["available"]):
             _h3_v13 = True
+        if _h3_refs_on:
+            # References runs on its own sampler: preserve explicitly requested speed /
+            # Clean up sound switches so pre-queue validation can refuse them with a clear
+            # reason instead of silently dropping them, without auto-enabling defaults.
+            _h3_tristep = bool(_h3_tristep_want)
+            _h3_v13 = bool(_h3_v13_want)
+            _h3_flex = bool(_h3_flex_want)
+            _h3_flex_turbo = bool(_h3_flex_turbo_want)
+            _h3_clean_sound = bool(_h3_clean_want)
         # Per-window prompts, matched to the cell that will ACTUALLY render.
         # Normalising after the fallback above is the whole point: a 15 s
         # request that degraded to 5 s has one window, and three prompts on a
@@ -40633,7 +41133,7 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             # Inert without a reference image; a leftover pill from a mode
             # switch resets quietly rather than logging noise on every t2v.
             _i2v_ref_mode = "anchor"
-    if _h3_turbo and _h3_steps:
+    if not (_h3_refs and _engine == "h3" and mode_in in h3_refs.MODES) and _h3_turbo and _h3_steps:
         # The adapter is distilled FOR 4 sigma points. Honouring a Steps pill on
         # top of it would quietly render a configuration nobody validated, so
         # Turbo wins and says so rather than losing to a leftover pill.
@@ -40732,6 +41232,8 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                               else ""),
             "h3_reference3": (_h3_reference3 if (_h3_refs and _engine == "h3" and mode_in in h3_refs.MODES)
                               else ""),
+            # H3 Lip-sync explicit audio-trim confirmation (H68). SAME allowlist trap.
+            "h3_audio_trim_confirmed": bool(_h3_audio_trim_confirmed and _engine == "h3"),
             # 4.17 (Codex H3-2): H3-06 made a typed per-window box ADD to the
             # main prompt. Callers that already send COMPLETE per-window
             # prompts — a One Shot's beats, a storyboard shot's chain — set
@@ -41147,149 +41649,141 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
     # Bounded to [0, 2.0] same as parse_loras_from_form for any user-picked
     # LoRA — overriding to 0 effectively disables a character without
     # forcing the user to clear the picker.
-    if _character_id and (_engine == "h3" or not _selected_character.get("face_lora_path")):
-        # Identity is engine-specific; voice resolution below is shared.
-        pictures = _selected_character.get("pictures") or []
+    if _selected_characters and _engine == "h3":
+        # Identity on H3 uses character pictures; voice resolution below is shared.
+        if len(_selected_characters) == 1:
+            pictures = list(_selected_character.get("pictures") or [])
+        else:
+            pictures = []
+            for _sc in _selected_characters:
+                _spics = _sc.get("pictures") or []
+                if _spics:
+                    pictures.append(_spics[0])
         for picture in pictures:
             if not Path(picture).is_file():
                 raise CharacterRequestError("Character picture is missing; add it again.")
         job["params"]["character_id"] = _character_id
+        if len(_selected_characters) > 1:
+            job["params"]["character_ids"] = [c["id"] for c in _selected_characters]
         job["params"]["character_face_lora"] = False
         if _engine == "h3" and pictures and not bool(pro_status().get("active")):
-            # Pictures on H3 go through References (Pro). Free keeps the character's voice and says so in one
-            # line, instead of a job the worker refuses with a switch Free cannot use (release review, 21 Nov).
             job["params"]["refs_note"] = ("On Hailuo H3, a character's pictures go into References, which is part "
                                           "of Phosphene Pro, so this clip uses the character's voice but not "
                                           "their pictures.")
-        elif _engine == "h3" and pictures:
+        elif pictures:
             job["params"]["h3_refs"] = True
+            # Character pictures route to References: clear auto-defaulted flags that the
+            # caller did not explicitly ask for, while preserving explicit selections so
+            # pre-queue validation can report conflicts instead of silently dropping them.
+            if _h3_tristep_want is None:
+                job["params"]["h3_tristep"] = False
+            elif _h3_tristep_want is True:
+                job["params"]["h3_tristep"] = True
+            if _h3_clean_want is None:
+                job["params"]["h3_clean_sound"] = False
+            elif _h3_clean_want is True:
+                job["params"]["h3_clean_sound"] = True
+            if not _h3_v13_want:
+                job["params"]["h3_v13"] = False
+            else:
+                job["params"]["h3_v13"] = True
+            if _h3_flex_want:
+                job["params"]["h3_flex"] = True
+            if _h3_flex_turbo_want:
+                job["params"]["h3_flex_turbo"] = True
             for key, picture in zip(("h3_reference", "h3_reference2", "h3_reference3"),
                                     (pictures + ["", "", ""])[:3]):
                 job["params"][key] = picture
-        elif _engine == "ltx" and pictures and mode_in == "t2v":
+    elif _selected_characters and not any(c.get("face_lora_path") for c in _selected_characters):
+        for _sc in _selected_characters:
+            for picture in (_sc.get("pictures") or []):
+                if not Path(picture).is_file():
+                    raise CharacterRequestError("Character picture is missing; add it again.")
+        job["params"]["character_id"] = _character_id
+        if len(_selected_characters) > 1:
+            job["params"]["character_ids"] = [c["id"] for c in _selected_characters]
+        job["params"]["character_face_lora"] = False
+        pictures = _selected_character.get("pictures") or []
+        if len(_selected_characters) == 1 and _engine == "ltx" and pictures and mode_in == "t2v":
             job["params"].update(mode="i2v", image=pictures[0])
-    elif _character_id:
+    elif _selected_characters:
         job["params"]["character_face_lora"] = True
         try:
             char_strength = float(f("character_strength", "1.0") or "1.0")
         except (TypeError, ValueError):
             char_strength = 1.0
         char_strength = max(0.0, min(2.0, char_strength))
-        # THE VOICE IS A SEPARATE FILE AND IT NEEDS A SEPARATE NUMBER.
-        #
-        # A character is two trained LoRAs: <trigger>.safetensors (1152 modules,
-        # 384 of them on the audio branch) and <trigger>.audio.safetensors (576,
-        # all audio). They OVERLAP on 384 modules, and on those the face file's
-        # audio deltas are NOISE — it was trained on 42 still images with
-        # generate_audio false, so whatever the optimiser did to those
-        # parameters encodes no voice at all. Measured, the noise is LOUDER than
-        # the signal: median ||D|| 1.45 against the voice file's 1.10, an SNR of
-        # 0.81x at equal strength. At q4 both were erased (~95 %) and the ratio
-        # never mattered; at q8 ~90 % of both survives, which is why fixing the
-        # face is what surfaced the voice.
-        #
-        # That is the MEASUREMENT, and it argued for running the voice hotter:
-        # parity is 1.2, and 1.4 was the first rung with real headroom — also
-        # where community guidance for 2.5 puts "balanced".
-        #
-        # THE EAR DISAGREED, and the ear is the authority here. 1.0 and 1.4
-        # were rendered as a graded pair and the owner rejected 1.4: "candidate
-        # seems less good". So the default is 1.0 — the pair every graded clip
-        # was rendered at and passed on — and it is not provisional. The split
-        # control still ships and the ladder is still reachable; what changed is
-        # that the panel no longer recommends climbing it. An SNR argument is a
-        # reason to give the voice its own number, not a reason to turn it up.
-        #
-        # THE ALLOWLIST TRAP: make_job builds params from named reads, and a
-        # field nobody reads here is dropped with no error — the render
-        # succeeds and the voice silently runs at the face's strength. That has
-        # bitten this project before (image params, 2026-05). The assertion that
-        # this key reaches params is part of the same commit.
         try:
             char_voice_strength = float(
                 f("character_voice_strength", "1.0") or "1.0")
         except (TypeError, ValueError):
             char_voice_strength = 1.0
         char_voice_strength = max(0.0, min(2.0, char_voice_strength))
-        # Per-render voice opt-out (2026-05-18). When the user flips the
-        # "No voice" toggle in composer-tools, drop the character's
-        # audio LoRA from the stack for THIS render — face still locks,
-        # but no speech is generated. Useful when the trained voice
-        # produces gibberish on a particular prompt and the user only
-        # wants the visual. Matches the same checkbox idiom as
-        # f("enhance") / f("stop_comfy") above — "on" or empty.
         no_voice = (f("no_voice", "off") or "").strip().lower() in ("on", "true", "1", "yes")
         try:
             chars_by_id = {c["id"]: c for c in list_characters()}
         except Exception as exc:  # noqa: BLE001 - preserve a loud contract failure
             raise CharacterRequestError(
                 f"could not resolve character {_character_id!r}: {exc}") from exc
-        char_rec = chars_by_id.get(_character_id)
-        if not char_rec:
-            raise CharacterRequestError(
-                f"character {_character_id!r} not found; request was not queued")
-        face_p = char_rec.get("face_lora_path")
-        audio_p = char_rec.get("audio_lora_path")
-        if not face_p or not Path(str(face_p)).is_file():
-            raise CharacterRequestError(
-                f"character {_character_id!r} is missing its face LoRA; "
-                "request was not queued")
-        # DECLARED-BUT-MISSING refuses; NEVER-DECLARED renders. `audio_p` is
-        # None for a character with no `.audio.safetensors` beside its face
-        # file — the representation of a face-only character, which the UI
-        # shows with a "silent" badge and whose No-voice pill is HIDDEN (so
-        # `no_voice` can never be submitted for it). Refusing that shape made
-        # every silent character unrenderable with no opt-out, the shipped
-        # one-click sample character among them. See the twin check in
-        # _validate_character_quality.
-        _audio_declared = str(audio_p or "").strip()
-        from voices import VoiceLibrary, resolve_render_voice
-        try:
-            _replacement_voice = resolve_render_voice(VoiceLibrary(STATE_DIR), form, list(chars_by_id.values()), _character_id)
-        except ValueError as exc:
-            raise CharacterRequestError(str(exc)) from exc
-        if _audio_declared and not no_voice and not _replacement_voice and not Path(_audio_declared).is_file():
-            raise CharacterRequestError(
-                f"character {_character_id!r} is missing its trained voice "
-                "LoRA. Restore/train the voice file, or submit no_voice=on "
-                "explicitly; request was not queued")
-        if no_voice:
-            job["params"]["no_voice"] = True
         existing_paths = {
             str((entry or {}).get("path") or "")
             for entry in (job["params"].get("loras") or [])
         }
         additions: list[dict] = []
-        if face_p not in existing_paths:
-            additions.append({"path": face_p, "strength": char_strength})
-            existing_paths.add(face_p)
-        if audio_p and audio_p not in existing_paths and not no_voice and not _replacement_voice:
-            additions.append({"path": audio_p,
-                              "strength": char_voice_strength})
-            existing_paths.add(audio_p)
+        trained_face_count = 0
+        from voices import VoiceLibrary, resolve_render_voice
+        for _sc in _selected_characters:
+            _cid_i = _sc["id"]
+            char_rec = chars_by_id.get(_cid_i)
+            if not char_rec:
+                raise CharacterRequestError(
+                    f"character {_cid_i!r} not found; request was not queued")
+            face_p = char_rec.get("face_lora_path")
+            audio_p = char_rec.get("audio_lora_path")
+            if not face_p:
+                for picture in (char_rec.get("pictures") or []):
+                    if not Path(picture).is_file():
+                        raise CharacterRequestError("Character picture is missing; add it again.")
+                continue
+            if not Path(str(face_p)).is_file():
+                raise CharacterRequestError(
+                    f"character {_cid_i!r} is missing its face LoRA; "
+                    "request was not queued")
+            trained_face_count += 1
+            if face_p not in existing_paths:
+                additions.append({"path": face_p, "strength": char_strength})
+                existing_paths.add(face_p)
+            if len(_selected_characters) == 1:
+                _audio_declared = str(audio_p or "").strip()
+                try:
+                    _replacement_voice = resolve_render_voice(VoiceLibrary(STATE_DIR), form, list(chars_by_id.values()), _cid_i)
+                except ValueError as exc:
+                    raise CharacterRequestError(str(exc)) from exc
+                if _audio_declared and not no_voice and not _replacement_voice and not Path(_audio_declared).is_file():
+                    raise CharacterRequestError(
+                        f"character {_cid_i!r} is missing its trained voice "
+                        "LoRA. Restore/train the voice file, or submit no_voice=on "
+                        "explicitly; request was not queued")
+                if audio_p and audio_p not in existing_paths and not no_voice and not _replacement_voice:
+                    additions.append({"path": audio_p,
+                                      "strength": char_voice_strength})
+                    existing_paths.add(audio_p)
+        if no_voice:
+            job["params"]["no_voice"] = True
         if additions:
-            # Face/audio LoRAs go FIRST in the stack so they take effect
-            # before any style LoRAs the user stacked on top. Mirrors
-            # the existing /characters/<id>/generate ordering.
             job["params"]["loras"] = additions + list(
                 job["params"].get("loras") or []
             )
-        # Always stamp the character_id on params even when the form
-        # didn't declare source="characters". The Manual-tab picker is
-        # a different entry point — stamping is what lets Load Params
-        # later restore the picker selection.
+        if trained_face_count >= 2:
+            job["params"]["ltx_face_blend_note"] = (
+                "Two trained looks in one LTX shot can blend; for two clear faces "
+                "use shot and reverse shot, or Hailuo H3."
+            )
         if "character_id" not in job["params"]:
             job["params"]["character_id"] = _character_id
-        # This is the UI token, while params.quality above is the pipeline token.
-        # Recording both is what lets all four chips round-trip even when Pro
-        # and High share 1024×576. Missing/legacy requests resolve to Pro here,
-        # preserving the graded default explicitly in new sidecars.
+        if len(_selected_characters) > 1:
+            job["params"]["character_ids"] = [c["id"] for c in _selected_characters]
         job["params"]["quality_choice"] = _quality_choice
-        # Persist BOTH strengths so Load Params restores the exact sliders
-        # and the sidecar records what actually rendered. The voice value is
-        # stamped even when it equals the default: the number in a clip's
-        # sidecar is how a future listener knows which rung of the ladder
-        # they are hearing.
         job["params"].setdefault("character_strength", char_strength)
         job["params"].setdefault("character_voice_strength",
                                  char_voice_strength)
@@ -41349,26 +41843,70 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
 
     # Snapshot adapters at submission. Character audio adapters never go through
     # the weaker sample-reference or conversion route unless explicitly chosen.
-    from voices import VoiceLibrary, resolve_render_voice
-    from voice_pass import dialogue_phrases
+    from voices import VoiceLibrary, resolve_render_voice, resolve_speaker_voice
+    from voice_pass import dialogue_phrases, plain_dialogue, ltx_plain_dialogue
     _voice_library = VoiceLibrary(STATE_DIR)
     try:
-        _saved_voice = resolve_render_voice(_voice_library, form, list_library_characters(), _character_id)
+        _lib_chars = list_library_characters()
+        _saved_voice = resolve_render_voice(_voice_library, form, _lib_chars, _character_id)
         _route = f("voice_method", "voice_pass")
         if _route not in ("voice_pass", "h3_reference", "conversion"):
             raise ValueError("Unknown voice method")
         if _route == "conversion" and os.environ.get("PHOSPHENE_EXPERIMENTAL_VOICE_CONVERSION") != "1":
             raise ValueError("Voice conversion is experimental and disabled")
+        _no_voice_flag = f("no_voice", "off").lower() in ("on", "true", "1", "yes")
+        _speaker_voices_map: dict = {}
+        _sv_raw = f("speaker_voices", "")
+        if _sv_raw.startswith("{"):
+            try:
+                _parsed_sv = json.loads(_sv_raw)
+                if isinstance(_parsed_sv, dict):
+                    _speaker_voices_map = _parsed_sv
+            except ValueError:
+                _speaker_voices_map = {}
+        _names = []
+        for _c in _lib_chars:
+            _names += [_c.get("name") or "", re.sub(r"\s*\([^)]*\)\s*$", "", str(_c.get("name") or "")),
+                       _c.get("trigger") or ""]
+        for _v in _voice_library.list():
+            _names += [_v.get("name") or "", re.sub(r"\s*\([^)]*\)\s*$", "", str(_v.get("name") or "")),
+                       _v.get("trigger") or ""]
+        if _saved_voice:
+            _names += [_saved_voice.get("name") or "", _saved_voice.get("trigger") or ""]
+        for _sk_name in _speaker_voices_map:
+            _names.append(str(_sk_name))
+        _dlg_lang = f("dialogue_lang", "English") or "English"
+        _voice_id_raw = f("voice_id", "inherit").strip().lower()
+        _model_voice_only = (_voice_id_raw == "default" and not bool(_speaker_voices_map))
+        if _model_voice_only and _engine == "ltx":
+            _old_audio = {c.get("audio_lora_path") for c in list_characters() if c.get("audio_lora_path")}
+            if _old_audio:
+                job["params"]["loras"] = [x for x in job["params"].get("loras", [])
+                                          if x.get("path") not in _old_audio]
+        # Detect multi-speaker LTX dialogue (2+ cast characters, explicit speaker_voices map, or 2+ named speakers in prompt).
+        _ltx_multi_voice = False
+        if _engine == "ltx" and not _no_voice_flag and not _model_voice_only:
+            if len(_selected_characters) >= 2 or bool(_speaker_voices_map):
+                _ltx_multi_voice = True
+            else:
+                _probe_phrases = dialogue_phrases(plain_dialogue(job["params"]["prompt"], _names, "", language=_dlg_lang))
+                _distinct_speakers = {
+                    unicodedata.normalize("NFC", p["speaker"]).strip().casefold()
+                    for p in _probe_phrases
+                    if p.get("speaker") and resolve_speaker_voice(_voice_library, p["speaker"], _lib_chars, _speaker_voices_map)
+                }
+                if len(_distinct_speakers) >= 2:
+                    _ltx_multi_voice = True
         job["params"]["voice_id"] = _saved_voice["id"] if _saved_voice else ""
         job["params"]["voice_method"] = _route
         if _saved_voice:
             job["params"].update(voice_name=_saved_voice["name"], voice_trigger=_saved_voice["trigger"])
-            if _engine == "ltx" or _route == "voice_pass":
+            if _engine == "ltx":
                 _adapter = _saved_voice.get("adapter_path")
                 if not _adapter or not Path(_adapter).is_file():
                     raise ValueError("Train this voice in Voices before rendering.")
                 job["params"]["voice_adapter"] = _adapter
-            if _engine == "ltx":
+            if _engine == "ltx" and not _ltx_multi_voice:
                 _old_audio = {c.get("audio_lora_path") for c in list_characters()}
                 job["params"]["loras"] = [x for x in job["params"].get("loras", [])
                                           if x.get("path") not in _old_audio]
@@ -41377,8 +41915,8 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                     if _saved_voice["id"] == "character:" + _character_id else 1.0)})
                 job["params"]["voice_route"] = "ltx_lora"
                 job["params"]["prompt"] += f" Audio: {_saved_voice['trigger']} speaking."
-            elif _route == "h3_reference":
-                if _engine != "h3" or not job["params"].get("h3_refs"):
+            elif _route == "h3_reference" and _engine == "h3":
+                if not job["params"].get("h3_refs"):
                     raise ValueError("Voice reference needs H3 References.")
                 if sum(bool(job["params"].get(k)) for k in
                        ("h3_reference", "h3_reference2", "h3_reference3")) > 2:
@@ -41387,37 +41925,84 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                     raise ValueError("This character has a trained voice but no reference sample. Use Voice pass.")
                 job["params"]["voice_sample"] = _saved_voice["sample_path"]
                 job["params"]["voice_route"] = "h3_reference"
+            elif _route == "h3_reference":
+                raise ValueError("Voice reference needs H3 References.")
             elif _route == "conversion":
                 job["params"]["voice_sample"] = _saved_voice["sample_path"]
                 job["params"]["voice_route"] = "conversion"
-        if _engine == "h3" and _route == "voice_pass" and f("no_voice", "off").lower() not in ("on", "true", "1", "yes"):
-            # Plain words in, engine format out (owner, 21 Nov 2026): "Bizarro: Hello" or a quoted line with one
-            # character picked becomes H3 dialogue here, so the user never types <d> tags.
-            from voice_pass import plain_dialogue
-            _names = []
-            for _c in list_library_characters():
-                _names += [_c.get("name") or "", re.sub(r"\s*\([^)]*\)\s*$", "", str(_c.get("name") or "")),
-                           _c.get("trigger") or ""]
-            if _saved_voice:
-                _names += [_saved_voice.get("name") or "", _saved_voice.get("trigger") or ""]
-            _default = re.sub(r"\s*\([^)]*\)\s*$", "", str((_saved_voice or {}).get("name") or ""))
-            job["params"]["prompt"] = plain_dialogue(job["params"]["prompt"], _names, _default)
-            _phrases = dialogue_phrases(job["params"]["prompt"])
+        if ((_engine == "h3" and _route == "voice_pass") or _ltx_multi_voice) and not _no_voice_flag:
+            if _ltx_multi_voice:
+                _old_audio = {c.get("audio_lora_path") for c in list_characters() if c.get("audio_lora_path")}
+                if _old_audio:
+                    job["params"]["loras"] = [x for x in job["params"].get("loras", [])
+                                              if x.get("path") not in _old_audio]
+            _default = (
+                re.sub(r"\s*\([^)]*\)\s*$", "", str((_saved_voice or {}).get("name") or ""))
+                if len(_selected_characters) <= 1 else ""
+            )
+            _raw_prompt = f("prompt_plain", "").strip() or job["params"]["prompt"]
+            _tagged_prompt = plain_dialogue(_raw_prompt, _names, _default, language=_dlg_lang)
+            if _engine == "h3":
+                job["params"]["prompt"] = _tagged_prompt
+                if _tagged_prompt != _raw_prompt:
+                    job["params"]["prompt_plain"] = _raw_prompt
+                if f("dialogue_lang", "").strip() or _dlg_lang != "English":
+                    job["params"]["dialogue_lang"] = _dlg_lang
+            _spoken_prompts = [_tagged_prompt]
+            if _engine == "h3":
+                # Later windows speak too (L207/F04): convert each window box and collect the dialogue
+                # from the same window composition the runner uses, repeated main-prompt lines included.
+                _windows = int(job["params"].get("h3_chain_windows") or 1)
+                _asked = job["params"].get("h3_chain_prompts") or []
+                if _windows > 1:
+                    _asked = [plain_dialogue(x, _names, _default, language=_dlg_lang) for x in _asked]
+                    job["params"]["h3_chain_prompts"] = _asked
+                    _spoken_prompts = h3_window_prompts_for_job(
+                        job["params"]["prompt"], _asked, _windows,
+                        complete=bool(job["params"].get("h3_chain_prompts_complete")))
+            _phrases = ([phrase for text in _spoken_prompts for phrase in dialogue_phrases(text)]
+                        if not _model_voice_only else [])
+            # Layout r6 (Codex sweep): a voice picked for THIS shot on a one-character shot is the voice
+            # its lines speak in ("This shot speaks in X"), over the character's own; a per-line pick
+            # (speaker_voices) still wins. With two or more characters each keeps their own voice.
+            _shot_override = (_voice_id_raw not in ("", "inherit", "default") and _saved_voice
+                              and len(_selected_characters) <= 1)
+            def _line_mapped(_who):
+                _k = str(_who or "").strip().casefold()
+                return any(str(_kk or "").strip().casefold() == _k and str(_vv or "").strip() not in ("", "default")
+                           for _kk, _vv in (_speaker_voices_map or {}).items())
             for _phrase in _phrases:
                 _speaker = _phrase["speaker"]
-                _picked = (resolve_render_voice(_voice_library, {"voice_id": "inherit"},
-                           list_library_characters(), _speaker) if _speaker else _saved_voice)
+                if _speaker and _shot_override and not _line_mapped(_speaker):
+                    _picked = _saved_voice
+                else:
+                    _picked = (resolve_speaker_voice(_voice_library, _speaker, _lib_chars, _speaker_voices_map)
+                               if _speaker else _saved_voice)
+                if not _picked and _saved_voice and (
+                    _voice_id_raw not in ("", "inherit", "default")
+                    or re.fullmatch(r"speaker(?:\s*\d+)?", str(_speaker or "").strip(), re.I)
+                ):
+                    _picked = _saved_voice
                 if _picked:
                     if not _picked.get("adapter_path") or not Path(_picked["adapter_path"]).is_file():
                         raise ValueError("Train this voice in Voices before rendering.")
                     _phrase["voice"] = {k: _picked[k] for k in
-                                        ("id", "name", "trigger", "adapter_path")}
+                                        ("id", "name", "trigger", "adapter_path", "sample_path", "identity") if k in _picked}
             if any(x.get("voice") for x in _phrases):
+                if _engine == "ltx":
+                    _ltx_prompt = ltx_plain_dialogue(_raw_prompt, _names)
+                    job["params"]["prompt"] = _ltx_prompt
+                    if _ltx_prompt != _raw_prompt:
+                        job["params"]["prompt_plain"] = _raw_prompt
+                    if f("dialogue_lang", "").strip() or _dlg_lang != "English":
+                        job["params"]["dialogue_lang"] = _dlg_lang
                 job["params"].update(voice_route="voice_pass", voice_phrases=_phrases)
-            elif _saved_voice:
-                # No spoken line: render anyway, without the voice, and say so in one plain line (it used to
-                # refuse with tag syntax, owner 21 Nov 2026).
-                _who = _default or _saved_voice.get("name") or "This character"
+                _unresolved = sorted({x["speaker"] for x in _phrases if x["speaker"] and not x.get("voice")})
+                if _unresolved and _engine == "h3":
+                    job["params"]["voice_note"] = ("No saved voice for " + ", ".join(_unresolved)
+                        + "; those lines keep Hailuo H3's voice.")
+            elif not _model_voice_only and (_saved_voice or len(_selected_characters) >= 2):
+                _who = _default or (_selected_characters[0].get("name") if _selected_characters else None) or (_saved_voice or {}).get("name") or "This character"
                 job["params"]["voice_note"] = (f"{_who} doesn't say anything in this prompt, so the voice wasn't used. "
                                                f"To hear it, add a line like: {_who}: Hello there.")
     except ValueError as exc:
@@ -41943,9 +42528,13 @@ def run_image_job_inner(job: dict) -> None:
     for r in refs_in:
         if not isinstance(r, str) or not r.strip():
             raise RuntimeError("each ref must be a non-empty path string")
-        r = normalize_pasted_path(r)
-        rp = Path(r)
-        rp = (rp if rp.is_absolute() else (UPLOADS / r)).resolve()
+        try:
+            r, rp = _resolve_image_ref_path(r)
+        except OSError:
+            raise RuntimeError(
+                f"The reference image is no longer on disk: {r}. It was moved, "
+                "renamed or deleted after it was picked. Remove it or pick it "
+                "again, then generate again.")
         # The character sheets are a legitimate reference too: the Storyboard's
         # anchor stills are drawn from a character's own sheet.
         allowed = [UPLOADS.resolve(), *output_roots(), _CHARACTERS_CACHE_PATH.resolve()]
@@ -41953,7 +42542,10 @@ def run_image_job_inner(job: dict) -> None:
             raise RuntimeError("This queued reference is outside Phosphene’s uploads and outputs folders. "
                                "Attach the reference again so Phosphene can keep a copy, then retry.")
         if not rp.is_file():
-            raise RuntimeError(f"ref image not found: {r}")
+            raise RuntimeError(
+                f"The reference image is no longer on disk: {r}. It was moved, "
+                "renamed or deleted after it was picked. Remove it or pick it "
+                "again, then generate again.")
         refs_resolved.append(str(rp))
 
     try:
@@ -43870,7 +44462,22 @@ def h3_media_plan(job: dict, p: dict, mode: str, tier: dict, width: int,
                                     f"Start at {start_t:.1f}s is past the end of "
                                     f"{Path(audio).name} ({total:.1f}s).")
             want = min(want, avail)
-        want = min(want, H3_A2V_MAX_SECONDS)
+        requested_s = want
+        if requested_s > H3_A2V_MAX_SECONDS + 1e-6:
+            if not bool(p.get("h3_audio_trim_confirmed")):
+                raise RenderRefused(
+                    "h3_mode",
+                    f"Hailuo H3 Lip-sync renders up to {H3_A2V_MAX_SECONDS:.0f}s per clip, "
+                    f"so {Path(audio).name} ({requested_s:.1f}s from {start_t:.1f}s) "
+                    f"would be trimmed to {H3_A2V_MAX_SECONDS:.0f}s. Shorten the duration, "
+                    f"move Start at later, switch to LTX for longer audio, or confirm "
+                    f"trimming (h3_audio_trim_confirmed=1).",
+                )
+            want = H3_A2V_MAX_SECONDS
+            out["notes"].append(
+                f"lip-sync: trimmed {Path(audio).name} from {requested_s:.2f}s to "
+                f"{H3_A2V_MAX_SECONDS:.0f}s (confirmed)"
+            )
         # The track decides the length. A short line still renders one whole
         # 22-frame window (the model's smallest), but --chain-total-frames trims
         # delivery back to the audio, so a 0.5 s line is not padded with silence.
@@ -44413,16 +45020,19 @@ def run_h3_job_inner(job: dict) -> None:
                      f"{_total:.2f} — above {H3_LORA_STACK_STRENGTH_ADVISORY:g} the "
                      f"stack tends to break motion. Lower one if the clip judders.")
 
-    # References (Pro) runs on its own sampler: the speed switches never resolve their files for
-    # it (a missing Fast adapter must not stop a References clip). Resolved in full further down.
-    if p.get("h3_refs") and mode in h3_refs.MODES:
-        for _k in ("h3_turbo", "h3_tristep", "h3_v13", "h3_flex", "h3_flex_turbo", "h3_clean_sound"):
-            p[_k] = False
+    # References (Pro) runs on its own sampler: skip resolving speed-adapter files for it
+    # (a missing Fast adapter must not stop a References clip), without silently clearing the
+    # requested flags before the References warning logic below can inspect and report them.
+    _refs_mode = bool(p.get("h3_refs") and mode in h3_refs.MODES)
+    _refs_ignored_flags = [
+        label for _k, label in H3_REFS_INCOMPATIBLE_FLAGS
+        if _refs_mode and bool(p.get(_k))
+    ]
     # ---- Turbo: the 4-step distillation LoRA -----------------------------
     # make_job already gated this and pinned `steps`, but re-resolve the adapter
     # HERE: the queue can sit for an hour and a job must not reach the runner
     # with a --lora path that stopped resolving in the meantime.
-    turbo = bool(p.get("h3_turbo"))
+    turbo = bool(p.get("h3_turbo")) and not _refs_mode
     if turbo and user_lora is not None and not h3_supports_lora_stack():
         # ONE slot, two claimants (a runner that predates stacking). Both
         # outcomes are stated out loud; neither is chosen for the user behind
@@ -44483,7 +45093,7 @@ def run_h3_job_inner(job: dict) -> None:
     # make_job resolved it; re-check here for the same reason as Turbo (a
     # queued job outlives the file), and keep the two adapters exclusive even
     # for a hand-edited queue entry.
-    tristep = bool(p.get("h3_tristep"))
+    tristep = bool(p.get("h3_tristep")) and not _refs_mode
     tristep_paths: dict = {}
     if tristep and not h3_cell_takes_tristep(tier):
         tristep = False
@@ -44520,7 +45130,7 @@ def run_h3_job_inner(job: dict) -> None:
     # ---- Best at High: lightx2v v1.3 (6 forwards, video shift 6) ----------
     # make_job resolved it; re-check here (a queued job outlives the file, a
     # hand-edited queue entry can carry anything) and never stack it.
-    v13 = bool(p.get("h3_v13"))
+    v13 = bool(p.get("h3_v13")) and not _refs_mode
     v13_paths: dict = {}
     if v13 and (tristep or turbo or not h3_cell_takes_v13(tier)
                 or mode not in H3_V13_MODES):
@@ -44554,11 +45164,11 @@ def run_h3_job_inner(job: dict) -> None:
     # Pika H3 Flex running natively on Apple Silicon (MLX). make_job resolved
     # it; re-check here (a queued job outlives the file) and never stack it
     # with another step-distillation adapter.
-    flex = bool(p.get("h3_flex"))
+    flex = bool(p.get("h3_flex")) and not _refs_mode
     flex_paths: dict = {}
     # H3 Flex Turbo (Pro): its own LoRA and step ladder; re-checked here (a
     # queued job outlives a licence and a file).
-    flex_turbo = bool(p.get("h3_flex_turbo"))
+    flex_turbo = bool(p.get("h3_flex_turbo")) and not _refs_mode
     flex_turbo_paths: dict = {}
     flex_turbo_spec: dict = {}
     if flex_turbo and (tristep or turbo or v13 or flex or not h3_cell_takes_flex(tier)
@@ -44569,6 +45179,8 @@ def run_h3_job_inner(job: dict) -> None:
              f"this render keeps its own sampler.")
     if flex_turbo:
         if not h3_flex_turbo_allowed():
+            if pro_is_active():
+                raise RuntimeError("Getting Pro ready on this Studio. Try again once setup finishes.")
             raise RuntimeError(f"{H3_FLEX_TURBO_NAME} is part of Phosphene Pro, and Pro is not "
                                "active on this Mac. Pick H3 Flex, Fast or Best.")
         if not h3_supports_flex_turbo():
@@ -44806,9 +45418,13 @@ def run_h3_job_inner(job: dict) -> None:
         refs_pictures = refs_pictures[:int(refs_spec.get("max_pictures") or h3_refs.MAX_PICTURES)]
         if not refs_pictures:
             raise RuntimeError(f"{h3_refs.NAME} needs at least one picture.")
-        if tristep or turbo or v13 or flex or flex_turbo or user_lora is not None:
-            push(f"[h3] {h3_refs.NAME} runs on its own sampler - the speed switch and LoRAs "
-                 "stay off for this clip.")
+        _refs_ignored = list(_refs_ignored_flags)
+        if user_lora is not None:
+            _refs_ignored.append("LoRAs")
+        if _refs_ignored:
+            push(f"[h3] {h3_refs.NAME} runs on its own sampler - ignoring "
+                 f"{', '.join(_refs_ignored)} for this clip.")
+            p["h3_refs_ignored"] = list(_refs_ignored)
         tristep = turbo = v13 = flex = flex_turbo = False
         user_lora = None
         p["h3_tristep"] = p["h3_turbo"] = p["h3_v13"] = p["h3_flex"] = p["h3_flex_turbo"] = False
@@ -45099,9 +45715,18 @@ def run_h3_job_inner(job: dict) -> None:
     if flex_turbo:
         _turbo_argv = h3_flex_turbo_argv(flex_turbo_paths)
         if not _turbo_argv:
+            if pro_is_active():
+                raise RuntimeError("Getting Pro ready on this Studio. Try again once setup finishes.")
             raise RuntimeError(f"{H3_FLEX_TURBO_NAME} is part of Phosphene Pro, and Pro is not "
                                "active on this Mac. Pick H3 Flex, Fast or Best.")
         cmd += _turbo_argv
+    if user_lora is not None and not h3_supports_lora_stack() and (tristep or flex or flex_turbo):
+        _speed_label = "Fast (3 steps)" if tristep else H3_FLEX_NAME
+        raise RenderRefused(
+            "h3_lora_slots",
+            f"{_speed_label} and the LoRA {user_lora.name} both want H3's single "
+            f"adapter slot — its runner's `--lora` takes one path, so they "
+            f"cannot both run. Pick Best under Speed, or un-pick the LoRA.")
     if user_lora is not None and (not turbo or h3_supports_lora_stack()):
         # The SAME flag Turbo rides. On a stacking runner every `--lora` is one
         # more adapter on the same base layers, Turbo first; on the single-slot
@@ -45309,30 +45934,40 @@ def run_h3_job_inner(job: dict) -> None:
         import selectors as _selectors
         _sel = _selectors.DefaultSelector()
         _sel.register(proc.stdout, _selectors.EVENT_READ)
-        _H3_IDLE_LIMIT_SEC = 20 * 60
+        _h3_lowmem = "--low-memory" in cmd
+        _h3_idle_limit = h3_idle_limit_sec(
+            _modeled_per_step, _decode_est, low_memory=_h3_lowmem)
 
         def _h3_lines():
             buf = b""
-            while True:
-                if not _sel.select(timeout=_H3_IDLE_LIMIT_SEC):
-                    try:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    except (ProcessLookupError, PermissionError, OSError):
-                        pass
-                    raise RuntimeError(
-                        "H3 render timed out — no output for 20 minutes, so "
-                        "the process was killed. The machine was likely "
-                        "swapping too hard to make progress; try a shorter "
-                        "length or a smaller canvas.")
-                chunk = os.read(proc.stdout.fileno(), 65536)
-                if not chunk:
-                    if buf:
-                        yield buf.decode("utf-8", "replace")
-                    return
-                buf += chunk
-                while b"\n" in buf:
-                    line, buf = buf.split(b"\n", 1)
-                    yield line.decode("utf-8", "replace") + "\n"
+            try:
+                while True:
+                    if not _sel.select(timeout=_h3_idle_limit):
+                        try:
+                            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                        except (ProcessLookupError, PermissionError, OSError):
+                            pass
+                        _mins = max(1, int(round(_h3_idle_limit / 60.0)))
+                        _where = f" during {phase_label}" if phase_label else ""
+                        raise RuntimeError(
+                            f"H3 render timed out — no output for {_mins} minutes{_where}, so "
+                            "the process was stopped. The cause is unknown. "
+                            "Try again. If it happens again, try a shorter clip "
+                            "or smaller size and use Report a bug.")
+                    chunk = os.read(proc.stdout.fileno(), 65536)
+                    if not chunk:
+                        if buf:
+                            yield buf.decode("utf-8", "replace")
+                        return
+                    buf += chunk
+                    while b"\n" in buf:
+                        line, buf = buf.split(b"\n", 1)
+                        yield line.decode("utf-8", "replace") + "\n"
+            finally:
+                try:
+                    _sel.close()
+                except Exception:                                    # noqa: BLE001
+                    pass
 
         # The last few lines the engine printed ride on the failure message
         # (fleet 2026-09-03: 20 H3 failures on one release all read
@@ -45429,6 +46064,11 @@ def run_h3_job_inner(job: dict) -> None:
                 pct = win_base + win_span * (last_step / float(total_steps))
                 spent = elapsed if denoise_t0 is None else max(0.0, time.time() - denoise_t0)
                 per_step = spent / max(1, last_step)
+                _h3_idle_limit = max(
+                    _h3_idle_limit,
+                    h3_idle_limit_sec(_modeled_per_step, _decode_est,
+                                      low_memory=_h3_lowmem,
+                                      measured_step_sec=per_step))
                 # H3-04: pace check. Needs a couple of steps before the
                 # measured per-step time means anything (the first step
                 # after a phase change often carries residual setup cost).
@@ -45550,7 +46190,14 @@ def run_h3_job_inner(job: dict) -> None:
                 # The runner refused a broken render and said why (NaN/inf
                 # latents, blank decode) — that sentence IS the diagnosis.
                 raise RuntimeError(_runner_msg)
+            _h3_crash_line = h3_metal_crash_line(list(_h3_tail))
+            _h3_cphase = _h3_crash_phase(bare_phase)
+            if _h3_crash_line:
+                job["crash_line"] = _h3_crash_line
+                job["crash_phase"] = _h3_cphase
             if h3_metal_oom_line(list(_h3_tail)):
+                job["crash_line"] = "gpu_oom"
+                job["crash_phase"] = _h3_cphase
                 # Fleet 18 Nov: Metal "Insufficient Memory" on 16 GB Macs making
                 # 10-15 s clips reached the user as the raw Metal line. Same
                 # needle the analytics class reads (metal_oom), plain words up
@@ -45578,6 +46225,8 @@ def run_h3_job_inner(job: dict) -> None:
             # way since #44; the H3 path never got the same treatment.
             if rc < 0:
                 if h3_watchdog_line(list(_h3_tail)):
+                    if _h3_cphase in WATCHDOG_PHASES:
+                        job["watchdog_phase"] = _h3_cphase
                     h3_watchdog_mark()      # the next H3 render starts short
                 try:
                     _sig = signal.Signals(-rc).name
@@ -45603,16 +46252,17 @@ def run_h3_job_inner(job: dict) -> None:
             if rc != 0 and h3_watchdog_line(list(_h3_tail)):
                 # The next H3 render on this Mac starts in short GPU steps.
                 _h3_was_short = h3_watchdog_seen()
+                if _h3_cphase in WATCHDOG_PHASES:
+                    job["watchdog_phase"] = _h3_cphase
                 h3_watchdog_mark()
-                if not _h3_was_short:
-                    raise RuntimeError(
-                        f"H3 render exited with code {rc}"
-                        + (f" — last line: {_last[:220]}" if _last else "")
-                        + ". macOS's GPU watchdog stopped it (one graphics step ran "
-                          "too long on this Mac). Press Retry: from now on this Mac "
-                          "renders Hailuo H3 in smaller GPU steps, the remedy LTX "
-                          "videos already use; it may be a little slower. "
-                          f"(metrics at {metrics_path}).")
+                raise RuntimeError(
+                    h3_watchdog_message(
+                        frames, was_short=_h3_was_short, detail=_last)
+                    + f" (metrics at {metrics_path}).")
+            if rc != 0 and _h3_crash_line:
+                raise RuntimeError(
+                    h3_metal_driver_message(_h3_crash_line, rc=rc, detail=_last)
+                    + f" (metrics at {metrics_path}).")
             raise RuntimeError(
                 f"H3 render exited with code {rc}"
                 + (f" — last line: {_last[:220]}" if _last else "")
@@ -46429,6 +47079,13 @@ def run_take_job_inner(job: dict) -> None:
     if first_image and not Path(first_image).is_file():
         first_image = ""
     render_part = run_h3_job_inner if engine == "h3" else run_job_inner
+    if resume_outs:
+        # A failed final join also leaves a resumable take with every part
+        # rendered. Check its inputs even when no further render is needed.
+        _gone = [i + 1 for i, o in enumerate(resume_outs) if not Path(o).is_file()]
+        if _gone:
+            raise RuntimeError(f"part {_gone[0]} of this take is no longer on disk — "
+                               "it can't be resumed")
     if resume_outs and start_k < n_parts:
         # SAFETY-6: the handoff frame is rebuilt from the last kept part, never
         # trusted from the manifest — a Stop during (or before) the previous
@@ -46438,10 +47095,6 @@ def run_take_job_inner(job: dict) -> None:
         # Only the last was checked, so a take whose EARLIER part was deleted
         # (stopped takes show their parts in the gallery) re-rendered the rest
         # and then died at the join: "ffmpeg exit 254: Error opening input".
-        _gone = [i + 1 for i, o in enumerate(resume_outs) if not Path(o).is_file()]
-        if _gone:
-            raise RuntimeError(f"part {_gone[0]} of this take is no longer on disk — "
-                               "it can't be resumed")
         last_png = str(take_dir / f"part{start_k}_last.png")
         _take_last_frame(ff, resume_outs[-1], last_png, job)
     if not resume_outs:
@@ -46876,6 +47529,9 @@ def queue_update_job(job_id: str, form: dict) -> dict:
             new_params[k] = v
         if old.get("session_tag") and not new_params.get("session_tag"):
             new_params["session_tag"] = old["session_tag"]
+        _h3_ref = h3_job_settings_refusal(new_params)
+        if _h3_ref:
+            return {"ok": False, "code": _h3_ref[0], "error": _h3_ref[1]}
         job["params"] = new_params
     persist_queue()
     return {"ok": True, "id": job_id}
@@ -47325,7 +47981,8 @@ def run_job_voice_pass(job: dict) -> None:
             raise
         push("[voice pass] failed, render kept: " + f"{type(exc).__name__}: {exc}"[:400])
         why = str(exc).strip().rstrip(".")[:200]
-        note = ("The saved voices could not be put in, so this clip keeps the voices Hailuo H3 made"
+        _eng_label = "LTX" if (job.get("params") or {}).get("engine") == "ltx" else "Hailuo H3"
+        note = (f"The saved voices could not be put in, so this clip keeps the voices {_eng_label} made"
                 + (f" ({why})." if why else "."))
         job["warning"] = " ".join(x for x in (job.get("warning"), note) if x)
         push("[voice pass] " + note)
@@ -48868,6 +49525,9 @@ def run_job_inner(job: dict) -> None:
         audio_src = (p.get("audio") or "").strip()
         if not audio_src or not Path(audio_src).exists():
             raise RuntimeError(f"audio file not found: {audio_src}")
+        _a_ref = a2v_audio_refusal(audio_src, p.get("audio_start_time"))
+        if _a_ref:
+            raise RenderRefused("input_unreadable", _a_ref)
         import scene_sound
         scene_sound_on = scene_sound.enabled(p, audio_src, model_version()["id"])
         scene_bed_path = str(p.get("a2v_scene_bed") or "").strip()
@@ -48882,6 +49542,10 @@ def run_job_inner(job: dict) -> None:
         cond_audio, stem_note = a2v_conditioning_audio(p, audio_src)
         if stem_note:
             push(f"[a2v] {stem_note}")
+        if cond_audio and Path(cond_audio) != Path(audio_src):
+            _c_ref = a2v_audio_refusal(cond_audio, p.get("audio_start_time"))
+            if _c_ref:
+                raise RenderRefused("input_unreadable", _c_ref)
         width, height = int(p["width"]), int(p["height"])
         # Clamp resolution by tier cap (no-op when tier_max_dim returns 0):
         # proportionally, on the /64 grid, and recorded on the job, so the
@@ -49066,7 +49730,27 @@ def run_job_inner(job: dict) -> None:
             f" scale={a2v_params['audio_conditioning_scale']}{_scale_note}"
             f"{_start_note}"
         )
-        result = HELPER.run(job_spec)
+        try:
+            result = HELPER.run(job_spec)
+        except RuntimeError as exc:
+            if "no audio found in " in str(exc).lower():
+                _name = Path(audio_src).name or audio_src
+                _start = float(a2v_params["audio_start_time"] or 0.0)
+                if _start > 0.0:
+                    raise RenderRefused(
+                        "input_unreadable",
+                        f"Phosphene could not read the audio in {_name} at {_start:.1f}s "
+                        "(the file may have no audio track, be damaged, or end before "
+                        "Start at). Nothing was rendered. Pick an audio file (WAV, MP3, "
+                        "M4A, FLAC) or a video with sound.",
+                    ) from exc
+                raise RenderRefused(
+                    "input_unreadable",
+                    f"Phosphene could not read the audio in {_name}: it has no readable "
+                    "audio track. Nothing was rendered. Pick an audio file (WAV, MP3, "
+                    "M4A, FLAC) or a video with sound.",
+                ) from exc
+            raise
         if "seed_used" in result:
             push(f"seed used: {result['seed_used']}")
             p["seed_used"] = result["seed_used"]
@@ -55638,7 +56322,14 @@ HTML = (ROOT / "webapp" / "index.html").read_text(encoding="utf-8")
 # from here when populated. Dev keeps reading from disk so a hard-refresh
 # still picks up edits without a restart (docs/ARCHITECTURE.md).
 _WEBAPP_SNAPSHOT: dict[str, bytes] = {}
-# Disabled so that webapp files are always read live from disk on reload
+if False:
+    try:
+        _wa = ROOT / "webapp"
+        for _f in _wa.rglob("*"):
+            if _f.is_file():
+                _WEBAPP_SNAPSHOT[_f.relative_to(_wa).as_posix()] = _f.read_bytes()
+    except Exception:                                      # noqa: BLE001
+        _WEBAPP_SNAPSHOT = {}
 
 
 def _diagnose_port_busy(port: int) -> str:
@@ -55883,5 +56574,5 @@ if __name__ == "__main__":
         server.serve_forever()
     finally:
         agent_discovery.withdraw(PORT)
-        HELPER.kill()
+        _kill_helper_at_exit()
         caffeinate_off()

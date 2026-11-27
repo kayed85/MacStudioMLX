@@ -96,9 +96,9 @@ def patch_yue2_run(version_dir: Path):
         path.write_text(content, encoding="utf-8")
         print(f"[+] Patched yue2_run.py swap abort condition")
         return True
-    elif 'and available memory is depleted' in content:
+    elif 'hard_swap_growth' in content or 'and available memory is depleted' in content:
         path.write_text(content, encoding="utf-8")
-        print(f"[=] yue2_run.py already has available memory check")
+        print(f"[=] yue2_run.py already has improved swap memory check")
         return True
     else:
         path.write_text(content, encoding="utf-8")
